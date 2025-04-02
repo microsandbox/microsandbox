@@ -4,6 +4,7 @@ members = [
     "microsandbox-core",
     "microsandbox-utils",
 ]
+exclude = ["sdk/rust"]
 resolver = "2"
 
 [workspace.package]
@@ -12,6 +13,7 @@ repository = "https://github.com/microsandbox/microsandbox"
 version = "0.1.0-alpha"
 license = "Apache-2.0"
 edition = "2021"
+
 
 [workspace.dependencies]
 async-stream = "0.3"
