@@ -21,43 +21,13 @@ greet("World");
 // greet('World');
 ```
 
-## Development
+## Examples
 
-### Setup
+Check out the [examples directory](./examples) for sample scripts that demonstrate how to:
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/monocore.git
-cd monocore/sdk/javascript
-
-# Install dependencies
-npm install
-```
-
-### Running Tests
-
-```bash
-npm test
-```
-
-### Building the Package
-
-```bash
-npm run build
-```
-
-### Publishing to npm
-
-```bash
-# Login to npm (if not already logged in)
-npm login
-
-# Publish the package
-npm publish
-```
-
-Make sure you have registered for an account on [npm](https://www.npmjs.com/) and verified your email address.
+- Use the SDK in both JavaScript and TypeScript
+- See simple usage patterns
 
 ## License
 
-[MIT](LICENSE)
+[Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0)
