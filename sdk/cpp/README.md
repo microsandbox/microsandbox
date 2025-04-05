@@ -46,55 +46,6 @@ int main() {
 }
 ```
 
-## Development
-
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/monocore.git
-cd monocore/sdk/cpp
-
-# Create a build directory
-mkdir build && cd build
-
-# Configure and build
-cmake ..
-make
-```
-
-### Running Tests
-
-```bash
-# In the build directory
-ctest
-```
-
-### Publishing to Package Managers
-
-#### vcpkg
-
-1. Fork the [vcpkg repository](https://github.com/microsoft/vcpkg)
-2. Add a new port in `ports/microsandbox/`
-3. Create a PR against the vcpkg repository
-
-#### Conan
-
-1. Create a Conan recipe:
-
-```bash
-conan new microsandbox/0.0.1 -t
-```
-
-2. Test and upload to Conan Center:
-
-```bash
-conan create . microsandbox/0.0.1@user/testing
-conan upload microsandbox/0.0.1@user/testing -r conan-center
-```
-
-For more information, see the [Conan documentation](https://docs.conan.io/en/latest/uploading_packages/using_artifactory.html).
-
 ## License
 
 [MIT](LICENSE)
