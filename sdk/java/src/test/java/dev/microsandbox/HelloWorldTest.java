@@ -1,4 +1,4 @@
-package com.microsandbox;
+package dev.microsandbox;
 
 import org.junit.Test;
 import static org.junit.Assert.*;
