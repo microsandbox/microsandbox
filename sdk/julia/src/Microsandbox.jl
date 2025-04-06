@@ -12,7 +12,7 @@ julia> greet("World")
 ```
 """
 function greet(name::String)
-    message = "Hello, $name! Welcome to Microsandbox!"
+    message = "Hello, $(name)! Welcome to Microsandbox!"
     println(message)
     return message
 end
