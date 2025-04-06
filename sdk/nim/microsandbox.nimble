@@ -11,3 +11,6 @@ skipDirs      = @["tests"]
 
 # Dependencies
 requires "nim >= 1.6.0"
+
+task test, "Run the test suite":
+  exec "nim c -r tests/test_microsandbox.nim"
