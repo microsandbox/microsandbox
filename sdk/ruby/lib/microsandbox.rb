@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "microsandbox/version"
+require_relative "microsandbox/version"
 
 # Microsandbox SDK for Ruby
 module Microsandbox
@@ -11,8 +11,6 @@ module Microsandbox
   # @param name [String] The name to greet
   # @return [String] A greeting message
   def self.greet(name)
-    message = "Hello, #{name}! Welcome to Microsandbox!"
-    puts message
-    message
+    "Hello, #{name}!"
   end
 end
