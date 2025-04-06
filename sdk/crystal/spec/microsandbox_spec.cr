@@ -2,7 +2,7 @@ require "./spec_helper"
 
 describe Microsandbox do
   it "has a version number" do
-    Microsandbox::VERSION.should eq("0.0.1")
+    Microsandbox::VERSION.should eq("0.1.0")
   end
 
   describe ".greet" do
