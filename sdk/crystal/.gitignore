@@ -1,0 +1,37 @@
+# Compiled output
+/bin/
+/lib/
+/.shards/
+*.dwarf
+
+# Dependencies
+/lib/
+/libs/
+
+# Build artifacts
+/.crystal/
+/.deps/
+/.build/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Crystal specific
+/docs/
+/tmp/
+/dist/
+
+# Shard lock file (uncomment if you want to ignore it)
+# shard.lock

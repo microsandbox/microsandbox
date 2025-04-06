@@ -2,8 +2,6 @@ require "./microsandbox/version"
 
 # Main module for the Microsandbox library
 module Microsandbox
-  VERSION = "0.0.1"
-
   # Returns a greeting message with the given name
   #
   # ## Example
