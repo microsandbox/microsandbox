@@ -1,4 +1,4 @@
-package com.microsandbox
+package dev.microsandbox
 
 /**
  * Hello World class for the Microsandbox SDK.
