@@ -1,4 +1,4 @@
-package com.microsandbox
+package dev.microsandbox
 
 import kotlin.test.Test
 import kotlin.test.assertTrue
