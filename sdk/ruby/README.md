@@ -31,43 +31,6 @@ require 'microsandbox'
 Microsandbox.greet('World')
 ```
 
-## Development
-
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/monocore.git
-cd monocore/sdk/ruby
-
-# Install dependencies
-bundle install
-```
-
-### Running Tests
-
-```bash
-rake test
-```
-
-### Building the Gem
-
-```bash
-gem build microsandbox.gemspec
-```
-
-### Publishing to RubyGems
-
-```bash
-# Login to RubyGems (if not already logged in)
-gem signin
-
-# Publish the gem
-gem push microsandbox-0.0.1.gem
-```
-
-Make sure you have registered for an account on [RubyGems](https://rubygems.org/) and verified your email address.
-
 ## License
 
-[MIT](LICENSE)
+[Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0)
