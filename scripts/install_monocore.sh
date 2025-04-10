@@ -171,7 +171,15 @@ install_files() {
     # Install binaries
     info "Installing binaries..."
     install -m 755 monocore "$BIN_DIR/" || { error "Failed to install monocore"; exit 1; }
-    install -m 755 monokrun "$BIN_DIR/" || { error "Failed to install monokrun"; exit 1; }
+    install -m 755 mcrun "$BIN_DIR/" || { error "Failed to install mcrun"; exit 1; }
+
+    # Self codesign on macOS
+    if [ "$OS" = "darwin" ]; then
+        info "Attempting to codesign binaries on macOS..."
+        codesign --force -s - "$BIN_DIR/monocore" 2>/dev/null || true
+        codesign --force -s - "$BIN_DIR/mcrun" 2>/dev/null || true
+        info "Codesigning done"
+    fi
 
     # Create mc symlink
     ln -sf "$BIN_DIR/monocore" "$BIN_DIR/mc" || { error "Failed to create mc symlink"; exit 1; }
