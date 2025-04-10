@@ -1,5 +1,4 @@
 {
-  "monocore": "0.2.1",
-  "monofs": "0.2.1",
-  "monoutils-store": "0.2.1"
+  "microsandbox-core": "0.2.1",
+  "microsandbox-utils": "0.2.1"
 }

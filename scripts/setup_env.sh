@@ -89,7 +89,7 @@ setup_posix_shell() {
     if [ ! -f "$shell_rc" ]; then
         info "Creating new config file: $shell_rc"
         mkdir -p "$(dirname "$shell_rc")"
-        echo "# Created by monocore setup" > "$shell_rc"
+        echo "# Created by microsandbox setup" > "$shell_rc"
         echo >> "$shell_rc"
     fi
 
@@ -118,7 +118,7 @@ setup_fish() {
     if [ ! -f "$fish_config" ]; then
         info "Creating new fish config file: $fish_config"
         mkdir -p "$(dirname "$fish_config")"
-        echo "# Created by monocore setup" > "$fish_config"
+        echo "# Created by microsandbox setup" > "$fish_config"
         echo >> "$fish_config"
     fi
 

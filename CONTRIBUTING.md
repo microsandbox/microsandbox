@@ -1,4 +1,4 @@
-# Contributing to monocore
+# Contributing to microsandbox
 
 We welcome everyone to contribute what and where they can. Whether you are brand
 new, just want to contribute a little bit, or want to contribute a lot there is
@@ -45,20 +45,22 @@ add, then you can start a [GitHub discussion][gh-discussions]. Some examples of
 what kinds of things that are good discussion topics can include, but are not
 limited to the following:
 
--   Community announcements and/or asking the community for feedback
--   Discussing a new release
--   Asking questions, Q&A that isn't for sure a bug report
+- Community announcements and/or asking the community for feedback
+- Discussing a new release
+- Asking questions, Q&A that isn't for sure a bug report
 
 ### Contributing through Code
 
 In order to contribute through code follow the steps below. Note that you don't
 need to be the best programmer to contribute.
 
- 1. **Pick a feature** you would like to add or a bug you would like to fix
+1.  **Pick a feature** you would like to add or a bug you would like to fix
+
     - If you wish to contribute but what you want to fix/add is not already
       covered in an existing issue, please open a new issue.
 
- 2. **Discuss** the issue with the rest of the community
+2.  **Discuss** the issue with the rest of the community
+
     - Before you write any code, it is recommended that you discuss your
       intention to write the code on the issue you are attempting to edit.
     - This helps to stop you from wasting your time duplicating the work of
@@ -66,34 +68,40 @@ need to be the best programmer to contribute.
     - This step also allows you to get helpful pointers on the community on some
       problems they may have encountered on similar issues.
 
- 3. **Fork** the repository
+3.  **Fork** the repository
+
     - A fork creates a copy of the code on your Github, so you can work on it
       separately from everyone else.
     - You can learn more about forking [here][forking].
 
- 4. Ensure that you have **commit signing** enabled
+4.  Ensure that you have **commit signing** enabled
+
     - This ensures that the code you submit was committed by you and not someone
       else who claims to be you.
     - You can learn more about how to setup commit signing [here][commit-signing].
-	- If you have already made some commits that you wish to put in a pull
+    - If you have already made some commits that you wish to put in a pull
       request without signing them, then you can follow [this guide][post-signing]
       on how to fix that.
 
- 5. **Clone** the repository to your local computer
-    - This puts a copy of your fork on your computer so you can edit it
-	- You can learn more about cloning repositories [here][git-clone].
+5.  **Clone** the repository to your local computer
 
- 6. **Build** the project
-    - For a detailed look on how to build monocore look at our
+    - This puts a copy of your fork on your computer so you can edit it
+    - You can learn more about cloning repositories [here][git-clone].
+
+6.  **Build** the project
+
+    - For a detailed look on how to build microsandbox look at our
       [README file](./README.md).
 
- 7. **Start writing** your code
+7.  **Start writing** your code
+
     - Open up your favorite code editor and make the changes that you wanted to
       make to the repository.
     - Make sure to test your code with the test command(s) found in our
       [README file](./README.md).
 
- 8. **Write tests** for your code
+8.  **Write tests** for your code
+
     - If you are adding a new feature, you should write tests that ensure that
       if someone make changes to the code it cannot break your new feature
       without breaking the test.
@@ -105,13 +113,14 @@ need to be the best programmer to contribute.
       without breaking test.
     - Please create integration tests, if the addition is large enough to
       warrant them, and unit tests.
-		  * Unit tests are tests that ensure the functionality of a single
-      function or small section of code.
-		  * Integration tests test large large sections of code.
-		  * Read more about the differences [here][unit-and-integration].
+      - Unit tests are tests that ensure the functionality of a single
+        function or small section of code.
+      - Integration tests test large large sections of code.
+      - Read more about the differences [here][unit-and-integration].
     - For more information on test organization, take a look [here][test-org].
 
- 9. Ensure that the code that you made follows our Rust **coding guidelines**
+9.  Ensure that the code that you made follows our Rust **coding guidelines**
+
     - You can find a list of some Rust guidelines [here][rust-style-guide]. This
       is a courtesy to the programmers that come after you. The easier your code
       is to read, the easier it will be for the next person to make modifications.
@@ -119,22 +128,22 @@ need to be the best programmer to contribute.
       unclear, please reach out to us through our email linked above, or you
       can just continue and leave a comment at the pull request stage.
 
- 10. **Commit and Push** your code
-     - This sends your changes to your repository branch.
-     - You can learn more about committing code [here][commiting-code] and
-       pushing it to a remote repository [here][push-remote].
-     - We use conventional commits for the names and description of commits.
-       You can find out more about them [here][conventional-commits].
+10. **Commit and Push** your code
 
- 11. The final step is to create **pull request** to our main branch 🎉
-     - A pull request is how you merge the code you just worked so hard on with
-       the code everyone else has access to.
-	 - Once you have submitted your pull request, we will review your code and
-       check to make sure the code implements the feature or fixes the bug. We
-       may leave some feedback and suggest edits. You can make the changes we
-       suggest by committing more code to your fork.
-     - You can learn more about pull requests [here][prs].
+    - This sends your changes to your repository branch.
+    - You can learn more about committing code [here][commiting-code] and
+      pushing it to a remote repository [here][push-remote].
+    - We use conventional commits for the names and description of commits.
+      You can find out more about them [here][conventional-commits].
 
+11. The final step is to create **pull request** to our main branch 🎉
+    - A pull request is how you merge the code you just worked so hard on with
+      the code everyone else has access to.
+    - Once you have submitted your pull request, we will review your code and
+      check to make sure the code implements the feature or fixes the bug. We
+      may leave some feedback and suggest edits. You can make the changes we
+      suggest by committing more code to your fork.
+    - You can learn more about pull requests [here][prs].
 
 [conventional-commits]: https://www.conventionalcommits.org/en/v1.0.0/
 [commiting-code]: https://docs.github.com/en/desktop/contributing-and-collaborating-using-github-desktop/making-changes-in-a-branch/committing-and-reviewing-changes-to-your-project
@@ -142,6 +151,7 @@ need to be the best programmer to contribute.
 [forking]: https://docs.github.com/en/get-started/quickstart/fork-a-repo
 [gh-discussions]: https://docs.github.com/en/discussions
 [git-clone]: https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository
+
 [good-first-issues]: [https://build.prestashop-project.org/news/a-definition-of-the-good-first-issue-label/]
 [post-signing]: https://dev.to/jmarhee/signing-existing-commits-with-gpg-5b58
 [prs]: https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-pull-requests

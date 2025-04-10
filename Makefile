@@ -1,5 +1,5 @@
 # =============================================================================
-# Monocore Makefile - Build, install, and run monocore components
+# Microsandbox Makefile - Build, install, and run microsandbox components
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -23,7 +23,7 @@ HOME_BIN := $(HOME)/.local/bin
 # -----------------------------------------------------------------------------
 # Build Paths and Directories
 # -----------------------------------------------------------------------------
-MONOCORE_RELEASE_BIN := target/release/monocore
+MICROSANDBOX_RELEASE_BIN := target/release/microsandbox
 MCRUN_RELEASE_BIN := target/release/mcrun
 EXAMPLES_DIR := target/release/examples
 BENCHES_DIR := target/release
@@ -43,7 +43,7 @@ endif
 # -----------------------------------------------------------------------------
 # Phony Targets Declaration
 # -----------------------------------------------------------------------------
-.PHONY: all build install clean build_libkrun example bench bin _run_example _run_bench _run_bin help uninstall monocore
+.PHONY: all build install clean build_libkrun example bench bin _run_example _run_bench _run_bin help uninstall microsandbox
 
 # -----------------------------------------------------------------------------
 # Main Targets
@@ -51,30 +51,30 @@ endif
 all: build
 
 build: build_libkrun
-	@$(MAKE) _build_monocore
+	@$(MAKE) _build_microsandbox
 
-_build_monocore: $(MONOCORE_RELEASE_BIN) $(MCRUN_RELEASE_BIN)
-	@cp $(MONOCORE_RELEASE_BIN) $(BUILD_DIR)/
+_build_microsandbox: $(MICROSANDBOX_RELEASE_BIN) $(MCRUN_RELEASE_BIN)
+	@cp $(MICROSANDBOX_RELEASE_BIN) $(BUILD_DIR)/
 	@cp $(MCRUN_RELEASE_BIN) $(BUILD_DIR)/
-	@echo "Monocore build artifacts copied to $(BUILD_DIR)/"
+	@echo "Microsandbox build artifacts copied to $(BUILD_DIR)/"
 
 # -----------------------------------------------------------------------------
 # Binary Building
 # -----------------------------------------------------------------------------
-$(MONOCORE_RELEASE_BIN): build_libkrun
-	cd monocore
+$(MICROSANDBOX_RELEASE_BIN): build_libkrun
+	cd microsandbox-core
 ifeq ($(OS),Darwin)
-	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin monocore $(FEATURES)
-	codesign --entitlements monocore.entitlements --force -s - $@
+	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin microsandbox $(FEATURES)
+	codesign --entitlements microsandbox.entitlements --force -s - $@
 else
-	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin monocore $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin microsandbox $(FEATURES)
 endif
 
 $(MCRUN_RELEASE_BIN): build_libkrun
-	cd monocore
+	cd microsandbox-core
 ifeq ($(OS),Darwin)
 	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin mcrun $(FEATURES)
-	codesign --entitlements monocore.entitlements --force -s - $@
+	codesign --entitlements microsandbox.entitlements --force -s - $@
 else
 	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin mcrun $(FEATURES)
 endif
@@ -85,9 +85,9 @@ endif
 install: build
 	install -d $(HOME_BIN)
 	install -d $(HOME_LIB)
-	install -m 755 $(BUILD_DIR)/monocore $(HOME_BIN)/monocore
+	install -m 755 $(BUILD_DIR)/microsandbox $(HOME_BIN)/microsandbox
 	install -m 755 $(BUILD_DIR)/mcrun $(HOME_BIN)/mcrun
-	ln -sf $(HOME_BIN)/monocore $(HOME_BIN)/mc
+	ln -sf $(HOME_BIN)/microsandbox $(HOME_BIN)/mc
 	@if [ -n "$(LIBKRUNFW_FILE)" ]; then \
 		install -m 755 $(LIBKRUNFW_FILE) $(HOME_LIB)/; \
 		cd $(HOME_LIB) && ln -sf $(notdir $(LIBKRUNFW_FILE)) libkrunfw.dylib; \
@@ -106,10 +106,10 @@ install: build
 # -----------------------------------------------------------------------------
 clean:
 	rm -rf $(BUILD_DIR)
-	cd monocore && cargo clean && rm -rf build
+	cd microsandbox-core && cargo clean && rm -rf build
 
 uninstall:
-	rm -f $(HOME_BIN)/monocore
+	rm -f $(HOME_BIN)/microsandbox
 	rm -f $(HOME_BIN)/mcrun
 	rm -f $(HOME_BIN)/mc
 	rm -f $(HOME_LIB)/libkrunfw.dylib
@@ -132,11 +132,11 @@ build_libkrun:
 # Help Documentation
 # -----------------------------------------------------------------------------
 help:
-	@echo "Monocore Makefile Help"
+	@echo "Microsandbox Makefile Help"
 	@echo "======================"
 	@echo
 	@echo "Main Targets:"
-	@echo "  make build                  - Build monocore components"
+	@echo "  make build                  - Build microsandbox components"
 	@echo "  make install                - Install binaries and libraries to ~/.local/{bin,lib}"
 	@echo "  make uninstall              - Remove all installed components"
 	@echo "  make clean                  - Remove build artifacts"

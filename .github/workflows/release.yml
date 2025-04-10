@@ -35,7 +35,7 @@
 #         run: |
 #           echo "Release created: ${{ steps.release.outputs.releases_created }}"
 #           echo "PRs created: ${{ steps.release.outputs.prs_created }}"
-#           echo "monocore created: ${{ steps.release.outputs.monocore--releases_created }}"
+#           echo "microsandbox created: ${{ steps.release.outputs.microsandbox--releases_created }}"
 #           echo "monofs created: ${{ steps.release.outputs.monofs--releases_created }}"
 #           echo "monoutils-store created: ${{ steps.release.outputs.monoutils-store--releases_created }}"
 
@@ -67,9 +67,9 @@
 #         run: |
 #           cargo publish -p monofs
 
-#       - name: Publish monocore
-#         working-directory: monocore
+#       - name: Publish microsandbox
+#         working-directory: microsandbox
 #         env:
 #           CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}
 #         run: |
-#           cargo publish -p monocore
+#           cargo publish -p microsandbox

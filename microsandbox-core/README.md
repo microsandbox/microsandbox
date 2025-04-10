@@ -3,7 +3,7 @@
     <img src="https://raw.githubusercontent.com/microsandbox/microsandbox/main/assets/microsandbox-thick-line-purple-gradient.svg" alt="microsandbox logo" width="100"></img>
   </a>
 
-  <h1 align="center">microsandbox</h1>
+  <h1>microsandbox</h1>
 
   <p>
     <a href="https://discord.gg/T95Y3XnEAK">
@@ -24,5 +24,7 @@
   </p>
 </div>
 
+**`microsandbox`** is the engine behind the microsandbox platform, providing a robust foundation for running AI workloads in isolated microVMs. It handles everything from VM lifecycle management to OCI image distribution, making it easy to deploy and orchestrate code sandboxes securely.
+
 > [!WARNING]
-> This project is currently undergoing significant architectural changes and active development. As a result, comprehensive documentation and a detailed README will be provided once the core components stabilize. Stay tuned for updates.
+> This project is undergoing major refactoring. The API is unstable and subject to breaking changes.

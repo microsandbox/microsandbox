@@ -2,17 +2,12 @@
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
   "packages": {
-    "monocore": {
-      "package-name": "monocore",
+    "microsandbox-core": {
+      "package-name": "microsandbox-core",
       "release-type": "rust"
     },
-    "monofs": {
-      "package-name": "monofs",
-      "skip-github-release": true,
-      "release-type": "rust"
-    },
-    "monoutils-store": {
-      "package-name": "monoutils-store",
+    "microsandbox-utils": {
+      "package-name": "microsandbox-utils",
       "skip-github-release": true,
       "release-type": "rust"
     }
@@ -24,8 +19,8 @@
     },
     {
       "type": "linked-versions",
-      "groupName": "monocore-project",
-      "components": ["monocore", "monofs", "monoutils-store"]
+      "groupName": "microsandbox-project",
+      "components": ["microsandbox-core", "microsandbox-utils"]
     }
   ]
 }

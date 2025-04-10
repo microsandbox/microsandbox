@@ -12,10 +12,9 @@ private
 .history
 .DS_Store
 
-# monocore
+# microsandbox
 ignore/
 build/
-monocore/build/
 libkrunfw.*
 libkrun.*
 .menv/
