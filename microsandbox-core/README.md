@@ -24,7 +24,7 @@
   </p>
 </div>
 
-**`microsandbox`** is the engine behind the microsandbox platform, providing a robust foundation for running AI workloads in isolated microVMs. It handles everything from VM lifecycle management to OCI image distribution, making it easy to deploy and orchestrate code sandboxes securely.
+**`microsandbox-core`** is the engine behind the microsandbox platform, providing a robust foundation for running AI workloads in isolated microVMs. It handles everything from VM lifecycle management to OCI image distribution, making it easy to deploy and orchestrate code sandboxes securely.
 
 > [!WARNING]
 > This project is undergoing major refactoring. The API is unstable and subject to breaking changes.
