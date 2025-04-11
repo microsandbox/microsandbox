@@ -12,8 +12,8 @@ name = "microsandbox_core"
 path = "lib/lib.rs"
 
 [[bin]]
-name = "microsandbox"
-path = "bin/microsandbox/main.rs"
+name = "msb"
+path = "bin/msb/main.rs"
 
 [[bin]]
 name = "msbrun"

@@ -45,8 +45,8 @@ pub async fn add_subcommand(
     path: Option<PathBuf>,
     config: Option<String>,
 ) -> MicrosandboxResult<()> {
-    trio_conflict_error(build, sandbox, group, "add", "[NAMES]");
-    unsupported_build_group_error(build, group, "add", "[NAMES]");
+    trio_conflict_error(build, sandbox, group, "add", Some("[NAMES]"));
+    unsupported_build_group_error(build, group, "add", Some("[NAMES]"));
 
     let component = Component::Sandbox {
         image,
@@ -76,8 +76,8 @@ pub async fn remove_subcommand(
     path: Option<PathBuf>,
     config: Option<String>,
 ) -> MicrosandboxResult<()> {
-    trio_conflict_error(build, sandbox, group, "remove", "[NAMES]");
-    unsupported_build_group_error(build, group, "remove", "[NAMES]");
+    trio_conflict_error(build, sandbox, group, "remove", Some("[NAMES]"));
+    unsupported_build_group_error(build, group, "remove", Some("[NAMES]"));
     config::remove(
         ComponentType::Sandbox,
         &names,
@@ -94,8 +94,8 @@ pub async fn list_subcommand(
     path: Option<PathBuf>,
     config: Option<String>,
 ) -> MicrosandboxResult<()> {
-    trio_conflict_error(build, sandbox, group, "list", "[NAMES]");
-    unsupported_build_group_error(build, group, "list", "[NAMES]");
+    trio_conflict_error(build, sandbox, group, "list", None);
+    unsupported_build_group_error(build, group, "list", None);
     let names = config::list(ComponentType::Sandbox, path.as_deref(), config.as_deref()).await?;
     for name in names {
         println!("{}", name);
@@ -113,7 +113,7 @@ pub async fn init_subcommand(
         (None, Some(path)) => Some(path),
         (Some(_), Some(_)) => {
             MicrosandboxArgs::command()
-                .override_usage(usage("init", "[PATH]", None))
+                .override_usage(usage("init", Some("[PATH]"), None))
                 .error(
                     ErrorKind::ArgumentConflict,
                     format!(
@@ -144,7 +144,7 @@ pub async fn run_subcommand(
 ) -> MicrosandboxResult<()> {
     if build && sandbox {
         MicrosandboxArgs::command()
-            .override_usage(usage("run", "[NAME]", Some("<ARGS>")))
+            .override_usage(usage("run", Some("[NAME]"), Some("<ARGS>")))
             .error(
                 ErrorKind::ArgumentConflict,
                 format!(
@@ -156,12 +156,12 @@ pub async fn run_subcommand(
             .exit();
     }
 
-    unsupported_build_group_error(build, sandbox, "run", "[NAME]");
+    unsupported_build_group_error(build, sandbox, "run", Some("[NAME]"));
 
     let (sandbox, script) = parse_name_and_script(&name);
     if matches!((script, &exec), (Some(_), Some(_))) {
         MicrosandboxArgs::command()
-            .override_usage(usage("run", "[NAME[~SCRIPT]]", Some("<ARGS>")))
+            .override_usage(usage("run", Some("[NAME[~SCRIPT]]"), Some("<ARGS>")))
             .error(
                 ErrorKind::ArgumentConflict,
                 format!(
@@ -200,7 +200,7 @@ pub async fn script_run_subcommand(
 ) -> MicrosandboxResult<()> {
     if build && sandbox {
         MicrosandboxArgs::command()
-            .override_usage(usage(&script, "[NAME]", Some("<ARGS>")))
+            .override_usage(usage(&script, Some("[NAME]"), Some("<ARGS>")))
             .error(
                 ErrorKind::ArgumentConflict,
                 format!(
@@ -212,7 +212,7 @@ pub async fn script_run_subcommand(
             .exit();
     }
 
-    unsupported_build_group_error(build, sandbox, &script, "[NAME]");
+    unsupported_build_group_error(build, sandbox, &script, Some("[NAME]"));
 
     sandbox::run(
         &name,
@@ -243,7 +243,7 @@ pub async fn tmp_subcommand(
 
     if matches!((script, &exec), (Some(_), Some(_))) {
         MicrosandboxArgs::command()
-            .override_usage(usage("tmp", "[NAME[~SCRIPT]]", Some("<ARGS>")))
+            .override_usage(usage("tmp", Some("[NAME[~SCRIPT]]"), Some("<ARGS>")))
             .error(
                 ErrorKind::ArgumentConflict,
                 format!(
@@ -278,8 +278,8 @@ pub async fn up_subcommand(
     path: Option<PathBuf>,
     config: Option<String>,
 ) -> MicrosandboxResult<()> {
-    trio_conflict_error(build, sandbox, group, "up", "[NAMES]");
-    unsupported_build_group_error(build, group, "up", "[NAMES]");
+    trio_conflict_error(build, sandbox, group, "up", Some("[NAMES]"));
+    unsupported_build_group_error(build, group, "up", Some("[NAMES]"));
 
     orchestra::up(names, path.as_deref(), config.as_deref()).await
 }
@@ -292,8 +292,8 @@ pub async fn down_subcommand(
     path: Option<PathBuf>,
     config: Option<String>,
 ) -> MicrosandboxResult<()> {
-    trio_conflict_error(build, sandbox, group, "down", "[NAMES]");
-    unsupported_build_group_error(build, group, "down", "[NAMES]");
+    trio_conflict_error(build, sandbox, group, "down", Some("[NAMES]"));
+    unsupported_build_group_error(build, group, "down", Some("[NAMES]"));
 
     orchestra::down(names, path.as_deref(), config.as_deref()).await
 }
@@ -308,15 +308,15 @@ pub async fn log_subcommand(
     follow: bool,
     tail: Option<usize>,
 ) -> MicrosandboxResult<()> {
-    trio_conflict_error(build, sandbox, group, "log", "[NAME]");
-    unsupported_build_group_error(build, group, "log", "[NAME]");
+    trio_conflict_error(build, sandbox, group, "log", Some("[NAME]"));
+    unsupported_build_group_error(build, group, "log", Some("[NAME]"));
 
     // Check if tail command exists when follow mode is requested
     if follow {
         let tail_exists = which::which("tail").is_ok();
         if !tail_exists {
             MicrosandboxArgs::command()
-                .override_usage(usage("log", "[NAME]", None))
+                .override_usage(usage("log", Some("[NAME]"), None))
                 .error(
                     ErrorKind::InvalidValue,
                     "'tail' command not found. Please install it to use the follow (-f) option.",
@@ -397,7 +397,7 @@ pub async fn server_start_subcommand(
 ) -> MicrosandboxResult<()> {
     if !secure && key.is_some() {
         MicrosandboxArgs::command()
-            .override_usage(usage("server start", "[OPTIONS]", None))
+            .override_usage(usage("server start", Some("[OPTIONS]"), None))
             .error(
                 ErrorKind::InvalidValue,
                 format!(
@@ -432,7 +432,7 @@ fn trio_conflict_error(
     sandbox: bool,
     group: bool,
     command: &str,
-    positional_placeholder: &str,
+    positional_placeholder: Option<&str>,
 ) {
     match (build, sandbox, group) {
         (true, true, _) => conflict_error("build", "sandbox", command, positional_placeholder),
@@ -442,7 +442,7 @@ fn trio_conflict_error(
     }
 }
 
-fn conflict_error(arg1: &str, arg2: &str, command: &str, positional_placeholder: &str) {
+fn conflict_error(arg1: &str, arg2: &str, command: &str, positional_placeholder: Option<&str>) {
     MicrosandboxArgs::command()
         .override_usage(usage(command, positional_placeholder, None))
         .error(
@@ -460,7 +460,7 @@ fn unsupported_build_group_error(
     build: bool,
     group: bool,
     command: &str,
-    positional_placeholder: &str,
+    positional_placeholder: Option<&str>,
 ) {
     if build || group {
         MicrosandboxArgs::command()
@@ -468,7 +468,7 @@ fn unsupported_build_group_error(
             .error(
                 ErrorKind::ArgumentConflict,
                 format!(
-                    "`{}/{}` or `{}/{}` not yet supported.",
+                    "`{}`, `{}`, `{}`, and `{}` flags are not yet supported.",
                     "--build".literal(),
                     "-b".literal(),
                     "--group".literal(),
@@ -483,13 +483,13 @@ fn unsupported_build_group_error(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-fn usage(command: &str, positional_placeholder: &str, varargs: Option<&str>) -> String {
+fn usage(command: &str, positional_placeholder: Option<&str>, varargs: Option<&str>) -> String {
     let mut usage = format!(
         "{} {} {} {}",
-        "microsandbox".literal(),
+        "msb".literal(),
         command.literal(),
         "[OPTIONS]".placeholder(),
-        positional_placeholder.placeholder()
+        positional_placeholder.unwrap_or("").placeholder()
     );
 
     if let Some(varargs) = varargs {

@@ -8,9 +8,9 @@ use typed_path::Utf8UnixPathBuf;
 // Types
 //-------------------------------------------------------------------------------------------------
 
-/// `microsandbox` is a tool for managing lightweight virtual machines and images
+/// msb (microsandbox) is a tool for managing lightweight virtual machines and images
 #[derive(Debug, Parser)]
-#[command(name = "microsandbox", author, styles=styles::styles())]
+#[command(name = "msb", author, styles=styles::styles())]
 pub struct MicrosandboxArgs {
     /// The subcommand to run
     #[command(subcommand)]

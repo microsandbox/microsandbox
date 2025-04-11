@@ -1,8 +1,8 @@
 #[path = "mod.rs"]
-mod internal;
+mod msb;
 
 use clap::{CommandFactory, Parser};
-use internal::handlers;
+use msb::handlers;
 use microsandbox_core::{
     cli::{MicrosandboxArgs, MicrosandboxSubcommand, ServerSubcommand},
     management::{image, orchestra, server},
