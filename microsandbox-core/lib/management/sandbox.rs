@@ -242,14 +242,6 @@ pub async fn run(
         command.env("RUST_LOG", rust_log);
     }
 
-    // Pass the extra arguments last.
-    if !args.is_empty() {
-        command.arg("--");
-        for arg in args {
-            command.arg(arg);
-        }
-    }
-
     // In detached mode, ignore the i/o of the supervisor process.
     if detach {
         // Safety:
@@ -284,6 +276,14 @@ pub async fn run(
         command.stdin(Stdio::null());
     } else {
         command.arg("--forward-output");
+    }
+
+    // Pass the extra arguments last.
+    if !args.is_empty() {
+        command.arg("--");
+        for arg in args {
+            command.arg(arg);
+        }
     }
 
     let mut child = command.spawn()?;

@@ -3,7 +3,7 @@
     <img src="https://raw.githubusercontent.com/microsandbox/microsandbox/main/assets/microsandbox-thick-line-purple-gradient.svg" alt="microsandbox logo" width="100"></img>
   </a>
 
-  <h1>microsandbox</h1>
+  <h1>microsandbox-core</h1>
 
   <p>
     <a href="https://discord.gg/T95Y3XnEAK">
