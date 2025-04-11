@@ -2,12 +2,12 @@
 mod msb;
 
 use clap::{CommandFactory, Parser};
-use msb::handlers;
 use microsandbox_core::{
     cli::{MicrosandboxArgs, MicrosandboxSubcommand, ServerSubcommand},
     management::{image, orchestra, server},
     MicrosandboxResult,
 };
+use msb::handlers;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -195,6 +195,9 @@ async fn main() -> MicrosandboxResult<()> {
         }) => {
             handlers::log_subcommand(sandbox, build, group, name, path, config, follow, tail)
                 .await?;
+        }
+        Some(MicrosandboxSubcommand::Clean { global, all, path }) => {
+            handlers::clean_subcommand(global, all, path).await?;
         }
         Some(MicrosandboxSubcommand::Server { subcommand }) => match subcommand {
             ServerSubcommand::Start {

@@ -517,9 +517,21 @@ pub enum MicrosandboxSubcommand {
         config: Option<String>,
     },
 
-    /// Clean project data
+    /// Clean cached sandbox layers, metadata, etc.
     #[command(name = "clean")]
-    Clean,
+    Clean {
+        /// Clean globally. This cleans $MICROSANDBOX_HOME
+        #[arg(long)]
+        global: bool,
+
+        /// Clean all
+        #[arg(long)]
+        all: bool,
+
+        /// Project path
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+    },
 
     /// Build images
     #[command(name = "build")]

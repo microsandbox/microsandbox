@@ -61,6 +61,51 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
     Ok(())
 }
 
+/// Clean up the microsandbox environment for a project
+///
+/// This removes the .menv directory and all its contents, effectively
+/// cleaning up all microsandbox data for the project.
+///
+/// ## Arguments
+/// * `project_dir` - Optional path where the microsandbox environment should be cleaned.
+///                   If None, uses current directory
+///
+/// ## Example
+/// ```no_run
+/// use microsandbox_core::management::menv;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// // Clean in current directory
+/// menv::clean(None).await?;
+///
+/// // Clean in specific directory
+/// menv::clean(Some("my_project".into())).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn clean(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> {
+    // Get the target path, defaulting to current directory if none specified
+    let project_dir = project_dir.unwrap_or_else(|| PathBuf::from("."));
+    let menv_path = project_dir.join(MICROSANDBOX_ENV_DIR);
+
+    // Check if .menv directory exists
+    if menv_path.exists() {
+        // Remove the .menv directory and all its contents
+        fs::remove_dir_all(&menv_path).await?;
+        tracing::info!(
+            "Removed microsandbox environment at {}",
+            menv_path.display()
+        );
+    } else {
+        tracing::info!(
+            "No microsandbox environment found at {}",
+            menv_path.display()
+        );
+    }
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------

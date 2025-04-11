@@ -3,7 +3,7 @@ use microsandbox_core::{
     cli::{AnsiStyles, MicrosandboxArgs},
     management::{
         config::{self, Component, ComponentType},
-        menv, orchestra, sandbox, server,
+        home, menv, orchestra, sandbox, server,
     },
     oci::Reference,
     MicrosandboxError, MicrosandboxResult,
@@ -382,6 +382,26 @@ pub async fn log_subcommand(
         for line in lines_to_print {
             println!("{}", line);
         }
+    }
+
+    Ok(())
+}
+
+/// Handles the clean subcommand, which removes the .menv directory from a project
+pub async fn clean_subcommand(
+    global: bool,
+    all: bool,
+    path: Option<PathBuf>,
+) -> MicrosandboxResult<()> {
+    if global || all {
+        // Global cleanup - clean the microsandbox home directory
+        home::clean().await?;
+        tracing::info!("Global microsandbox home directory cleaned");
+    }
+
+    if !global || all {
+        // Local project cleanup - clean the .menv directory
+        menv::clean(path).await?;
     }
 
     Ok(())

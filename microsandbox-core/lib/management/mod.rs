@@ -12,6 +12,7 @@
 //! - `rootfs`: Root filesystem operations for containers
 //! - `sandbox`: Sandbox creation and management
 //! - `orchestra`: Orchestra management for sandboxes
+//! - `home`: Home directory management
 
 //--------------------------------------------------------------------------------------------------
 // Exports
@@ -25,3 +26,4 @@ pub mod orchestra;
 pub mod rootfs;
 pub mod sandbox;
 pub mod server;
+pub mod home;
