@@ -14,8 +14,8 @@ pub const MICROSANDBOX_HOME_ENV_VAR: &str = "MICROSANDBOX_HOME";
 /// Environment variable for the OCI registry domain
 pub const OCI_REGISTRY_ENV_VAR: &str = "OCI_REGISTRY_DOMAIN";
 
-/// Environment variable for the mcrun binary path
-pub const MCRUN_EXE_ENV_VAR: &str = "MCRUN_EXE";
+/// Environment variable for the msbrun binary path
+pub const MSBRUN_EXE_ENV_VAR: &str = "MSBRUN_EXE";
 
 //--------------------------------------------------------------------------------------------------
 // Functions

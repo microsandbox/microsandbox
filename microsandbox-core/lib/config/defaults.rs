@@ -33,11 +33,11 @@ sandboxes: []
 /// The default shell to use for the sandbox.
 pub const DEFAULT_SHELL: &str = "/bin/sh";
 
-/// The default path to the mcrun binary.
-pub static DEFAULT_MCRUN_EXE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+/// The default path to the msbrun binary.
+pub static DEFAULT_MSBRUN_EXE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
     let current_exe = std::env::current_exe().unwrap();
     let actual_exe = fs::canonicalize(current_exe).unwrap();
-    actual_exe.parent().unwrap().join("mcrun")
+    actual_exe.parent().unwrap().join("msbrun")
 });
 
 /// The default working directory for the sandbox.

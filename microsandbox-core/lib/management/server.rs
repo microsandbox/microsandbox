@@ -19,9 +19,9 @@ use rand::{distr::Alphanumeric, Rng};
 use tokio::{fs, process::Command};
 
 use crate::{
-    config::DEFAULT_MCRUN_EXE_PATH,
+    config::DEFAULT_MSBRUN_EXE_PATH,
     server::Claims,
-    utils::{self, MCRUN_EXE_ENV_VAR, SERVER_KEY_FILE, SERVER_PID_FILE},
+    utils::{self, MSBRUN_EXE_ENV_VAR, SERVER_KEY_FILE, SERVER_PID_FILE},
     MicrosandboxError, MicrosandboxResult,
 };
 
@@ -52,11 +52,11 @@ pub async fn start(
     let microsandbox_home_path = utils::get_microsandbox_home_path();
     fs::create_dir_all(&microsandbox_home_path).await?;
 
-    // Get the path to the mcrun executable
-    let mcrun_path =
-        microsandbox_utils::path::resolve_env_path(MCRUN_EXE_ENV_VAR, &*DEFAULT_MCRUN_EXE_PATH)?;
+    // Get the path to the msbrun executable
+    let msbrun_path =
+        microsandbox_utils::path::resolve_env_path(MSBRUN_EXE_ENV_VAR, &*DEFAULT_MSBRUN_EXE_PATH)?;
 
-    let mut command = Command::new(mcrun_path);
+    let mut command = Command::new(msbrun_path);
     command.arg("server");
 
     if let Some(port) = port {

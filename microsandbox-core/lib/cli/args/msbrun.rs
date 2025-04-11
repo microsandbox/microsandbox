@@ -9,9 +9,9 @@ use crate::cli::styles;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Arguments for the mcrun command
+/// Arguments for the msbrun command
 #[derive(Debug, Parser)]
-#[command(name = "mcrun", author, styles=styles::styles())]
+#[command(name = "msbrun", author, styles=styles::styles())]
 pub struct McrunArgs {
     /// The subcommand to run
     #[command(subcommand)]

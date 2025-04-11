@@ -18,14 +18,14 @@ use typed_path::Utf8UnixPathBuf;
 use crate::{
     config::{
         EnvPair, Microsandbox, PathPair, PortPair, ReferenceOrPath, Sandbox,
-        DEFAULT_MCRUN_EXE_PATH, START_SCRIPT_NAME,
+        DEFAULT_MSBRUN_EXE_PATH, START_SCRIPT_NAME,
     },
     management::{config, db, image, menv, rootfs},
     oci::Reference,
     utils::{
-        env, EXTRACTED_LAYER_SUFFIX, LAYERS_SUBDIR, LOG_SUBDIR, MCRUN_EXE_ENV_VAR,
-        MICROSANDBOX_CONFIG_FILENAME, MICROSANDBOX_ENV_DIR, OCI_DB_FILENAME, PATCH_SUBDIR,
-        RW_SUBDIR, SANDBOX_DB_FILENAME, SANDBOX_SCRIPT_DIR, SHELL_SCRIPT_NAME,
+        env, EXTRACTED_LAYER_SUFFIX, LAYERS_SUBDIR, LOG_SUBDIR, MICROSANDBOX_CONFIG_FILENAME,
+        MICROSANDBOX_ENV_DIR, MSBRUN_EXE_ENV_VAR, OCI_DB_FILENAME, PATCH_SUBDIR, RW_SUBDIR,
+        SANDBOX_DB_FILENAME, SANDBOX_SCRIPT_DIR, SHELL_SCRIPT_NAME,
     },
     vm::Rootfs,
     MicrosandboxError, MicrosandboxResult,
@@ -173,10 +173,10 @@ pub async fn run(
     tracing::debug!("rootfs: {:?}", rootfs);
     tracing::debug!("exec_path: {}", exec_path);
 
-    let mcrun_path =
-        microsandbox_utils::path::resolve_env_path(MCRUN_EXE_ENV_VAR, &*DEFAULT_MCRUN_EXE_PATH)?;
+    let msbrun_path =
+        microsandbox_utils::path::resolve_env_path(MSBRUN_EXE_ENV_VAR, &*DEFAULT_MSBRUN_EXE_PATH)?;
 
-    let mut command = Command::new(mcrun_path);
+    let mut command = Command::new(msbrun_path);
     command
         .arg("supervisor")
         .arg("--log-dir")
@@ -216,7 +216,7 @@ pub async fn run(
 
     // Ports
     for port in sandbox_config.get_ports() {
-        command.arg("--port").arg(port.to_string());
+        command.arg("--port-map").arg(port.to_string());
     }
 
     // Volumes

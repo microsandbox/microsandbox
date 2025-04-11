@@ -16,8 +16,8 @@ name = "microsandbox"
 path = "bin/microsandbox/main.rs"
 
 [[bin]]
-name = "mcrun"
-path = "bin/mcrun.rs"
+name = "msbrun"
+path = "bin/msbrun.rs"
 
 [[test]]
 name = "integration_cli"

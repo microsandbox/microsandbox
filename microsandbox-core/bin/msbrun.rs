@@ -1,4 +1,4 @@
-//! `mcrun` is a polymorphic binary that can operate in three modes: MicroVM, supervisor, or sandbox server.
+//! `msbrun` is a polymorphic binary that can operate in three modes: MicroVM, supervisor, or sandbox server.
 //!
 //! # Overview
 //!
@@ -13,7 +13,7 @@
 //!
 //! To run as a MicroVM:
 //! ```bash
-//! mcrun microvm \
+//! msbrun microvm \
 //!     --log-level=3 \
 //!     --native-rootfs=/path/to/rootfs \
 //!     --overlayfs-rootfs=/path/to/rootfs \
@@ -34,10 +34,10 @@
 //!
 //! To run as a supervisor:
 //! ```bash
-//! mcrun supervisor \
+//! msbrun supervisor \
 //!     --log-dir=/path/to/logs \
 //!     --child-name=my_vm \
-//!     --sandbox-db-path=/path/to/mcrun.db \
+//!     --sandbox-db-path=/path/to/msbrun.db \
 //!     --log-level=3 \
 //!     --native-rootfs=/path/to/rootfs \
 //!     --overlayfs-rootfs=/path/to/rootfs \
@@ -59,7 +59,7 @@
 //!
 //! To start the sandbox server:
 //! ```bash
-//! mcrun server \
+//! msbrun server \
 //!     --port 8080 \
 //!     --path /path/to/namespaces \
 //!     --disable-default \

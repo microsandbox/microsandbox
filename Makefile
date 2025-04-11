@@ -24,7 +24,7 @@ HOME_BIN := $(HOME)/.local/bin
 # Build Paths and Directories
 # -----------------------------------------------------------------------------
 MICROSANDBOX_RELEASE_BIN := target/release/microsandbox
-MCRUN_RELEASE_BIN := target/release/mcrun
+MSBRUN_RELEASE_BIN := target/release/msbrun
 EXAMPLES_DIR := target/release/examples
 BENCHES_DIR := target/release
 BUILD_DIR := build
@@ -53,9 +53,9 @@ all: build
 build: build_libkrun
 	@$(MAKE) _build_microsandbox
 
-_build_microsandbox: $(MICROSANDBOX_RELEASE_BIN) $(MCRUN_RELEASE_BIN)
+_build_microsandbox: $(MICROSANDBOX_RELEASE_BIN) $(MSBRUN_RELEASE_BIN)
 	@cp $(MICROSANDBOX_RELEASE_BIN) $(BUILD_DIR)/
-	@cp $(MCRUN_RELEASE_BIN) $(BUILD_DIR)/
+	@cp $(MSBRUN_RELEASE_BIN) $(BUILD_DIR)/
 	@echo "Microsandbox build artifacts copied to $(BUILD_DIR)/"
 
 # -----------------------------------------------------------------------------
@@ -70,13 +70,13 @@ else
 	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin microsandbox $(FEATURES)
 endif
 
-$(MCRUN_RELEASE_BIN): build_libkrun
+$(MSBRUN_RELEASE_BIN): build_libkrun
 	cd microsandbox-core
 ifeq ($(OS),Darwin)
-	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin mcrun $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin msbrun $(FEATURES)
 	codesign --entitlements microsandbox.entitlements --force -s - $@
 else
-	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin mcrun $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msbrun $(FEATURES)
 endif
 
 # -----------------------------------------------------------------------------
@@ -86,8 +86,8 @@ install: build
 	install -d $(HOME_BIN)
 	install -d $(HOME_LIB)
 	install -m 755 $(BUILD_DIR)/microsandbox $(HOME_BIN)/microsandbox
-	install -m 755 $(BUILD_DIR)/mcrun $(HOME_BIN)/mcrun
-	ln -sf $(HOME_BIN)/microsandbox $(HOME_BIN)/mc
+	install -m 755 $(BUILD_DIR)/msbrun $(HOME_BIN)/msbrun
+	ln -sf $(HOME_BIN)/microsandbox $(HOME_BIN)/msb
 	@if [ -n "$(LIBKRUNFW_FILE)" ]; then \
 		install -m 755 $(LIBKRUNFW_FILE) $(HOME_LIB)/; \
 		cd $(HOME_LIB) && ln -sf $(notdir $(LIBKRUNFW_FILE)) libkrunfw.dylib; \
@@ -110,8 +110,8 @@ clean:
 
 uninstall:
 	rm -f $(HOME_BIN)/microsandbox
-	rm -f $(HOME_BIN)/mcrun
-	rm -f $(HOME_BIN)/mc
+	rm -f $(HOME_BIN)/msbrun
+	rm -f $(HOME_BIN)/msb
 	rm -f $(HOME_LIB)/libkrunfw.dylib
 	rm -f $(HOME_LIB)/libkrun.dylib
 	@if [ -n "$(LIBKRUNFW_FILE)" ]; then \
