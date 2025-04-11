@@ -480,8 +480,6 @@ async fn setup_image_rootfs(
     tracing::info!("pulling image: {}", image);
     image::pull(image.clone(), true, false, None).await?;
 
-    tracing::debug!("Updated sandbox config: {:#?}", sandbox_config);
-
     // Get the microsandbox home path and database path
     let microsandbox_home_path = env::get_microsandbox_home_path();
     let db_path = microsandbox_home_path.join(OCI_DB_FILENAME);
@@ -493,6 +491,7 @@ async fn setup_image_rootfs(
     // Apply image configuration defaults if enabled.
     if use_image_defaults {
         config::apply_image_defaults(sandbox_config, image, &pool).await?;
+        tracing::debug!("updated sandbox config: {:#?}", sandbox_config);
     }
 
     // Get the layers for the image
