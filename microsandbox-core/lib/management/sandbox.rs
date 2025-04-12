@@ -106,6 +106,8 @@ pub async fn run(
     let (config, canonical_project_dir, config_file) =
         config::load_config(project_dir, config_file).await?;
 
+    let config_path = canonical_project_dir.join(&config_file);
+
     // Ensure the .menv files exist
     let menv_path = canonical_project_dir.join(MICROSANDBOX_ENV_DIR);
     menv::ensure_menv_files(&menv_path).await?;
@@ -114,7 +116,7 @@ pub async fn run(
     let Some(mut sandbox_config) = config.get_sandbox(sandbox_name).cloned() else {
         return Err(MicrosandboxError::SandboxNotFoundInConfig(
             sandbox_name.to_string(),
-            canonical_project_dir.join(&config_file),
+            config_path,
         ));
     };
 
@@ -127,7 +129,7 @@ pub async fn run(
     let sandbox_pool = db::get_or_create_pool(&sandbox_db_path, &db::SANDBOX_DB_MIGRATOR).await?;
 
     // Get the config last modified timestamp
-    let config_last_modified: DateTime<Utc> = fs::metadata(&config_file).await?.modified()?.into();
+    let config_last_modified: DateTime<Utc> = fs::metadata(&config_path).await?.modified()?.into();
 
     let rootfs = match sandbox_config.get_image().clone() {
         ReferenceOrPath::Path(root_path) => {
