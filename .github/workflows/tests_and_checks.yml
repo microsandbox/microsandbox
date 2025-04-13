@@ -40,8 +40,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            build/libkrunfw/libkrunfw*.so*
-            build/libkrun/target/release/libkrun*.so*
+            build/libkrunfw/libkrunfw.so*
+            build/libkrun/target/release/libkrun.so*
           key: ${{ runner.os }}-libkrun-${{ steps.hash_libkrun.outputs.hash }}
 
       - name: Check if build is needed
@@ -90,8 +90,8 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            build/libkrunfw/libkrunfw*.so*
-            build/libkrun/target/release/libkrun*.so*
+            build/libkrunfw/libkrunfw.so*
+            build/libkrun/target/release/libkrun.so*
           key: ${{ runner.os }}-libkrun-${{ needs.check-libkrun-cache-changes.outputs.libkrun_hash }}
 
   run-checks:
@@ -115,8 +115,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            build/libkrunfw/libkrunfw*.so*
-            build/libkrun/target/release/libkrun*.so*
+            build/libkrunfw/libkrunfw.so*
+            build/libkrun/target/release/libkrun.so*
           key: ${{ runner.os }}-libkrun-${{ needs.check-libkrun-cache-changes.outputs.libkrun_hash }}
 
       - name: Install Rust Toolchain
@@ -152,15 +152,6 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check bans licenses sources
-
-      # A hack to make `ld` find the libkrunfw because right now it seems to only look for libkrunfw.so.x
-      # and not libkrunfw.so or libkrunfw.so.x.x.x even though their SONAME is libkrunfw.so.x
-      - name: Create symlinks
-        run: |
-          cd build/libkrunfw
-          objdump -p libkrunfw.so.4.4.2 | grep SONAME # sanity check
-          ln -sf libkrunfw.so.4.4.2 libkrunfw.so.4
-          ln -sf libkrunfw.so.4 libkrunfw.so
 
       - name: Test Release
         if: ${{ matrix.rust-toolchain == 'stable'  && github.event_name == 'push' }}
@@ -207,15 +198,6 @@ jobs:
         with:
           override: true
           toolchain: ${{ matrix.rust-toolchain }}
-
-      # A hack to make `ld` find the libkrunfw because right now it seems to only look for libkrunfw.so.x
-      # and not libkrunfw.so or libkrunfw.so.x.x.x even though their SONAME is libkrunfw.so.x
-      - name: Create symlinks
-        run: |
-          cd build/libkrunfw
-          objdump -p libkrunfw.so.4.4.2 | grep SONAME # sanity check
-          ln -sf libkrunfw.so.4.4.2 libkrunfw.so.4
-          ln -sf libkrunfw.so.4 libkrunfw.so
 
       - name: Run Tests
         run: |
