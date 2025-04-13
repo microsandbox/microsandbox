@@ -195,14 +195,11 @@ pub struct Config {
     pub modified_at: DateTime<Utc>,
 }
 
-/// Represents an OCI image layer in the database
+/// Represents a layer in an OCI container image
 #[derive(Debug, Clone)]
 pub struct Layer {
     /// Unique identifier for the layer
     pub id: i64,
-
-    /// ID of the manifest this layer belongs to
-    pub manifest_id: i64,
 
     /// Media type of the layer
     pub media_type: String,
@@ -216,9 +213,9 @@ pub struct Layer {
     /// Size of the layer in bytes
     pub size_bytes: i64,
 
-    /// When the layer was created
+    /// Time when the record was created
     pub created_at: DateTime<Utc>,
 
-    /// When the layer was last modified
+    /// Time when the record was last modified
     pub modified_at: DateTime<Utc>,
 }

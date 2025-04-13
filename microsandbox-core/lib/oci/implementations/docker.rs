@@ -336,16 +336,18 @@ impl OciRegistryPull for DockerRegistry {
                 self.download_image_blob(repository, layer_desc.digest(), layer_desc.size())
                     .await?;
 
-                // Save layer metadata to database
-                db::save_or_update_layer(
+                // Save layer metadata to database independently of manifests
+                let layer_id = db::save_or_update_layer(
                     &self.oci_db,
-                    manifest_id,
                     &layer_desc.media_type().to_string(),
                     &layer_desc.digest().to_string(),
                     layer_desc.size() as i64,
                     diff_id,
                 )
                 .await?;
+
+                // Link the layer to the manifest
+                db::save_manifest_layer(&self.oci_db, manifest_id, layer_id).await?;
 
                 Ok::<_, MicrosandboxError>(())
             })

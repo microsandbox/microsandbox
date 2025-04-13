@@ -348,7 +348,7 @@ pub enum MicrosandboxSubcommand {
         name: String,
 
         /// Number of CPUs
-        #[arg(long)]
+        #[arg(long, alias = "cpu")]
         cpus: Option<u8>,
 
         /// RAM in MB

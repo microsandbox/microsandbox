@@ -522,7 +522,6 @@ pub(crate) async fn save_config(
 /// Saves an image layer to the database
 pub(crate) async fn save_layer(
     pool: &Pool<Sqlite>,
-    manifest_id: i64,
     media_type: &str,
     digest: &str,
     size_bytes: i64,
@@ -530,7 +529,6 @@ pub(crate) async fn save_layer(
 ) -> MicrosandboxResult<i64> {
     let layer_model = Layer {
         id: 0, // Will be set by the database
-        manifest_id,
         media_type: media_type.to_string(),
         digest: digest.to_string(),
         diff_id: diff_id.to_string(),
@@ -542,14 +540,12 @@ pub(crate) async fn save_layer(
     let record = sqlx::query(
         r#"
         INSERT INTO layers (
-            manifest_id, media_type, digest,
-            size_bytes, diff_id
+            media_type, digest, size_bytes, diff_id
         )
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?)
         RETURNING id
         "#,
     )
-    .bind(layer_model.manifest_id)
     .bind(&layer_model.media_type)
     .bind(&layer_model.digest)
     .bind(layer_model.size_bytes)
@@ -560,42 +556,11 @@ pub(crate) async fn save_layer(
     Ok(record.get::<i64, _>("id"))
 }
 
-/// Saves or updates an image in the database.
-/// If the image exists, it updates the size_bytes and last_used_at.
-/// If it doesn't exist, creates a new record.
-pub(crate) async fn save_or_update_image(
-    pool: &Pool<Sqlite>,
-    reference: &str,
-    size_bytes: i64,
-) -> MicrosandboxResult<i64> {
-    // Try to update first
-    let update_result = sqlx::query(
-        r#"
-        UPDATE images
-        SET size_bytes = ?, last_used_at = CURRENT_TIMESTAMP, modified_at = CURRENT_TIMESTAMP
-        WHERE reference = ?
-        RETURNING id, reference, size_bytes, last_used_at, created_at, modified_at
-        "#,
-    )
-    .bind(size_bytes)
-    .bind(reference)
-    .fetch_optional(pool)
-    .await?;
-
-    if let Some(record) = update_result {
-        Ok(record.get::<i64, _>("id"))
-    } else {
-        // If no record was updated, insert a new one
-        save_image(pool, reference, size_bytes).await
-    }
-}
-
 /// Saves or updates a layer in the database.
 /// If the layer exists, it updates the size_bytes and other fields.
 /// If it doesn't exist, creates a new record.
 pub(crate) async fn save_or_update_layer(
     pool: &Pool<Sqlite>,
-    manifest_id: i64,
     media_type: &str,
     digest: &str,
     size_bytes: i64,
@@ -603,7 +568,6 @@ pub(crate) async fn save_or_update_layer(
 ) -> MicrosandboxResult<i64> {
     let layer_model = Layer {
         id: 0, // Will be set by the database
-        manifest_id,
         media_type: media_type.to_string(),
         digest: digest.to_string(),
         diff_id: diff_id.to_string(),
@@ -616,8 +580,7 @@ pub(crate) async fn save_or_update_layer(
     let update_result = sqlx::query(
         r#"
         UPDATE layers
-        SET manifest_id = ?,
-            media_type = ?,
+        SET media_type = ?,
             size_bytes = ?,
             diff_id = ?,
             modified_at = CURRENT_TIMESTAMP
@@ -625,7 +588,6 @@ pub(crate) async fn save_or_update_layer(
         RETURNING id
         "#,
     )
-    .bind(layer_model.manifest_id)
     .bind(&layer_model.media_type)
     .bind(layer_model.size_bytes)
     .bind(&layer_model.diff_id)
@@ -637,8 +599,81 @@ pub(crate) async fn save_or_update_layer(
         Ok(record.get::<i64, _>("id"))
     } else {
         // If no record was updated, insert a new one
-        save_layer(pool, manifest_id, media_type, digest, size_bytes, diff_id).await
+        save_layer(pool, media_type, digest, size_bytes, diff_id).await
     }
+}
+
+/// Associates a layer with a manifest in the manifest_layers join table
+pub(crate) async fn save_manifest_layer(
+    pool: &Pool<Sqlite>,
+    manifest_id: i64,
+    layer_id: i64,
+) -> MicrosandboxResult<i64> {
+    let record = sqlx::query(
+        r#"
+        INSERT INTO manifest_layers (manifest_id, layer_id)
+        VALUES (?, ?)
+        ON CONFLICT (manifest_id, layer_id) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(layer_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(record) = record {
+        Ok(record.get::<i64, _>("id"))
+    } else {
+        // If no record was inserted (because it already exists), fetch the existing ID
+        let record = sqlx::query(
+            r#"
+            SELECT id FROM manifest_layers
+            WHERE manifest_id = ? AND layer_id = ?
+            "#,
+        )
+        .bind(manifest_id)
+        .bind(layer_id)
+        .fetch_one(pool)
+        .await?;
+
+        Ok(record.get::<i64, _>("id"))
+    }
+}
+
+/// Gets all layers for an image from the database.
+pub(crate) async fn get_image_layers(
+    pool: &Pool<Sqlite>,
+    reference: &str,
+) -> MicrosandboxResult<Vec<Layer>> {
+    let records = sqlx::query(
+        r#"
+        SELECT l.id, l.media_type, l.digest,
+               l.diff_id, l.size_bytes, l.created_at, l.modified_at
+        FROM layers l
+        JOIN manifest_layers ml ON l.id = ml.layer_id
+        JOIN manifests m ON ml.manifest_id = m.id
+        JOIN images i ON m.image_id = i.id
+        WHERE i.reference = ?
+        ORDER BY l.id ASC
+        "#,
+    )
+    .bind(reference)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(records
+        .into_iter()
+        .map(|row| Layer {
+            id: row.get("id"),
+            media_type: row.get("media_type"),
+            digest: row.get("digest"),
+            diff_id: row.get("diff_id"),
+            size_bytes: row.get("size_bytes"),
+            created_at: parse_sqlite_datetime(&row.get::<String, _>("created_at")),
+            modified_at: parse_sqlite_datetime(&row.get::<String, _>("modified_at")),
+        })
+        .collect())
 }
 
 /// Checks if an image exists in the database.
@@ -655,41 +690,6 @@ pub(crate) async fn image_exists(pool: &Pool<Sqlite>, reference: &str) -> Micros
     .await?;
 
     Ok(record.get::<i64, _>("count") > 0)
-}
-
-/// Gets all layers for an image from the database.
-pub(crate) async fn get_image_layers(
-    pool: &Pool<Sqlite>,
-    reference: &str,
-) -> MicrosandboxResult<Vec<Layer>> {
-    let records = sqlx::query(
-        r#"
-        SELECT l.id, l.manifest_id, l.media_type, l.digest,
-               l.diff_id, l.size_bytes, l.created_at, l.modified_at
-        FROM layers l
-        JOIN manifests m ON l.manifest_id = m.id
-        JOIN images i ON m.image_id = i.id
-        WHERE i.reference = ?
-        ORDER BY l.id ASC
-        "#,
-    )
-    .bind(reference)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(records
-        .into_iter()
-        .map(|row| Layer {
-            id: row.get("id"),
-            manifest_id: row.get("manifest_id"),
-            media_type: row.get("media_type"),
-            digest: row.get("digest"),
-            diff_id: row.get("diff_id"),
-            size_bytes: row.get("size_bytes"),
-            created_at: parse_sqlite_datetime(&row.get::<String, _>("created_at")),
-            modified_at: parse_sqlite_datetime(&row.get::<String, _>("modified_at")),
-        })
-        .collect())
 }
 
 /// Gets the configuration for an image from the database.
@@ -752,6 +752,36 @@ pub(crate) async fn get_image_config(
         created_at: parse_sqlite_datetime(&row.get::<String, _>("created_at")),
         modified_at: parse_sqlite_datetime(&row.get::<String, _>("modified_at")),
     }))
+}
+
+/// Saves or updates an image in the database.
+/// If the image exists, it updates the size_bytes and last_used_at.
+/// If it doesn't exist, creates a new record.
+pub(crate) async fn save_or_update_image(
+    pool: &Pool<Sqlite>,
+    reference: &str,
+    size_bytes: i64,
+) -> MicrosandboxResult<i64> {
+    // Try to update first
+    let update_result = sqlx::query(
+        r#"
+        UPDATE images
+        SET size_bytes = ?, last_used_at = CURRENT_TIMESTAMP, modified_at = CURRENT_TIMESTAMP
+        WHERE reference = ?
+        RETURNING id, reference, size_bytes, last_used_at, created_at, modified_at
+        "#,
+    )
+    .bind(size_bytes)
+    .bind(reference)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(record) = update_result {
+        Ok(record.get::<i64, _>("id"))
+    } else {
+        // If no record was updated, insert a new one
+        save_image(pool, reference, size_bytes).await
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
