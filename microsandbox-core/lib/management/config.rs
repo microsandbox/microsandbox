@@ -13,7 +13,7 @@ use tokio::fs;
 use typed_path::Utf8UnixPathBuf;
 
 use crate::{
-    config::{EnvPair, Microsandbox, PathSegment, PortPair, Sandbox, START_SCRIPT_NAME},
+    config::{EnvPair, Microsandbox, PathSegment, PortPair, Sandbox, DEFAULT_SHELL, START_SCRIPT_NAME},
     oci::Reference,
     utils::MICROSANDBOX_CONFIG_FILENAME,
     MicrosandboxError, MicrosandboxResult,
