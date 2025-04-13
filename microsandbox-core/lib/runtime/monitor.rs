@@ -68,6 +68,7 @@ pub struct MicroVmMonitor {
 
 impl MicroVmMonitor {
     /// Create a new MicroVM monitor
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         supervisor_pid: u32,
         sandbox_db_path: impl AsRef<Path>,

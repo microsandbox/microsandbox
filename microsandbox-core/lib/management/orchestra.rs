@@ -96,7 +96,7 @@ pub async fn apply(
         running_sandboxes.iter().map(|s| s.name.clone()).collect();
 
     // Start sandboxes that are in config but not active
-    for (name, _) in config_sandboxes {
+    for name in config_sandboxes.keys() {
         // Should start in parallel
         if !running_sandbox_names.contains(name) {
             tracing::info!("Starting sandbox: {}", name);
@@ -201,7 +201,7 @@ pub async fn up(
         running_sandboxes.iter().map(|s| s.name.clone()).collect();
 
     // Start specified sandboxes that are in config but not active
-    for (sandbox_name, _) in config_sandboxes {
+    for sandbox_name in config_sandboxes.keys() {
         // Only start if sandbox is in the specified list and not already running
         if sandbox_names.contains(sandbox_name) && !running_sandbox_names.contains(sandbox_name) {
             tracing::info!("Starting sandbox: {}", sandbox_name);

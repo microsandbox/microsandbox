@@ -339,8 +339,8 @@ impl OciRegistryPull for DockerRegistry {
                 // Save layer metadata to database independently of manifests
                 let layer_id = db::save_or_update_layer(
                     &self.oci_db,
-                    &layer_desc.media_type().to_string(),
-                    &layer_desc.digest().to_string(),
+                    layer_desc.media_type().as_ref(),
+                    layer_desc.digest().as_ref(),
                     layer_desc.size() as i64,
                     diff_id,
                 )

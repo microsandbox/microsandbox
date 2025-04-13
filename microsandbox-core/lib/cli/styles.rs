@@ -8,7 +8,7 @@ use std::fmt::Write;
 #[cfg(not(test))]
 /// Global flag indicating whether we're in an ANSI-capable interactive terminal
 static IS_ANSI_TERMINAL: std::sync::LazyLock<bool> =
-    std::sync::LazyLock::new(|| microsandbox_utils::term::is_ansi_interactive_terminal());
+    std::sync::LazyLock::new(microsandbox_utils::term::is_ansi_interactive_terminal);
 
 //--------------------------------------------------------------------------------------------------
 // Functions

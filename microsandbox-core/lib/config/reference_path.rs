@@ -83,9 +83,9 @@ impl TryFrom<String> for ReferenceOrPath {
     }
 }
 
-impl Into<String> for ReferenceOrPath {
-    fn into(self) -> String {
-        self.to_string()
+impl From<ReferenceOrPath> for String {
+    fn from(value: ReferenceOrPath) -> Self {
+        value.to_string()
     }
 }
 

@@ -68,7 +68,7 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
 ///
 /// ## Arguments
 /// * `project_dir` - Optional path where the microsandbox environment should be cleaned.
-///                   If None, uses current directory
+///   If None, uses current directory
 ///
 /// ## Example
 /// ```no_run
@@ -111,7 +111,7 @@ pub async fn clean(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> {
 //--------------------------------------------------------------------------------------------------
 
 /// Create the required directories and files for a microsandbox environment
-pub(crate) async fn ensure_menv_files(menv_path: &PathBuf) -> MicrosandboxResult<()> {
+pub(crate) async fn ensure_menv_files(menv_path: &Path) -> MicrosandboxResult<()> {
     // Create log directory if it doesn't exist
     fs::create_dir_all(menv_path.join(LOG_SUBDIR)).await?;
 

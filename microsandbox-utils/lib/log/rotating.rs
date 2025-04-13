@@ -327,9 +327,9 @@ impl AsyncWrite for RotatingLog {
 impl Write for SyncChannelWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let data = buf.to_vec();
-        self.tx.send(data).map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "failed to send log data to channel")
-        })?;
+        self.tx
+            .send(data)
+            .map_err(|_| io::Error::other("failed to send log data to channel"))?;
         Ok(buf.len())
     }
 

@@ -127,8 +127,7 @@ where
             // Set up child's session and controlling terminal
             unsafe {
                 command.pre_exec(|| {
-                    nix::unistd::setsid()
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    nix::unistd::setsid().map_err(std::io::Error::other)?;
                     if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 1 as libc::c_long) < 0
                     {
                         return Err(std::io::Error::last_os_error());

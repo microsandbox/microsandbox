@@ -154,7 +154,7 @@ pub async fn start(
     // Wait for either child process to exit or signal to be received
     tokio::select! {
         status = child.wait() => {
-            if !status.as_ref().map_or(false, |s| s.success()) {
+            if !status.as_ref().is_ok_and(|s| s.success()) {
                 tracing::error!(
                     "child process — sandbox server — exited with status: {:?}",
                     status

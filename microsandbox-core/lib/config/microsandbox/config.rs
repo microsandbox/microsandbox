@@ -540,7 +540,7 @@ impl TryFrom<String> for NetworkScope {
     type Error = MicrosandboxError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        Ok(NetworkScope::try_from(s.as_str())?)
+        NetworkScope::try_from(s.as_str())
     }
 }
 

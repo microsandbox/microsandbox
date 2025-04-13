@@ -106,6 +106,7 @@ pub async fn get_or_create_pool(
 /// Saves or updates a sandbox in the database and returns its ID.
 /// If a sandbox with the same name and config_file exists, it will be updated.
 /// Otherwise, a new sandbox record will be created.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn save_or_update_sandbox(
     pool: &Pool<Sqlite>,
     name: &str,
@@ -122,7 +123,7 @@ pub(crate) async fn save_or_update_sandbox(
         id: 0,
         name: name.to_string(),
         config_file: config_file.to_string(),
-        config_last_modified: config_last_modified.clone(),
+        config_last_modified: *config_last_modified,
         status: status.to_string(),
         supervisor_pid,
         microvm_pid,
@@ -149,12 +150,12 @@ pub(crate) async fn save_or_update_sandbox(
         RETURNING id
         "#,
     )
-    .bind(&sandbox.config_last_modified.to_rfc3339())
+    .bind(sandbox.config_last_modified.to_rfc3339())
     .bind(&sandbox.status)
-    .bind(&sandbox.supervisor_pid)
-    .bind(&sandbox.microvm_pid)
+    .bind(sandbox.supervisor_pid)
+    .bind(sandbox.microvm_pid)
     .bind(&sandbox.rootfs_paths)
-    .bind(&sandbox.group_id)
+    .bind(sandbox.group_id)
     .bind(&sandbox.group_ip)
     .bind(&sandbox.name)
     .bind(&sandbox.config_file)
