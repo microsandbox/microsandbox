@@ -182,9 +182,9 @@ pub async fn pull_from_docker_registry(
 /// Returns an error if:
 /// * Sandboxes registry image pull is not implemented
 pub async fn pull_from_sandboxes_registry(_image: &Reference) -> MicrosandboxResult<()> {
-    return Err(MicrosandboxError::NotImplemented(
+    Err(MicrosandboxError::NotImplemented(
         "sandboxes registry image pull is not implemented".to_string(),
-    ));
+    ))
 }
 
 /// Pulls an image group from the Sandboxes.io registry.
@@ -197,9 +197,9 @@ pub async fn pull_from_sandboxes_registry(_image: &Reference) -> MicrosandboxRes
 /// Returns an error if:
 /// * Sandboxes registry image group pull is not implemented
 pub async fn pull_group_from_sandboxes_registry(_group: &Reference) -> MicrosandboxResult<()> {
-    return Err(MicrosandboxError::NotImplemented(
+    Err(MicrosandboxError::NotImplemented(
         "Sandboxes registry image group pull is not implemented".to_string(),
-    ));
+    ))
 }
 
 //--------------------------------------------------------------------------------------------------

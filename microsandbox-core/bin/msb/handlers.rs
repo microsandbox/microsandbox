@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use clap::{error::ErrorKind, CommandFactory};
 use microsandbox_core::{
     cli::{AnsiStyles, MicrosandboxArgs},
@@ -59,7 +61,7 @@ pub async fn add_subcommand(
         depends_on,
         workdir,
         shell,
-        scripts: scripts.into_iter().map(|(k, v)| (k, v.into())).collect(),
+        scripts: scripts.into_iter().collect(),
         imports: imports.into_iter().map(|(k, v)| (k, v.into())).collect(),
         exports: exports.into_iter().map(|(k, v)| (k, v.into())).collect(),
         reach,
@@ -173,7 +175,7 @@ pub async fn run_subcommand(
     }
 
     sandbox::run(
-        &sandbox,
+        sandbox,
         script,
         path.as_deref(),
         config.as_deref(),
@@ -566,7 +568,7 @@ fn parse_duration_string(duration_str: &str) -> MicrosandboxResult<chrono::Durat
     })?;
 
     // Safety check for very large numbers
-    if value < 0 || value > 8760 {
+    if !(0..=8760).contains(&value) {
         // 8760 is the number of hours in a year
         return Err(MicrosandboxError::InvalidArgument(format!(
             "Duration value too large or negative: {}. Maximum allowed is 8760 hours (1 year)",

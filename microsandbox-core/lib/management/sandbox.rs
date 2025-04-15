@@ -87,6 +87,7 @@ const TEMPORARY_SANDBOX_NAME: &str = "tmp";
 ///     Ok(())
 /// }
 /// ```
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     sandbox_name: &str,
     script_name: Option<&str>,
@@ -188,7 +189,7 @@ pub async fn run(
         .arg("--config-file")
         .arg(&config_file)
         .arg("--config-last-modified")
-        .arg(&config_last_modified.to_rfc3339())
+        .arg(config_last_modified.to_rfc3339())
         .arg("--sandbox-db-path")
         .arg(&sandbox_db_path)
         .arg("--scope")
@@ -378,6 +379,7 @@ pub async fn run(
 ///     Ok(())
 /// }
 /// ```
+#[allow(clippy::too_many_arguments)]
 pub async fn run_temp(
     image: &Reference,
     script: Option<&str>,
@@ -467,6 +469,7 @@ pub async fn run_temp(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn setup_image_rootfs(
     image: &Reference,
     sandbox_name: &str,

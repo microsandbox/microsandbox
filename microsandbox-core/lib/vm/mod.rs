@@ -2,8 +2,8 @@
 
 mod builder;
 mod ffi;
+mod microvm;
 mod rlimit;
-mod vm;
 
 //--------------------------------------------------------------------------------------------------
 // Exports
@@ -12,5 +12,5 @@ mod vm;
 pub use builder::*;
 #[allow(unused)]
 pub use ffi::*;
+pub use microvm::*;
 pub use rlimit::*;
-pub use vm::*;

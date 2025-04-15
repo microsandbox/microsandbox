@@ -248,7 +248,7 @@ async fn auth_middleware(
             (
                 status,
                 Json(ErrorResponse::new(
-                    status.as_u16() as u16,
+                    status.as_u16(),
                     message,
                     ErrorType::AuthenticationError,
                 )),

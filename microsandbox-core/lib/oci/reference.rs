@@ -133,10 +133,10 @@ impl FromStr for Reference {
                     selector: ReferenceSelector::tag_with_digest(tag, parsed_digest),
                 })
             } else {
-                return Err(MicrosandboxError::ImageReferenceError(format!(
+                Err(MicrosandboxError::ImageReferenceError(format!(
                     "invalid digest: {}",
                     potential_digest
-                )));
+                )))
             }
         } else {
             let (registry, remainder) = extract_registry_and_path(s, &default_registry);

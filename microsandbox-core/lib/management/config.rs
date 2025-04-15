@@ -26,6 +26,7 @@ use super::db;
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 /// The component to add to the Microsandbox configuration.
 pub enum Component {
     /// A sandbox component.
@@ -171,7 +172,7 @@ pub async fn add(
                     .make_mapping();
 
                 // Add image field (required)
-                sandbox_mapping.insert_str("image", image.to_string());
+                sandbox_mapping.insert_str("image", image);
 
                 // Add optional fields
                 if let Some(ram_value) = ram {
@@ -179,7 +180,7 @@ pub async fn add(
                 }
 
                 if let Some(cpus_value) = cpus {
-                    sandbox_mapping.insert_u32("cpus", *cpus_value as u32);
+                    sandbox_mapping.insert_u32("cpus", *cpus_value);
                 }
 
                 // Add shell (default if not provided)
@@ -222,7 +223,7 @@ pub async fn add(
 
                 // Add env_file if provided
                 if let Some(env_file_path) = env_file {
-                    sandbox_mapping.insert_str("env_file", env_file_path.to_string());
+                    sandbox_mapping.insert_str("env_file", env_file_path);
                 }
 
                 // Add depends_on if any
@@ -238,7 +239,7 @@ pub async fn add(
 
                 // Add workdir if provided
                 if let Some(workdir_path) = workdir {
-                    sandbox_mapping.insert_str("workdir", workdir_path.to_string());
+                    sandbox_mapping.insert_str("workdir", workdir_path);
                 }
 
                 // Add scripts if any
@@ -259,7 +260,7 @@ pub async fn add(
                         .make_mapping();
 
                     for (import_name, import_path) in imports {
-                        imports_mapping.insert_str(import_name, import_path.to_string());
+                        imports_mapping.insert_str(import_name, import_path);
                     }
                 }
 
@@ -270,7 +271,7 @@ pub async fn add(
                         .make_mapping();
 
                     for (export_name, export_path) in exports {
-                        exports_mapping.insert_str(export_name, export_path.to_string());
+                        exports_mapping.insert_str(export_name, export_path);
                     }
                 }
 
@@ -326,37 +327,33 @@ pub async fn remove(
     let mut doc = yaml::from_slice(config_contents.as_bytes())
         .map_err(|e| MicrosandboxError::ConfigParseError(e.to_string()))?;
 
-    match component_type {
-        ComponentType::Sandbox => {
-            let doc_mut = doc.as_mut();
-            let mut root_mapping =
-                doc_mut
-                    .into_mapping_mut()
-                    .ok_or(MicrosandboxError::ConfigParseError(
-                        "config is not valid. expected an object".to_string(),
-                    ))?;
+    if let ComponentType::Sandbox = component_type {
+        let doc_mut = doc.as_mut();
+        let mut root_mapping =
+            doc_mut
+                .into_mapping_mut()
+                .ok_or(MicrosandboxError::ConfigParseError(
+                    "config is not valid. expected an object".to_string(),
+                ))?;
 
-            // Ensure the "sandboxes" key exists in the root mapping
-            let mut sandboxes_mapping =
-                if let Some(sandboxes_mut) = root_mapping.get_mut("sandboxes") {
-                    // Get the existing sandboxes mapping
-                    sandboxes_mut
-                        .into_mapping_mut()
-                        .ok_or(MicrosandboxError::ConfigParseError(
-                            "sandboxes is not a valid mapping".to_string(),
-                        ))?
-                } else {
-                    // Create a new sandboxes mapping if it doesn't exist
-                    root_mapping
-                        .insert("sandboxes", yaml::Separator::Auto)
-                        .make_mapping()
-                };
+        // Ensure the "sandboxes" key exists in the root mapping
+        let mut sandboxes_mapping = if let Some(sandboxes_mut) = root_mapping.get_mut("sandboxes") {
+            // Get the existing sandboxes mapping
+            sandboxes_mut
+                .into_mapping_mut()
+                .ok_or(MicrosandboxError::ConfigParseError(
+                    "sandboxes is not a valid mapping".to_string(),
+                ))?
+        } else {
+            // Create a new sandboxes mapping if it doesn't exist
+            root_mapping
+                .insert("sandboxes", yaml::Separator::Auto)
+                .make_mapping()
+        };
 
-            for name in names {
-                sandboxes_mapping.remove(name);
-            }
+        for name in names {
+            sandboxes_mapping.remove(name);
         }
-        _ => (),
     }
 
     // Write the modified YAML back to the file, preserving formatting
@@ -390,10 +387,8 @@ pub async fn list(
     let (config, _, _) = load_config(project_dir, config_file).await?;
 
     match component_type {
-        ComponentType::Sandbox => {
-            return Ok(config.get_sandboxes().keys().cloned().collect());
-        }
-        _ => return Ok(vec![]),
+        ComponentType::Sandbox => Ok(config.get_sandboxes().keys().cloned().collect()),
+        _ => Ok(vec![]),
     }
 }
 
@@ -435,7 +430,7 @@ pub async fn load_config(
     let canonical_project_dir = fs::canonicalize(project_dir).await?;
 
     // Validate the config file path
-    let config_file = config_file.unwrap_or_else(|| MICROSANDBOX_CONFIG_FILENAME);
+    let config_file = config_file.unwrap_or(MICROSANDBOX_CONFIG_FILENAME);
     let _ = PathSegment::try_from(config_file)?;
     let full_config_path = canonical_project_dir.join(config_file);
 
@@ -478,7 +473,7 @@ pub async fn resolve_config_paths(
     let canonical_project_dir = fs::canonicalize(project_dir).await?;
 
     // Validate the config file path
-    let config_file = config_file.unwrap_or_else(|| MICROSANDBOX_CONFIG_FILENAME);
+    let config_file = config_file.unwrap_or(MICROSANDBOX_CONFIG_FILENAME);
     let _ = PathSegment::try_from(config_file)?;
     let full_config_path = canonical_project_dir.join(config_file);
 
@@ -524,7 +519,7 @@ pub async fn apply_image_defaults(
     oci_db: &Pool<Sqlite>,
 ) -> MicrosandboxResult<()> {
     // Get the image configuration
-    if let Some(config) = db::get_image_config(&oci_db, &reference.to_string()).await? {
+    if let Some(config) = db::get_image_config(oci_db, &reference.to_string()).await? {
         tracing::info!("Applying defaults from image configuration");
 
         // Apply working directory if not set in sandbox
