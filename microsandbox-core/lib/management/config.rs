@@ -33,8 +33,8 @@ pub enum Component {
         /// The image to use for the sandbox.
         image: String,
 
-        /// The amount of RAM in MiB to use.
-        ram: Option<u32>,
+        /// The amount of memory in MiB to use.
+        memory: Option<u32>,
 
         /// The number of CPUs to use.
         cpus: Option<u32>,
@@ -128,7 +128,7 @@ pub async fn add(
         match component {
             Component::Sandbox {
                 image,
-                ram,
+                memory,
                 cpus,
                 volumes,
                 ports,
@@ -174,8 +174,8 @@ pub async fn add(
                 sandbox_mapping.insert_str("image", image.to_string());
 
                 // Add optional fields
-                if let Some(ram_value) = ram {
-                    sandbox_mapping.insert_u32("ram", *ram_value);
+                if let Some(memory_value) = memory {
+                    sandbox_mapping.insert_u32("memory", *memory_value);
                 }
 
                 if let Some(cpus_value) = cpus {

@@ -4,7 +4,7 @@ use ipnetwork::Ipv4Network;
 use typed_path::Utf8UnixPathBuf;
 
 use crate::{
-    config::{EnvPair, NetworkScope, PathPair, PortPair, DEFAULT_NUM_VCPUS, DEFAULT_RAM_MIB},
+    config::{EnvPair, NetworkScope, PathPair, PortPair, DEFAULT_MEMORY_MIB, DEFAULT_NUM_VCPUS},
     MicrosandboxResult,
 };
 
@@ -22,7 +22,7 @@ use super::{LinuxRlimit, LogLevel, MicroVm, MicroVmConfig, Rootfs};
 ///
 /// ## Optional Fields
 /// - `num_vcpus`: The number of virtual CPUs to use for the MicroVm.
-/// - `ram_mib`: The amount of RAM in MiB to use for the MicroVm.
+/// - `memory_mib`: The amount of memory in MiB to use for the MicroVm.
 /// - `mapped_dirs`: The directories to mount in the MicroVm.
 /// - `port_map`: The ports to map in the MicroVm.
 /// - `rlimits`: The resource limits to use for the MicroVm.
@@ -35,7 +35,7 @@ pub struct MicroVmConfigBuilder<R, E> {
     log_level: LogLevel,
     rootfs: R,
     num_vcpus: u8,
-    ram_mib: u32,
+    memory_mib: u32,
     mapped_dirs: Vec<PathPair>,
     port_map: Vec<PortPair>,
     scope: NetworkScope,
@@ -53,7 +53,7 @@ pub struct MicroVmConfigBuilder<R, E> {
 ///
 /// This struct provides a fluent interface for configuring and creating a `MicroVm` instance.
 /// It allows you to set various parameters such as the log level, root path, number of vCPUs,
-/// RAM size, virtio-fs mounts, port mappings, resource limits, working directory, executable path,
+/// memory size, virtio-fs mounts, port mappings, resource limits, working directory, executable path,
 /// arguments, environment variables, and console output.
 ///
 /// ## Required Fields
@@ -62,7 +62,7 @@ pub struct MicroVmConfigBuilder<R, E> {
 ///
 /// ## Optional Fields
 /// - `num_vcpus`: The number of virtual CPUs to use for the MicroVm.
-/// - `ram_mib`: The amount of RAM in MiB to use for the MicroVm.
+/// - `memory_mib`: The amount of memory in MiB to use for the MicroVm.
 /// - `mapped_dirs`: The directories to mount in the MicroVm.
 /// - `port_map`: The ports to map in the MicroVm.
 /// - `scope`: The network scope to use for the MicroVm.
@@ -86,7 +86,7 @@ pub struct MicroVmConfigBuilder<R, E> {
 ///     .log_level(LogLevel::Debug)
 ///     .rootfs(Rootfs::Native(PathBuf::from("/tmp")))
 ///     .num_vcpus(2)
-///     .ram_mib(1024)
+///     .memory_mib(1024)
 ///     .mapped_dirs(["/home:/guest/mount".parse()?])
 ///     .port_map(["8080:80".parse()?])
 ///     .scope(NetworkScope::Public)
@@ -170,7 +170,7 @@ impl<R, M> MicroVmConfigBuilder<R, M> {
             log_level: self.log_level,
             rootfs,
             num_vcpus: self.num_vcpus,
-            ram_mib: self.ram_mib,
+            memory_mib: self.memory_mib,
             mapped_dirs: self.mapped_dirs,
             port_map: self.port_map,
             scope: self.scope,
@@ -207,7 +207,7 @@ impl<R, M> MicroVmConfigBuilder<R, M> {
         self
     }
 
-    /// Sets the amount of RAM in MiB for the MicroVm.
+    /// Sets the amount of memory in MiB for the MicroVm.
     ///
     /// This determines how much memory is available to the guest system.
     ///
@@ -217,15 +217,15 @@ impl<R, M> MicroVmConfigBuilder<R, M> {
     /// use microsandbox_core::vm::MicroVmConfigBuilder;
     ///
     /// let config = MicroVmConfigBuilder::default()
-    ///     .ram_mib(1024);  // Allocate 1 GiB of RAM
+    ///     .memory_mib(1024);  // Allocate 1 GiB of memory
     /// ```
     ///
     /// ## Notes
     /// - The value is in MiB (1 GiB = 1024 MiB)
     /// - Consider the host's available memory when setting this value
     /// - Common values: 512 MiB for minimal systems, 1024-2048 MiB for typical workloads
-    pub fn ram_mib(mut self, ram_mib: u32) -> Self {
-        self.ram_mib = ram_mib;
+    pub fn memory_mib(mut self, memory_mib: u32) -> Self {
+        self.memory_mib = memory_mib;
         self
     }
 
@@ -471,7 +471,7 @@ impl<R, M> MicroVmConfigBuilder<R, M> {
             log_level: self.log_level,
             rootfs: self.rootfs,
             num_vcpus: self.num_vcpus,
-            ram_mib: self.ram_mib,
+            memory_mib: self.memory_mib,
             mapped_dirs: self.mapped_dirs,
             port_map: self.port_map,
             scope: self.scope,
@@ -591,7 +591,7 @@ impl<R, M> MicroVmBuilder<R, M> {
     /// let vm = MicroVmBuilder::default()
     ///     .log_level(LogLevel::Debug)  // Enable debug logging
     ///     .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-    ///     .ram_mib(1024)
+    ///     .memory_mib(1024)
     ///     .exec_path("/bin/echo")
     ///     .build()?;
     /// # Ok(())
@@ -662,7 +662,7 @@ impl<R, M> MicroVmBuilder<R, M> {
     /// let temp_dir = TempDir::new()?;
     /// let vm = MicroVmBuilder::default()
     ///     .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-    ///     .ram_mib(1024)
+    ///     .memory_mib(1024)
     ///     .num_vcpus(2)  // Allocate 2 virtual CPU cores
     ///     .exec_path("/bin/echo")
     ///     .build()?;
@@ -678,7 +678,7 @@ impl<R, M> MicroVmBuilder<R, M> {
         self
     }
 
-    /// Sets the amount of RAM in MiB for the MicroVm.
+    /// Sets the amount of memory in MiB for the MicroVm.
     ///
     /// This determines how much memory is available to the guest system.
     ///
@@ -692,7 +692,7 @@ impl<R, M> MicroVmBuilder<R, M> {
     /// let temp_dir = TempDir::new()?;
     /// let vm = MicroVmBuilder::default()
     ///     .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-    ///     .ram_mib(1024)  // Allocate 1 GiB of RAM
+    ///     .memory_mib(1024)  // Allocate 1 GiB of memory
     ///     .exec_path("/bin/echo")
     ///     .build()?;
     /// # Ok(())
@@ -703,8 +703,8 @@ impl<R, M> MicroVmBuilder<R, M> {
     /// - The value is in MiB (1 GiB = 1024 MiB)
     /// - Consider the host's available memory when setting this value
     /// - This is a required field - the build will fail if not set
-    pub fn ram_mib(mut self, ram_mib: u32) -> Self {
-        self.inner = self.inner.ram_mib(ram_mib);
+    pub fn memory_mib(mut self, memory_mib: u32) -> Self {
+        self.inner = self.inner.memory_mib(memory_mib);
         self
     }
 
@@ -1008,7 +1008,7 @@ impl MicroVmConfigBuilder<Rootfs, Utf8UnixPathBuf> {
             log_level: self.log_level,
             rootfs: self.rootfs,
             num_vcpus: self.num_vcpus,
-            ram_mib: self.ram_mib,
+            memory_mib: self.memory_mib,
             mapped_dirs: self.mapped_dirs,
             port_map: self.port_map,
             scope: self.scope,
@@ -1040,7 +1040,7 @@ impl MicroVmBuilder<Rootfs, Utf8UnixPathBuf> {
     /// let temp_dir = TempDir::new()?;
     /// let vm = MicroVmBuilder::default()
     ///     .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-    ///     .ram_mib(1024)
+    ///     .memory_mib(1024)
     ///     .exec_path("/usr/bin/python3")
     ///     .args(["-c", "print('Hello from MicroVm!')"])
     ///     .build()?;
@@ -1054,14 +1054,14 @@ impl MicroVmBuilder<Rootfs, Utf8UnixPathBuf> {
     /// ## Notes
     /// - The build will fail if required configuration is missing
     /// - The build will fail if the root path doesn't exist
-    /// - The build will fail if RAM or vCPU values are invalid
+    /// - The build will fail if memory value is invalid
     /// - After building, use `start()` to run the MicroVm
     pub fn build(self) -> MicrosandboxResult<MicroVm> {
         MicroVm::from_config(MicroVmConfig {
             log_level: self.inner.log_level,
             rootfs: self.inner.rootfs,
             num_vcpus: self.inner.num_vcpus,
-            ram_mib: self.inner.ram_mib,
+            memory_mib: self.inner.memory_mib,
             mapped_dirs: self.inner.mapped_dirs,
             port_map: self.inner.port_map,
             scope: self.inner.scope,
@@ -1087,7 +1087,7 @@ impl Default for MicroVmConfigBuilder<(), ()> {
             log_level: LogLevel::default(),
             rootfs: (),
             num_vcpus: DEFAULT_NUM_VCPUS,
-            ram_mib: DEFAULT_RAM_MIB,
+            memory_mib: DEFAULT_MEMORY_MIB,
             mapped_dirs: vec![],
             port_map: vec![],
             scope: NetworkScope::Group,
@@ -1131,7 +1131,7 @@ mod tests {
             .log_level(LogLevel::Debug)
             .rootfs(rootfs.clone())
             .num_vcpus(2)
-            .ram_mib(1024)
+            .memory_mib(1024)
             .mapped_dirs(["/guest/mount:/host/mount".parse()?])
             .port_map(["8080:80".parse()?])
             .rlimits(["RLIMIT_NOFILE=1024:1024".parse()?])
@@ -1144,7 +1144,7 @@ mod tests {
         assert_eq!(builder.inner.log_level, LogLevel::Debug);
         assert_eq!(builder.inner.rootfs, rootfs);
         assert_eq!(builder.inner.num_vcpus, 2);
-        assert_eq!(builder.inner.ram_mib, 1024);
+        assert_eq!(builder.inner.memory_mib, 1024);
         assert_eq!(
             builder.inner.mapped_dirs,
             ["/guest/mount:/host/mount".parse()?]
@@ -1171,19 +1171,19 @@ mod tests {
     #[test]
     fn test_microvm_builder_minimal() -> anyhow::Result<()> {
         let rootfs = Rootfs::Native(PathBuf::from("/tmp"));
-        let ram_mib = 1024;
+        let memory_mib = 1024;
 
         let builder = MicroVmBuilder::default()
             .rootfs(rootfs.clone())
             .exec_path("/bin/echo");
 
         assert_eq!(builder.inner.rootfs, rootfs);
-        assert_eq!(builder.inner.ram_mib, ram_mib);
+        assert_eq!(builder.inner.memory_mib, memory_mib);
 
         // Check that other fields have default values
         assert_eq!(builder.inner.log_level, LogLevel::default());
         assert_eq!(builder.inner.num_vcpus, DEFAULT_NUM_VCPUS);
-        assert_eq!(builder.inner.ram_mib, DEFAULT_RAM_MIB);
+        assert_eq!(builder.inner.memory_mib, DEFAULT_MEMORY_MIB);
         assert!(builder.inner.mapped_dirs.is_empty());
         assert!(builder.inner.port_map.is_empty());
         assert!(builder.inner.rlimits.is_empty());

@@ -63,9 +63,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         image: String,
 
-        /// RAM in MiB
+        /// Memory in MiB
         #[arg(long)]
-        ram: Option<u32>,
+        memory: Option<u32>,
 
         /// Number of CPUs
         #[arg(long, alias = "cpu")]
@@ -351,9 +351,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(long, alias = "cpu")]
         cpus: Option<u8>,
 
-        /// RAM in MB
+        /// Memory in MB
         #[arg(long)]
-        ram: Option<u32>,
+        memory: Option<u32>,
 
         /// Volume mappings, format: <host_path>:<container_path>
         #[arg(long = "volume", name = "VOLUME")]

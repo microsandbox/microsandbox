@@ -201,9 +201,9 @@ pub async fn run(
         command.arg("--num-vcpus").arg(cpus.to_string());
     }
 
-    // RAM
-    if let Some(ram) = sandbox_config.get_ram() {
-        command.arg("--ram-mib").arg(ram.to_string());
+    // Memory
+    if let Some(memory) = sandbox_config.get_memory() {
+        command.arg("--memory-mib").arg(memory.to_string());
     }
 
     // Workdir
@@ -327,7 +327,7 @@ pub async fn run(
 /// * `image` - The OCI image reference to use as the base for the sandbox
 /// * `script` - The name of the script to execute within the sandbox
 /// * `cpus` - Optional number of virtual CPUs to allocate to the sandbox
-/// * `ram` - Optional amount of RAM in MiB to allocate to the sandbox
+/// * `memory` - Optional amount of memory in MiB to allocate to the sandbox
 /// * `volumes` - List of volume mappings in the format "host_path:guest_path"
 /// * `ports` - List of port mappings in the format "host_port:guest_port"
 /// * `envs` - List of environment variables in the format "KEY=VALUE"
@@ -382,7 +382,7 @@ pub async fn run_temp(
     image: &Reference,
     script: Option<&str>,
     cpus: Option<u8>,
-    ram: Option<u32>,
+    memory: Option<u32>,
     volumes: Vec<String>,
     ports: Vec<String>,
     envs: Vec<String>,
@@ -411,8 +411,8 @@ pub async fn run_temp(
             b = b.cpus(cpus);
         }
 
-        if let Some(ram) = ram {
-            b = b.ram(ram);
+        if let Some(memory) = memory {
+            b = b.memory(memory);
         }
 
         if let Some(workdir) = workdir {

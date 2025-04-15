@@ -18,7 +18,7 @@
 //!     --native-rootfs=/path/to/rootfs \
 //!     --overlayfs-rootfs=/path/to/rootfs \
 //!     --num-vcpus=2 \
-//!     --ram-mib=1024 \
+//!     --memory-mib=1024 \
 //!     --workdir-path=/app \
 //!     --exec-path=/usr/bin/python3 \
 //!     --mapped-dirs=/host/path:/guest/path \
@@ -42,7 +42,7 @@
 //!     --native-rootfs=/path/to/rootfs \
 //!     --overlayfs-rootfs=/path/to/rootfs \
 //!     --num-vcpus=2 \
-//!     --ram-mib=1024 \
+//!     --memory-mib=1024 \
 //!     --workdir-path=/app \
 //!     --exec-path=/usr/bin/python3 \
 //!     --mapped-dirs=/host/path:/guest/path \
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
             native_rootfs,
             overlayfs_layer,
             num_vcpus,
-            ram_mib,
+            memory_mib,
             workdir_path,
             exec_path,
             env,
@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
             tracing::debug!("native_rootfs: {:#?}", native_rootfs);
             tracing::debug!("overlayfs_layer: {:#?}", overlayfs_layer);
             tracing::debug!("num_vcpus: {:#?}", num_vcpus);
-            tracing::debug!("ram_mib: {:#?}", ram_mib);
+            tracing::debug!("memory_mib: {:#?}", memory_mib);
             tracing::debug!("workdir_path: {:#?}", workdir_path);
             tracing::debug!("exec_path: {:#?}", exec_path);
             tracing::debug!("env: {:#?}", env);
@@ -162,9 +162,9 @@ async fn main() -> Result<()> {
                 builder = builder.num_vcpus(num_vcpus);
             }
 
-            // Set ram mib if provided
-            if let Some(ram_mib) = ram_mib {
-                builder = builder.ram_mib(ram_mib);
+            // Set memory mib if provided
+            if let Some(memory_mib) = memory_mib {
+                builder = builder.memory_mib(memory_mib);
             }
 
             // Set log level if provided
@@ -229,7 +229,7 @@ async fn main() -> Result<()> {
             native_rootfs,
             overlayfs_layer,
             num_vcpus,
-            ram_mib,
+            memory_mib,
             workdir_path,
             exec_path,
             env,
@@ -282,9 +282,9 @@ async fn main() -> Result<()> {
                 child_args.push(format!("--num-vcpus={}", num_vcpus));
             }
 
-            // Set ram mib if provided
-            if let Some(ram_mib) = ram_mib {
-                child_args.push(format!("--ram-mib={}", ram_mib));
+            // Set memory mib if provided
+            if let Some(memory_mib) = memory_mib {
+                child_args.push(format!("--memory-mib={}", memory_mib));
             }
 
             // Set workdir path if provided

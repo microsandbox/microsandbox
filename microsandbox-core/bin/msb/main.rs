@@ -39,7 +39,7 @@ async fn main() -> MicrosandboxResult<()> {
             group,
             names,
             image,
-            ram,
+            memory,
             cpus,
             volumes,
             ports,
@@ -56,7 +56,7 @@ async fn main() -> MicrosandboxResult<()> {
             config,
         }) => {
             handlers::add_subcommand(
-                sandbox, build, group, names, image, ram, cpus, volumes, ports, envs, env_file,
+                sandbox, build, group, names, image, memory, cpus, volumes, ports, envs, env_file,
                 depends_on, workdir, shell, scripts, imports, exports, reach, path, config,
             )
             .await?;
@@ -149,7 +149,7 @@ async fn main() -> MicrosandboxResult<()> {
             image: _image,
             name,
             cpus,
-            ram,
+            memory,
             volumes,
             ports,
             envs,
@@ -157,7 +157,7 @@ async fn main() -> MicrosandboxResult<()> {
             exec,
             args,
         }) => {
-            handlers::tmp_subcommand(name, cpus, ram, volumes, ports, envs, workdir, exec, args)
+            handlers::tmp_subcommand(name, cpus, memory, volumes, ports, envs, workdir, exec, args)
                 .await?;
         }
         Some(MicrosandboxSubcommand::Apply { path, config }) => {

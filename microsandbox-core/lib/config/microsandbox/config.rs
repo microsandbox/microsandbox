@@ -129,10 +129,10 @@ pub struct Build {
     /// The image to use. This can be a path to a local rootfs or an OCI image reference.
     pub(crate) image: ReferenceOrPath,
 
-    /// The amount of RAM in MiB to use.
+    /// The amount of memory in MiB to use.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     #[builder(default, setter(strip_option))]
-    pub(crate) ram: Option<u32>,
+    pub(crate) memory: Option<u32>,
 
     /// The number of vCPUs to use.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -309,9 +309,9 @@ pub struct Sandbox {
     /// The image to use. This can be a path to a local rootfs or an OCI image reference.
     pub(crate) image: ReferenceOrPath,
 
-    /// The amount of RAM in MiB to use.
+    /// The amount of memory in MiB to use.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub(crate) ram: Option<u32>,
+    pub(crate) memory: Option<u32>,
 
     /// The number of vCPUs to use.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -677,7 +677,7 @@ mod tests {
         let sandbox = sandboxes.get("test").unwrap();
 
         assert!(sandbox.version.is_none());
-        assert!(sandbox.ram.is_none());
+        assert!(sandbox.memory.is_none());
         assert!(sandbox.cpus.is_none());
         assert!(sandbox.volumes.is_empty());
         assert!(sandbox.ports.is_empty());
@@ -763,7 +763,7 @@ mod tests {
               test_sandbox:
                 version: "1.0.0"
                 image: "alpine:latest"
-                ram: 1024
+                memory: 1024
                 cpus: 2
                 volumes:
                   - "./src:/app/src"
@@ -805,7 +805,7 @@ mod tests {
         let sandboxes = &config.sandboxes;
         let sandbox = sandboxes.get("test_sandbox").unwrap();
         assert_eq!(sandbox.version.as_ref().unwrap().to_string(), "1.0.0");
-        assert_eq!(sandbox.ram.unwrap(), 1024);
+        assert_eq!(sandbox.memory.unwrap(), 1024);
         assert_eq!(sandbox.cpus.unwrap(), 2);
         assert_eq!(sandbox.volumes[0].to_string(), "./src:/app/src");
         assert_eq!(sandbox.ports[0].to_string(), "8080:80");
@@ -837,7 +837,7 @@ mod tests {
             builds:
               base_build:
                 image: "python:3.11-slim"
-                ram: 2048
+                memory: 2048
                 cpus: 2
                 volumes:
                   - "./requirements.txt:/build/requirements.txt"
@@ -860,7 +860,7 @@ mod tests {
               api:
                 version: "1.0.0"
                 image: "python:3.11-slim"
-                ram: 1024
+                memory: 1024
                 cpus: 1
                 volumes:
                   - "./api:/app/src"
@@ -909,7 +909,7 @@ mod tests {
         // Test builds
         let builds = &config.builds;
         let base_build = builds.get("base_build").unwrap();
-        assert_eq!(base_build.ram.unwrap(), 2048);
+        assert_eq!(base_build.memory.unwrap(), 2048);
         assert_eq!(base_build.cpus.unwrap(), 2);
         assert_eq!(
             base_build.workdir.as_ref().unwrap(),
@@ -933,7 +933,7 @@ mod tests {
         let sandboxes = &config.sandboxes;
         let api = sandboxes.get("api").unwrap();
         assert_eq!(api.version.as_ref().unwrap().to_string(), "1.0.0");
-        assert_eq!(api.ram.unwrap(), 1024);
+        assert_eq!(api.memory.unwrap(), 1024);
         assert_eq!(api.cpus.unwrap(), 1);
         assert_eq!(api.depends_on, vec!["database", "cache"]);
         assert_eq!(api.scope, NetworkScope::Public);

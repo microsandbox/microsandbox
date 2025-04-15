@@ -9,8 +9,8 @@ use crate::utils::MICROSANDBOX_HOME_DIR;
 /// The default number of vCPUs to use for the MicroVm.
 pub const DEFAULT_NUM_VCPUS: u8 = 1;
 
-/// The default amount of RAM in MiB to use for the MicroVm.
-pub const DEFAULT_RAM_MIB: u32 = 1024;
+/// The default amount of memory in MiB to use for the MicroVm.
+pub const DEFAULT_MEMORY_MIB: u32 = 1024;
 
 /// The path where all microsandbox global data is stored.
 pub static DEFAULT_MICROSANDBOX_HOME: LazyLock<PathBuf> =

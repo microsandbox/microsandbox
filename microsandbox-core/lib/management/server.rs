@@ -62,9 +62,13 @@ pub async fn start(
             let process_running = unsafe { libc::kill(pid, 0) == 0 };
 
             if process_running {
-                return Err(MicrosandboxError::SandboxServerError(
-                    format!("A sandbox server is already running (PID: {}). Use 'msb server stop' to stop it first.", pid)
-                ));
+                // Server is already running - this is OK for idempotent behavior
+                tracing::info!(
+                    "A sandbox server is already running (PID: {}). No action needed.",
+                    pid
+                );
+                println!("A sandbox server is already running (PID: {}). Use 'msb server stop' to stop it if needed.", pid);
+                return Ok(());
             } else {
                 // Process not running, clean up stale PID file
                 tracing::warn!("Found stale PID file for process {}. Cleaning up.", pid);

@@ -39,9 +39,9 @@ pub enum McrunSubcommand {
         #[arg(long)]
         num_vcpus: Option<u8>,
 
-        /// RAM size in MiB
+        /// Memory size in MiB
         #[arg(long)]
-        ram_mib: Option<u32>,
+        memory_mib: Option<u32>,
 
         /// Working directory path
         #[arg(long)]
@@ -122,9 +122,9 @@ pub enum McrunSubcommand {
         #[arg(long)]
         num_vcpus: Option<u8>,
 
-        /// RAM size in MiB
+        /// Memory size in MiB
         #[arg(long)]
-        ram_mib: Option<u32>,
+        memory_mib: Option<u32>,
 
         /// Working directory path
         #[arg(long)]

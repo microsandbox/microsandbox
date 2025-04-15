@@ -305,9 +305,9 @@ pub enum InvalidMicroVMConfigError {
     #[error("number of vCPUs is zero")]
     NumVCPUsIsZero,
 
-    /// The amount of RAM is zero.
-    #[error("amount of RAM is zero")]
-    RamIsZero,
+    /// The amount of memory is zero.
+    #[error("amount of memory is zero")]
+    MemoryIsZero,
 
     /// The command line contains invalid characters. Only printable ASCII characters (space through tilde) are allowed.
     #[error("command line contains invalid characters (only ASCII characters between space and tilde are allowed): {0}")]

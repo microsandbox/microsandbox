@@ -29,7 +29,7 @@ pub async fn add_subcommand(
     group: bool,
     names: Vec<String>,
     image: String,
-    ram: Option<u32>,
+    memory: Option<u32>,
     cpus: Option<u32>,
     volumes: Vec<String>,
     ports: Vec<String>,
@@ -50,7 +50,7 @@ pub async fn add_subcommand(
 
     let component = Component::Sandbox {
         image,
-        ram,
+        memory,
         cpus,
         volumes,
         ports,
@@ -230,7 +230,7 @@ pub async fn script_run_subcommand(
 pub async fn tmp_subcommand(
     name: String,
     cpus: Option<u8>,
-    ram: Option<u32>,
+    memory: Option<u32>,
     volumes: Vec<String>,
     ports: Vec<String>,
     envs: Vec<String>,
@@ -258,7 +258,7 @@ pub async fn tmp_subcommand(
         &image,
         script,
         cpus,
-        ram,
+        memory,
         volumes,
         ports,
         envs,

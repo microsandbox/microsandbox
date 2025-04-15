@@ -104,7 +104,7 @@ pub enum Rootfs {
 /// let temp_dir = TempDir::new()?;
 /// let config = MicroVmConfig::builder()
 ///     .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-///     .ram_mib(1024)
+///     .memory_mib(1024)
 ///     .exec_path("/bin/echo")
 ///     .build();
 ///
@@ -123,8 +123,8 @@ pub struct MicroVmConfig {
     /// The number of vCPUs to use for the MicroVm.
     pub num_vcpus: u8,
 
-    /// The amount of RAM in MiB to use for the MicroVm.
-    pub ram_mib: u32,
+    /// The amount of memory in MiB to use for the MicroVm.
+    pub memory_mib: u32,
 
     /// The directories to mount in the MicroVm using virtio-fs.
     /// Each PathPair represents a host:guest path mapping.
@@ -313,7 +313,7 @@ impl MicroVm {
 
         // Set basic VM configuration
         unsafe {
-            let status = ffi::krun_set_vm_config(ctx_id, config.num_vcpus, config.ram_mib);
+            let status = ffi::krun_set_vm_config(ctx_id, config.num_vcpus, config.memory_mib);
             assert!(status >= 0, "failed to set VM config: {}", status);
         }
 
@@ -454,7 +454,7 @@ impl MicroVmConfig {
     /// let temp_dir = TempDir::new()?;
     /// let config = MicroVmConfig::builder()
     ///     .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-    ///     .ram_mib(1024)
+    ///     .memory_mib(1024)
     ///     .exec_path("/bin/echo")
     ///     .build();
     /// # Ok(())
@@ -523,7 +523,7 @@ impl MicroVmConfig {
     /// - Verifies the root path exists and is accessible
     /// - Verifies all host paths in mapped_dirs exist and are accessible
     /// - Ensures number of vCPUs is non-zero
-    /// - Ensures RAM allocation is non-zero
+    /// - Ensures memory allocation is non-zero
     /// - Validates executable path and arguments contain only printable ASCII characters
     /// - Validates guest paths don't overlap or conflict with each other
     ///
@@ -540,7 +540,7 @@ impl MicroVmConfig {
     /// let temp_dir = TempDir::new()?;
     /// let config = MicroVmConfig::builder()
     ///     .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-    ///     .ram_mib(1024)
+    ///     .memory_mib(1024)
     ///     .exec_path("/bin/echo")
     ///     .build();
     ///
@@ -591,9 +591,10 @@ impl MicroVmConfig {
             ));
         }
 
-        if self.ram_mib == 0 {
+        // Validate memory_mib is not zero
+        if self.memory_mib == 0 {
             return Err(MicrosandboxError::InvalidMicroVMConfig(
-                InvalidMicroVMConfigError::RamIsZero,
+                InvalidMicroVMConfigError::MemoryIsZero,
             ));
         }
 
@@ -694,13 +695,13 @@ mod tests {
         let config = MicroVmConfig::builder()
             .log_level(LogLevel::Info)
             .rootfs(Rootfs::Native(PathBuf::from("/tmp")))
-            .ram_mib(512)
+            .memory_mib(512)
             .exec_path("/bin/echo")
             .build();
 
         assert!(config.log_level == LogLevel::Info);
         assert_eq!(config.rootfs, Rootfs::Native(PathBuf::from("/tmp")));
-        assert_eq!(config.ram_mib, 512);
+        assert_eq!(config.memory_mib, 512);
         assert_eq!(config.num_vcpus, DEFAULT_NUM_VCPUS);
     }
 
@@ -721,7 +722,7 @@ mod tests {
         let config = MicroVmConfig::builder()
             .log_level(LogLevel::Info)
             .rootfs(Rootfs::Native(PathBuf::from("/non/existent/path")))
-            .ram_mib(512)
+            .memory_mib(512)
             .exec_path("/bin/echo")
             .build();
 
@@ -739,14 +740,14 @@ mod tests {
         let config = MicroVmConfig::builder()
             .log_level(LogLevel::Info)
             .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-            .ram_mib(0)
+            .memory_mib(0)
             .exec_path("/bin/echo")
             .build();
 
         assert!(matches!(
             config.validate(),
             Err(MicrosandboxError::InvalidMicroVMConfig(
-                InvalidMicroVMConfigError::RamIsZero
+                InvalidMicroVMConfigError::MemoryIsZero
             ))
         ));
     }
@@ -795,7 +796,7 @@ mod tests {
         // Test invalid executable path
         let config = MicroVmConfig::builder()
             .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-            .ram_mib(512)
+            .memory_mib(512)
             .exec_path("/bin/hello\nworld")
             .build();
         assert!(matches!(
@@ -808,7 +809,7 @@ mod tests {
         // Test invalid argument
         let config = MicroVmConfig::builder()
             .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-            .ram_mib(512)
+            .memory_mib(512)
             .exec_path("/bin/echo")
             .args(["hello\tworld"])
             .build();
@@ -887,7 +888,7 @@ mod tests {
         // Test valid configuration
         let valid_config = MicroVmConfig::builder()
             .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-            .ram_mib(1024)
+            .memory_mib(1024)
             .exec_path("/bin/echo")
             .mapped_dirs([
                 format!("{}:/app", host_dir1.display()).parse()?,
@@ -900,7 +901,7 @@ mod tests {
         // Test configuration with conflicting guest paths
         let invalid_config = MicroVmConfig::builder()
             .rootfs(Rootfs::Native(temp_dir.path().to_path_buf()))
-            .ram_mib(1024)
+            .memory_mib(1024)
             .exec_path("/bin/echo")
             .mapped_dirs([
                 format!("{}:/app/data", host_dir1.display()).parse()?,

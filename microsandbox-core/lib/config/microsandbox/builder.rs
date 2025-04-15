@@ -40,7 +40,7 @@ pub struct MicrosandboxBuilder {
 /// ### Optional fields:
 /// - `version`: The version of the sandbox
 /// - `meta`: The metadata for the sandbox
-/// - `ram`: The maximum amount of RAM allowed for the sandbox
+/// - `memory`: The maximum amount of memory allowed for the sandbox
 /// - `cpus`: The maximum number of CPUs allowed for the sandbox
 /// - `volumes`: The volumes to mount
 /// - `ports`: The ports to expose
@@ -59,7 +59,7 @@ pub struct SandboxBuilder<I, S> {
     version: Option<Version>,
     meta: Option<Meta>,
     image: I,
-    ram: Option<u32>,
+    memory: Option<u32>,
     cpus: Option<u8>,
     volumes: Vec<PathPair>,
     ports: Vec<PortPair>,
@@ -149,7 +149,7 @@ impl<I, S> SandboxBuilder<I, S> {
             version: self.version,
             meta: self.meta,
             image: image.into(),
-            ram: self.ram,
+            memory: self.memory,
             cpus: self.cpus,
             volumes: self.volumes,
             ports: self.ports,
@@ -167,9 +167,9 @@ impl<I, S> SandboxBuilder<I, S> {
         }
     }
 
-    /// Sets the maximum amount of RAM allowed for the sandbox
-    pub fn ram(mut self, ram: u32) -> SandboxBuilder<I, S> {
-        self.ram = Some(ram);
+    /// Sets the maximum amount of memory allowed for the sandbox
+    pub fn memory(mut self, memory: u32) -> SandboxBuilder<I, S> {
+        self.memory = Some(memory);
         self
     }
 
@@ -233,7 +233,7 @@ impl<I, S> SandboxBuilder<I, S> {
             version: self.version,
             meta: self.meta,
             image: self.image,
-            ram: self.ram,
+            memory: self.memory,
             cpus: self.cpus,
             volumes: self.volumes,
             ports: self.ports,
@@ -298,7 +298,7 @@ impl SandboxBuilder<ReferenceOrPath, String> {
             version: self.version,
             meta: self.meta,
             image: self.image,
-            ram: self.ram,
+            memory: self.memory,
             cpus: self.cpus,
             volumes: self.volumes,
             ports: self.ports,
@@ -327,7 +327,7 @@ impl Default for SandboxBuilder<(), String> {
             version: None,
             meta: None,
             image: (),
-            ram: None,
+            memory: None,
             cpus: None,
             volumes: Vec::new(),
             ports: Vec::new(),
