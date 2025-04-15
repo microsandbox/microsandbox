@@ -90,10 +90,10 @@ check_success "Failed to create package directory"
 
 info "Copying binaries..."
 # Copy microsandbox and monokrun
-cp "$BUILD_DIR/microsandbox" "$PACKAGE_DIR/"
-check_success "Failed to copy microsandbox binary"
-cp "$BUILD_DIR/monokrun" "$PACKAGE_DIR/"
-check_success "Failed to copy monokrun binary"
+cp "$BUILD_DIR/msb" "$PACKAGE_DIR/"
+check_success "Failed to copy msb binary"
+cp "$BUILD_DIR/msbrun" "$PACKAGE_DIR/"
+check_success "Failed to copy msbrun binary"
 
 # Copy libraries based on OS type
 info "Copying libraries..."

@@ -200,8 +200,8 @@ export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
 # Set up variables
 BUILD_DIR="$ORIGINAL_DIR/build"
-LIBKRUNFW_REPO="https://github.com/appcypher/libkrunfw.git"
-LIBKRUN_REPO="https://github.com/appcypher/libkrun.git"
+LIBKRUNFW_REPO="https://github.com/microsandbox/libkrunfw.git"
+LIBKRUN_REPO="https://github.com/microsandbox/libkrun.git"
 NO_CLEANUP=false
 FORCE_BUILD=false
 
@@ -449,14 +449,14 @@ build_libkrun() {
 check_existing_lib "libkrunfw"
 if [ $? -eq 0 ]; then
     create_build_directory
-    clone_repo "$LIBKRUNFW_REPO" "libkrunfw" --single-branch
+    clone_repo "$LIBKRUNFW_REPO" "libkrunfw" --single-branch --branch develop
     build_libkrunfw
 fi
 
 check_existing_lib "libkrun"
 if [ $? -eq 0 ]; then
     create_build_directory
-    clone_repo "$LIBKRUN_REPO" "libkrun" --single-branch
+    clone_repo "$LIBKRUN_REPO" "libkrun" --single-branch --branch develop
     build_libkrun
 fi
 

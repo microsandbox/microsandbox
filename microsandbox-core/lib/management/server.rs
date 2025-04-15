@@ -52,6 +52,33 @@ pub async fn start(
     let microsandbox_home_path = utils::get_microsandbox_home_path();
     fs::create_dir_all(&microsandbox_home_path).await?;
 
+    // Check if PID file exists, indicating a server might be running
+    let pid_file_path = microsandbox_home_path.join(SERVER_PID_FILE);
+    if pid_file_path.exists() {
+        // Read PID from file
+        let pid_str = fs::read_to_string(&pid_file_path).await?;
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            // Check if process is actually running
+            let process_running = unsafe { libc::kill(pid, 0) == 0 };
+
+            if process_running {
+                return Err(MicrosandboxError::SandboxServerError(
+                    format!("A sandbox server is already running (PID: {}). Use 'msb server stop' to stop it first.", pid)
+                ));
+            } else {
+                // Process not running, clean up stale PID file
+                tracing::warn!("Found stale PID file for process {}. Cleaning up.", pid);
+                let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
+                cleanup_server_files(&pid_file_path, &key_file_path).await?;
+            }
+        } else {
+            // Invalid PID in file, clean up
+            tracing::warn!("Found invalid PID in server.pid file. Cleaning up.");
+            let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
+            cleanup_server_files(&pid_file_path, &key_file_path).await?;
+        }
+    }
+
     // Get the path to the msbrun executable
     let msbrun_path =
         microsandbox_utils::path::resolve_env_path(MSBRUN_EXE_ENV_VAR, &*DEFAULT_MSBRUN_EXE_PATH)?;
