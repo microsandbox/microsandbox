@@ -784,6 +784,103 @@ pub(crate) async fn save_or_update_image(
     }
 }
 
+/// Gets layers from the database by their digest values.
+///
+/// This function retrieves layer information for a list of digest values without
+/// requiring a manifest relationship. This is useful for checking if specific layers
+/// exist in the database before trying to download them.
+///
+/// ## Arguments
+///
+/// * `pool` - SQLite connection pool
+/// * `digests` - List of layer digest strings to search for
+///
+/// ## Returns
+///
+/// Returns a `MicrosandboxResult` containing a vector of `Layer` objects that match the provided digests
+pub(crate) async fn get_layers_by_digest(
+    pool: &Pool<Sqlite>,
+    digests: &[String],
+) -> MicrosandboxResult<Vec<Layer>> {
+    if digests.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Create placeholders for the IN clause (?,?,?)
+    let placeholders = (0..digests.len())
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let query = format!(
+        r#"
+        SELECT id, media_type, digest, diff_id, size_bytes, created_at, modified_at
+        FROM layers
+        WHERE digest IN ({})
+        "#,
+        placeholders
+    );
+
+    // Build the query with the dynamic number of parameters
+    let mut query_builder = sqlx::query(&query);
+    for digest in digests {
+        query_builder = query_builder.bind(digest);
+    }
+
+    let records = query_builder.fetch_all(pool).await?;
+
+    Ok(records
+        .into_iter()
+        .map(|row| Layer {
+            id: row.get("id"),
+            media_type: row.get("media_type"),
+            digest: row.get("digest"),
+            diff_id: row.get("diff_id"),
+            size_bytes: row.get("size_bytes"),
+            created_at: parse_sqlite_datetime(&row.get::<String, _>("created_at")),
+            modified_at: parse_sqlite_datetime(&row.get::<String, _>("modified_at")),
+        })
+        .collect())
+}
+
+/// Gets all layer digests for an image manifest from the database.
+///
+/// This function retrieves just the digest strings for all layers associated with a specific
+/// image reference. This is useful for checking if layers exist without needing the full layer details.
+///
+/// ## Arguments
+///
+/// * `pool` - SQLite connection pool
+/// * `reference` - OCI image reference string (e.g., "ubuntu:latest")
+///
+/// ## Returns
+///
+/// Returns a `MicrosandboxResult` containing a vector of layer digest strings
+pub(crate) async fn get_image_layer_digests(
+    pool: &Pool<Sqlite>,
+    reference: &str,
+) -> MicrosandboxResult<Vec<String>> {
+    let records = sqlx::query(
+        r#"
+        SELECT l.digest
+        FROM layers l
+        JOIN manifest_layers ml ON l.id = ml.layer_id
+        JOIN manifests m ON ml.manifest_id = m.id
+        JOIN images i ON m.image_id = i.id
+        WHERE i.reference = ?
+        ORDER BY l.id ASC
+        "#,
+    )
+    .bind(reference)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(records
+        .into_iter()
+        .map(|row| row.get::<String, _>("digest"))
+        .collect())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------

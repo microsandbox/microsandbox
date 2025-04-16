@@ -96,6 +96,12 @@ pub async fn pull(
     // Single image pull mode (default if both flags are false, or if image is true)
     let registry = name.to_string().split('/').next().unwrap_or("").to_string();
     let temp_download_dir = tempdir()?.into_path();
+
+    tracing::info!(
+        "temporary download directory: {}",
+        temp_download_dir.display()
+    );
+
     if registry == DOCKER_REGISTRY {
         pull_from_docker_registry(&name, &temp_download_dir, layer_path).await
     } else {
@@ -228,37 +234,59 @@ async fn check_image_layers(
     // Check if the image exists in the database
     match db::image_exists(pool, &image.to_string()).await {
         Ok(true) => {
-            // Image exists, check if all layers are present
-            match db::get_image_layers(pool, &image.to_string()).await {
-                Ok(layers) => {
-                    let mut found_layers = 0;
-                    for layer in &layers {
-                        // Check if layer exists in the layers directory
-                        let layer_path =
-                            layers_dir.join(format!("{}.{}", layer.digest, EXTRACTED_LAYER_SUFFIX));
-                        if !layer_path.exists() {
-                            tracing::warn!("layer {} not found in layers directory", layer.digest);
-                            return Ok(false);
-                        }
-
-                        tracing::info!("layer {} found in layers directory", layer.digest);
-                        found_layers += 1;
-                    }
-
-                    if found_layers < layers.len() {
-                        tracing::warn!("missing layers for image {}", image);
+            // Image exists, get all layer digests for this image
+            match db::get_image_layer_digests(pool, &image.to_string()).await {
+                Ok(layer_digests) => {
+                    tracing::info!("layer_digests: {:?}", layer_digests);
+                    if layer_digests.is_empty() {
+                        tracing::warn!("no layers found for image {}", image);
                         return Ok(false);
                     }
 
+                    // Check if all layers exist in the layers directory
+                    for digest in &layer_digests {
+                        let layer_path =
+                            layers_dir.join(format!("{}.{}", digest, EXTRACTED_LAYER_SUFFIX));
+                        if !layer_path.exists() {
+                            tracing::warn!("layer {} not found in layers directory", digest);
+                            return Ok(false);
+                        }
+
+                        // Also check that the layer directory actually has content
+                        let mut read_dir = fs::read_dir(&layer_path).await?;
+                        let dir_empty = read_dir.next_entry().await?.is_none();
+                        if dir_empty {
+                            tracing::warn!("layer {} exists but is empty", digest);
+                            return Ok(false);
+                        }
+
+                        tracing::info!("layer {} found in layers directory", digest);
+                    }
+
+                    // Get the layers from database to verify database records exist for all digests
+                    let db_layers = db::get_layers_by_digest(pool, &layer_digests).await?;
+
+                    if db_layers.len() < layer_digests.len() {
+                        tracing::warn!(
+                            "some layers for image {} exist on disk but missing in db",
+                            image
+                        );
+                        return Ok(false);
+                    }
+
+                    tracing::info!("all layers for image {} exist and are valid", image);
                     Ok(true)
                 }
                 Err(e) => {
-                    tracing::warn!("error checking layers: {}, will pull image", e);
+                    tracing::warn!("error checking layer digests: {}, will pull image", e);
                     Ok(false)
                 }
             }
         }
-        Ok(false) => Ok(false),
+        Ok(false) => {
+            tracing::warn!("image {} does not exist in db, will pull image", image);
+            Ok(false)
+        }
         Err(e) => {
             tracing::warn!("error checking image existence: {}, will pull image", e);
             Ok(false)

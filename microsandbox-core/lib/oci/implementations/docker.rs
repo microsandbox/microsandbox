@@ -23,7 +23,8 @@ use tokio::{
 use crate::{
     management::db,
     oci::{OciRegistryPull, ReferenceSelector},
-    utils, MicrosandboxError, MicrosandboxResult,
+    utils::{self, env, path},
+    MicrosandboxError, MicrosandboxResult,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -192,13 +193,46 @@ impl DockerRegistry {
     }
 
     /// Downloads a blob from the registry, supports download resumption if the file already partially exists.
+    ///
+    /// Returns a tuple (MicrosandboxResult<()>, bool) where the boolean indicates whether a download
+    /// actually occurred (true) or was skipped because the file already exists (false).
     pub async fn download_image_blob(
         &self,
         repository: &str,
         digest: &Digest,
         download_size: u64,
-    ) -> MicrosandboxResult<()> {
+    ) -> MicrosandboxResult<bool> {
         let download_path = self.layer_download_dir.join(digest.to_string());
+
+        // First, check if the extracted layer directory already exists and is not empty
+        // Get the microsandbox home path and layers directory
+        let microsandbox_home_path = env::get_microsandbox_home_path();
+        let layers_dir = microsandbox_home_path.join(path::LAYERS_SUBDIR);
+        let extracted_layer_path = layers_dir.join(format!(
+            "{}.{}",
+            digest.to_string(),
+            utils::EXTRACTED_LAYER_SUFFIX
+        ));
+
+        // Check if extracted directory exists and has content
+        if extracted_layer_path.exists() {
+            match fs::read_dir(&extracted_layer_path).await {
+                Ok(mut read_dir) => {
+                    if let Ok(Some(_)) = read_dir.next_entry().await {
+                        // Extracted layer exists and contains at least one file
+                        tracing::info!(
+                            "extracted layer already exists: {}, skipping download",
+                            extracted_layer_path.display()
+                        );
+                        return Ok(false); // Return false to indicate no download occurred
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("error checking extracted layer directory: {}", e);
+                    // Continue with download if we can't read the directory
+                }
+            }
+        }
 
         // Ensure the destination directory exists
         if let Some(parent) = download_path.parent() {
@@ -210,6 +244,7 @@ impl DockerRegistry {
 
         // Open the file for writing, create if it doesn't exist
         let mut file = if downloaded_size == 0 {
+            tracing::info!("layer {} does not exist, downloading", digest);
             OpenOptions::new()
                 .create(true)
                 .truncate(true)
@@ -217,13 +252,14 @@ impl DockerRegistry {
                 .open(&download_path)
                 .await?
         } else if downloaded_size < download_size {
+            tracing::info!("layer {} exists, but is incomplete, downloading", digest);
             OpenOptions::new().append(true).open(&download_path).await?
         } else {
             tracing::info!(
                 "file already exists skipping download: {}",
                 download_path.display()
             );
-            return Ok(());
+            return Ok(false); // Return false to indicate no download occurred
         };
 
         let mut stream = self
@@ -249,7 +285,7 @@ impl DockerRegistry {
                 )));
         }
 
-        Ok(())
+        Ok(true) // Return true to indicate a download occurred
     }
 }
 
@@ -333,20 +369,55 @@ impl OciRegistryPull for DockerRegistry {
             .zip(config.rootfs().diff_ids())
             .map(|(layer_desc, diff_id)| async {
                 // Download the layer if it doesn't exist
-                self.download_image_blob(repository, layer_desc.digest(), layer_desc.size())
+                // Check if the layer was actually downloaded
+                let layer_downloaded = self
+                    .download_image_blob(repository, layer_desc.digest(), layer_desc.size())
                     .await?;
 
-                // Save layer metadata to database independently of manifests
-                let layer_id = db::save_or_update_layer(
-                    &self.oci_db,
-                    &layer_desc.media_type().to_string(),
-                    &layer_desc.digest().to_string(),
-                    layer_desc.size() as i64,
-                    diff_id,
-                )
-                .await?;
+                // Get or create layer record in database
+                let layer_id = if layer_downloaded {
+                    tracing::info!(
+                        "Layer {} was downloaded, saving to database",
+                        layer_desc.digest()
+                    );
 
-                // Link the layer to the manifest
+                    // Save new layer metadata to database
+                    db::save_or_update_layer(
+                        &self.oci_db,
+                        &layer_desc.media_type().to_string(),
+                        &layer_desc.digest().to_string(),
+                        layer_desc.size() as i64,
+                        diff_id,
+                    )
+                    .await?
+                } else {
+                    tracing::info!(
+                        "Layer {} already exists, finding in database or creating record",
+                        layer_desc.digest()
+                    );
+
+                    // Try to find existing layer in database by digest
+                    let layers =
+                        db::get_layers_by_digest(&self.oci_db, &[layer_desc.digest().to_string()])
+                            .await?;
+
+                    if let Some(layer) = layers.first() {
+                        // Layer exists in database, use its ID
+                        layer.id
+                    } else {
+                        // Layer exists on disk but not in database, create record
+                        db::save_or_update_layer(
+                            &self.oci_db,
+                            &layer_desc.media_type().to_string(),
+                            &layer_desc.digest().to_string(),
+                            layer_desc.size() as i64,
+                            diff_id,
+                        )
+                        .await?
+                    }
+                };
+
+                // Always link the layer to the manifest
                 db::save_manifest_layer(&self.oci_db, manifest_id, layer_id).await?;
 
                 Ok::<_, MicrosandboxError>(())
