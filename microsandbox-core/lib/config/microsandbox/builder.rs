@@ -8,7 +8,7 @@ use crate::{
     MicrosandboxResult,
 };
 
-use super::{Build, Group, Meta, Microsandbox, Module, NetworkScope, Proxy, Sandbox, SandboxGroup};
+use super::{Build, Group, Meta, Microsandbox, Module, NetworkScope, Sandbox, SandboxGroup};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -73,7 +73,6 @@ pub struct SandboxBuilder<I, S> {
     imports: HashMap<String, Utf8UnixPathBuf>,
     exports: HashMap<String, Utf8UnixPathBuf>,
     scope: NetworkScope,
-    proxy: Option<Proxy>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -163,7 +162,6 @@ impl<I, S> SandboxBuilder<I, S> {
             imports: self.imports,
             exports: self.exports,
             scope: self.scope,
-            proxy: self.proxy,
         }
     }
 
@@ -247,7 +245,6 @@ impl<I, S> SandboxBuilder<I, S> {
             imports: self.imports,
             exports: self.exports,
             scope: self.scope,
-            proxy: self.proxy,
         }
     }
 
@@ -283,12 +280,6 @@ impl<I, S> SandboxBuilder<I, S> {
         self.scope = scope;
         self
     }
-
-    /// Sets the proxy for the sandbox
-    pub fn proxy(mut self, proxy: Proxy) -> SandboxBuilder<I, S> {
-        self.proxy = Some(proxy);
-        self
-    }
 }
 
 impl SandboxBuilder<ReferenceOrPath, String> {
@@ -303,7 +294,6 @@ impl SandboxBuilder<ReferenceOrPath, String> {
             volumes: self.volumes,
             ports: self.ports,
             envs: self.envs,
-            env_file: self.env_file,
             groups: self.groups,
             depends_on: self.depends_on,
             workdir: self.workdir,
@@ -312,7 +302,6 @@ impl SandboxBuilder<ReferenceOrPath, String> {
             imports: self.imports,
             exports: self.exports,
             scope: self.scope,
-            proxy: self.proxy,
         }
     }
 }
@@ -341,7 +330,6 @@ impl Default for SandboxBuilder<(), String> {
             imports: HashMap::new(),
             exports: HashMap::new(),
             scope: NetworkScope::Group,
-            proxy: None,
         }
     }
 }

@@ -247,53 +247,6 @@ pub struct GroupNetwork {
     pub(crate) subnet: Option<Ipv4Net>,
 }
 
-/// Proxy configuration for a sandbox.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type")]
-pub enum Proxy {
-    /// Legacy HTTP proxy configuration.
-    #[serde(rename = "legacy")]
-    Legacy {
-        /// The prefix to use for routing.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        prefix: Option<String>,
-
-        /// The keep alive duration.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        keep_alive: Option<String>,
-
-        /// The maximum number of concurrent connections.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        concurrency: Option<u32>,
-
-        /// The port to expose.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        port: Option<PortPair>,
-    },
-    /// Handler-based proxy configuration.
-    #[serde(rename = "handler")]
-    Handler {
-        /// The programming language to use.
-        language: String,
-
-        /// The prefix to use for routing.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        prefix: Option<String>,
-
-        /// The keep alive duration.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        keep_alive: Option<String>,
-
-        /// The maximum number of concurrent connections.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        concurrency: Option<u32>,
-
-        /// The port to expose.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        port: Option<PortPair>,
-    },
-}
-
 /// The sandbox to run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Getters)]
 #[getset(get = "pub with_prefix")]
@@ -328,15 +281,6 @@ pub struct Sandbox {
     /// The environment variables to use.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(crate) envs: Vec<EnvPair>,
-
-    /// The environment file to use.
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        default,
-        serialize_with = "serialize_optional_path",
-        deserialize_with = "deserialize_optional_path"
-    )]
-    pub(crate) env_file: Option<Utf8UnixPathBuf>,
 
     /// The groups to run in.
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
@@ -383,10 +327,6 @@ pub struct Sandbox {
     /// The network scope for the sandbox.
     #[serde(default)]
     pub(crate) scope: NetworkScope,
-
-    /// The proxy configuration.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub(crate) proxy: Option<Proxy>,
 }
 
 /// Configuration for a sandbox's group membership.
@@ -686,7 +626,6 @@ mod tests {
         assert_eq!(sandbox.shell, "/bin/sh");
         assert!(sandbox.scripts.is_empty());
         assert_eq!(sandbox.scope, NetworkScope::Group);
-        assert!(sandbox.proxy.is_none());
     }
 
     #[test]
@@ -1034,42 +973,6 @@ mod tests {
             group.network.as_ref().unwrap().subnet.unwrap().to_string(),
             "10.0.1.0/24"
         );
-    }
-
-    #[test]
-    fn test_microsandbox_config_proxy_configuration() {
-        let yaml = r#"
-            sandboxes:
-              test_sandbox:
-                image: "alpine:latest"
-                shell: "/bin/sh"
-                proxy:
-                  type: "legacy"
-                  prefix: "/api"
-                  keep_alive: "60s"
-                  concurrency: 100
-                  port: "8080:80"
-        "#;
-
-        let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
-
-        // Fix temporary value dropped issue
-        let sandboxes = &config.sandboxes;
-        let sandbox = sandboxes.get("test_sandbox").unwrap();
-        if let Some(Proxy::Legacy {
-            prefix,
-            keep_alive,
-            concurrency,
-            port,
-        }) = &sandbox.proxy
-        {
-            assert_eq!(prefix.as_ref().unwrap(), "/api");
-            assert_eq!(keep_alive.as_ref().unwrap(), "60s");
-            assert_eq!(concurrency.unwrap(), 100);
-            assert_eq!(port.as_ref().unwrap().to_string(), "8080:80");
-        } else {
-            panic!("Expected legacy proxy configuration");
-        }
     }
 
     #[test]

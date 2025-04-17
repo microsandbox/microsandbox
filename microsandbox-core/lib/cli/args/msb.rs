@@ -16,13 +16,29 @@ pub struct MicrosandboxArgs {
     #[command(subcommand)]
     pub subcommand: Option<MicrosandboxSubcommand>,
 
-    /// Enable verbose logging
-    #[arg(short = 'V', long)]
-    pub verbose: bool,
-
     /// Show version
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long, global = true)]
     pub version: bool,
+
+    /// Show logs with error level
+    #[arg(long, global = true)]
+    pub error: bool,
+
+    /// Show logs with warn level
+    #[arg(long, global = true)]
+    pub warn: bool,
+
+    /// Show logs with info level
+    #[arg(long, global = true)]
+    pub info: bool,
+
+    /// Show logs with debug level
+    #[arg(long, global = true)]
+    pub debug: bool,
+
+    /// Show logs with trace level
+    #[arg(long, global = true)]
+    pub trace: bool,
 }
 
 /// Available subcommands for managing services
@@ -111,9 +127,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(long = "export", name = "EXPORT", value_parser = parse_key_val::<String, String>)]
         exports: Vec<(String, String)>,
 
-        /// Network reach, options: local, public, any, none
+        /// Network scope, options: local, public, any, none
         #[arg(long)]
-        reach: Option<String>,
+        scope: Option<String>,
 
         /// Project path
         #[arg(short, long)]
@@ -371,6 +387,10 @@ pub enum MicrosandboxSubcommand {
         #[arg(long)]
         workdir: Option<Utf8UnixPathBuf>,
 
+        /// Network scope, options: local, public, any, none
+        #[arg(long)]
+        scope: Option<String>,
+
         /// Execute a command within the sandbox
         #[arg(short, long)]
         exec: Option<String>,
@@ -383,23 +403,53 @@ pub enum MicrosandboxSubcommand {
     /// Install a script from an image
     #[command(name = "install")]
     Install {
-        /// Whether to install from an image
+        /// Whether to create a temporary sandbox from an image
         #[arg(short, long)]
         image: bool,
 
-        /// Whether to install from an image group
-        #[arg(short = 'G', long)]
-        image_group: bool,
-
-        /// Name of the image or image group
-        #[arg(required = true)]
+        /// Name of the image
+        #[arg(required = true, name = "NAME[~SCRIPT]")]
         name: String,
 
-        /// Script to install
-        script: Option<String>,
+        /// Alias for the script
+        #[arg()]
+        alias: Option<String>,
 
-        /// New name for the script
-        rename: Option<String>,
+        /// Number of CPUs
+        #[arg(long, alias = "cpu")]
+        cpus: Option<u8>,
+
+        /// Memory in MB
+        #[arg(long)]
+        memory: Option<u32>,
+
+        /// Volume mappings, format: <host_path>:<container_path>
+        #[arg(long = "volume", name = "VOLUME")]
+        volumes: Vec<String>,
+
+        /// Port mappings, format: <host_port>:<container_port>
+        #[arg(long = "port", name = "PORT")]
+        ports: Vec<String>,
+
+        /// Environment variables, format: <key>=<value>
+        #[arg(long = "env", name = "ENV")]
+        envs: Vec<String>,
+
+        /// Working directory
+        #[arg(long)]
+        workdir: Option<Utf8UnixPathBuf>,
+
+        /// Network scope, options: local, public, any, none
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// Execute a command within the sandbox
+        #[arg(short, long)]
+        exec: Option<String>,
+
+        /// Additional arguments after `--`
+        #[arg(last = true)]
+        args: Vec<String>,
     },
 
     /// Uninstall a script
@@ -407,18 +457,6 @@ pub enum MicrosandboxSubcommand {
     Uninstall {
         /// Script to uninstall
         script: Option<String>,
-
-        /// Whether to uninstall from an image
-        #[arg(short, long)]
-        image: bool,
-
-        /// Whether to uninstall from an image group
-        #[arg(short = 'G', long)]
-        image_group: bool,
-
-        /// Name of the image or image group
-        #[arg(required = true)]
-        name: String,
     },
 
     /// Start or stop project sandboxes based on configuration

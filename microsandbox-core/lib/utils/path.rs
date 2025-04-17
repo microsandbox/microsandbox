@@ -1,5 +1,7 @@
 //! Utility functions for working with paths.
 
+use std::{path::PathBuf, sync::LazyLock};
+
 use microsandbox_utils::SupportedPathType;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -86,6 +88,22 @@ pub const SERVER_PID_FILE: &str = "server.pid";
 ///
 /// Example: <MICROSANDBOX_HOME_DIR>/<SERVER_KEY_FILE>
 pub const SERVER_KEY_FILE: &str = "server.key";
+
+/// The XDG home directory
+///
+/// Example: <HOME>/.local
+pub static XDG_HOME_DIR: LazyLock<PathBuf> =
+    LazyLock::new(|| dirs::home_dir().unwrap().join(".local"));
+
+/// The bin subdirectory for microsandbox
+///
+/// Example: <XDG_HOME_DIR>/bin
+pub const XDG_BIN_DIR: &str = "bin";
+
+/// The lib subdirectory for microsandbox
+///
+/// Example: <XDG_HOME_DIR>/lib
+pub const XDG_LIB_DIR: &str = "lib";
 
 //--------------------------------------------------------------------------------------------------
 // Functions

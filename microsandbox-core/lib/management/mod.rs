@@ -27,3 +27,4 @@ pub mod orchestra;
 pub mod rootfs;
 pub mod sandbox;
 pub mod server;
+pub mod toolchain;

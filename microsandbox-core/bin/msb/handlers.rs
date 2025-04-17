@@ -1,9 +1,9 @@
 use clap::{error::ErrorKind, CommandFactory};
 use microsandbox_core::{
-    cli::{AnsiStyles, MicrosandboxArgs},
+    cli::{AnsiStyles, MicrosandboxArgs, SelfAction},
     management::{
         config::{self, Component, ComponentType},
-        home, menv, orchestra, sandbox, server,
+        home, menv, orchestra, sandbox, server, toolchain,
     },
     oci::Reference,
     MicrosandboxError, MicrosandboxResult,
@@ -23,6 +23,27 @@ const LOG_SUBDIR: &str = "log";
 // Functions: Handlers
 //--------------------------------------------------------------------------------------------------
 
+pub fn log_level(args: &MicrosandboxArgs) {
+    let level = if args.trace {
+        Some("trace")
+    } else if args.debug {
+        Some("debug")
+    } else if args.info {
+        Some("info")
+    } else if args.warn {
+        Some("warn")
+    } else if args.error {
+        Some("error")
+    } else {
+        None
+    };
+
+    // Set RUST_LOG environment variable only if a level is specified
+    if let Some(level) = level {
+        std::env::set_var("RUST_LOG", format!("micro={},msb={}", level, level));
+    }
+}
+
 pub async fn add_subcommand(
     sandbox: bool,
     build: bool,
@@ -41,7 +62,7 @@ pub async fn add_subcommand(
     scripts: Vec<(String, String)>,
     imports: Vec<(String, String)>,
     exports: Vec<(String, String)>,
-    reach: Option<String>,
+    scope: Option<String>,
     path: Option<PathBuf>,
     config: Option<String>,
 ) -> MicrosandboxResult<()> {
@@ -62,7 +83,7 @@ pub async fn add_subcommand(
         scripts: scripts.into_iter().map(|(k, v)| (k, v.into())).collect(),
         imports: imports.into_iter().map(|(k, v)| (k, v.into())).collect(),
         exports: exports.into_iter().map(|(k, v)| (k, v.into())).collect(),
-        reach,
+        scope,
     };
 
     config::add(&names, &component, path.as_deref(), config.as_deref()).await
@@ -235,6 +256,7 @@ pub async fn tmp_subcommand(
     ports: Vec<String>,
     envs: Vec<String>,
     workdir: Option<Utf8UnixPathBuf>,
+    scope: Option<String>,
     exec: Option<String>,
     args: Vec<String>,
 ) -> MicrosandboxResult<()> {
@@ -263,6 +285,7 @@ pub async fn tmp_subcommand(
         ports,
         envs,
         workdir,
+        scope,
         exec.as_deref(),
         args,
         true,
@@ -441,6 +464,30 @@ pub async fn server_keygen_subcommand(expire: Option<String>) -> MicrosandboxRes
     };
 
     server::keygen(duration).await
+}
+
+/// Handle the self subcommand, which manages microsandbox itself
+pub async fn self_subcommand(action: SelfAction) -> MicrosandboxResult<()> {
+    match action {
+        SelfAction::Upgrade => {
+            MicrosandboxArgs::command()
+                .override_usage(usage("self", Some("upgrade"), None))
+                .error(
+                    ErrorKind::InvalidValue,
+                    "Upgrade functionality is not yet implemented",
+                )
+                .exit();
+        }
+        SelfAction::Uninstall => {
+            // Clean the home directory first
+            home::clean().await?;
+
+            // Then uninstall the binaries and libraries
+            toolchain::uninstall().await?;
+        }
+    }
+
+    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------

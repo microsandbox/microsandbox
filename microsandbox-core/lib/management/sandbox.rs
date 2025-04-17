@@ -387,6 +387,7 @@ pub async fn run_temp(
     ports: Vec<String>,
     envs: Vec<String>,
     workdir: Option<Utf8UnixPathBuf>,
+    scope: Option<String>,
     exec: Option<&str>,
     args: Vec<String>,
     use_image_defaults: bool,
@@ -429,6 +430,10 @@ pub async fn run_temp(
 
         if !envs.is_empty() {
             b = b.envs(envs);
+        }
+
+        if let Some(scope) = scope {
+            b = b.scope(scope.parse()?);
         }
 
         b.build()

@@ -69,8 +69,8 @@ pub enum Component {
         /// The exports to use for the sandbox.
         exports: HashMap<String, Utf8UnixPathBuf>,
 
-        /// The network reach to use for the sandbox.
-        reach: Option<String>,
+        /// The network scope to use for the sandbox.
+        scope: Option<String>,
     },
     /// A build component.
     Build {},
@@ -140,7 +140,7 @@ pub async fn add(
                 scripts,
                 imports,
                 exports,
-                reach,
+                scope,
             } => {
                 let doc_mut = doc.as_mut();
                 let mut root_mapping = doc_mut.make_mapping();
@@ -274,13 +274,13 @@ pub async fn add(
                     }
                 }
 
-                // Add network reach if provided
-                if let Some(reach_value) = reach {
+                // Add network scope if provided
+                if let Some(scope_value) = scope {
                     let mut network_mapping = sandbox_mapping
                         .insert("network", yaml::Separator::Auto)
                         .make_mapping();
 
-                    network_mapping.insert_str("reach", reach_value);
+                    network_mapping.insert_str("scope", scope_value);
                 }
             }
             Component::Build {} => {}

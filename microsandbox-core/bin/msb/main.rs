@@ -22,10 +22,12 @@ const SHELL_SCRIPT: &str = "shell";
 
 #[tokio::main]
 async fn main() -> MicrosandboxResult<()> {
-    tracing_subscriber::fmt::init();
-
     // Parse command line arguments
     let args = MicrosandboxArgs::parse();
+
+    handlers::log_level(&args);
+    tracing_subscriber::fmt::init();
+
     match args.subcommand {
         Some(MicrosandboxSubcommand::Init {
             path,
@@ -51,13 +53,13 @@ async fn main() -> MicrosandboxResult<()> {
             scripts,
             imports,
             exports,
-            reach,
+            scope,
             path,
             config,
         }) => {
             handlers::add_subcommand(
                 sandbox, build, group, names, image, memory, cpus, volumes, ports, envs, env_file,
-                depends_on, workdir, shell, scripts, imports, exports, reach, path, config,
+                depends_on, workdir, shell, scripts, imports, exports, scope, path, config,
             )
             .await?;
         }
@@ -154,11 +156,12 @@ async fn main() -> MicrosandboxResult<()> {
             ports,
             envs,
             workdir,
+            scope,
             exec,
             args,
         }) => {
             handlers::tmp_subcommand(
-                name, cpus, memory, volumes, ports, envs, workdir, exec, args,
+                name, cpus, memory, volumes, ports, envs, workdir, scope, exec, args,
             )
             .await?;
         }
@@ -200,6 +203,9 @@ async fn main() -> MicrosandboxResult<()> {
         }
         Some(MicrosandboxSubcommand::Clean { global, all, path }) => {
             handlers::clean_subcommand(global, all, path).await?;
+        }
+        Some(MicrosandboxSubcommand::Self_ { action }) => {
+            handlers::self_subcommand(action).await?;
         }
         Some(MicrosandboxSubcommand::Server { subcommand }) => match subcommand {
             ServerSubcommand::Start {
