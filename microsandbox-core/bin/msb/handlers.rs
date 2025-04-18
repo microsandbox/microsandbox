@@ -1,9 +1,13 @@
 use clap::{error::ErrorKind, CommandFactory};
 use microsandbox_core::{
-    cli::{AnsiStyles, MicrosandboxArgs, SelfAction}, config::DEFAULT_SHELL, management::{
+    cli::{AnsiStyles, MicrosandboxArgs, SelfAction},
+    config::DEFAULT_SHELL,
+    management::{
         config::{self, Component, ComponentType},
         home, menv, orchestra, sandbox, server, toolchain,
-    }, oci::Reference, MicrosandboxError, MicrosandboxResult
+    },
+    oci::Reference,
+    MicrosandboxError, MicrosandboxResult,
 };
 use std::path::PathBuf;
 use typed_path::Utf8UnixPathBuf;
