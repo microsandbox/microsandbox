@@ -502,7 +502,8 @@ async fn setup_image_rootfs(
     }
 
     // Get the layers for the image
-    let layers = db::get_image_layers(&pool, &image.to_string()).await?;
+    let digests = db::get_image_layer_digests(&pool, &image.to_string()).await?;
+    let layers = db::get_layers_by_digest(&pool, &digests).await?;
     tracing::info!("found {} layers for image {}", layers.len(), image);
 
     // Get the extracted layer paths

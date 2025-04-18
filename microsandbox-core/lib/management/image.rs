@@ -189,9 +189,9 @@ pub async fn pull_from_docker_registry(
                 .unwrap()
                 .tick_strings(&*TICK_STRINGS),
         );
-        pb.set_message("Downloading layers...");
+        pb.set_message("Download layers");
         pb.enable_steady_tick(std::time::Duration::from_millis(80));
-        pb.clone()
+        pb
     };
 
     docker_registry
@@ -199,7 +199,7 @@ pub async fn pull_from_docker_registry(
         .await?;
 
     #[cfg(feature = "cli-viz")]
-    header_pb.finish_with_message("Layers downloaded");
+    header_pb.finish_with_message("Download layers");
 
     // Find and extract layers in parallel
     let layer_paths = collect_layer_files(download_dir).await?;
@@ -212,9 +212,9 @@ pub async fn pull_from_docker_registry(
                 .unwrap()
                 .tick_strings(&*TICK_STRINGS),
         );
-        pb.set_message("Extracting layers...");
+        pb.set_message("Extract layers");
         pb.enable_steady_tick(std::time::Duration::from_millis(80));
-        pb.clone()
+        pb
     };
 
     let extraction_futures: Vec<_> = layer_paths
@@ -231,7 +231,7 @@ pub async fn pull_from_docker_registry(
     }
 
     #[cfg(feature = "cli-viz")]
-    header_extract_pb.finish_with_message("Layers extracted");
+    header_extract_pb.finish_with_message("Extract layers");
 
     Ok(())
 }
@@ -470,7 +470,7 @@ async fn extract_layer(
                 "{prefix:.bold.dim} {bar:40.green/green.dim} {bytes:.bold}/{total_bytes:.dim}",
             )
             .unwrap()
-            .progress_chars("=+-")
+            .progress_chars("=+-"),
         );
         let digest_short = if let Some(rest) = file_name.strip_prefix("sha256:") {
             &rest[..8.min(rest.len())]

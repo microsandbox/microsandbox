@@ -642,7 +642,7 @@ pub(crate) async fn save_manifest_layer(
 }
 
 /// Gets all layers for an image from the database.
-pub(crate) async fn get_image_layers(
+pub async fn get_image_layers(
     pool: &Pool<Sqlite>,
     reference: &str,
 ) -> MicrosandboxResult<Vec<Layer>> {
