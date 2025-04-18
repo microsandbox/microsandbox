@@ -27,6 +27,9 @@ use tokio::{fs, process::Command};
 /// The domain name for the Docker registry.
 const DOCKER_REGISTRY: &str = "docker.io";
 
+/// The domain name for the Sandboxes registry.
+const SANDBOXES_REGISTRY: &str = "sandboxes.io";
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -35,6 +38,10 @@ const DOCKER_REGISTRY: &str = "docker.io";
 ///
 /// This function handles pulling container images from different registries based on the provided
 /// parameters. It supports both single image pulls and image group pulls (for Sandboxes.io registry only).
+///
+/// For Sandboxes.io registry:
+/// - Library repository images are pulled from Docker registry for compatibility
+/// - Other namespaces are also pulled from Docker registry with a warning about potential future changes
 ///
 /// ## Arguments
 ///
@@ -64,10 +71,14 @@ const DOCKER_REGISTRY: &str = "docker.io";
 /// image::pull("docker.io/library/ubuntu:latest".parse().unwrap(), true, false, None).await?;
 ///
 /// // Pull an image from Sandboxes.io registry
-/// image::pull("myimage".parse().unwrap(), false, false, None).await?;
+/// image::pull("sandboxes.io/library/alpine:latest".parse().unwrap(), true, false, None).await?;
 ///
-/// // Pull an image group from Sandboxes.io registry
-/// image::pull("sandboxes.io/mygroup:latest".parse().unwrap(), false, true, None).await?;
+/// // Pull an image from the default registry (when no registry is specified in the reference)
+/// image::pull("nginx:latest".parse().unwrap(), true, false, None).await?;
+///
+/// // You can set the OCI_REGISTRY_DOMAIN environment variable to specify your default registry
+/// std::env::set_var("OCI_REGISTRY_DOMAIN", "docker.io");
+/// image::pull("alpine:latest".parse().unwrap(), true, false, None).await?;
 ///
 /// // Pull an image from Docker registry and store the layers in a custom directory
 /// image::pull("docker.io/library/ubuntu:latest".parse().unwrap(), true, false, Some(PathBuf::from("/custom/path"))).await?;
@@ -104,6 +115,8 @@ pub async fn pull(
 
     if registry == DOCKER_REGISTRY {
         pull_from_docker_registry(&name, &temp_download_dir, layer_path).await
+    } else if registry == SANDBOXES_REGISTRY {
+        pull_from_sandboxes_registry(&name, &temp_download_dir, layer_path).await
     } else {
         Err(MicrosandboxError::InvalidArgument(format!(
             "Unsupported registry: {}",
@@ -180,17 +193,56 @@ pub async fn pull_from_docker_registry(
 
 /// Pulls a single image from the Sandboxes.io registry.
 ///
+/// For library repository images, this function delegates to `pull_from_docker_registry` for compatibility.
+/// For other namespaces, it also uses Docker registry but displays a warning about potential future changes.
+///
 /// ## Arguments
 ///
 /// * `image` - The reference to the Sandboxes.io image to pull
+/// * `download_dir` - The directory to download the image layers to
+/// * `layer_path` - Optional custom path to store layers
+///
 /// ## Errors
 ///
-/// Returns an error if:
-/// * Sandboxes registry image pull is not implemented
-pub async fn pull_from_sandboxes_registry(_image: &Reference) -> MicrosandboxResult<()> {
-    return Err(MicrosandboxError::NotImplemented(
-        "sandboxes registry image pull is not implemented".to_string(),
-    ));
+/// Returns an error if the underlying Docker registry pull fails
+pub async fn pull_from_sandboxes_registry(
+    image: &Reference,
+    download_dir: impl AsRef<Path>,
+    layer_path: Option<PathBuf>,
+) -> MicrosandboxResult<()> {
+    // Check if this is a library repository image
+    let repository = image.get_repository();
+
+    // Create a Docker reference string using the original repository but with docker.io registry
+    // Format: docker.io/repository:tag
+    let docker_ref_str = format!(
+        "{}/{}",
+        DOCKER_REGISTRY,
+        image
+            .to_string()
+            .split('/')
+            .skip(1)
+            .collect::<Vec<&str>>()
+            .join("/")
+    );
+    let docker_reference: Reference = docker_ref_str.parse()?;
+
+    if repository.starts_with("library/") {
+        tracing::info!("Pulling library image from Docker registry for compatibility");
+    } else {
+        tracing::warn!(
+            "Non-library namespace image requested from Sandboxes registry: {}",
+            repository
+        );
+        tracing::warn!(
+            "Currently using Docker registry for compatibility, but namespace mappings may change in the future"
+        );
+        tracing::info!(
+            "To ensure consistent behavior, consider setting OCI_REGISTRY_DOMAIN=docker.io if you want to use Docker registry consistently"
+        );
+    }
+
+    pull_from_docker_registry(&docker_reference, download_dir, layer_path).await
 }
 
 /// Pulls an image group from the Sandboxes.io registry.

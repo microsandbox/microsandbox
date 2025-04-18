@@ -56,18 +56,18 @@ pub enum MicrosandboxSubcommand {
         path_with_flag: Option<PathBuf>,
     },
 
-    /// Add a new build, sandbox, or group component to the project
+    /// Add a new sandbox to the project
     #[command(name = "add")]
     Add {
-        /// Whether to add a sandbox
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether to add a build sandbox
+        /// Whether command should apply for a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether to add a group
+        /// Whether command should apply for a group
         #[arg(short, long)]
         group: bool,
 
@@ -140,18 +140,18 @@ pub enum MicrosandboxSubcommand {
         config: Option<String>,
     },
 
-    /// Remove a build, sandbox, or group component from the project
+    /// Remove a sandbox from the project
     #[command(name = "remove")]
     Remove {
-        /// Whether to remove a sandbox
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether to remove a build sandbox
+        /// Whether command should apply for a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether to remove a group
+        /// Whether command should apply for a group
         #[arg(short, long)]
         group: bool,
 
@@ -168,18 +168,18 @@ pub enum MicrosandboxSubcommand {
         config: Option<String>,
     },
 
-    /// List build, sandbox, or group components in the project
+    /// List sandboxs in the project
     #[command(name = "list")]
     List {
-        /// Whether to list sandboxes
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether to list build sandboxes
+        /// Whether command should apply for a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether to list groups
+        /// Whether command should apply for a group
         #[arg(short, long)]
         group: bool,
 
@@ -195,15 +195,15 @@ pub enum MicrosandboxSubcommand {
     /// Show logs of a running build, sandbox, or group
     #[command(name = "log")]
     Log {
-        /// Whether to show logs of a sandbox
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether to show logs of a build sandbox
+        /// Whether command should apply for a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether to show logs of a group
+        /// Whether command should apply for a group
         #[arg(short, long)]
         group: bool,
 
@@ -228,18 +228,18 @@ pub enum MicrosandboxSubcommand {
         tail: Option<usize>,
     },
 
-    /// Show tree of layers that make up a build, sandbox, or group component
+    /// Show tree of layers that make up a sandbox
     #[command(name = "tree")]
     Tree {
-        /// Whether to show a sandbox tree
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether to show a build sandbox tree
+        /// Whether command should apply for a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether to show a group tree
+        /// Whether command should apply for a group
         #[arg(short, long)]
         group: bool,
 
@@ -253,13 +253,13 @@ pub enum MicrosandboxSubcommand {
     },
 
     /// Run a sandbox script
-    #[command(name = "run")]
+    #[command(name = "run", alias = "r")]
     Run {
-        /// Whether to run start or specific script for a sandbox
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether to run start or specific script for a build sandbox
+        /// Whether command should apply for a build sandbox
         #[arg(short, long)]
         build: bool,
 
@@ -288,46 +288,14 @@ pub enum MicrosandboxSubcommand {
         args: Vec<String>,
     },
 
-    /// Start a sandbox
-    #[command(name = "start")]
-    Start {
-        /// Whether to run start script for a sandbox
-        #[arg(short, long)]
-        sandbox: bool,
-
-        /// Whether to run start script for a build sandbox
-        #[arg(short, long)]
-        build: bool,
-
-        /// Name of the component
-        #[arg(required = true)]
-        name: String,
-
-        /// Project path
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
-
-        /// Additional arguments
-        #[arg(last = true)]
-        args: Vec<String>,
-
-        /// Run sandbox in the background
-        #[arg(short, long)]
-        detach: bool,
-    },
-
     /// Open a shell in a sandbox
     #[command(name = "shell")]
     Shell {
-        /// Whether to open a shell in a sandbox
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether to open a shell in a build sandbox
+        /// Whether command should apply for a build sandbox
         #[arg(short, long)]
         build: bool,
 
@@ -343,19 +311,19 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         config: Option<String>,
 
-        /// Additional arguments
-        #[arg(last = true)]
-        args: Vec<String>,
-
         /// Run sandbox in the background
         #[arg(short, long)]
         detach: bool,
+
+        /// Additional arguments after `--`
+        #[arg(last = true)]
+        args: Vec<String>,
     },
 
     /// Create a temporary sandbox
-    #[command(name = "tmp")]
+    #[command(name = "tmp", alias = "t")]
     Tmp {
-        /// Whether to create a temporary sandbox from an image
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         image: bool,
 
@@ -401,9 +369,9 @@ pub enum MicrosandboxSubcommand {
     },
 
     /// Install a script from an image
-    #[command(name = "install")]
+    #[command(name = "install", alias = "i")]
     Install {
-        /// Whether to create a temporary sandbox from an image
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         image: bool,
 
@@ -474,15 +442,15 @@ pub enum MicrosandboxSubcommand {
     /// Start project sandboxes
     #[command(name = "up")]
     Up {
-        /// Whether to start a sandbox
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether to start a build sandbox
+        /// Whether command should apply for a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether to start a group
+        /// Whether command should apply for a group
         #[arg(short, long)]
         group: bool,
 
@@ -502,15 +470,15 @@ pub enum MicrosandboxSubcommand {
     /// Stop project sandboxes
     #[command(name = "down")]
     Down {
-        /// Whether to stop a sandbox
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether to stop a build sandbox
+        /// Whether command should apply for a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether to stop a group
+        /// Whether command should apply for a group
         #[arg(short, long)]
         group: bool,
 
@@ -530,15 +498,15 @@ pub enum MicrosandboxSubcommand {
     /// Show running status
     #[command(name = "status")]
     Status {
-        /// Whether to show a sandbox
+        /// Whether command should apply for a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether to show a build sandbox
+        /// Whether command should apply for a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether to show a group
+        /// Whether command should apply for a group
         #[arg(short, long)]
         group: bool,
 
@@ -598,11 +566,11 @@ pub enum MicrosandboxSubcommand {
     /// Pull an image
     #[command(name = "pull")]
     Pull {
-        /// Whether to pull an image
+        /// Whether command should apply for an image
         #[arg(short, long)]
         image: bool,
 
-        /// Whether to pull an image group
+        /// Whether command should apply for an image group
         #[arg(short = 'G', long)]
         image_group: bool,
 
@@ -618,11 +586,11 @@ pub enum MicrosandboxSubcommand {
     /// Push an image
     #[command(name = "push")]
     Push {
-        /// Whether to push an image
+        /// Whether command should apply for an image
         #[arg(short, long)]
         image: bool,
 
-        /// Whether to push an image group
+        /// Whether command should apply for an image group
         #[arg(short = 'G', long)]
         image_group: bool,
 

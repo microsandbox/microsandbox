@@ -13,7 +13,6 @@ use msb::handlers;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-const START_SCRIPT: &str = "start";
 const SHELL_SCRIPT: &str = "shell";
 
 //--------------------------------------------------------------------------------------------------
@@ -94,56 +93,33 @@ async fn main() -> MicrosandboxResult<()> {
             sandbox,
             build,
             name,
-            args,
             path,
             config,
             detach,
             exec,
-        }) => {
-            handlers::run_subcommand(sandbox, build, name, args, path, config, detach, exec)
-                .await?;
-        }
-        Some(MicrosandboxSubcommand::Start {
-            sandbox,
-            build,
-            name,
             args,
-            path,
-            config,
-            detach,
         }) => {
-            handlers::script_run_subcommand(
-                sandbox,
-                build,
-                name,
-                START_SCRIPT.to_string(),
-                args,
-                path,
-                config,
-                detach,
-                None,
-            )
-            .await?;
+            handlers::run_subcommand(sandbox, build, name, path, config, detach, exec, args)
+                .await?;
         }
         Some(MicrosandboxSubcommand::Shell {
             sandbox,
             build,
             name,
-            args,
             path,
             config,
             detach,
+            args,
         }) => {
             handlers::script_run_subcommand(
                 sandbox,
                 build,
                 name,
                 SHELL_SCRIPT.to_string(),
-                args,
                 path,
                 config,
                 detach,
-                None,
+                args,
             )
             .await?;
         }

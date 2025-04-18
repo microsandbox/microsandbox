@@ -1,8 +1,8 @@
 //! Toolchain management for Microsandbox.
 //!
 //! This module provides functionality for managing the Microsandbox toolchain,
-//! including installation, upgrades, and uninstallation. It handles the binaries
-//! and libraries that make up the Microsandbox runtime.
+//! including upgrades, and uninstallation. It handles the binaries and libraries
+//! that make up the Microsandbox runtime.
 
 use std::path::{Path, PathBuf};
 use tokio::fs;

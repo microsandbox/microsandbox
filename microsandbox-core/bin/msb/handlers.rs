@@ -1,12 +1,9 @@
 use clap::{error::ErrorKind, CommandFactory};
 use microsandbox_core::{
-    cli::{AnsiStyles, MicrosandboxArgs, SelfAction},
-    management::{
+    cli::{AnsiStyles, MicrosandboxArgs, SelfAction}, config::DEFAULT_SHELL, management::{
         config::{self, Component, ComponentType},
         home, menv, orchestra, sandbox, server, toolchain,
-    },
-    oci::Reference,
-    MicrosandboxError, MicrosandboxResult,
+    }, oci::Reference, MicrosandboxError, MicrosandboxResult
 };
 use std::path::PathBuf;
 use typed_path::Utf8UnixPathBuf;
@@ -79,7 +76,7 @@ pub async fn add_subcommand(
         env_file,
         depends_on,
         workdir,
-        shell,
+        shell: Some(shell.unwrap_or(DEFAULT_SHELL.to_string())),
         scripts: scripts.into_iter().map(|(k, v)| (k, v.into())).collect(),
         imports: imports.into_iter().map(|(k, v)| (k, v.into())).collect(),
         exports: exports.into_iter().map(|(k, v)| (k, v.into())).collect(),
@@ -157,11 +154,11 @@ pub async fn run_subcommand(
     sandbox: bool,
     build: bool,
     name: String,
-    args: Vec<String>,
     path: Option<PathBuf>,
     config: Option<String>,
     detach: bool,
     exec: Option<String>,
+    args: Vec<String>,
 ) -> MicrosandboxResult<()> {
     if build && sandbox {
         MicrosandboxArgs::command()
@@ -213,11 +210,10 @@ pub async fn script_run_subcommand(
     build: bool,
     name: String,
     script: String,
-    args: Vec<String>,
     path: Option<PathBuf>,
     config: Option<String>,
     detach: bool,
-    exec: Option<String>,
+    args: Vec<String>,
 ) -> MicrosandboxResult<()> {
     if build && sandbox {
         MicrosandboxArgs::command()
@@ -242,7 +238,7 @@ pub async fn script_run_subcommand(
         config.as_deref(),
         args,
         detach,
-        exec.as_deref(),
+        None,
         true,
     )
     .await
