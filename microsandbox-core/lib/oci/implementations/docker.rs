@@ -27,6 +27,11 @@ use crate::{
     MicrosandboxError, MicrosandboxResult,
 };
 
+#[cfg(feature = "cli-viz")]
+use crate::utils::viz::MULTI_PROGRESS;
+#[cfg(feature = "cli-viz")]
+use indicatif::{ProgressBar, ProgressStyle};
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -202,6 +207,29 @@ impl DockerRegistry {
         digest: &Digest,
         download_size: u64,
     ) -> MicrosandboxResult<bool> {
+        #[cfg(feature = "cli-viz")]
+        let progress_bar = {
+            let pb = MULTI_PROGRESS.add(ProgressBar::new(download_size));
+            let style = ProgressStyle::with_template(
+                "{prefix:.bold.dim} {bar:40.green/green.dim} {bytes:.bold} / {total_bytes:.dim}",
+            )
+            .unwrap()
+            .progress_chars("=+-");
+
+            pb.set_style(style);
+            // first 8 chars of sha part
+            let digest_short = digest.digest().get(..8).unwrap_or("");
+            pb.set_prefix(format!("{}", digest_short));
+            pb.clone()
+        };
+
+        #[cfg(feature = "cli-viz")]
+        {
+            // If we already have some bytes downloaded, reflect that on the progress bar.
+            let downloaded_so_far = self.get_downloaded_file_size(digest);
+            progress_bar.set_position(downloaded_so_far);
+        }
+
         let download_path = self.layer_download_dir.join(digest.to_string());
 
         // First, check if the extracted layer directory already exists and is not empty
@@ -270,7 +298,12 @@ impl DockerRegistry {
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
             file.write_all(&bytes).await?;
+            #[cfg(feature = "cli-viz")]
+            progress_bar.inc(bytes.len() as u64);
         }
+
+        #[cfg(feature = "cli-viz")]
+        progress_bar.finish_and_clear();
 
         // Verify the hash of the downloaded file
         let algorithm = digest.algorithm();

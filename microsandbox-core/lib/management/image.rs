@@ -4,21 +4,34 @@
 //! registries. It supports pulling images from Docker and Sandboxes.io registries,
 //! handling image layers, and managing the local image cache.
 
+#[cfg(feature = "cli-viz")]
+use crate::utils::viz::MULTI_PROGRESS;
 use crate::{
     management::db::{self, OCI_DB_MIGRATOR},
     oci::{DockerRegistry, OciRegistryPull, Reference},
     utils::{
         env::get_microsandbox_home_path,
         path::{LAYERS_SUBDIR, OCI_DB_FILENAME},
+        viz::TICK_STRINGS,
         EXTRACTED_LAYER_SUFFIX,
     },
     MicrosandboxError, MicrosandboxResult,
 };
+#[cfg(feature = "cli-viz")]
+use flate2::read::GzDecoder;
 use futures::future;
+#[cfg(feature = "cli-viz")]
+use indicatif::{ProgressBar, ProgressStyle};
 use sqlx::{Pool, Sqlite};
+#[cfg(feature = "cli-viz")]
+use std::io::{Read, Result as IoResult};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "cli-viz")]
+use tar::Archive;
 use tempfile::tempdir;
-use tokio::{fs, process::Command};
+use tokio::fs;
+#[cfg(feature = "cli-viz")]
+use tokio::task::spawn_blocking;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -168,12 +181,41 @@ pub async fn pull_from_docker_registry(
         return Ok(());
     }
 
+    #[cfg(feature = "cli-viz")]
+    let header_pb = {
+        let pb = MULTI_PROGRESS.insert(0, ProgressBar::new_spinner());
+        pb.set_style(
+            ProgressStyle::with_template("{spinner} {msg}")
+                .unwrap()
+                .tick_strings(&*TICK_STRINGS),
+        );
+        pb.set_message("Downloading layers...");
+        pb.enable_steady_tick(std::time::Duration::from_millis(80));
+        pb.clone()
+    };
+
     docker_registry
         .pull_image(image.get_repository(), image.get_selector().clone())
         .await?;
 
+    #[cfg(feature = "cli-viz")]
+    header_pb.finish_with_message("Layers downloaded");
+
     // Find and extract layers in parallel
     let layer_paths = collect_layer_files(download_dir).await?;
+
+    #[cfg(feature = "cli-viz")]
+    let header_extract_pb = {
+        let pb = MULTI_PROGRESS.add(ProgressBar::new_spinner());
+        pb.set_style(
+            ProgressStyle::with_template("{spinner} {msg}")
+                .unwrap()
+                .tick_strings(&*TICK_STRINGS),
+        );
+        pb.set_message("Extracting layers...");
+        pb.enable_steady_tick(std::time::Duration::from_millis(80));
+        pb.clone()
+    };
 
     let extraction_futures: Vec<_> = layer_paths
         .into_iter()
@@ -187,6 +229,9 @@ pub async fn pull_from_docker_registry(
     for result in future::join_all(extraction_futures).await {
         result?;
     }
+
+    #[cfg(feature = "cli-viz")]
+    header_extract_pb.finish_with_message("Layers extracted");
 
     Ok(())
 }
@@ -400,25 +445,83 @@ async fn extract_layer(
         extract_dir.display()
     );
 
-    // Use tar command to extract the layer
-    let output = Command::new("tar")
-        .arg("-xzf")
-        .arg(layer_path)
-        .arg("-C")
-        .arg(&extract_dir)
-        .output()
-        .await
-        .map_err(|e| MicrosandboxError::LayerHandling {
-            source: e,
-            layer: file_name.to_string(),
-        })?;
+    #[cfg(feature = "cli-viz")]
+    struct ProgressReader<R> {
+        inner: R,
+        bar: ProgressBar,
+    }
+    #[cfg(feature = "cli-viz")]
+    impl<R: Read> Read for ProgressReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+            let n = self.inner.read(buf)?;
+            if n > 0 {
+                self.bar.inc(n as u64);
+            }
+            Ok(n)
+        }
+    }
 
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(MicrosandboxError::LayerExtraction(format!(
-            "Failed to extract layer {}: {}",
-            file_name, error_msg
-        )));
+    #[cfg(feature = "cli-viz")]
+    {
+        let total_bytes = fs::metadata(layer_path).await?.len();
+        let pb = MULTI_PROGRESS.add(ProgressBar::new(total_bytes));
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{prefix:.bold.dim} {bar:40.green/green.dim} {bytes:.bold}/{total_bytes:.dim}",
+            )
+            .unwrap()
+            .progress_chars("=+-")
+        );
+        let digest_short = if let Some(rest) = file_name.strip_prefix("sha256:") {
+            &rest[..8.min(rest.len())]
+        } else {
+            &file_name[..8.min(file_name.len())]
+        };
+        pb.set_prefix(format!("{}", digest_short));
+
+        let layer_path_clone = layer_path.to_path_buf();
+        let extract_dir_clone = extract_dir.clone();
+        let pb_clone = pb.clone();
+
+        spawn_blocking(move || -> MicrosandboxResult<()> {
+            let file = std::fs::File::open(&layer_path_clone)?;
+            let reader = ProgressReader {
+                inner: file,
+                bar: pb_clone.clone(),
+            };
+            let decoder = GzDecoder::new(reader);
+            let mut archive = Archive::new(decoder);
+            archive.unpack(&extract_dir_clone)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| MicrosandboxError::LayerExtraction(format!("{:?}", e)))??;
+
+        pb.finish_and_clear();
+    }
+
+    #[cfg(not(feature = "cli-viz"))]
+    {
+        // Fallback to system tar when cli-viz disabled
+        let output = Command::new("tar")
+            .arg("-xzf")
+            .arg(layer_path)
+            .arg("-C")
+            .arg(&extract_dir)
+            .output()
+            .await
+            .map_err(|e| MicrosandboxError::LayerHandling {
+                source: e,
+                layer: file_name.to_string(),
+            })?;
+
+        if !output.status.success() {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            return Err(MicrosandboxError::LayerExtraction(format!(
+                "Failed to extract layer {}: {}",
+                file_name, error_msg
+            )));
+        }
     }
 
     tracing::info!(

@@ -64,19 +64,19 @@ _build_msb: $(MSB_RELEASE_BIN) $(MSBRUN_RELEASE_BIN)
 $(MSB_RELEASE_BIN): build_libkrun
 	cd microsandbox-core
 ifeq ($(OS),Darwin)
-	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin msb $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin msb --features cli-viz $(FEATURES)
 	codesign --entitlements microsandbox.entitlements --force -s - $@
 else
-	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msb $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msb --features cli-viz $(FEATURES)
 endif
 
 $(MSBRUN_RELEASE_BIN): build_libkrun
 	cd microsandbox-core
 ifeq ($(OS),Darwin)
-	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin msbrun $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin msbrun --features cli-viz $(FEATURES)
 	codesign --entitlements microsandbox.entitlements --force -s - $@
 else
-	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msbrun $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msbrun --features cli-viz $(FEATURES)
 endif
 
 # -----------------------------------------------------------------------------
