@@ -28,7 +28,7 @@ use crate::{
 };
 
 #[cfg(feature = "cli-viz")]
-use crate::utils::viz::MULTI_PROGRESS;
+use crate::utils::viz::{self, MULTI_PROGRESS};
 #[cfg(feature = "cli-viz")]
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -63,6 +63,12 @@ const DOCKER_CONFIG_MIME_TYPE: &str = "application/vnd.docker.container.image.v1
 
 /// The annotation key used to identify attestation manifests in the Docker Registry.
 const DOCKER_REFERENCE_TYPE_ANNOTATION: &str = "vnd.docker.reference.type";
+
+/// Spinner message used for fetching image details.
+const FETCH_IMAGE_DETAILS_MSG: &str = "Fetch image details";
+
+/// Spinner message used for downloading layers.
+const DOWNLOAD_LAYER_MSG: &str = "Download layers";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -334,7 +340,11 @@ impl OciRegistryPull for DockerRegistry {
         selector: ReferenceSelector,
     ) -> MicrosandboxResult<()> {
         // Calculate total size and save image record
+        #[cfg(feature = "cli-viz")]
+        let fetch_details_sp = viz::create_spinner(FETCH_IMAGE_DETAILS_MSG.to_string(), None, None);
+
         let index = self.fetch_index(repository, selector.clone()).await?;
+
         let total_size: i64 = index.manifests().iter().map(|m| m.size() as i64).sum();
 
         // Construct reference based on selector type
@@ -382,22 +392,29 @@ impl OciRegistryPull for DockerRegistry {
             })
             .ok_or(MicrosandboxError::ManifestNotFound)?;
 
-        // Fetch and save manifest
         let manifest = self
             .fetch_manifest(repository, manifest_desc.digest())
             .await?;
+
         let manifest_id =
             db::save_manifest(&self.oci_db, image_id, Some(index_id), &manifest).await?;
 
-        // Fetch and save config
         let config = self
             .fetch_config(repository, manifest.config().digest())
             .await?;
+
         db::save_config(&self.oci_db, manifest_id, &config).await?;
 
+        #[cfg(feature = "cli-viz")]
+        fetch_details_sp.finish_with_message(FETCH_IMAGE_DETAILS_MSG);
+
+        let layers = manifest.layers();
+
+        #[cfg(feature = "cli-viz")]
+        let download_layers_sp = viz::create_spinner(DOWNLOAD_LAYER_MSG.to_string(), None, Some(layers.len() as u64));
+
         // Download layers concurrently and save to database
-        let layer_futures: Vec<_> = manifest
-            .layers()
+        let layer_futures: Vec<_> = layers
             .iter()
             .zip(config.rootfs().diff_ids())
             .map(|(layer_desc, diff_id)| async {
@@ -406,6 +423,9 @@ impl OciRegistryPull for DockerRegistry {
                 let layer_downloaded = self
                     .download_image_blob(repository, layer_desc.digest(), layer_desc.size())
                     .await?;
+
+                #[cfg(feature = "cli-viz")]
+                download_layers_sp.inc(1);
 
                 // Get or create layer record in database
                 let layer_id = if layer_downloaded {
@@ -461,6 +481,9 @@ impl OciRegistryPull for DockerRegistry {
         for result in future::join_all(layer_futures).await {
             result?;
         }
+
+        #[cfg(feature = "cli-viz")]
+        download_layers_sp.finish_with_message(DOWNLOAD_LAYER_MSG);
 
         Ok(())
     }

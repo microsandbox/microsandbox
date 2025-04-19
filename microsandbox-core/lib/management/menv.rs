@@ -10,12 +10,24 @@ use crate::{
     utils::{MICROSANDBOX_CONFIG_FILENAME, RW_SUBDIR},
     MicrosandboxResult,
 };
+
+#[cfg(feature = "cli-viz")]
+use crate::utils::viz;
 use std::path::{Path, PathBuf};
 use tokio::{fs, io::AsyncWriteExt};
 
 use crate::utils::path::{LOG_SUBDIR, MICROSANDBOX_ENV_DIR, SANDBOX_DB_FILENAME};
 
 use super::db;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const REMOVE_MENV_DIR_MSG: &str = "Remove .menv directory";
+const INITIALIZE_MENV_DIR_MSG: &str = "Initialize .menv directory";
+const CREATE_DEFAULT_CONFIG_MSG: &str = "Create default config file";
+const UPDATE_GITIGNORE_MSG: &str = "Update .gitignore";
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -43,10 +55,28 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
     // Get the target path, defaulting to current directory if none specified
     let project_dir = project_dir.unwrap_or_else(|| PathBuf::from("."));
     let menv_path = project_dir.join(MICROSANDBOX_ENV_DIR);
+    let menv_exists = menv_path.exists();
+
+    #[cfg(feature = "cli-viz")]
+    let initialize_menv_dir_sp = if !menv_exists {
+        Some(viz::create_spinner(
+            INITIALIZE_MENV_DIR_MSG.to_string(),
+            None,
+            None,
+        ))
+    } else {
+        None
+    };
+
     fs::create_dir_all(&menv_path).await?;
 
     // Create the required files for the microsandbox environment
     ensure_menv_files(&menv_path).await?;
+
+    #[cfg(feature = "cli-viz")]
+    if let Some(sp) = initialize_menv_dir_sp {
+        sp.finish_with_message(INITIALIZE_MENV_DIR_MSG);
+    }
 
     // Create default config file if it doesn't exist
     create_default_config(&project_dir).await?;
@@ -55,8 +85,14 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
         project_dir.join(MICROSANDBOX_CONFIG_FILENAME).display()
     );
 
+    #[cfg(feature = "cli-viz")]
+    let update_gitignore_sp = viz::create_spinner(UPDATE_GITIGNORE_MSG.to_string(), None, None);
+
     // Update .gitignore to include .menv directory
     update_gitignore(&project_dir).await?;
+
+    #[cfg(feature = "cli-viz")]
+    update_gitignore_sp.finish_with_message(UPDATE_GITIGNORE_MSG);
 
     Ok(())
 }
@@ -88,6 +124,9 @@ pub async fn clean(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> {
     let project_dir = project_dir.unwrap_or_else(|| PathBuf::from("."));
     let menv_path = project_dir.join(MICROSANDBOX_ENV_DIR);
 
+    #[cfg(feature = "cli-viz")]
+    let remove_menv_dir_sp = viz::create_spinner(REMOVE_MENV_DIR_MSG.to_string(), None, None);
+
     // Check if .menv directory exists
     if menv_path.exists() {
         // Remove the .menv directory and all its contents
@@ -102,6 +141,9 @@ pub async fn clean(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> {
             menv_path.display()
         );
     }
+
+    #[cfg(feature = "cli-viz")]
+    remove_menv_dir_sp.finish_with_message(REMOVE_MENV_DIR_MSG);
 
     Ok(())
 }
@@ -134,8 +176,15 @@ pub(crate) async fn create_default_config(project_dir: &Path) -> MicrosandboxRes
 
     // Only create if it doesn't exist
     if !config_path.exists() {
+        #[cfg(feature = "cli-viz")]
+        let create_default_config_sp =
+            viz::create_spinner(CREATE_DEFAULT_CONFIG_MSG.to_string(), None, None);
+
         let mut file = fs::File::create(&config_path).await?;
         file.write_all(DEFAULT_CONFIG.as_bytes()).await?;
+
+        #[cfg(feature = "cli-viz")]
+        create_default_config_sp.finish_with_message(CREATE_DEFAULT_CONFIG_MSG);
     }
 
     Ok(())

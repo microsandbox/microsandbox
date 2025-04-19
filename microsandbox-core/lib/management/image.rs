@@ -5,14 +5,13 @@
 //! handling image layers, and managing the local image cache.
 
 #[cfg(feature = "cli-viz")]
-use crate::utils::viz::MULTI_PROGRESS;
+use crate::utils::viz::{self, MULTI_PROGRESS};
 use crate::{
     management::db::{self, OCI_DB_MIGRATOR},
     oci::{DockerRegistry, OciRegistryPull, Reference},
     utils::{
         env::get_microsandbox_home_path,
         path::{LAYERS_SUBDIR, OCI_DB_FILENAME},
-        viz::TICK_STRINGS,
         EXTRACTED_LAYER_SUFFIX,
     },
     MicrosandboxError, MicrosandboxResult,
@@ -30,6 +29,8 @@ use std::path::{Path, PathBuf};
 use tar::Archive;
 use tempfile::tempdir;
 use tokio::fs;
+#[cfg(not(feature = "cli-viz"))]
+use tokio::process::Command;
 #[cfg(feature = "cli-viz")]
 use tokio::task::spawn_blocking;
 
@@ -42,6 +43,9 @@ const DOCKER_REGISTRY: &str = "docker.io";
 
 /// The domain name for the Sandboxes registry.
 const SANDBOXES_REGISTRY: &str = "sandboxes.io";
+
+/// Spinner message used for extracting layers.
+const EXTRACT_LAYERS_MSG: &str = "Extracting layers";
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -181,47 +185,27 @@ pub async fn pull_from_docker_registry(
         return Ok(());
     }
 
-    #[cfg(feature = "cli-viz")]
-    let header_pb = {
-        let pb = MULTI_PROGRESS.insert(0, ProgressBar::new_spinner());
-        pb.set_style(
-            ProgressStyle::with_template("{spinner} {msg}")
-                .unwrap()
-                .tick_strings(&*TICK_STRINGS),
-        );
-        pb.set_message("Download layers");
-        pb.enable_steady_tick(std::time::Duration::from_millis(80));
-        pb
-    };
-
     docker_registry
         .pull_image(image.get_repository(), image.get_selector().clone())
         .await?;
-
-    #[cfg(feature = "cli-viz")]
-    header_pb.finish_with_message("Download layers");
 
     // Find and extract layers in parallel
     let layer_paths = collect_layer_files(download_dir).await?;
 
     #[cfg(feature = "cli-viz")]
-    let header_extract_pb = {
-        let pb = MULTI_PROGRESS.add(ProgressBar::new_spinner());
-        pb.set_style(
-            ProgressStyle::with_template("{spinner} {msg}")
-                .unwrap()
-                .tick_strings(&*TICK_STRINGS),
-        );
-        pb.set_message("Extract layers");
-        pb.enable_steady_tick(std::time::Duration::from_millis(80));
-        pb
-    };
+    let extract_layers_sp = viz::create_spinner(EXTRACT_LAYERS_MSG.to_string(), None, Some(layer_paths.len() as u64));
 
     let extraction_futures: Vec<_> = layer_paths
         .into_iter()
         .map(|path| {
             let layers_dir = layers_dir.clone();
-            async move { extract_layer(path, &layers_dir).await }
+            let extract_layers_sp = extract_layers_sp.clone();
+            async move {
+                let result = extract_layer(path, &layers_dir).await;
+                #[cfg(feature = "cli-viz")]
+                extract_layers_sp.inc(1);
+                result
+            }
         })
         .collect();
 
@@ -231,7 +215,7 @@ pub async fn pull_from_docker_registry(
     }
 
     #[cfg(feature = "cli-viz")]
-    header_extract_pb.finish_with_message("Extract layers");
+    extract_layers_sp.finish_with_message(EXTRACT_LAYERS_MSG);
 
     Ok(())
 }
