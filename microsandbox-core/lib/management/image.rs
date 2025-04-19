@@ -44,6 +44,7 @@ const DOCKER_REGISTRY: &str = "docker.io";
 /// The domain name for the Sandboxes registry.
 const SANDBOXES_REGISTRY: &str = "sandboxes.io";
 
+#[cfg(feature = "cli-viz")]
 /// Spinner message used for extracting layers.
 const EXTRACT_LAYERS_MSG: &str = "Extracting layers";
 
@@ -203,6 +204,7 @@ pub async fn pull_from_docker_registry(
         .into_iter()
         .map(|path| {
             let layers_dir = layers_dir.clone();
+            #[cfg(feature = "cli-viz")]
             let extract_layers_sp = extract_layers_sp.clone();
             async move {
                 let result = extract_layer(path, &layers_dir).await;

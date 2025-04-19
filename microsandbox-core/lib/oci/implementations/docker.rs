@@ -64,9 +64,11 @@ const DOCKER_CONFIG_MIME_TYPE: &str = "application/vnd.docker.container.image.v1
 /// The annotation key used to identify attestation manifests in the Docker Registry.
 const DOCKER_REFERENCE_TYPE_ANNOTATION: &str = "vnd.docker.reference.type";
 
+#[cfg(feature = "cli-viz")]
 /// Spinner message used for fetching image details.
 const FETCH_IMAGE_DETAILS_MSG: &str = "Fetch image details";
 
+#[cfg(feature = "cli-viz")]
 /// Spinner message used for downloading layers.
 const DOWNLOAD_LAYER_MSG: &str = "Download layers";
 

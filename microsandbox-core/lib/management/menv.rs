@@ -24,9 +24,13 @@ use super::db;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "cli-viz")]
 const REMOVE_MENV_DIR_MSG: &str = "Remove .menv directory";
+#[cfg(feature = "cli-viz")]
 const INITIALIZE_MENV_DIR_MSG: &str = "Initialize .menv directory";
+#[cfg(feature = "cli-viz")]
 const CREATE_DEFAULT_CONFIG_MSG: &str = "Create default config file";
+#[cfg(feature = "cli-viz")]
 const UPDATE_GITIGNORE_MSG: &str = "Update .gitignore";
 
 //--------------------------------------------------------------------------------------------------
@@ -55,6 +59,7 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
     // Get the target path, defaulting to current directory if none specified
     let project_dir = project_dir.unwrap_or_else(|| PathBuf::from("."));
     let menv_path = project_dir.join(MICROSANDBOX_ENV_DIR);
+    #[cfg(feature = "cli-viz")]
     let menv_exists = menv_path.exists();
 
     #[cfg(feature = "cli-viz")]
