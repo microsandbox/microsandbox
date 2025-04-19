@@ -162,11 +162,11 @@ pub(crate) async fn save_or_update_sandbox(
     .await?;
 
     if let Some(record) = update_result {
-        tracing::debug!("Updated existing sandbox record");
+        tracing::debug!("updated existing sandbox record");
         Ok(record.get::<i64, _>("id"))
     } else {
         // If no record was updated, insert a new one
-        tracing::debug!("Creating new sandbox record");
+        tracing::debug!("creating new sandbox record");
         let record = sqlx::query(
             r#"
             INSERT INTO sandboxes (

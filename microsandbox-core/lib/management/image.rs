@@ -263,7 +263,7 @@ pub async fn pull_from_sandboxes_registry(
     let docker_reference: Reference = docker_ref_str.parse()?;
 
     if repository.starts_with("library/") {
-        tracing::info!("Pulling library image from Docker registry for compatibility");
+        tracing::info!("pulling library image from Docker registry for compatibility");
     } else {
         tracing::warn!(
             "Non-library namespace image requested from Sandboxes registry: {}",
@@ -632,13 +632,13 @@ mod helper {
             }
 
             let layer_path = entry.path();
-            tracing::info!("Checking layer: {}", layer_path.display());
+            tracing::info!("checking layer: {}", layer_path.display());
 
             // Check for nginx.conf
             let nginx_conf = layer_path.join("etc").join("nginx").join("nginx.conf");
             if nginx_conf.exists() {
                 found_nginx_conf = true;
-                tracing::info!("Found nginx.conf at {}", nginx_conf.display());
+                tracing::info!("found nginx.conf at {}", nginx_conf.display());
             }
 
             // Check for default.conf
@@ -649,14 +649,14 @@ mod helper {
                 .join("default.conf");
             if default_conf.exists() {
                 found_default_conf = true;
-                tracing::info!("Found default.conf at {}", default_conf.display());
+                tracing::info!("found default.conf at {}", default_conf.display());
             }
 
             // Check for nginx binary
             let nginx_binary = layer_path.join("usr").join("sbin").join("nginx");
             if nginx_binary.exists() {
                 found_nginx_binary = true;
-                tracing::info!("Found nginx binary at {}", nginx_binary.display());
+                tracing::info!("found nginx binary at {}", nginx_binary.display());
             }
 
             // If we found all files, we can stop checking

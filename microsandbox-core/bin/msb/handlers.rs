@@ -419,7 +419,7 @@ pub async fn clean_subcommand(
     if global || all {
         // Global cleanup - clean the microsandbox home directory
         home::clean().await?;
-        tracing::info!("Global microsandbox home directory cleaned");
+        tracing::info!("global microsandbox home directory cleaned");
     }
 
     if !global || all {

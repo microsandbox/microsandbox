@@ -40,7 +40,7 @@ pub async fn uninstall() -> MicrosandboxResult<()> {
     uninstall_libraries().await?;
 
     // Log success
-    tracing::info!("Microsandbox toolchain has been successfully uninstalled");
+    tracing::info!("microsandbox toolchain has been successfully uninstalled");
 
     Ok(())
 }
@@ -60,9 +60,9 @@ async fn uninstall_binaries() -> MicrosandboxResult<()> {
         let binary_path = bin_dir.join(binary);
         if binary_path.exists() {
             fs::remove_file(&binary_path).await?;
-            tracing::info!("Removed binary: {}", binary_path.display());
+            tracing::info!("removed binary: {}", binary_path.display());
         } else {
-            tracing::info!("Binary not found: {}", binary_path.display());
+            tracing::info!("binary not found: {}", binary_path.display());
         }
     }
 
@@ -90,9 +90,9 @@ async fn uninstall_libraries() -> MicrosandboxResult<()> {
 async fn remove_if_exists(path: PathBuf) -> MicrosandboxResult<()> {
     if path.exists() {
         fs::remove_file(&path).await?;
-        tracing::info!("Removed library: {}", path.display());
+        tracing::info!("removed library: {}", path.display());
     } else {
-        tracing::debug!("Library not found: {}", path.display());
+        tracing::debug!("library not found: {}", path.display());
     }
     Ok(())
 }
@@ -114,7 +114,7 @@ async fn uninstall_versioned_libraries(lib_dir: &Path, lib_prefix: &str) -> Micr
 
             if is_dylib || is_so {
                 fs::remove_file(&path).await?;
-                tracing::info!("Removed versioned library: {}", path.display());
+                tracing::info!("removed versioned library: {}", path.display());
             }
         }
     }

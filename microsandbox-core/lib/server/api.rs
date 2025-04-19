@@ -88,7 +88,7 @@ impl SandboxServer {
 
             if !default_config_path.exists() {
                 std::fs::write(default_config_path, DEFAULT_CONFIG)?;
-                tracing::info!("Created default Sandboxfile in default namespace");
+                tracing::info!("created default Sandboxfile in default namespace");
             }
         }
 
@@ -108,12 +108,12 @@ impl SandboxServer {
 
         // Add JWT authentication if secure mode is enabled
         if self.key.is_some() {
-            tracing::info!("Server running in secure mode with API key authentication");
+            tracing::info!("server running in secure mode with API key authentication");
             // Add authentication middleware to all routes
             app = app.layer(middleware::from_fn_with_state(state, auth_middleware));
         }
 
-        tracing::info!("Server listening on {}", self.addr);
+        tracing::info!("server listening on {}", self.addr);
 
         axum::serve(
             tokio::net::TcpListener::bind(self.addr).await?,
@@ -267,7 +267,7 @@ async fn up(
     State(state): State<Arc<SandboxServer>>,
     Json(request): Json<UpRequest>,
 ) -> ApiResponse<StatusResponse> {
-    tracing::info!("Received up request: {:?}", request);
+    tracing::info!("received up request: {:?}", request);
     let namespace_path = state.get_namespace_path(request.namespace).map_err(|e| {
         Json(
             ErrorResponse::new(
@@ -286,7 +286,7 @@ async fn up(
     )
     .await
     .map_err(|e| {
-        tracing::error!("Failed to start sandboxes: {}", e);
+        tracing::error!("failed to start sandboxes: {}", e);
         Json(
             ErrorResponse::new(
                 500,
@@ -305,7 +305,7 @@ async fn down(
     State(state): State<Arc<SandboxServer>>,
     Json(request): Json<DownRequest>,
 ) -> ApiResponse<StatusResponse> {
-    tracing::info!("Received down request: {:?}", request);
+    tracing::info!("received down request: {:?}", request);
     let namespace_path = state.get_namespace_path(request.namespace).map_err(|e| {
         Json(
             ErrorResponse::new(
@@ -324,7 +324,7 @@ async fn down(
     )
     .await
     .map_err(|e| {
-        tracing::error!("Failed to stop sandboxes: {}", e);
+        tracing::error!("failed to stop sandboxes: {}", e);
         Json(
             ErrorResponse::new(
                 500,

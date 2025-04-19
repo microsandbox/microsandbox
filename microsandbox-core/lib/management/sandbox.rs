@@ -120,7 +120,7 @@ pub async fn run(
         ));
     };
 
-    tracing::debug!("Original sandbox config: {:#?}", sandbox_config);
+    tracing::debug!("original sandbox config: {:#?}", sandbox_config);
 
     // Sandbox database path
     let sandbox_db_path = menv_path.join(SANDBOX_DB_FILENAME);

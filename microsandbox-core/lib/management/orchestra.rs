@@ -99,7 +99,7 @@ pub async fn apply(
     for (name, _) in config_sandboxes {
         // Should start in parallel
         if !running_sandbox_names.contains(name) {
-            tracing::info!("Starting sandbox: {}", name);
+            tracing::info!("starting sandbox: {}", name);
             sandbox::run(
                 name,
                 Some(START_SCRIPT_NAME),
@@ -117,7 +117,7 @@ pub async fn apply(
     // Stop sandboxes that are active but not in config
     for sandbox in running_sandboxes {
         if !config_sandboxes.contains_key(&sandbox.name) {
-            tracing::info!("Stopping sandbox: {}", sandbox.name);
+            tracing::info!("stopping sandbox: {}", sandbox.name);
             signal::kill(
                 Pid::from_raw(sandbox.supervisor_pid as i32),
                 Signal::SIGTERM,
@@ -204,7 +204,7 @@ pub async fn up(
     for (sandbox_name, _) in config_sandboxes {
         // Only start if sandbox is in the specified list and not already running
         if sandbox_names.contains(sandbox_name) && !running_sandbox_names.contains(sandbox_name) {
-            tracing::info!("Starting sandbox: {}", sandbox_name);
+            tracing::info!("starting sandbox: {}", sandbox_name);
             sandbox::run(
                 sandbox_name,
                 Some(START_SCRIPT_NAME),
@@ -295,7 +295,7 @@ pub async fn down(
     // Stop specified sandboxes that are both in config and running
     for sandbox in running_sandboxes {
         if sandbox_names.contains(&sandbox.name) && config_sandboxes.contains_key(&sandbox.name) {
-            tracing::info!("Stopping sandbox: {}", sandbox.name);
+            tracing::info!("stopping sandbox: {}", sandbox.name);
             signal::kill(
                 Pid::from_raw(sandbox.supervisor_pid as i32),
                 Signal::SIGTERM,

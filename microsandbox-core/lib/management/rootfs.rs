@@ -5,9 +5,14 @@
 //! Container Initiative) specifications.
 
 use std::{
-    borrow::Cow, collections::HashMap, fs::Permissions, os::unix::fs::PermissionsExt, path::Path,
+    borrow::Cow,
+    collections::HashMap,
+    fs::Permissions,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
 };
 
+use async_recursion::async_recursion;
 use tokio::fs;
 
 use crate::{config::PathPair, vm::VIRTIOFS_TAG_PREFIX, MicrosandboxResult};
@@ -21,6 +26,45 @@ pub const OPAQUE_WHITEOUT_MARKER: &str = ".wh..wh..opq";
 
 /// The prefix for whiteout files in OCI layers.
 pub const WHITEOUT_PREFIX: &str = ".wh.";
+
+//--------------------------------------------------------------------------------------------------
+// Structs
+//--------------------------------------------------------------------------------------------------
+
+/// RAII guard that temporarily changes file permissions and restores them when dropped
+struct PermissionGuard {
+    path: std::path::PathBuf,
+    original_mode: u32,
+}
+
+impl PermissionGuard {
+    /// Creates a new guard that temporarily adds the given mode bits to the file permissions
+    fn new(path: impl AsRef<Path>, mode_to_add: u32) -> MicrosandboxResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let metadata = std::fs::metadata(&path)?;
+        let original_mode = metadata.permissions().mode();
+
+        // Update permissions
+        let mut perms = metadata.permissions();
+        perms.set_mode(original_mode | mode_to_add);
+        std::fs::set_permissions(&path, perms)?;
+
+        Ok(Self {
+            path,
+            original_mode,
+        })
+    }
+}
+
+impl Drop for PermissionGuard {
+    fn drop(&mut self) {
+        // Attempt to restore original permissions, ignore errors during drop
+        if let Ok(mut perms) = std::fs::metadata(&self.path).and_then(|m| Ok(m.permissions())) {
+            perms.set_mode(self.original_mode);
+            let _ = fs::set_permissions(&self.path, perms);
+        }
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -129,6 +173,7 @@ pub async fn patch_with_virtiofs_mounts(
     // Add entries for mapped directories
     for (idx, dir) in mapped_dirs.iter().enumerate() {
         let tag = format!("{}_{}", VIRTIOFS_TAG_PREFIX, idx);
+        tracing::debug!("adding virtiofs mount for {}", tag);
         let guest_path = dir.get_guest();
 
         // Add entry for this mapped directory
@@ -226,6 +271,112 @@ async fn _patch_with_hostnames(
     let mut new_perms = perms;
     new_perms.set_mode(0o644);
     fs::set_permissions(&hosts_path, new_perms).await?;
+
+    Ok(())
+}
+
+/// Recursively copies a directory from source to destination, preserving file permissions.
+///
+/// This function:
+/// 1. Creates the destination directory if it doesn't exist
+/// 2. Recursively copies all files and subdirectories from source to destination
+/// 3. Preserves the original file permissions for all copied files and directories
+/// 4. Uses PermissionGuard to handle directories that may have restrictive permissions
+///
+/// ## Arguments
+/// * `src_dir` - Path to the source directory
+/// * `dst_dir` - Path to the destination directory
+///
+/// ## Errors
+/// Returns an error if:
+/// - Source directory doesn't exist or isn't readable
+/// - Cannot create the destination directory
+/// - Cannot copy files or subdirectories
+/// - Cannot set permissions on copied files or directories
+#[async_recursion(?Send)]
+pub async fn copy_dir_recursive(src_dir: &Path, dst_dir: &Path) -> MicrosandboxResult<()> {
+    // Ensure source directory exists
+    // Ensure source directory exists
+    if !src_dir.exists() {
+        return Err(crate::MicrosandboxError::PathNotFound(format!(
+            "source directory does not exist: {}",
+            src_dir.display()
+        )));
+    }
+
+    // Create destination directory if it doesn't exist
+    if !dst_dir.exists() {
+        fs::create_dir_all(dst_dir).await?;
+    }
+
+    // Copy the permissions from source to destination directory
+    let src_metadata = fs::metadata(src_dir).await?;
+    let src_perms = src_metadata.permissions();
+    fs::set_permissions(dst_dir, src_perms.clone()).await?;
+
+    // Create a permission guard to ensure we have read access to the source directory
+    // This temporarily adds read and execute permissions if needed
+    let _src_guard = PermissionGuard::new(src_dir, 0o500)?;
+
+    // Read directory entries
+    let mut entries = fs::read_dir(src_dir).await?;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let src_path = entry.path();
+        let dst_path = dst_dir.join(entry.file_name());
+
+        let file_type = entry.file_type().await?;
+
+        if file_type.is_dir() {
+            // Recursively copy subdirectory
+            copy_dir_recursive(&src_path, &dst_path).await?;
+        } else if file_type.is_file() {
+            // Copy file with permissions
+            copy_file_with_permissions(&src_path, &dst_path).await?;
+        } else if file_type.is_symlink() {
+            // Copy symlink
+            let target = fs::read_link(&src_path).await?;
+            fs::symlink(target, &dst_path).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Copies a single file from source to destination, preserving file permissions.
+///
+/// This function:
+/// 1. Creates the destination file
+/// 2. Copies the file contents
+/// 3. Preserves the original file permissions
+///
+/// ## Arguments
+/// * `src_file` - Path to the source file
+/// * `dst_file` - Path to the destination file
+///
+/// ## Errors
+/// Returns an error if:
+/// - Source file doesn't exist or isn't readable
+/// - Cannot create or write to the destination file
+/// - Cannot copy file contents
+/// - Cannot set permissions on the destination file
+async fn copy_file_with_permissions(
+    src_file: impl AsRef<Path>,
+    dst_file: impl AsRef<Path>,
+) -> MicrosandboxResult<()> {
+    let src_file = src_file.as_ref();
+    let dst_file = dst_file.as_ref();
+
+    // Create a permission guard to ensure we have read access to the source file
+    let _src_guard = PermissionGuard::new(src_file, 0o400)?;
+
+    // Copy the file contents
+    fs::copy(src_file, dst_file).await?;
+
+    // Copy the permissions from source to destination file
+    let src_metadata = fs::metadata(src_file).await?;
+    let src_perms = src_metadata.permissions();
+    fs::set_permissions(dst_file, src_perms).await?;
 
     Ok(())
 }
@@ -442,6 +593,202 @@ mod tests {
             .filter(|line| line.contains("192.168.1.100"))
             .count();
         assert_eq!(count, 1, "Should not have duplicate entries");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_copy_dir_complex_permissions() -> anyhow::Result<()> {
+        // Skip this test in CI environments
+        if std::env::var("CI").is_ok() {
+            println!("Skipping permission test in CI environment");
+            return Ok(());
+        }
+
+        // Create temporary source and destination directories
+        let src_root = TempDir::new()?;
+        let dst_root = TempDir::new()?;
+
+        let src_path = src_root.path();
+        let dst_path = dst_root.path();
+
+        // Create a complex nested directory structure with restrictive permissions
+        // Structure:
+        // src/
+        //   ├── noaccess/     (0o000 - no permissions)
+        //   │   ├── hidden/   (0o700 - rwx------)
+        //   │   │   └── file  (0o600 - rw-------)
+        //   ├── readonly/     (0o400 - r--------)
+        //   │   ├── nested/   (0o500 - r-x------)
+        //   │   │   └── file  (0o400 - r--------)
+        //   └── normal/       (0o755 - rwxr-xr-x)
+        //       └── file      (0o644 - rw-r--r--)
+
+        // Create the directory structure first with normal permissions
+        let noaccess_dir = src_path.join("noaccess");
+        let hidden_dir = noaccess_dir.join("hidden");
+        let hidden_file = hidden_dir.join("file");
+
+        let readonly_dir = src_path.join("readonly");
+        let nested_dir = readonly_dir.join("nested");
+        let nested_file = nested_dir.join("file");
+
+        let normal_dir = src_path.join("normal");
+        let normal_file = normal_dir.join("file");
+
+        // Create directories
+        fs::create_dir_all(&hidden_dir).await?;
+        fs::create_dir_all(&nested_dir).await?;
+        fs::create_dir_all(&normal_dir).await?;
+
+        // Create files with content
+        fs::write(&hidden_file, "hidden content").await?;
+        fs::write(&nested_file, "nested content").await?;
+        fs::write(&normal_file, "normal content").await?;
+
+        // Now set the restrictive permissions
+        fs::set_permissions(&noaccess_dir, Permissions::from_mode(0o000)).await?; // ---------
+        fs::set_permissions(&hidden_dir, Permissions::from_mode(0o700)).await?; // rwx------
+        fs::set_permissions(&hidden_file, Permissions::from_mode(0o600)).await?; // rw-------
+
+        fs::set_permissions(&readonly_dir, Permissions::from_mode(0o400)).await?; // r--------
+        fs::set_permissions(&nested_dir, Permissions::from_mode(0o500)).await?; // r-x------
+        fs::set_permissions(&nested_file, Permissions::from_mode(0o400)).await?; // r--------
+
+        fs::set_permissions(&normal_dir, Permissions::from_mode(0o755)).await?; // rwxr-xr-x
+        fs::set_permissions(&normal_file, Permissions::from_mode(0o644)).await?; // rw-r--r--
+
+        // Verify permissions were set correctly
+        let noaccess_perms = fs::metadata(&noaccess_dir).await?.permissions().mode() & 0o777;
+        let readonly_perms = fs::metadata(&readonly_dir).await?.permissions().mode() & 0o777;
+
+        println!("No access dir permissions: {:o}", noaccess_perms);
+        println!("Read-only dir permissions: {:o}", readonly_perms);
+
+        // This copy should succeed despite the restrictive permissions
+        // The PermissionGuard will temporarily add necessary permissions
+        copy_dir_recursive(src_path, dst_path).await?;
+
+        // Verify the copy worked, even for directories with restrictive permissions
+        let dst_noaccess_dir = dst_path.join("noaccess");
+        let dst_hidden_dir = dst_noaccess_dir.join("hidden");
+        let dst_hidden_file = dst_hidden_dir.join("file");
+
+        let dst_readonly_dir = dst_path.join("readonly");
+        let dst_nested_dir = dst_readonly_dir.join("nested");
+        let dst_nested_file = dst_nested_dir.join("file");
+
+        let dst_normal_dir = dst_path.join("normal");
+        let dst_normal_file = dst_normal_dir.join("file");
+
+        // Check everything was copied
+        assert!(
+            dst_noaccess_dir.exists(),
+            "No-access directory was not copied"
+        );
+        assert!(dst_hidden_dir.exists(), "Hidden directory was not copied");
+        assert!(dst_hidden_file.exists(), "Hidden file was not copied");
+
+        assert!(
+            dst_readonly_dir.exists(),
+            "Read-only directory was not copied"
+        );
+        assert!(dst_nested_dir.exists(), "Nested directory was not copied");
+        assert!(dst_nested_file.exists(), "Nested file was not copied");
+
+        assert!(dst_normal_dir.exists(), "Normal directory was not copied");
+        assert!(dst_normal_file.exists(), "Normal file was not copied");
+
+        // Check file contents were preserved
+        assert_eq!(
+            fs::read_to_string(&dst_hidden_file).await?,
+            "hidden content"
+        );
+        assert_eq!(
+            fs::read_to_string(&dst_nested_file).await?,
+            "nested content"
+        );
+        assert_eq!(
+            fs::read_to_string(&dst_normal_file).await?,
+            "normal content"
+        );
+
+        // Check permissions were preserved
+        let dst_noaccess_perms =
+            fs::metadata(&dst_noaccess_dir).await?.permissions().mode() & 0o777;
+        let dst_hidden_perms = fs::metadata(&dst_hidden_dir).await?.permissions().mode() & 0o777;
+        let dst_hidden_file_perms =
+            fs::metadata(&dst_hidden_file).await?.permissions().mode() & 0o777;
+
+        let dst_readonly_perms =
+            fs::metadata(&dst_readonly_dir).await?.permissions().mode() & 0o777;
+        let dst_nested_perms = fs::metadata(&dst_nested_dir).await?.permissions().mode() & 0o777;
+        let dst_nested_file_perms =
+            fs::metadata(&dst_nested_file).await?.permissions().mode() & 0o777;
+
+        let dst_normal_perms = fs::metadata(&dst_normal_dir).await?.permissions().mode() & 0o777;
+        let dst_normal_file_perms =
+            fs::metadata(&dst_normal_file).await?.permissions().mode() & 0o777;
+
+        // Verify all permissions were preserved
+        assert_eq!(
+            dst_noaccess_perms, 0o000,
+            "No-access directory permissions not preserved"
+        );
+        assert_eq!(
+            dst_hidden_perms, 0o700,
+            "Hidden directory permissions not preserved"
+        );
+        assert_eq!(
+            dst_hidden_file_perms, 0o600,
+            "Hidden file permissions not preserved"
+        );
+
+        assert_eq!(
+            dst_readonly_perms, 0o400,
+            "Read-only directory permissions not preserved"
+        );
+        assert_eq!(
+            dst_nested_perms, 0o500,
+            "Nested directory permissions not preserved"
+        );
+        assert_eq!(
+            dst_nested_file_perms, 0o400,
+            "Nested file permissions not preserved"
+        );
+
+        assert_eq!(
+            dst_normal_perms, 0o755,
+            "Normal directory permissions not preserved"
+        );
+        assert_eq!(
+            dst_normal_file_perms, 0o644,
+            "Normal file permissions not preserved"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_copy_dir_nonexistent_source() -> anyhow::Result<()> {
+        // Create a temporary destination directory
+        let dst_root = TempDir::new()?;
+        let dst_path = dst_root.path();
+
+        // Try to copy from a non-existent source
+        let src_path = PathBuf::from("/nonexistent/directory");
+
+        // This should fail with a PathNotFound error
+        let result = copy_dir_recursive(&src_path, dst_path).await;
+
+        assert!(
+            result.is_err(),
+            "Expected an error when source doesn't exist"
+        );
+        assert!(
+            matches!(result.unwrap_err(), MicrosandboxError::PathNotFound(_)),
+            "Expected a PathNotFound error"
+        );
 
         Ok(())
     }

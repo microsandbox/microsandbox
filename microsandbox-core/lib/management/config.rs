@@ -525,12 +525,12 @@ pub async fn apply_image_defaults(
 ) -> MicrosandboxResult<()> {
     // Get the image configuration
     if let Some(config) = db::get_image_config(&oci_db, &reference.to_string()).await? {
-        tracing::info!("Applying defaults from image configuration");
+        tracing::info!("applying defaults from image configuration");
 
         // Apply working directory if not set in sandbox
         if sandbox_config.get_workdir().is_none() && config.config_working_dir.is_some() {
             let workdir = config.config_working_dir.unwrap();
-            tracing::debug!("Using image working directory: {}", workdir);
+            tracing::debug!("using image working directory: {}", workdir);
             let workdir_path = Utf8UnixPathBuf::from(workdir);
             sandbox_config.workdir = Some(workdir_path);
         }
@@ -544,7 +544,7 @@ pub async fn apply_image_defaults(
                         image_env_pairs.push(env_pair);
                     }
                 }
-                tracing::debug!("Image env vars: {:#?}", image_env_pairs);
+                tracing::debug!("image env vars: {:#?}", image_env_pairs);
 
                 // Combine image env vars with sandbox env vars (image vars come first)
                 let mut combined_env = image_env_pairs;
@@ -602,7 +602,7 @@ pub async fn apply_image_defaults(
                             }
                         }
 
-                        tracing::debug!("Entrypoint start script content: {}", script_content);
+                        tracing::debug!("entrypoint start script content: {}", script_content);
 
                         script_content.push_str(&cmd_line);
                     }
@@ -627,7 +627,7 @@ pub async fn apply_image_defaults(
                             }
                         }
 
-                        tracing::debug!("Cmd start script content: {}", script_content);
+                        tracing::debug!("cmd start script content: {}", script_content);
 
                         script_content.push_str(&cmd_line);
                     }
@@ -636,7 +636,7 @@ pub async fn apply_image_defaults(
 
             // If no entrypoint or cmd, use shell as fallback
             if !has_entrypoint_or_cmd {
-                tracing::debug!("Using shell as fallback start script");
+                tracing::debug!("using shell as fallback start script");
                 script_content = shell;
             }
 
@@ -676,7 +676,7 @@ pub async fn apply_image_defaults(
                         }
                     }
 
-                    tracing::debug!("Additional ports: {:?}", additional_ports);
+                    tracing::debug!("additional ports: {:?}", additional_ports);
 
                     // Add new ports to existing ones
                     let mut combined_ports = sandbox_config.get_ports().to_vec();

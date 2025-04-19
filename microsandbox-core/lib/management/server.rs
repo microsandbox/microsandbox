@@ -71,13 +71,13 @@ pub async fn start(
                 return Ok(());
             } else {
                 // Process not running, clean up stale PID file
-                tracing::warn!("Found stale PID file for process {}. Cleaning up.", pid);
+                tracing::warn!("found stale PID file for process {}. Cleaning up.", pid);
                 let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
                 cleanup_server_files(&pid_file_path, &key_file_path).await?;
             }
         } else {
             // Invalid PID in file, clean up
-            tracing::warn!("Found invalid PID in server.pid file. Cleaning up.");
+            tracing::warn!("found invalid PID in server.pid file. Cleaning up.");
             let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
             cleanup_server_files(&pid_file_path, &key_file_path).await?;
         }

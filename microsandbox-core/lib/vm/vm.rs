@@ -340,13 +340,15 @@ impl MicroVm {
             }
         }
 
-        tracing::debug!("Applying config: {:#?}", config);
+        tracing::debug!("applying config: {:#?}", config);
 
         // Add mapped directories using virtio-fs
         let mapped_dirs = &config.mapped_dirs;
         for (idx, dir) in mapped_dirs.iter().enumerate() {
             let tag = CString::new(format!("{}_{}", VIRTIOFS_TAG_PREFIX, idx)).unwrap();
+            tracing::debug!("adding virtiofs mount for {}", tag.to_string_lossy());
             let host_path = CString::new(dir.get_host().to_string().as_bytes()).unwrap();
+            tracing::debug!("host path: {}", host_path.to_string_lossy());
             unsafe {
                 let status = ffi::krun_add_virtiofs(ctx_id, tag.as_ptr(), host_path.as_ptr());
                 assert!(status >= 0, "failed to add mapped directory: {}", status);
