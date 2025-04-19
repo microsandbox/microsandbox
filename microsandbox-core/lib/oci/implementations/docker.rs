@@ -411,7 +411,11 @@ impl OciRegistryPull for DockerRegistry {
         let layers = manifest.layers();
 
         #[cfg(feature = "cli-viz")]
-        let download_layers_sp = viz::create_spinner(DOWNLOAD_LAYER_MSG.to_string(), None, Some(layers.len() as u64));
+        let download_layers_sp = viz::create_spinner(
+            DOWNLOAD_LAYER_MSG.to_string(),
+            None,
+            Some(layers.len() as u64),
+        );
 
         // Download layers concurrently and save to database
         let layer_futures: Vec<_> = layers

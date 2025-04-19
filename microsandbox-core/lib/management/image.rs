@@ -193,7 +193,11 @@ pub async fn pull_from_docker_registry(
     let layer_paths = collect_layer_files(download_dir).await?;
 
     #[cfg(feature = "cli-viz")]
-    let extract_layers_sp = viz::create_spinner(EXTRACT_LAYERS_MSG.to_string(), None, Some(layer_paths.len() as u64));
+    let extract_layers_sp = viz::create_spinner(
+        EXTRACT_LAYERS_MSG.to_string(),
+        None,
+        Some(layer_paths.len() as u64),
+    );
 
     let extraction_futures: Vec<_> = layer_paths
         .into_iter()
