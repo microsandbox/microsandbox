@@ -567,6 +567,11 @@ async fn setup_image_rootfs(
         rootfs::patch_with_sandbox_scripts(&script_dir, scripts, sandbox_config.get_shell())
             .await?;
 
+        // Patch with default DNS settings - check all layers
+        let mut all_layers = layer_paths.clone();
+        all_layers.push(patch_dir.clone());
+        rootfs::patch_with_default_dns_settings(&all_layers).await?;
+
         // Patch with volume mounts if there are any volumes defined
         let volumes = &sandbox_config.get_volumes();
         if !volumes.is_empty() {
@@ -622,6 +627,9 @@ async fn setup_native_rootfs(
         // Patch with sandbox scripts
         rootfs::patch_with_sandbox_scripts(&scripts_dir, scripts, sandbox_config.get_shell())
             .await?;
+
+        // Patch with default DNS settings - for native rootfs, just pass the single root path
+        rootfs::patch_with_default_dns_settings(&[root_path.to_path_buf()]).await?;
 
         // Patch with volume mounts if there are any volumes defined
         let volumes = &sandbox_config.get_volumes();

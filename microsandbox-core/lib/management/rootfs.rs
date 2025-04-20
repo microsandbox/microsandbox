@@ -275,6 +275,82 @@ async fn _patch_with_hostnames(
     Ok(())
 }
 
+/// Updates the /etc/resolv.conf file in the guest rootfs to add default DNS servers if none exist.
+/// Creates the file if it doesn't exist.
+///
+/// This function:
+/// 1. Checks all root paths for existing /etc/resolv.conf files
+/// 2. If any nameserver entries exist in any layer, does nothing
+/// 3. If no nameservers exist in any layer, adds default ones (1.1.1.1 and 8.8.8.8) to the top layer
+/// 4. Sets appropriate permissions on the resolv.conf file
+///
+/// ## Format
+/// The resolv.conf file follows the standard format:
+/// ```text
+/// nameserver 1.1.1.1
+/// nameserver 8.8.8.8
+/// ```
+///
+/// ## Arguments
+/// * `root_paths` - List of root paths to check, ordered from bottom to top layer
+///                  For overlayfs, this should be [lower_layers..., patch_dir]
+///                  For native rootfs, this should be [root_path]
+///
+/// ## Errors
+/// Returns an error if:
+/// - Cannot create directories in the rootfs
+/// - Cannot read or write the resolv.conf file
+/// - Cannot set permissions on the resolv.conf file
+pub async fn patch_with_default_dns_settings(root_paths: &[PathBuf]) -> MicrosandboxResult<()> {
+    if root_paths.is_empty() {
+        return Ok(());
+    }
+
+    // Check all layers for existing nameserver entries
+    let mut has_nameserver = false;
+    for root_path in root_paths {
+        let resolv_path = root_path.join("etc/resolv.conf");
+        if resolv_path.exists() {
+            let content = fs::read_to_string(&resolv_path).await?;
+            if content
+                .lines()
+                .any(|line| line.trim_start().starts_with("nameserver "))
+            {
+                has_nameserver = true;
+                break;
+            }
+        }
+    }
+
+    // If no nameservers found in any layer, add defaults to the top layer
+    if !has_nameserver {
+        // Get the top layer (last in the list)
+        let top_layer = root_paths.last().unwrap();
+        let resolv_path = top_layer.join("etc/resolv.conf");
+
+        // Create parent directories if they don't exist
+        if let Some(parent) = resolv_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        // Create new resolv.conf with default nameservers
+        let mut resolv_content = String::from("# /etc/resolv.conf: DNS resolver configuration\n");
+        resolv_content.push_str("nameserver 1.1.1.1\n");
+        resolv_content.push_str("nameserver 8.8.8.8\n");
+
+        // Write the file
+        fs::write(&resolv_path, resolv_content).await?;
+
+        // Set proper permissions (644 - rw-r--r--)
+        let perms = fs::metadata(&resolv_path).await?.permissions();
+        let mut new_perms = perms;
+        new_perms.set_mode(0o644);
+        fs::set_permissions(&resolv_path, new_perms).await?;
+    }
+
+    Ok(())
+}
+
 /// Recursively copies a directory from source to destination, preserving file permissions.
 ///
 /// This function:
@@ -387,6 +463,8 @@ async fn copy_file_with_permissions(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use tempfile::TempDir;
 
     use crate::MicrosandboxError;
@@ -789,6 +867,114 @@ mod tests {
             matches!(result.unwrap_err(), MicrosandboxError::PathNotFound(_)),
             "Expected a PathNotFound error"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_patch_with_default_dns_settings() -> anyhow::Result<()> {
+        // Create a temporary directory to act as our rootfs
+        let root_dir = TempDir::new()?;
+        let root_path = root_dir.path();
+
+        // Test case 1: No existing resolv.conf
+        patch_with_default_dns_settings(&[root_path.to_path_buf()]).await?;
+
+        // Verify resolv.conf was created with correct content
+        let resolv_path = root_path.join("etc/resolv.conf");
+        assert!(resolv_path.exists());
+
+        let resolv_content = fs::read_to_string(&resolv_path).await?;
+
+        // Check content
+        assert!(resolv_content.contains("# /etc/resolv.conf: DNS resolver configuration"));
+        assert!(resolv_content.contains("nameserver 1.1.1.1"));
+        assert!(resolv_content.contains("nameserver 8.8.8.8"));
+
+        // Verify file permissions
+        let perms = fs::metadata(&resolv_path).await?.permissions();
+        assert_eq!(perms.mode() & 0o777, 0o644);
+
+        // Test case 2: Existing resolv.conf with no nameservers
+        let root_dir2 = TempDir::new()?;
+        let root_path2 = root_dir2.path();
+        let resolv_path2 = root_path2.join("etc/resolv.conf");
+        fs::create_dir_all(resolv_path2.parent().unwrap()).await?;
+        fs::write(&resolv_path2, "# Empty resolv.conf\n").await?;
+
+        patch_with_default_dns_settings(&[root_path2.to_path_buf()]).await?;
+
+        // Verify nameservers were added
+        let content2 = fs::read_to_string(&resolv_path2).await?;
+        assert!(content2.contains("nameserver 1.1.1.1"));
+        assert!(content2.contains("nameserver 8.8.8.8"));
+
+        // Test case 3: Existing resolv.conf with nameservers
+        let root_dir3 = TempDir::new()?;
+        let root_path3 = root_dir3.path();
+        let resolv_path3 = root_path3.join("etc/resolv.conf");
+        fs::create_dir_all(resolv_path3.parent().unwrap()).await?;
+        fs::write(
+            &resolv_path3,
+            "# Existing nameservers\nnameserver 192.168.1.1\n",
+        )
+        .await?;
+
+        patch_with_default_dns_settings(&[root_path3.to_path_buf()]).await?;
+
+        // Verify content was not changed
+        let content3 = fs::read_to_string(&resolv_path3).await?;
+        assert!(content3.contains("nameserver 192.168.1.1"));
+        assert!(!content3.contains("nameserver 1.1.1.1"));
+        assert!(!content3.contains("nameserver 8.8.8.8"));
+
+        // Test case 4: Multiple layers (overlayfs)
+        let root_dir4 = TempDir::new()?;
+        let lower_layer1 = root_dir4.path().join("lower1");
+        let lower_layer2 = root_dir4.path().join("lower2");
+        let patch_layer = root_dir4.path().join("patch");
+
+        // Create directories
+        fs::create_dir_all(&lower_layer1).await?;
+        fs::create_dir_all(&lower_layer2).await?;
+        fs::create_dir_all(&patch_layer).await?;
+
+        // Test 4a: No resolv.conf in any layer
+        patch_with_default_dns_settings(&[
+            lower_layer1.clone(),
+            lower_layer2.clone(),
+            patch_layer.clone(),
+        ])
+        .await?;
+
+        // Verify resolv.conf was created in patch layer only
+        assert!(!lower_layer1.join("etc/resolv.conf").exists());
+        assert!(!lower_layer2.join("etc/resolv.conf").exists());
+        let patch_resolv = patch_layer.join("etc/resolv.conf");
+        assert!(patch_resolv.exists());
+        let content = fs::read_to_string(&patch_resolv).await?;
+        assert!(content.contains("nameserver 1.1.1.1"));
+
+        // Test 4b: resolv.conf exists in lower layer with nameserver
+        let root_dir5 = TempDir::new()?;
+        let lower_layer = root_dir5.path().join("lower");
+        let patch_layer = root_dir5.path().join("patch");
+        fs::create_dir_all(&lower_layer.join("etc")).await?;
+        fs::create_dir_all(&patch_layer).await?;
+
+        // Create resolv.conf in lower layer with nameserver
+        fs::write(
+            lower_layer.join("etc/resolv.conf"),
+            "nameserver 192.168.1.1\n",
+        )
+        .await?;
+
+        patch_with_default_dns_settings(&[lower_layer.clone(), patch_layer.clone()]).await?;
+
+        // Verify no resolv.conf was created in patch layer
+        assert!(!patch_layer.join("etc/resolv.conf").exists());
+        let lower_content = fs::read_to_string(lower_layer.join("etc/resolv.conf")).await?;
+        assert!(lower_content.contains("nameserver 192.168.1.1"));
 
         Ok(())
     }
