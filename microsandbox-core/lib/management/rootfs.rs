@@ -5,11 +5,7 @@
 //! Container Initiative) specifications.
 
 use std::{
-    borrow::Cow,
-    collections::HashMap,
-    fs::Permissions,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    borrow::Cow, collections::HashMap, fs::Permissions, os::unix::fs::PermissionsExt, path::Path,
 };
 
 use async_recursion::async_recursion;
@@ -387,6 +383,8 @@ async fn copy_file_with_permissions(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use tempfile::TempDir;
 
     use crate::MicrosandboxError;

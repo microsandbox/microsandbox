@@ -444,6 +444,7 @@ pub async fn run_temp(
         .sandboxes([(TEMPORARY_SANDBOX_NAME.to_string(), sandbox)])
         .build_unchecked();
 
+
     // Write the config to the temporary directory
     let config_path = temp_dir_path.join(MICROSANDBOX_CONFIG_FILENAME);
     tokio::fs::write(&config_path, serde_yaml::to_string(&config)?).await?;

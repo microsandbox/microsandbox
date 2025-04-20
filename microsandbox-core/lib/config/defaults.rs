@@ -2,6 +2,8 @@ use std::{fs, path::PathBuf, sync::LazyLock};
 
 use crate::utils::MICROSANDBOX_HOME_DIR;
 
+use super::NetworkScope;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -48,3 +50,6 @@ pub const DEFAULT_SERVER_NAMESPACE: &str = "default";
 
 /// The default port for the sandbox server.
 pub const DEFAULT_SERVER_PORT: u16 = 5050;
+
+/// The default network scope for a sandbox.
+pub const DEFAULT_NETWORK_SCOPE: NetworkScope = NetworkScope::Public;

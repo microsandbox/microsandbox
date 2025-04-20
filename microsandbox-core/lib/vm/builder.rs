@@ -1090,7 +1090,7 @@ impl Default for MicroVmConfigBuilder<(), ()> {
             memory_mib: DEFAULT_MEMORY_MIB,
             mapped_dirs: vec![],
             port_map: vec![],
-            scope: NetworkScope::Group,
+            scope: NetworkScope::default(),
             ip: None,
             subnet: None,
             rlimits: vec![],

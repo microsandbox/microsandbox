@@ -210,11 +210,11 @@ pub enum NetworkScope {
 
     /// Sandboxes can only communicate within their subnet
     #[serde(rename = "group")]
-    #[default]
     Group = 1,
 
     /// Sandboxes can communicate with any other non-private address
     #[serde(rename = "public")]
+    #[default]
     Public = 2,
 
     /// Sandboxes can communicate with any address

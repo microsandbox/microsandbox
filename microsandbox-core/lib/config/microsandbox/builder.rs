@@ -329,7 +329,7 @@ impl Default for SandboxBuilder<(), String> {
             scripts: HashMap::new(),
             imports: HashMap::new(),
             exports: HashMap::new(),
-            scope: NetworkScope::Group,
+            scope: NetworkScope::default(),
         }
     }
 }
