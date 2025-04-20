@@ -5,7 +5,11 @@
 //! Container Initiative) specifications.
 
 use std::{
-    borrow::Cow, collections::HashMap, fs::Permissions, os::unix::fs::PermissionsExt, path::Path,
+    borrow::Cow,
+    collections::HashMap,
+    fs::Permissions,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
 };
 
 use async_recursion::async_recursion;
@@ -29,7 +33,7 @@ pub const WHITEOUT_PREFIX: &str = ".wh.";
 
 /// RAII guard that temporarily changes file permissions and restores them when dropped
 struct PermissionGuard {
-    path: std::path::PathBuf,
+    path: PathBuf,
     original_mode: u32,
 }
 

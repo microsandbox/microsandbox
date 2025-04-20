@@ -347,8 +347,20 @@ impl MicroVm {
         for (idx, dir) in mapped_dirs.iter().enumerate() {
             let tag = CString::new(format!("{}_{}", VIRTIOFS_TAG_PREFIX, idx)).unwrap();
             tracing::debug!("adding virtiofs mount for {}", tag.to_string_lossy());
-            let host_path = CString::new(dir.get_host().to_string().as_bytes()).unwrap();
-            tracing::debug!("host path: {}", host_path.to_string_lossy());
+
+            // Canonicalize the host path
+            let host_path_buf = PathBuf::from(dir.get_host().as_str());
+            let canonical_host_path = match host_path_buf.canonicalize() {
+                Ok(path) => path,
+                Err(e) => {
+                    tracing::error!("failed to canonicalize host path: {}", e);
+                    panic!("failed to canonicalize host path: {}", e);
+                }
+            };
+
+            let host_path = CString::new(canonical_host_path.to_string_lossy().as_bytes()).unwrap();
+            tracing::debug!("canonical host path: {}", host_path.to_string_lossy());
+            
             unsafe {
                 let status = ffi::krun_add_virtiofs(ctx_id, tag.as_ptr(), host_path.as_ptr());
                 assert!(status >= 0, "failed to add mapped directory: {}", status);
