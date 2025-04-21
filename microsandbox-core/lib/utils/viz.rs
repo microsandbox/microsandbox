@@ -21,9 +21,26 @@ pub(crate) static MULTI_PROGRESS: Lazy<Arc<MultiProgress>> = Lazy::new(|| {
 });
 
 static CHECKMARK: LazyLock<String> = LazyLock::new(|| format!("{}", console::style("✓").green()));
+static ERROR_MARK: LazyLock<String> = LazyLock::new(|| format!("{}", console::style("✗").red()));
 
 pub(crate) static TICK_STRINGS: LazyLock<[&str; 11]> =
     LazyLock::new(|| ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", &CHECKMARK]);
+
+pub(crate) static ERROR_TICK_STRINGS: LazyLock<[&str; 11]> = LazyLock::new(|| {
+    [
+        "⠋",
+        "⠙",
+        "⠹",
+        "⠸",
+        "⠼",
+        "⠴",
+        "⠦",
+        "⠧",
+        "⠇",
+        "⠏",
+        &ERROR_MARK,
+    ]
+});
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -74,4 +91,21 @@ pub(crate) fn create_spinner(
     pb.set_message(message);
     pb.enable_steady_tick(std::time::Duration::from_millis(80));
     pb
+}
+
+/// Finishes a spinner with an error mark (✗) instead of a checkmark.
+/// Used for error paths to visually indicate failure.
+///
+/// ## Arguments
+///
+/// * `pb` - The progress bar to finish with an error mark
+/// * `message` - The message to display next to the error mark
+#[cfg(feature = "cli-viz")]
+pub(crate) fn finish_with_error(pb: &ProgressBar, message: &str) {
+    let style = ProgressStyle::with_template("{spinner} {msg}")
+        .unwrap()
+        .tick_strings(&*ERROR_TICK_STRINGS);
+
+    pb.set_style(style);
+    pb.finish_with_message(message.to_string());
 }

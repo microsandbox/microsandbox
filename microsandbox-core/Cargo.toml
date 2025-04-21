@@ -75,7 +75,7 @@ jsonwebtoken = "9.3.1"
 rand.workspace = true
 indicatif = { version = "0.17.0", optional = true }
 once_cell = { version = "1.18", optional = true }
-console = "0.15.11"
+console = { version = "0.15.11", optional = true }
 
 [dev-dependencies]
 test-log.workspace = true
@@ -84,4 +84,4 @@ serial_test = "3.2.0"
 
 [features]
 default = []
-cli-viz = ["indicatif", "once_cell"]
+cli-viz = ["indicatif", "once_cell", "console"]
