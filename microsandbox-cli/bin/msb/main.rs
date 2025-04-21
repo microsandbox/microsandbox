@@ -2,8 +2,8 @@
 mod msb;
 
 use clap::{CommandFactory, Parser};
+use microsandbox_cli::{MicrosandboxArgs, MicrosandboxSubcommand, ServerSubcommand};
 use microsandbox_core::{
-    cli::{MicrosandboxArgs, MicrosandboxSubcommand, ServerSubcommand},
     management::{image, orchestra, server},
     MicrosandboxResult,
 };

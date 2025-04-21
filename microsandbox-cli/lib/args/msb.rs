@@ -1,7 +1,8 @@
 use std::{error::Error, path::PathBuf};
 
-use crate::{cli::styles, oci::Reference};
+use crate::styles;
 use clap::Parser;
+use microsandbox_core::oci::Reference;
 use typed_path::Utf8UnixPathBuf;
 
 //-------------------------------------------------------------------------------------------------

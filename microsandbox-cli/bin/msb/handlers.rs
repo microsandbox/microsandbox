@@ -1,6 +1,6 @@
 use clap::{error::ErrorKind, CommandFactory};
+use microsandbox_cli::{AnsiStyles, MicrosandboxArgs, SelfAction};
 use microsandbox_core::{
-    cli::{AnsiStyles, MicrosandboxArgs, SelfAction},
     config::DEFAULT_SHELL,
     management::{
         config::{self, Component, ComponentType},

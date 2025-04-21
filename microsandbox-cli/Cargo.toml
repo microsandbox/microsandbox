@@ -1,0 +1,37 @@
+[package]
+name = "microsandbox-cli"
+authors.workspace = true
+repository.workspace = true
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "msb"
+path = "bin/msb/main.rs"
+
+[[bin]]
+name = "msbrun"
+path = "bin/msbrun.rs"
+
+
+[lib]
+name = "microsandbox_cli"
+path = "lib/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+microsandbox-core = { version = "0.2", path = "../microsandbox-core", features = [
+    "cli-viz",
+] }
+microsandbox-utils = { version = "0.2", path = "../microsandbox-utils" }
+clap.workspace = true
+typed-path.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+which = "7.0"
+
+[dev-dependencies]
+serial_test = "3.2.0"

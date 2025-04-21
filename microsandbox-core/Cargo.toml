@@ -11,16 +11,6 @@ edition.workspace = true
 name = "microsandbox_core"
 path = "lib/lib.rs"
 
-[[bin]]
-name = "msb"
-path = "bin/msb/main.rs"
-required-features = ["cli-viz"]
-
-[[bin]]
-name = "msbrun"
-path = "bin/msbrun.rs"
-required-features = ["cli-viz"]
-
 [[test]]
 name = "integration_cli"
 path = "tests/cli/mod.rs"
@@ -32,7 +22,6 @@ async-trait.workspace = true
 axum.workspace = true
 bytes.workspace = true
 chrono = { workspace = true, features = ["serde"] }
-clap.workspace = true
 criterion.workspace = true
 dirs.workspace = true
 dotenvy.workspace = true
@@ -81,7 +70,6 @@ microsandbox-utils.workspace = true
 regex.workspace = true
 async-recursion.workspace = true
 file-lock = "2.1.11"
-which = "7.0"
 nondestructive = { version = "0.0.26", features = ["serde"] }
 jsonwebtoken = "9.3.1"
 rand.workspace = true
@@ -93,6 +81,7 @@ console = "0.15.11"
 test-log.workspace = true
 criterion.workspace = true
 serial_test = "3.2.0"
+
 [features]
 default = []
 cli-viz = ["indicatif", "once_cell"]

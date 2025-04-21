@@ -73,8 +73,8 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
+use microsandbox_cli::{McrunArgs, McrunSubcommand};
 use microsandbox_core::{
-    cli::{McrunArgs, McrunSubcommand},
     config::{EnvPair, PathPair, PortPair, DEFAULT_SERVER_PORT},
     runtime::MicroVmMonitor,
     server::SandboxServer,

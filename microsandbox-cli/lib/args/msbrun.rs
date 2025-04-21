@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 
-use crate::cli::styles;
+use crate::styles;
 
 //--------------------------------------------------------------------------------------------------
 // Types

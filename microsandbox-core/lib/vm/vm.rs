@@ -360,7 +360,7 @@ impl MicroVm {
 
             let host_path = CString::new(canonical_host_path.to_string_lossy().as_bytes()).unwrap();
             tracing::debug!("canonical host path: {}", host_path.to_string_lossy());
-            
+
             unsafe {
                 let status = ffi::krun_add_virtiofs(ctx_id, tag.as_ptr(), host_path.as_ptr());
                 assert!(status >= 0, "failed to add mapped directory: {}", status);
