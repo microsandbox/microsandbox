@@ -32,6 +32,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 which = "7.0"
+console.workspace = true
 
 [dev-dependencies]
 serial_test = "3.2.0"

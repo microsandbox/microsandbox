@@ -1660,6 +1660,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "console",
  "microsandbox-core",
  "microsandbox-utils",
  "serial_test",

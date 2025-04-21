@@ -2,7 +2,7 @@
 mod msb;
 
 use clap::{CommandFactory, Parser};
-use microsandbox_cli::{MicrosandboxArgs, MicrosandboxSubcommand, ServerSubcommand};
+use microsandbox_cli::{AnsiStyles, MicrosandboxArgs, MicrosandboxSubcommand, ServerSubcommand};
 use microsandbox_core::{
     management::{image, orchestra, server},
     MicrosandboxResult,
@@ -26,6 +26,12 @@ async fn main() -> MicrosandboxResult<()> {
 
     handlers::log_level(&args);
     tracing_subscriber::fmt::init();
+
+    // Print version if requested
+    if args.version {
+        println!("{}", format!("v{}", env!("CARGO_PKG_VERSION")).literal());
+        return Ok(());
+    }
 
     match args.subcommand {
         Some(MicrosandboxSubcommand::Init {
