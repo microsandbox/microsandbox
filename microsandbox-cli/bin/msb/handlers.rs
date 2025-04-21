@@ -414,9 +414,13 @@ pub async fn log_subcommand(
 
 /// Handles the clean subcommand, which removes the .menv directory from a project
 pub async fn clean_subcommand(
+    _sandbox: bool,
+    name: Option<String>,
     global: bool,
     all: bool,
     path: Option<PathBuf>,
+    config: Option<String>,
+    force: bool,
 ) -> MicrosandboxResult<()> {
     if global || all {
         // Global cleanup - clean the microsandbox home directory
@@ -425,8 +429,16 @@ pub async fn clean_subcommand(
     }
 
     if !global || all {
-        // Local project cleanup - clean the .menv directory
-        menv::clean(path).await?;
+        // Local project cleanup
+        if let Some(sandbox_name) = name {
+            // Clean specific sandbox if sandbox name is provided
+            tracing::info!("cleaning sandbox: {}", sandbox_name);
+            menv::clean(path, config.as_deref(), Some(&sandbox_name), force).await?;
+        } else {
+            // Clean the entire .menv directory if no sandbox is specified
+            tracing::info!("cleaning entire project environment");
+            menv::clean(path, None, None, force).await?;
+        }
     }
 
     Ok(())

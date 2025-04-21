@@ -177,8 +177,16 @@ async fn main() -> MicrosandboxResult<()> {
             handlers::log_subcommand(sandbox, build, group, name, path, config, follow, tail)
                 .await?;
         }
-        Some(MicrosandboxSubcommand::Clean { global, all, path }) => {
-            handlers::clean_subcommand(global, all, path).await?;
+        Some(MicrosandboxSubcommand::Clean {
+            sandbox,
+            name,
+            global,
+            all,
+            path,
+            config,
+            force,
+        }) => {
+            handlers::clean_subcommand(sandbox, name, global, all, path, config, force).await?;
         }
         Some(MicrosandboxSubcommand::Self_ { action }) => {
             handlers::self_subcommand(action).await?;

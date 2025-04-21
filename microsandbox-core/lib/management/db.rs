@@ -298,6 +298,26 @@ pub(crate) async fn get_running_config_sandboxes(
         .collect())
 }
 
+/// Deletes a sandbox from the database by name and config file.
+pub(crate) async fn delete_sandbox(
+    pool: &Pool<Sqlite>,
+    name: &str,
+    config_file: &str,
+) -> MicrosandboxResult<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM sandboxes
+        WHERE name = ? AND config_file = ?
+        "#,
+    )
+    .bind(name)
+    .bind(config_file)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Images
 //--------------------------------------------------------------------------------------------------

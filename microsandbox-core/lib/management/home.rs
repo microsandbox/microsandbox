@@ -58,7 +58,7 @@ pub async fn clean() -> MicrosandboxResult<()> {
     }
 
     #[cfg(feature = "cli-viz")]
-    remove_home_dir_sp.finish_with_message(REMOVE_HOME_DIR_MSG);
+    remove_home_dir_sp.finish();
 
     Ok(())
 }

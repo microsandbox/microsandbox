@@ -60,15 +60,15 @@ pub enum MicrosandboxSubcommand {
     /// Add a new sandbox to the project
     #[command(name = "add")]
     Add {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply for a build sandbox
+        /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply for a group
+        /// Whether command should apply to a group
         #[arg(short, long)]
         group: bool,
 
@@ -144,15 +144,15 @@ pub enum MicrosandboxSubcommand {
     /// Remove a sandbox from the project
     #[command(name = "remove")]
     Remove {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply for a build sandbox
+        /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply for a group
+        /// Whether command should apply to a group
         #[arg(short, long)]
         group: bool,
 
@@ -172,15 +172,15 @@ pub enum MicrosandboxSubcommand {
     /// List sandboxs in the project
     #[command(name = "list")]
     List {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply for a build sandbox
+        /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply for a group
+        /// Whether command should apply to a group
         #[arg(short, long)]
         group: bool,
 
@@ -196,15 +196,15 @@ pub enum MicrosandboxSubcommand {
     /// Show logs of a running build, sandbox, or group
     #[command(name = "log")]
     Log {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply for a build sandbox
+        /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply for a group
+        /// Whether command should apply to a group
         #[arg(short, long)]
         group: bool,
 
@@ -232,15 +232,15 @@ pub enum MicrosandboxSubcommand {
     /// Show tree of layers that make up a sandbox
     #[command(name = "tree")]
     Tree {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply for a build sandbox
+        /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply for a group
+        /// Whether command should apply to a group
         #[arg(short, long)]
         group: bool,
 
@@ -256,11 +256,11 @@ pub enum MicrosandboxSubcommand {
     /// Run a sandbox script
     #[command(name = "run", alias = "r")]
     Run {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply for a build sandbox
+        /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
 
@@ -292,11 +292,11 @@ pub enum MicrosandboxSubcommand {
     /// Open a shell in a sandbox
     #[command(name = "shell")]
     Shell {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply for a build sandbox
+        /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
 
@@ -324,7 +324,7 @@ pub enum MicrosandboxSubcommand {
     /// Create a temporary sandbox
     #[command(name = "tmp", alias = "t")]
     Tmp {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         image: bool,
 
@@ -372,7 +372,7 @@ pub enum MicrosandboxSubcommand {
     /// Install a script from an image
     #[command(name = "install", alias = "i")]
     Install {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         image: bool,
 
@@ -443,15 +443,15 @@ pub enum MicrosandboxSubcommand {
     /// Start project sandboxes
     #[command(name = "up")]
     Up {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply for a build sandbox
+        /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply for a group
+        /// Whether command should apply to a group
         #[arg(short, long)]
         group: bool,
 
@@ -471,15 +471,15 @@ pub enum MicrosandboxSubcommand {
     /// Stop project sandboxes
     #[command(name = "down")]
     Down {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply for a build sandbox
+        /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply for a group
+        /// Whether command should apply to a group
         #[arg(short, long)]
         group: bool,
 
@@ -499,15 +499,15 @@ pub enum MicrosandboxSubcommand {
     /// Show running status
     #[command(name = "status")]
     Status {
-        /// Whether command should apply for a sandbox
+        /// Whether command should apply to a sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply for a build sandbox
+        /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply for a group
+        /// Whether command should apply to a group
         #[arg(short, long)]
         group: bool,
 
@@ -527,6 +527,14 @@ pub enum MicrosandboxSubcommand {
     /// Clean cached sandbox layers, metadata, etc.
     #[command(name = "clean")]
     Clean {
+        /// Whether command should apply to a sandbox
+        #[arg(short, long)]
+        sandbox: bool,
+
+        /// Name of the component
+        #[arg()]
+        name: Option<String>,
+
         /// Clean globally. This cleans $MICROSANDBOX_HOME
         #[arg(long)]
         global: bool,
@@ -538,6 +546,14 @@ pub enum MicrosandboxSubcommand {
         /// Project path
         #[arg(short, long)]
         path: Option<PathBuf>,
+
+        /// Config file path
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Force clean
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Build images
@@ -567,11 +583,11 @@ pub enum MicrosandboxSubcommand {
     /// Pull an image
     #[command(name = "pull")]
     Pull {
-        /// Whether command should apply for an image
+        /// Whether command should apply to an image
         #[arg(short, long)]
         image: bool,
 
-        /// Whether command should apply for an image group
+        /// Whether command should apply to an image group
         #[arg(short = 'G', long)]
         image_group: bool,
 
@@ -587,11 +603,11 @@ pub enum MicrosandboxSubcommand {
     /// Push an image
     #[command(name = "push")]
     Push {
-        /// Whether command should apply for an image
+        /// Whether command should apply to an image
         #[arg(short, long)]
         image: bool,
 
-        /// Whether command should apply for an image group
+        /// Whether command should apply to an image group
         #[arg(short = 'G', long)]
         image_group: bool,
 

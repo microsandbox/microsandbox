@@ -221,7 +221,7 @@ pub async fn pull_from_docker_registry(
     }
 
     #[cfg(feature = "cli-viz")]
-    extract_layers_sp.finish_with_message(EXTRACT_LAYERS_MSG);
+    extract_layers_sp.finish();
 
     Ok(())
 }

@@ -79,7 +79,7 @@ pub async fn start(
 
             if process_running {
                 #[cfg(feature = "cli-viz")]
-                viz::finish_with_error(&start_server_sp, START_SERVER_MSG);
+                viz::finish_with_error(&start_server_sp);
 
                 #[cfg(feature = "cli-viz")]
                 println!(
@@ -113,7 +113,7 @@ pub async fn start(
         microsandbox_utils::path::resolve_env_path(MSBRUN_EXE_ENV_VAR, &*DEFAULT_MSBRUN_EXE_PATH)
             .map_err(|e| {
             #[cfg(feature = "cli-viz")]
-            viz::finish_with_error(&start_server_sp, START_SERVER_MSG);
+            viz::finish_with_error(&start_server_sp);
             e
         })?;
 
@@ -153,7 +153,7 @@ pub async fn start(
         // Write the key to file
         fs::write(&key_file_path, &server_key).await.map_err(|e| {
             #[cfg(feature = "cli-viz")]
-            viz::finish_with_error(&start_server_sp, START_SERVER_MSG);
+            viz::finish_with_error(&start_server_sp);
 
             MicrosandboxError::SandboxServerError(format!(
                 "failed to write key file {}: {}",
@@ -188,7 +188,7 @@ pub async fn start(
 
     let mut child = command.spawn().map_err(|e| {
         #[cfg(feature = "cli-viz")]
-        viz::finish_with_error(&start_server_sp, START_SERVER_MSG);
+        viz::finish_with_error(&start_server_sp);
 
         MicrosandboxError::SandboxServerError(format!("failed to spawn server process: {}", e))
     })?;
@@ -207,7 +207,7 @@ pub async fn start(
         .await
         .map_err(|e| {
             #[cfg(feature = "cli-viz")]
-            viz::finish_with_error(&start_server_sp, START_SERVER_MSG);
+            viz::finish_with_error(&start_server_sp);
 
             MicrosandboxError::SandboxServerError(format!(
                 "failed to write PID file {}: {}",
@@ -217,7 +217,7 @@ pub async fn start(
         })?;
 
     #[cfg(feature = "cli-viz")]
-    start_server_sp.finish_with_message(START_SERVER_MSG);
+    start_server_sp.finish();
 
     // Show success message with server address
     #[cfg(feature = "cli-viz")]
@@ -245,7 +245,7 @@ pub async fn start(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| {
             #[cfg(feature = "cli-viz")]
-            viz::finish_with_error(&start_server_sp, START_SERVER_MSG);
+            viz::finish_with_error(&start_server_sp);
 
             MicrosandboxError::SandboxServerError(format!(
                 "failed to set up signal handlers: {}",
@@ -256,7 +256,7 @@ pub async fn start(
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .map_err(|e| {
             #[cfg(feature = "cli-viz")]
-            viz::finish_with_error(&start_server_sp, START_SERVER_MSG);
+            viz::finish_with_error(&start_server_sp);
 
             MicrosandboxError::SandboxServerError(format!(
                 "failed to set up signal handlers: {}",
@@ -277,7 +277,7 @@ pub async fn start(
                 cleanup_server_files(&pid_file_path, &key_file_path).await?;
 
                 #[cfg(feature = "cli-viz")]
-                viz::finish_with_error(&start_server_sp, START_SERVER_MSG);
+                viz::finish_with_error(&start_server_sp);
 
                 return Err(MicrosandboxError::SandboxServerError(format!(
                     "child process — sandbox server — failed with exit status: {:?}",
@@ -343,7 +343,7 @@ pub async fn stop() -> MicrosandboxResult<()> {
     // Check if PID file exists
     if !pid_file_path.exists() {
         #[cfg(feature = "cli-viz")]
-        viz::finish_with_error(&stop_server_sp, STOP_SERVER_MSG);
+        viz::finish_with_error(&stop_server_sp);
 
         return Err(MicrosandboxError::SandboxServerError(
             "server is not running (PID file not found)".to_string(),
@@ -365,7 +365,7 @@ pub async fn stop() -> MicrosandboxResult<()> {
                 cleanup_server_files(&pid_file_path, &key_file_path).await?;
 
                 #[cfg(feature = "cli-viz")]
-                viz::finish_with_error(&stop_server_sp, STOP_SERVER_MSG);
+                viz::finish_with_error(&stop_server_sp);
 
                 return Err(MicrosandboxError::SandboxServerError(
                     "server process not found (stale PID file removed)".to_string(),
@@ -373,7 +373,7 @@ pub async fn stop() -> MicrosandboxResult<()> {
             }
 
             #[cfg(feature = "cli-viz")]
-            viz::finish_with_error(&stop_server_sp, STOP_SERVER_MSG);
+            viz::finish_with_error(&stop_server_sp);
 
             return Err(MicrosandboxError::SandboxServerError(format!(
                 "failed to stop server process (PID: {})",
@@ -386,7 +386,7 @@ pub async fn stop() -> MicrosandboxResult<()> {
     cleanup_server_files(&pid_file_path, &key_file_path).await?;
 
     #[cfg(feature = "cli-viz")]
-    stop_server_sp.finish_with_message(STOP_SERVER_MSG);
+    stop_server_sp.finish();
 
     #[cfg(feature = "cli-viz")]
     println!("Stopped sandbox server (PID: {})", pid);
@@ -407,7 +407,7 @@ pub async fn keygen(expire: Option<Duration>) -> MicrosandboxResult<()> {
     // Check if server key file exists
     if !key_file_path.exists() {
         #[cfg(feature = "cli-viz")]
-        viz::finish_with_error(&keygen_sp, KEYGEN_MSG);
+        viz::finish_with_error(&keygen_sp);
 
         return Err(MicrosandboxError::SandboxServerError(
             "Server key file not found. Make sure the server is running in secure mode."
@@ -418,7 +418,7 @@ pub async fn keygen(expire: Option<Duration>) -> MicrosandboxResult<()> {
     // Read the server key
     let server_key = fs::read_to_string(&key_file_path).await.map_err(|e| {
         #[cfg(feature = "cli-viz")]
-        viz::finish_with_error(&keygen_sp, KEYGEN_MSG);
+        viz::finish_with_error(&keygen_sp);
 
         MicrosandboxError::SandboxServerError(format!(
             "Failed to read server key file {}: {}",
@@ -447,7 +447,7 @@ pub async fn keygen(expire: Option<Duration>) -> MicrosandboxResult<()> {
     )
     .map_err(|e| {
         #[cfg(feature = "cli-viz")]
-        viz::finish_with_error(&keygen_sp, KEYGEN_MSG);
+        viz::finish_with_error(&keygen_sp);
 
         MicrosandboxError::SandboxServerError(format!("Failed to generate token: {}", e))
     })?;
@@ -460,7 +460,7 @@ pub async fn keygen(expire: Option<Duration>) -> MicrosandboxResult<()> {
     let expiry_str = expiry.to_rfc3339();
 
     #[cfg(feature = "cli-viz")]
-    keygen_sp.finish_with_message(KEYGEN_MSG);
+    keygen_sp.finish();
 
     tracing::info!("Generated API token with expiry {}", expiry_str);
 

@@ -408,7 +408,7 @@ impl OciRegistryPull for DockerRegistry {
         db::save_config(&self.oci_db, manifest_id, &config).await?;
 
         #[cfg(feature = "cli-viz")]
-        fetch_details_sp.finish_with_message(FETCH_IMAGE_DETAILS_MSG);
+        fetch_details_sp.finish();
 
         let layers = manifest.layers();
 
@@ -489,7 +489,7 @@ impl OciRegistryPull for DockerRegistry {
         }
 
         #[cfg(feature = "cli-viz")]
-        download_layers_sp.finish_with_message(DOWNLOAD_LAYER_MSG);
+        download_layers_sp.finish();
 
         Ok(())
     }
