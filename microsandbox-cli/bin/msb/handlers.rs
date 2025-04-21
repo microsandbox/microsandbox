@@ -321,6 +321,7 @@ pub async fn down_subcommand(
     orchestra::down(names, path.as_deref(), config.as_deref()).await
 }
 
+/// Handle the `log` subcommand to show logs for a specific sandbox
 pub async fn log_subcommand(
     sandbox: bool,
     build: bool,
@@ -352,11 +353,12 @@ pub async fn log_subcommand(
     let (_, canonical_project_dir, config_file) =
         config::load_config(project_dir.as_deref(), config_file.as_deref()).await?;
 
-    // Construct log file path: <project_dir>/.menv/log/<config>-<sandbox>.log
+    // Construct log file path using the hierarchical structure: <project_dir>/.menv/log/<config>/<sandbox>.log
     let log_path = canonical_project_dir
         .join(MICROSANDBOX_ENV_DIR)
         .join(LOG_SUBDIR)
-        .join(format!("{}-{}.log", config_file, name));
+        .join(&config_file)
+        .join(format!("{}.log", name));
 
     // Check if log file exists
     if !log_path.exists() {

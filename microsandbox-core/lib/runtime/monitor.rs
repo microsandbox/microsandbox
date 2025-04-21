@@ -103,6 +103,15 @@ impl MicroVmMonitor {
             }
         }
     }
+
+    /// Generate a hierarchical log path with the format: <log_dir>/<config_file>/<sandbox_name>.<LOG_SUFFIX>
+    /// This creates a directory structure that namespaces logs by config file and sandbox name.
+    fn generate_log_path(&self) -> PathBuf {
+        // Create a directory for the config file
+        let config_dir = self.log_dir.join(&self.config_file);
+        // Place the log file inside that directory with the sandbox name
+        config_dir.join(format!("{}.{}", self.sandbox_name, LOG_SUFFIX))
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -112,8 +121,13 @@ impl MicroVmMonitor {
 #[async_trait]
 impl ProcessMonitor for MicroVmMonitor {
     async fn start(&mut self, pid: u32, child_io: ChildIo) -> MicrosandboxUtilsResult<()> {
-        let log_name = format!("{}-{}.{}", self.config_file, self.sandbox_name, LOG_SUFFIX);
-        let log_path = self.log_dir.join(&log_name);
+        // Generate the log path with directory-level separation
+        let log_path = self.generate_log_path();
+
+        // Ensure the parent directory exists
+        if let Some(parent) = log_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
 
         let microvm_log =
             std::sync::Arc::new(tokio::sync::Mutex::new(RotatingLog::new(&log_path).await?));
