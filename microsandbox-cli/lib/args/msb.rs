@@ -321,9 +321,9 @@ pub enum MicrosandboxSubcommand {
         args: Vec<String>,
     },
 
-    /// Create a temporary sandbox
-    #[command(name = "tmp", alias = "t")]
-    Tmp {
+    /// Run a temporary sandbox
+    #[command(name = "exe", alias = "x")]
+    Exe {
         /// Whether command should apply to a sandbox
         #[arg(short, long)]
         image: bool,

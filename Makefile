@@ -28,6 +28,8 @@ MSBRUN_RELEASE_BIN := target/release/msbrun
 EXAMPLES_DIR := target/release/examples
 BENCHES_DIR := target/release
 BUILD_DIR := build
+SCRIPT_DIR := scripts
+ALIASES_DIR := $(SCRIPT_DIR)/aliases
 
 # -----------------------------------------------------------------------------
 # Library Detection
@@ -43,7 +45,7 @@ endif
 # -----------------------------------------------------------------------------
 # Phony Targets Declaration
 # -----------------------------------------------------------------------------
-.PHONY: all build install clean build_libkrun example bench bin _run_example _run_bench _run_bin help uninstall microsandbox
+.PHONY: all build install clean build_libkrun example bench bin _run_example _run_bench _run_bin help uninstall microsandbox _build_aliases
 
 # -----------------------------------------------------------------------------
 # Main Targets
@@ -52,11 +54,19 @@ all: build
 
 build: build_libkrun
 	@$(MAKE) _build_msb
+	@$(MAKE) _build_aliases
 
 _build_msb: $(MSB_RELEASE_BIN) $(MSBRUN_RELEASE_BIN)
 	@cp $(MSB_RELEASE_BIN) $(BUILD_DIR)/
 	@cp $(MSBRUN_RELEASE_BIN) $(BUILD_DIR)/
 	@echo "Msb build artifacts copied to $(BUILD_DIR)/"
+
+_build_aliases:
+	@mkdir -p $(BUILD_DIR)
+	@cp $(ALIASES_DIR)/msr $(BUILD_DIR)/
+	@cp $(ALIASES_DIR)/msx $(BUILD_DIR)/
+	@cp $(ALIASES_DIR)/msi $(BUILD_DIR)/
+	@echo "Alias scripts copied to $(BUILD_DIR)/"
 
 # -----------------------------------------------------------------------------
 # Binary Building
@@ -87,6 +97,9 @@ install: build
 	install -d $(HOME_LIB)
 	install -m 755 $(BUILD_DIR)/msb $(HOME_BIN)/msb
 	install -m 755 $(BUILD_DIR)/msbrun $(HOME_BIN)/msbrun
+	install -m 755 $(BUILD_DIR)/msr $(HOME_BIN)/msr
+	install -m 755 $(BUILD_DIR)/msx $(HOME_BIN)/msx
+	install -m 755 $(BUILD_DIR)/msi $(HOME_BIN)/msi
 	@if [ -n "$(LIBKRUNFW_FILE)" ]; then \
 		install -m 755 $(LIBKRUNFW_FILE) $(HOME_LIB)/; \
 		cd $(HOME_LIB) && ln -sf $(notdir $(LIBKRUNFW_FILE)) libkrunfw.dylib; \
@@ -110,6 +123,9 @@ clean:
 uninstall:
 	rm -f $(HOME_BIN)/msb
 	rm -f $(HOME_BIN)/msbrun
+	rm -f $(HOME_BIN)/msr
+	rm -f $(HOME_BIN)/msx
+	rm -f $(HOME_BIN)/msi
 	rm -f $(HOME_LIB)/libkrunfw.dylib
 	rm -f $(HOME_LIB)/libkrun.dylib
 	@if [ -n "$(LIBKRUNFW_FILE)" ]; then \

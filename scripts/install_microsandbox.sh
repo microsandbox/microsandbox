@@ -20,7 +20,7 @@
 #   6. Creates unversioned library symlinks
 #
 # Installation Paths:
-#   Binaries: ~/.local/bin/
+#   Executables: ~/.local/bin/
 #   Libraries: ~/.local/lib/
 
 # Color variables
@@ -168,14 +168,19 @@ install_files() {
     EXTRACT_DIR="microsandbox-${VERSION}-${PLATFORM}"
     cd "$EXTRACT_DIR" || { error "Failed to enter extract directory"; exit 1; }
 
-    # Install binaries
-    info "Installing binaries..."
+    # Install main executables
+    info "Installing executables..."
     install -m 755 msb "$BIN_DIR/" || { error "Failed to install msb"; exit 1; }
     install -m 755 msbrun "$BIN_DIR/" || { error "Failed to install msbrun"; exit 1; }
 
+    # Install alias executables
+    install -m 755 msr "$BIN_DIR/" || { error "Failed to install msr"; exit 1; }
+    install -m 755 msx "$BIN_DIR/" || { error "Failed to install msx"; exit 1; }
+    install -m 755 msi "$BIN_DIR/" || { error "Failed to install msi"; exit 1; }
+
     # Self codesign on macOS
     if [ "$OS" = "darwin" ]; then
-        info "Attempting to codesign binaries on macOS..."
+        info "Attempting to codesign executables on macOS..."
         codesign --force -s - "$BIN_DIR/msb" 2>/dev/null || true
         codesign --force -s - "$BIN_DIR/msbrun" 2>/dev/null || true
         info "Codesigning done"
@@ -317,7 +322,12 @@ main() {
     fi
 
     info "Installation completed successfully!"
-    info "Binaries installed to: $BIN_DIR"
+    info "Executables installed to: $BIN_DIR"
+    info "  - msb: main microsandbox command"
+    info "  - msbrun: microsandbox runtime executable"
+    info "  - msr: alias for 'msb run'"
+    info "  - msx: alias for 'msb exe'"
+    info "  - msi: alias for 'msb install'"
     info "Libraries installed to: $LIB_DIR"
     info "Please restart your shell or source your shell's config file to use microsandbox"
 }

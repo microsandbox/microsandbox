@@ -14,7 +14,6 @@ path = "bin/msb/main.rs"
 name = "msbrun"
 path = "bin/msbrun.rs"
 
-
 [lib]
 name = "microsandbox_cli"
 path = "lib/lib.rs"

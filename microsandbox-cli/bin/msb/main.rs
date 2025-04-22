@@ -129,7 +129,7 @@ async fn main() -> MicrosandboxResult<()> {
             )
             .await?;
         }
-        Some(MicrosandboxSubcommand::Tmp {
+        Some(MicrosandboxSubcommand::Exe {
             image: _image,
             name,
             cpus,
@@ -142,7 +142,7 @@ async fn main() -> MicrosandboxResult<()> {
             exec,
             args,
         }) => {
-            handlers::tmp_subcommand(
+            handlers::exe_subcommand(
                 name, cpus, memory, volumes, ports, envs, workdir, scope, exec, args,
             )
             .await?;

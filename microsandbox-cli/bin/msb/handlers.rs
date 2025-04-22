@@ -248,7 +248,7 @@ pub async fn script_run_subcommand(
     .await
 }
 
-pub async fn tmp_subcommand(
+pub async fn exe_subcommand(
     name: String,
     cpus: Option<u8>,
     memory: Option<u32>,

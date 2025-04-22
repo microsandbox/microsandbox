@@ -88,12 +88,20 @@ info "Creating package directory..."
 mkdir -p "$PACKAGE_DIR"
 check_success "Failed to create package directory"
 
-info "Copying binaries..."
-# Copy microsandbox and monokrun
+info "Copying executables..."
+# Copy main executables
 cp "$BUILD_DIR/msb" "$PACKAGE_DIR/"
-check_success "Failed to copy msb binary"
+check_success "Failed to copy msb executable"
 cp "$BUILD_DIR/msbrun" "$PACKAGE_DIR/"
-check_success "Failed to copy msbrun binary"
+check_success "Failed to copy msbrun executable"
+
+# Copy alias executables
+cp "$BUILD_DIR/msr" "$PACKAGE_DIR/"
+check_success "Failed to copy msr executable"
+cp "$BUILD_DIR/msx" "$PACKAGE_DIR/"
+check_success "Failed to copy msx executable"
+cp "$BUILD_DIR/msi" "$PACKAGE_DIR/"
+check_success "Failed to copy msi executable"
 
 # Copy libraries based on OS type
 info "Copying libraries..."

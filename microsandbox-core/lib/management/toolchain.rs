@@ -20,7 +20,7 @@ use crate::{
 ///
 /// This removes all installed binaries and libraries related to Microsandbox from
 /// the user's system, including:
-/// - Binaries in ~/.local/bin (msb, msbrun)
+/// - Executables in ~/.local/bin (msb, msbrun, msr, msx, msi)
 /// - Libraries in ~/.local/lib (libkrun, libkrunfw)
 ///
 /// ## Example
@@ -33,8 +33,8 @@ use crate::{
 /// # }
 /// ```
 pub async fn uninstall() -> MicrosandboxResult<()> {
-    // Uninstall binaries
-    uninstall_binaries().await?;
+    // Uninstall executables
+    uninstall_executables().await?;
 
     // Uninstall libraries
     uninstall_libraries().await?;
@@ -49,20 +49,20 @@ pub async fn uninstall() -> MicrosandboxResult<()> {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Uninstall Microsandbox binaries from the user's system.
-async fn uninstall_binaries() -> MicrosandboxResult<()> {
+/// Uninstall Microsandbox executables from the user's system.
+async fn uninstall_executables() -> MicrosandboxResult<()> {
     let bin_dir = XDG_HOME_DIR.join(XDG_BIN_DIR);
 
-    // List of binary files to remove
-    let binaries = ["msb", "msbrun"];
+    // List of executable files to remove
+    let executables = ["msb", "msbrun", "msr", "msx", "msi"];
 
-    for binary in binaries {
-        let binary_path = bin_dir.join(binary);
-        if binary_path.exists() {
-            fs::remove_file(&binary_path).await?;
-            tracing::info!("removed binary: {}", binary_path.display());
+    for executable in executables {
+        let executable_path = bin_dir.join(executable);
+        if executable_path.exists() {
+            fs::remove_file(&executable_path).await?;
+            tracing::info!("removed executable: {}", executable_path.display());
         } else {
-            tracing::info!("binary not found: {}", binary_path.display());
+            tracing::info!("executable not found: {}", executable_path.display());
         }
     }
 
