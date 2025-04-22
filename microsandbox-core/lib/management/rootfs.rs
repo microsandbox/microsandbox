@@ -457,6 +457,51 @@ async fn copy_file_with_permissions(
     Ok(())
 }
 
+/// Sets the user.containers.override_stat xattr on the rootfs directory.
+///
+/// This function:
+/// 1. Sets the extended attribute user.containers.override_stat to "0:0:0555"
+/// 2. This overrides the UID:GID:MODE of the rootfs directory when accessed inside the container
+///
+/// ## Arguments
+/// * `root_path` - Path to the rootfs directory to modify
+///
+/// ## Errors
+/// Returns an error if:
+/// - Cannot set the extended attribute
+pub async fn patch_with_stat_override(root_path: &Path) -> MicrosandboxResult<()> {
+    // The xattr name to set
+    let xattr_name = "user.containers.override_stat";
+
+    // The value in the format "uid:gid:mode" (0:0:0555 means root:root with r-xr-xr-x permissions)
+    let xattr_value = "0:0:0555";
+
+    // Convert path to CString for xattr crate
+    let path_str = root_path.to_str().ok_or_else(|| {
+        crate::MicrosandboxError::InvalidArgument(format!(
+            "Could not convert path to string: {}",
+            root_path.display()
+        ))
+    })?;
+
+    // Set the xattr
+    match xattr::set(path_str, xattr_name, xattr_value.as_bytes()) {
+        Ok(_) => {
+            tracing::debug!(
+                "Set xattr {} = {} on {}",
+                xattr_name,
+                xattr_value,
+                root_path.display()
+            );
+            Ok(())
+        }
+        Err(err) => Err(crate::MicrosandboxError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to set xattr on {}: {}", root_path.display(), err),
+        ))),
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -975,6 +1020,32 @@ mod tests {
         assert!(!patch_layer.join("etc/resolv.conf").exists());
         let lower_content = fs::read_to_string(lower_layer.join("etc/resolv.conf")).await?;
         assert!(lower_content.contains("nameserver 192.168.1.1"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_patch_with_stat_override() -> anyhow::Result<()> {
+        // Skip this test if no xattr support
+        if !xattr::SUPPORTED_PLATFORM {
+            println!("Skipping xattr test on unsupported platform");
+            return Ok(());
+        }
+
+        // Create a temporary directory to act as our rootfs
+        let root_dir = TempDir::new()?;
+        let root_path = root_dir.path();
+
+        // Patch with stat override
+        patch_with_stat_override(root_path).await?;
+
+        // Verify xattr was set correctly
+        let xattr_value =
+            xattr::get(root_path, "user.containers.override_stat").expect("Failed to get xattr");
+
+        // Check if xattr was set and has the correct value
+        assert!(xattr_value.is_some(), "xattr was not set");
+        assert_eq!(xattr_value.unwrap(), b"0:0:0555", "xattr value incorrect");
 
         Ok(())
     }

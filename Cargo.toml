@@ -9,7 +9,7 @@ resolver = "2"
 [workspace.package]
 authors = ["Team MicroSandbox <team@microsandbox.dev>"]
 repository = "https://github.com/microsandbox/microsandbox"
-version = "0.1.0"
+version = "0.1.0-alpha"
 license = "Apache-2.0"
 edition = "2021"
 

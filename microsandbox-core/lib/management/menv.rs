@@ -33,8 +33,6 @@ const INITIALIZE_MENV_DIR_MSG: &str = "Initialize .menv directory";
 #[cfg(feature = "cli-viz")]
 const CREATE_DEFAULT_CONFIG_MSG: &str = "Create default config file";
 #[cfg(feature = "cli-viz")]
-const UPDATE_GITIGNORE_MSG: &str = "Update .gitignore";
-#[cfg(feature = "cli-viz")]
 const CLEAN_SANDBOX_MSG: &str = "Clean sandbox";
 
 //--------------------------------------------------------------------------------------------------
@@ -94,14 +92,8 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
         project_dir.join(MICROSANDBOX_CONFIG_FILENAME).display()
     );
 
-    #[cfg(feature = "cli-viz")]
-    let update_gitignore_sp = viz::create_spinner(UPDATE_GITIGNORE_MSG.to_string(), None, None);
-
     // Update .gitignore to include .menv directory
     update_gitignore(&project_dir).await?;
-
-    #[cfg(feature = "cli-viz")]
-    update_gitignore_sp.finish();
 
     Ok(())
 }

@@ -578,6 +578,9 @@ async fn setup_image_rootfs(
             tracing::info!("patching with {} volume mounts", volumes.len());
             rootfs::patch_with_virtiofs_mounts(&patch_dir, volumes).await?;
         }
+
+        // Set stat override on the rootfs to ensure proper permissions inside the container
+        rootfs::patch_with_stat_override(&top_rw_path).await?;
     } else {
         tracing::info!("skipping sandbox patch - config unchanged");
     }
@@ -638,6 +641,9 @@ async fn setup_native_rootfs(
             // For native rootfs, mount points should be created under the root path
             rootfs::patch_with_virtiofs_mounts(root_path, volumes).await?;
         }
+
+        // Set stat override on the rootfs to ensure proper permissions inside the container
+        rootfs::patch_with_stat_override(root_path).await?;
     } else {
         tracing::info!("skipping sandbox patch - config unchanged");
     }
