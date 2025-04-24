@@ -1,7 +1,7 @@
 [package]
 name = "microsandbox-utils"
-version = "0.2.1"
 description = "`microsandbox-utils` is a library containing general utilities for the microsandbox project."
+version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -23,6 +23,9 @@ async-trait.workspace = true
 nix = { workspace = true, features = ["process", "signal", "term", "fs"] }
 tracing.workspace = true
 libc.workspace = true
+indicatif.workspace = true
+console.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

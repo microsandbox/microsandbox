@@ -5,20 +5,18 @@
 //! necessary components for running sandboxes, including configuration files,
 //! databases, and log directories.
 
-use crate::{
-    config::DEFAULT_CONFIG,
-    utils::{MICROSANDBOX_CONFIG_FILENAME, RW_SUBDIR},
-    MicrosandboxResult,
-};
+use crate::MicrosandboxResult;
 
-#[cfg(feature = "cli-viz")]
-use crate::utils::viz;
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 use console::style;
+#[cfg(feature = "cli")]
+use microsandbox_utils::term;
+use microsandbox_utils::{
+    DEFAULT_CONFIG, LOG_SUBDIR, MICROSANDBOX_CONFIG_FILENAME, MICROSANDBOX_ENV_DIR, PATCH_SUBDIR,
+    RW_SUBDIR, SANDBOX_DB_FILENAME,
+};
 use std::path::{Path, PathBuf};
 use tokio::{fs, io::AsyncWriteExt};
-
-use crate::utils::path::{LOG_SUBDIR, MICROSANDBOX_ENV_DIR, PATCH_SUBDIR, SANDBOX_DB_FILENAME};
 
 use super::db;
 
@@ -26,13 +24,13 @@ use super::db;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 const REMOVE_MENV_DIR_MSG: &str = "Remove .menv directory";
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 const INITIALIZE_MENV_DIR_MSG: &str = "Initialize .menv directory";
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 const CREATE_DEFAULT_CONFIG_MSG: &str = "Create default config file";
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 const CLEAN_SANDBOX_MSG: &str = "Clean sandbox";
 
 //--------------------------------------------------------------------------------------------------
@@ -61,12 +59,9 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
     // Get the target path, defaulting to current directory if none specified
     let project_dir = project_dir.unwrap_or_else(|| PathBuf::from("."));
     let menv_path = project_dir.join(MICROSANDBOX_ENV_DIR);
-    #[cfg(feature = "cli-viz")]
-    let menv_exists = menv_path.exists();
-
-    #[cfg(feature = "cli-viz")]
-    let initialize_menv_dir_sp = if !menv_exists {
-        Some(viz::create_spinner(
+    #[cfg(feature = "cli")]
+    let initialize_menv_dir_sp = if !menv_path.exists() {
+        Some(term::create_spinner(
             INITIALIZE_MENV_DIR_MSG.to_string(),
             None,
             None,
@@ -80,11 +75,6 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
     // Create the required files for the microsandbox environment
     ensure_menv_files(&menv_path).await?;
 
-    #[cfg(feature = "cli-viz")]
-    if let Some(sp) = initialize_menv_dir_sp {
-        sp.finish();
-    }
-
     // Create default config file if it doesn't exist
     create_default_config(&project_dir).await?;
     tracing::info!(
@@ -94,6 +84,11 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
 
     // Update .gitignore to include .menv directory
     update_gitignore(&project_dir).await?;
+
+    #[cfg(feature = "cli")]
+    if let Some(sp) = initialize_menv_dir_sp {
+        sp.finish();
+    }
 
     Ok(())
 }
@@ -143,15 +138,15 @@ pub async fn clean(
 
     // If no sandbox name is provided, clean the entire project
     if sandbox_name.is_none() {
-        #[cfg(feature = "cli-viz")]
-        let remove_menv_dir_sp = viz::create_spinner(REMOVE_MENV_DIR_MSG.to_string(), None, None);
+        #[cfg(feature = "cli")]
+        let remove_menv_dir_sp = term::create_spinner(REMOVE_MENV_DIR_MSG.to_string(), None, None);
 
         // If the config file exists and force is false, don't clean
         if config_result.is_ok() && !force {
-            #[cfg(feature = "cli-viz")]
-            viz::finish_with_error(&remove_menv_dir_sp);
+            #[cfg(feature = "cli")]
+            term::finish_with_error(&remove_menv_dir_sp);
 
-            #[cfg(feature = "cli-viz")]
+            #[cfg(feature = "cli")]
             println!(
                 "Configuration file exists. Use {} to clean the entire environment",
                 style("--force").yellow()
@@ -178,7 +173,7 @@ pub async fn clean(
             );
         }
 
-        #[cfg(feature = "cli-viz")]
+        #[cfg(feature = "cli")]
         remove_menv_dir_sp.finish();
 
         return Ok(());
@@ -188,8 +183,8 @@ pub async fn clean(
     let sandbox_name = sandbox_name.unwrap();
     let config_file = config_file.unwrap_or(MICROSANDBOX_CONFIG_FILENAME);
 
-    #[cfg(feature = "cli-viz")]
-    let clean_sandbox_sp = viz::create_spinner(
+    #[cfg(feature = "cli")]
+    let clean_sandbox_sp = term::create_spinner(
         format!("{} '{}'", CLEAN_SANDBOX_MSG, sandbox_name),
         None,
         None,
@@ -198,10 +193,10 @@ pub async fn clean(
     // If the sandbox exists in the config and force is false, don't clean
     if let Ok((config, _, _)) = config_result {
         if config.get_sandbox(sandbox_name).is_some() && !force {
-            #[cfg(feature = "cli-viz")]
-            viz::finish_with_error(&clean_sandbox_sp);
+            #[cfg(feature = "cli")]
+            term::finish_with_error(&clean_sandbox_sp);
 
-            #[cfg(feature = "cli-viz")]
+            #[cfg(feature = "cli")]
             println!(
                 "Sandbox '{}' exists in configuration. Use {} to clean it",
                 sandbox_name,
@@ -256,7 +251,7 @@ pub async fn clean(
         tracing::info!("Removed sandbox {} from database", sandbox_name);
     }
 
-    #[cfg(feature = "cli-viz")]
+    #[cfg(feature = "cli")]
     clean_sandbox_sp.finish();
 
     Ok(())
@@ -290,14 +285,14 @@ pub(crate) async fn create_default_config(project_dir: &Path) -> MicrosandboxRes
 
     // Only create if it doesn't exist
     if !config_path.exists() {
-        #[cfg(feature = "cli-viz")]
+        #[cfg(feature = "cli")]
         let create_default_config_sp =
-            viz::create_spinner(CREATE_DEFAULT_CONFIG_MSG.to_string(), None, None);
+            term::create_spinner(CREATE_DEFAULT_CONFIG_MSG.to_string(), None, None);
 
         let mut file = fs::File::create(&config_path).await?;
         file.write_all(DEFAULT_CONFIG.as_bytes()).await?;
 
-        #[cfg(feature = "cli-viz")]
+        #[cfg(feature = "cli")]
         create_default_config_sp.finish();
     }
 

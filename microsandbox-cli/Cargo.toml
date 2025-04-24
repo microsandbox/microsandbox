@@ -20,10 +20,13 @@ path = "lib/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
-microsandbox-core = { version = "0.2", path = "../microsandbox-core", features = [
-    "cli-viz",
+microsandbox-core = { version = "0.1.0-alpha.1", path = "../microsandbox-core", features = [
+    "cli",
 ] }
-microsandbox-utils = { version = "0.2", path = "../microsandbox-utils" }
+microsandbox-server = { version = "0.1.0-alpha.1", path = "../microsandbox-server", features = [
+    "cli",
+] }
+microsandbox-utils = { version = "0.1.0-alpha.1", path = "../microsandbox-utils" }
 clap.workspace = true
 typed-path.workspace = true
 chrono.workspace = true

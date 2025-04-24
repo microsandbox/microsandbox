@@ -1,10 +1,11 @@
 use std::net::Ipv4Addr;
 
 use ipnetwork::Ipv4Network;
+use microsandbox_utils::{DEFAULT_MEMORY_MIB, DEFAULT_NUM_VCPUS};
 use typed_path::Utf8UnixPathBuf;
 
 use crate::{
-    config::{EnvPair, NetworkScope, PathPair, PortPair, DEFAULT_MEMORY_MIB, DEFAULT_NUM_VCPUS},
+    config::{EnvPair, NetworkScope, PathPair, PortPair},
     MicrosandboxResult,
 };
 

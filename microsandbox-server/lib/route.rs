@@ -1,13 +1,12 @@
-//! Utility functions and types.
+use axum::Router;
 
-pub mod conversion;
-pub mod file;
-pub mod path;
+use crate::state::AppState;
 
 //--------------------------------------------------------------------------------------------------
-// Exports
+// Functions
 //--------------------------------------------------------------------------------------------------
 
-pub use conversion::*;
-pub use file::*;
-pub use path::*;
+pub fn create_router(state: AppState) -> Router {
+    let router = Router::new();
+    router
+}

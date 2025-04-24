@@ -54,30 +54,15 @@
 //!     --subnet=192.168.1.0/24 \
 //!     -- -m http.server 8080
 //! ```
-//!
-//! ## Server Mode
-//!
-//! To start the sandbox server:
-//! ```bash
-//! msbrun server \
-//!     --port 8080 \
-//!     --path /path/to/namespaces \
-//!     --disable-default \
-//!     --key my_secret_key
-//! ```
 
-use std::{
-    env,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-};
+use std::env;
 
 use anyhow::Result;
 use clap::Parser;
 use microsandbox_cli::{McrunArgs, McrunSubcommand};
 use microsandbox_core::{
-    config::{EnvPair, PathPair, PortPair, DEFAULT_SERVER_PORT},
+    config::{EnvPair, PathPair, PortPair},
     runtime::MicroVmMonitor,
-    server::SandboxServer,
     vm::{MicroVm, Rootfs},
 };
 use microsandbox_utils::runtime::Supervisor;
@@ -367,25 +352,6 @@ async fn main() -> Result<()> {
                 Supervisor::new(child_exe, child_args, child_envs, log_dir, process_monitor);
 
             supervisor.start().await?;
-        }
-        McrunSubcommand::Server {
-            port,
-            path,
-            disable_default,
-            key,
-        } => {
-            tracing_subscriber::fmt::init();
-
-            let server = SandboxServer::new(
-                path,
-                !disable_default,
-                SocketAddr::new(
-                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-                    port.unwrap_or(DEFAULT_SERVER_PORT),
-                ),
-                key,
-            )?;
-            server.serve().await?;
         }
     }
 

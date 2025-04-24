@@ -698,9 +698,8 @@ impl TryFrom<u8> for LogLevel {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::DEFAULT_NUM_VCPUS;
-
     use super::*;
+    use microsandbox_utils::DEFAULT_NUM_VCPUS;
     use std::path::PathBuf;
     use tempfile::TempDir;
 

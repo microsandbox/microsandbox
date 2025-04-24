@@ -10,24 +10,28 @@ use std::{
 
 use getset::Getters;
 use ipnetwork::Ipv4Network as Ipv4Net;
+use microsandbox_utils::DEFAULT_SHELL;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 use typed_path::Utf8UnixPathBuf;
 
 use crate::{
-    config::{EnvPair, PathPair, PortPair, ReferenceOrPath, DEFAULT_SHELL},
+    config::{EnvPair, PathPair, PortPair, ReferenceOrPath},
     MicrosandboxError, MicrosandboxResult,
 };
 
 use super::{MicrosandboxBuilder, SandboxBuilder};
 
 //--------------------------------------------------------------------------------------------------
-// Types
+// Constants
 //--------------------------------------------------------------------------------------------------
 
 /// The start script name.
 pub const START_SCRIPT_NAME: &str = "start";
+
+/// The default network scope for a sandbox.
+pub const DEFAULT_NETWORK_SCOPE: NetworkScope = NetworkScope::Public;
 
 //--------------------------------------------------------------------------------------------------
 // Types

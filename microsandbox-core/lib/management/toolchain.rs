@@ -4,13 +4,11 @@
 //! including upgrades, and uninstallation. It handles the binaries and libraries
 //! that make up the Microsandbox runtime.
 
+use microsandbox_utils::{XDG_BIN_DIR, XDG_HOME_DIR, XDG_LIB_DIR};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-use crate::{
-    utils::path::{XDG_BIN_DIR, XDG_HOME_DIR, XDG_LIB_DIR},
-    MicrosandboxResult,
-};
+use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
 // Functions

@@ -4,17 +4,18 @@
 //! which contains cached images, layers, and databases. It also includes functions for
 //! cleaning up the home directory and checking its existence.
 
-use crate::{utils::env, MicrosandboxResult};
+use crate::MicrosandboxResult;
+use microsandbox_utils::env;
 
-#[cfg(feature = "cli-viz")]
-use crate::utils::viz;
+#[cfg(feature = "cli")]
+use microsandbox_utils::term;
 use tokio::fs;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 const REMOVE_HOME_DIR_MSG: &str = "Remove microsandbox home";
 
 //--------------------------------------------------------------------------------------------------
@@ -39,8 +40,8 @@ pub async fn clean() -> MicrosandboxResult<()> {
     // Get the microsandbox home path from environment or default
     let home_path = env::get_microsandbox_home_path();
 
-    #[cfg(feature = "cli-viz")]
-    let remove_home_dir_sp = viz::create_spinner(REMOVE_HOME_DIR_MSG.to_string(), None, None);
+    #[cfg(feature = "cli")]
+    let remove_home_dir_sp = term::create_spinner(REMOVE_HOME_DIR_MSG.to_string(), None, None);
 
     // Check if home directory exists
     if home_path.exists() {
@@ -57,7 +58,7 @@ pub async fn clean() -> MicrosandboxResult<()> {
         );
     }
 
-    #[cfg(feature = "cli-viz")]
+    #[cfg(feature = "cli")]
     remove_home_dir_sp.finish();
 
     Ok(())

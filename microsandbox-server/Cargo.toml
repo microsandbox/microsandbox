@@ -1,0 +1,39 @@
+[package]
+name = "microsandbox-server"
+authors.workspace = true
+repository.workspace = true
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mserver"
+path = "bin/mserver.rs"
+
+[lib]
+path = "lib/lib.rs"
+
+[dependencies]
+tower = { version = "0.5" }
+tower-http = { version = "0.6.2", features = ["cors"] }
+axum.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+dotenvy.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+getset.workspace = true
+thiserror.workspace = true
+pretty-error-debug.workspace = true
+clap.workspace = true
+indicatif = { workspace = true, optional = true }
+console = { workspace = true, optional = true }
+microsandbox-utils.workspace = true
+
+[features]
+default = []
+cli = ["indicatif", "console"]

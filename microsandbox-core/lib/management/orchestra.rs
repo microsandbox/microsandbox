@@ -10,6 +10,7 @@
 //! - `down`: Gracefully shut down all running sandboxes
 //! - `apply`: Reconcile running sandboxes with configuration
 
+use microsandbox_utils::{MICROSANDBOX_ENV_DIR, SANDBOX_DB_FILENAME};
 use nix::{
     sys::signal::{self, Signal},
     unistd::Pid,
@@ -19,7 +20,6 @@ use std::path::Path;
 use crate::{
     config::{Microsandbox, START_SCRIPT_NAME},
     management::{config, sandbox},
-    utils::{MICROSANDBOX_ENV_DIR, SANDBOX_DB_FILENAME},
     MicrosandboxError, MicrosandboxResult,
 };
 

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 // Types: Requests
 //--------------------------------------------------------------------------------------------------
 
+// TODO: Change to JSONRPC
 /// Request body for starting a sandbox
 #[derive(Debug, Deserialize)]
 pub struct UpRequest {
@@ -17,6 +18,7 @@ pub struct UpRequest {
     pub sandboxes: Vec<String>,
 }
 
+// TODO: Change to JSONRPC
 /// Request body for stopping a sandbox
 #[derive(Debug, Deserialize)]
 pub struct DownRequest {
@@ -34,9 +36,10 @@ pub struct DownRequest {
 // Types: Responses
 //--------------------------------------------------------------------------------------------------
 
+// TODO: Change to JSONRPC
 /// Response type for status requests
 #[derive(Debug, Serialize)]
-pub struct StatusResponse {
+pub struct RegularMessageResponse {
     /// Message indicating the status of the sandbox operation
     pub message: String,
 }
@@ -89,7 +92,7 @@ pub enum ErrorType {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl StatusResponse {
+impl RegularMessageResponse {
     /// Create a new status response
     pub fn success(action: &str, sandboxes: Vec<String>) -> Self {
         let sandbox_list = sandboxes.join(", ");

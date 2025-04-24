@@ -8,6 +8,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{future, stream::BoxStream, StreamExt};
 use getset::{Getters, Setters};
+use microsandbox_utils::{env, EXTRACTED_LAYER_SUFFIX, LAYERS_SUBDIR};
 use oci_spec::image::{Digest, ImageConfiguration, ImageIndex, ImageManifest, Os, Platform};
 use reqwest::Client;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
@@ -23,14 +24,13 @@ use tokio::{
 use crate::{
     management::db,
     oci::{OciRegistryPull, ReferenceSelector},
-    utils::{self, env, path},
-    MicrosandboxError, MicrosandboxResult,
+    utils, MicrosandboxError, MicrosandboxResult,
 };
 
-#[cfg(feature = "cli-viz")]
-use crate::utils::viz::{self, MULTI_PROGRESS};
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(feature = "cli")]
+use microsandbox_utils::term::{self, MULTI_PROGRESS};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -64,11 +64,11 @@ const DOCKER_CONFIG_MIME_TYPE: &str = "application/vnd.docker.container.image.v1
 /// The annotation key used to identify attestation manifests in the Docker Registry.
 const DOCKER_REFERENCE_TYPE_ANNOTATION: &str = "vnd.docker.reference.type";
 
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 /// Spinner message used for fetching image details.
 const FETCH_IMAGE_DETAILS_MSG: &str = "Fetch image details";
 
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 /// Spinner message used for downloading layers.
 const DOWNLOAD_LAYER_MSG: &str = "Download layers";
 
@@ -215,7 +215,7 @@ impl DockerRegistry {
         digest: &Digest,
         download_size: u64,
     ) -> MicrosandboxResult<bool> {
-        #[cfg(feature = "cli-viz")]
+        #[cfg(feature = "cli")]
         let progress_bar = {
             let pb = MULTI_PROGRESS.add(ProgressBar::new(download_size));
             let style = ProgressStyle::with_template(
@@ -231,7 +231,7 @@ impl DockerRegistry {
             pb.clone()
         };
 
-        #[cfg(feature = "cli-viz")]
+        #[cfg(feature = "cli")]
         {
             // If we already have some bytes downloaded, reflect that on the progress bar.
             let downloaded_so_far = self.get_downloaded_file_size(digest);
@@ -243,12 +243,9 @@ impl DockerRegistry {
         // First, check if the extracted layer directory already exists and is not empty
         // Get the microsandbox home path and layers directory
         let microsandbox_home_path = env::get_microsandbox_home_path();
-        let layers_dir = microsandbox_home_path.join(path::LAYERS_SUBDIR);
-        let extracted_layer_path = layers_dir.join(format!(
-            "{}.{}",
-            digest.to_string(),
-            utils::EXTRACTED_LAYER_SUFFIX
-        ));
+        let layers_dir = microsandbox_home_path.join(LAYERS_SUBDIR);
+        let extracted_layer_path =
+            layers_dir.join(format!("{}.{}", digest.to_string(), EXTRACTED_LAYER_SUFFIX));
 
         // Check if extracted directory exists and has content
         if extracted_layer_path.exists() {
@@ -306,11 +303,11 @@ impl DockerRegistry {
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
             file.write_all(&bytes).await?;
-            #[cfg(feature = "cli-viz")]
+            #[cfg(feature = "cli")]
             progress_bar.inc(bytes.len() as u64);
         }
 
-        #[cfg(feature = "cli-viz")]
+        #[cfg(feature = "cli")]
         progress_bar.finish_and_clear();
 
         // Verify the hash of the downloaded file
@@ -342,8 +339,9 @@ impl OciRegistryPull for DockerRegistry {
         selector: ReferenceSelector,
     ) -> MicrosandboxResult<()> {
         // Calculate total size and save image record
-        #[cfg(feature = "cli-viz")]
-        let fetch_details_sp = viz::create_spinner(FETCH_IMAGE_DETAILS_MSG.to_string(), None, None);
+        #[cfg(feature = "cli")]
+        let fetch_details_sp =
+            term::create_spinner(FETCH_IMAGE_DETAILS_MSG.to_string(), None, None);
 
         let index = self.fetch_index(repository, selector.clone()).await?;
 
@@ -407,13 +405,13 @@ impl OciRegistryPull for DockerRegistry {
 
         db::save_config(&self.oci_db, manifest_id, &config).await?;
 
-        #[cfg(feature = "cli-viz")]
+        #[cfg(feature = "cli")]
         fetch_details_sp.finish();
 
         let layers = manifest.layers();
 
-        #[cfg(feature = "cli-viz")]
-        let download_layers_sp = viz::create_spinner(
+        #[cfg(feature = "cli")]
+        let download_layers_sp = term::create_spinner(
             DOWNLOAD_LAYER_MSG.to_string(),
             None,
             Some(layers.len() as u64),
@@ -430,7 +428,7 @@ impl OciRegistryPull for DockerRegistry {
                     .download_image_blob(repository, layer_desc.digest(), layer_desc.size())
                     .await?;
 
-                #[cfg(feature = "cli-viz")]
+                #[cfg(feature = "cli")]
                 download_layers_sp.inc(1);
 
                 // Get or create layer record in database
@@ -488,7 +486,7 @@ impl OciRegistryPull for DockerRegistry {
             result?;
         }
 
-        #[cfg(feature = "cli-viz")]
+        #[cfg(feature = "cli")]
         download_layers_sp.finish();
 
         Ok(())

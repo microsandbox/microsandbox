@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
+use microsandbox_utils::DEFAULT_SHELL;
 use semver::Version;
 use typed_path::Utf8UnixPathBuf;
 
 use crate::{
-    config::{EnvPair, PathPair, PortPair, ReferenceOrPath, DEFAULT_SHELL},
+    config::{EnvPair, PathPair, PortPair, ReferenceOrPath},
     MicrosandboxResult,
 };
 

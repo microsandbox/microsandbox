@@ -4,34 +4,30 @@
 //! registries. It supports pulling images from Docker and Sandboxes.io registries,
 //! handling image layers, and managing the local image cache.
 
-#[cfg(feature = "cli-viz")]
-use crate::utils::viz::{self, MULTI_PROGRESS};
 use crate::{
     management::db::{self, OCI_DB_MIGRATOR},
     oci::{DockerRegistry, OciRegistryPull, Reference},
-    utils::{
-        env::get_microsandbox_home_path,
-        path::{LAYERS_SUBDIR, OCI_DB_FILENAME},
-        EXTRACTED_LAYER_SUFFIX,
-    },
     MicrosandboxError, MicrosandboxResult,
 };
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 use flate2::read::GzDecoder;
 use futures::future;
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(feature = "cli")]
+use microsandbox_utils::term::{self, MULTI_PROGRESS};
+use microsandbox_utils::{env, EXTRACTED_LAYER_SUFFIX, LAYERS_SUBDIR, OCI_DB_FILENAME};
 use sqlx::{Pool, Sqlite};
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 use std::io::{Read, Result as IoResult};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 use tar::Archive;
 use tempfile::tempdir;
 use tokio::fs;
-#[cfg(not(feature = "cli-viz"))]
+#[cfg(not(feature = "cli"))]
 use tokio::process::Command;
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 use tokio::task::spawn_blocking;
 
 //--------------------------------------------------------------------------------------------------
@@ -44,7 +40,7 @@ const DOCKER_REGISTRY: &str = "docker.io";
 /// The domain name for the Sandboxes registry.
 const SANDBOXES_REGISTRY: &str = "sandboxes.io";
 
-#[cfg(feature = "cli-viz")]
+#[cfg(feature = "cli")]
 /// Spinner message used for extracting layers.
 const EXTRACT_LAYERS_MSG: &str = "Extracting layers";
 
@@ -163,7 +159,7 @@ pub async fn pull_from_docker_registry(
     layer_path: Option<PathBuf>,
 ) -> MicrosandboxResult<()> {
     let download_dir = download_dir.as_ref();
-    let microsandbox_home_path = get_microsandbox_home_path();
+    let microsandbox_home_path = env::get_microsandbox_home_path();
     let db_path = microsandbox_home_path.join(OCI_DB_FILENAME);
 
     // Use custom layer_path if specified, otherwise use default microsandbox layers directory
@@ -193,8 +189,8 @@ pub async fn pull_from_docker_registry(
     // Find and extract layers in parallel
     let layer_paths = collect_layer_files(download_dir).await?;
 
-    #[cfg(feature = "cli-viz")]
-    let extract_layers_sp = viz::create_spinner(
+    #[cfg(feature = "cli")]
+    let extract_layers_sp = term::create_spinner(
         EXTRACT_LAYERS_MSG.to_string(),
         None,
         Some(layer_paths.len() as u64),
@@ -204,11 +200,11 @@ pub async fn pull_from_docker_registry(
         .into_iter()
         .map(|path| {
             let layers_dir = layers_dir.clone();
-            #[cfg(feature = "cli-viz")]
+            #[cfg(feature = "cli")]
             let extract_layers_sp = extract_layers_sp.clone();
             async move {
                 let result = extract_layer(path, &layers_dir).await;
-                #[cfg(feature = "cli-viz")]
+                #[cfg(feature = "cli")]
                 extract_layers_sp.inc(1);
                 result
             }
@@ -220,7 +216,7 @@ pub async fn pull_from_docker_registry(
         result?;
     }
 
-    #[cfg(feature = "cli-viz")]
+    #[cfg(feature = "cli")]
     extract_layers_sp.finish();
 
     Ok(())
@@ -435,12 +431,12 @@ async fn extract_layer(
         extract_dir.display()
     );
 
-    #[cfg(feature = "cli-viz")]
+    #[cfg(feature = "cli")]
     struct ProgressReader<R> {
         inner: R,
         bar: ProgressBar,
     }
-    #[cfg(feature = "cli-viz")]
+    #[cfg(feature = "cli")]
     impl<R: Read> Read for ProgressReader<R> {
         fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
             let n = self.inner.read(buf)?;
@@ -451,7 +447,7 @@ async fn extract_layer(
         }
     }
 
-    #[cfg(feature = "cli-viz")]
+    #[cfg(feature = "cli")]
     {
         let total_bytes = fs::metadata(layer_path).await?.len();
         let pb = MULTI_PROGRESS.add(ProgressBar::new(total_bytes));
@@ -490,9 +486,9 @@ async fn extract_layer(
         pb.finish_and_clear();
     }
 
-    #[cfg(not(feature = "cli-viz"))]
+    #[cfg(not(feature = "cli"))]
     {
-        // Fallback to system tar when cli-viz disabled
+        // Fallback to system tar when cli disabled
         let output = Command::new("tar")
             .arg("-xzf")
             .arg(layer_path)

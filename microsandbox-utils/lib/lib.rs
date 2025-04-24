@@ -3,7 +3,8 @@
 #![warn(missing_docs)]
 #![allow(clippy::module_inception)]
 
-pub mod config;
+pub mod defaults;
+pub mod env;
 pub mod error;
 pub mod log;
 pub mod path;
@@ -15,7 +16,8 @@ pub mod term;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use config::*;
+pub use defaults::*;
+pub use env::*;
 pub use error::*;
 pub use log::*;
 pub use path::*;

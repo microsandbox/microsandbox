@@ -1,12 +1,28 @@
+//! Default values and constants used throughout the microsandbox project.
+//!
+//! This module provides default configuration values, paths, and other constants
+//! that are used by various components of the microsandbox system.
+//!
+//! # Examples
+//!
+//! ```
+//! use microsandbox_utils::defaults::{DEFAULT_NUM_VCPUS, DEFAULT_MEMORY_MIB};
+//!
+//! // Use default values for VM configuration
+//! let vcpus = DEFAULT_NUM_VCPUS;
+//! let memory = DEFAULT_MEMORY_MIB;
+//! ```
+
 use std::{fs, path::PathBuf, sync::LazyLock};
 
-use crate::utils::MICROSANDBOX_HOME_DIR;
-
-use super::NetworkScope;
+use crate::MICROSANDBOX_HOME_DIR;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
+
+/// The default maximum log file size (10MB)
+pub const DEFAULT_LOG_MAX_SIZE: u64 = 10 * 1024 * 1024;
 
 /// The default number of vCPUs to use for the MicroVm.
 pub const DEFAULT_NUM_VCPUS: u8 = 1;
@@ -28,7 +44,7 @@ pub const DEFAULT_OCI_REFERENCE_TAG: &str = "latest";
 pub const DEFAULT_OCI_REFERENCE_REPO_NAMESPACE: &str = "library";
 
 /// The default configuration file content
-pub(crate) const DEFAULT_CONFIG: &str = r#"# Sandbox configurations
+pub const DEFAULT_CONFIG: &str = r#"# Sandbox configurations
 sandboxes: []
 "#;
 
@@ -47,9 +63,3 @@ pub const DEFAULT_WORKDIR: &str = "/";
 
 /// The default namespace for the sandbox server.
 pub const DEFAULT_SERVER_NAMESPACE: &str = "default";
-
-/// The default port for the sandbox server.
-pub const DEFAULT_SERVER_PORT: u16 = 5050;
-
-/// The default network scope for a sandbox.
-pub const DEFAULT_NETWORK_SCOPE: NetworkScope = NetworkScope::Public;

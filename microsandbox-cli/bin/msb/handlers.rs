@@ -1,14 +1,14 @@
 use clap::{error::ErrorKind, CommandFactory};
 use microsandbox_cli::{AnsiStyles, MicrosandboxArgs, SelfAction};
 use microsandbox_core::{
-    config::DEFAULT_SHELL,
     management::{
         config::{self, Component, ComponentType},
-        home, menv, orchestra, sandbox, server, toolchain,
+        home, menv, orchestra, sandbox, toolchain,
     },
     oci::Reference,
     MicrosandboxError, MicrosandboxResult,
 };
+use microsandbox_utils::DEFAULT_SHELL;
 use std::path::PathBuf;
 use typed_path::Utf8UnixPathBuf;
 
@@ -444,41 +444,41 @@ pub async fn clean_subcommand(
     Ok(())
 }
 
-pub async fn server_start_subcommand(
-    port: Option<u16>,
-    path: Option<PathBuf>,
-    disable_default: bool,
-    secure: bool,
-    key: Option<String>,
-    detach: bool,
-) -> MicrosandboxResult<()> {
-    if !secure && key.is_some() {
-        MicrosandboxArgs::command()
-            .override_usage(usage("server start", Some("[OPTIONS]"), None))
-            .error(
-                ErrorKind::InvalidValue,
-                format!(
-                    "cannot specify `{}` flag without `{}` flag",
-                    "--key".literal(),
-                    "--secure".literal(),
-                ),
-            )
-            .exit();
-    }
+// pub async fn server_start_subcommand(
+//     port: Option<u16>,
+//     path: Option<PathBuf>,
+//     disable_default: bool,
+//     secure: bool,
+//     key: Option<String>,
+//     detach: bool,
+// ) -> MicrosandboxResult<()> {
+//     if !secure && key.is_some() {
+//         MicrosandboxArgs::command()
+//             .override_usage(usage("server start", Some("[OPTIONS]"), None))
+//             .error(
+//                 ErrorKind::InvalidValue,
+//                 format!(
+//                     "cannot specify `{}` flag without `{}` flag",
+//                     "--key".literal(),
+//                     "--secure".literal(),
+//                 ),
+//             )
+//             .exit();
+//     }
 
-    server::start(port, path, disable_default, secure, key, detach).await
-}
+//     server::start(port, path, disable_default, secure, key, detach).await
+// }
 
-pub async fn server_keygen_subcommand(expire: Option<String>) -> MicrosandboxResult<()> {
-    // Convert the string duration to chrono::Duration
-    let duration = if let Some(expire_str) = expire {
-        Some(parse_duration_string(&expire_str)?)
-    } else {
-        None
-    };
+// pub async fn server_keygen_subcommand(expire: Option<String>) -> MicrosandboxResult<()> {
+//     // Convert the string duration to chrono::Duration
+//     let duration = if let Some(expire_str) = expire {
+//         Some(parse_duration_string(&expire_str)?)
+//     } else {
+//         None
+//     };
 
-    server::keygen(duration).await
-}
+//     server::keygen(duration).await
+// }
 
 /// Handle the self subcommand, which manages microsandbox itself
 pub async fn self_subcommand(action: SelfAction) -> MicrosandboxResult<()> {

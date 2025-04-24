@@ -2,9 +2,9 @@
 mod msb;
 
 use clap::{CommandFactory, Parser};
-use microsandbox_cli::{AnsiStyles, MicrosandboxArgs, MicrosandboxSubcommand, ServerSubcommand};
+use microsandbox_cli::{AnsiStyles, MicrosandboxArgs, MicrosandboxSubcommand};
 use microsandbox_core::{
-    management::{image, orchestra, server},
+    management::{image, orchestra},
     MicrosandboxResult,
 };
 use msb::handlers;
@@ -197,25 +197,25 @@ async fn main() -> MicrosandboxResult<()> {
         Some(MicrosandboxSubcommand::Self_ { action }) => {
             handlers::self_subcommand(action).await?;
         }
-        Some(MicrosandboxSubcommand::Server { subcommand }) => match subcommand {
-            ServerSubcommand::Start {
-                port,
-                path,
-                disable_default,
-                secure,
-                key,
-                detach,
-            } => {
-                handlers::server_start_subcommand(port, path, disable_default, secure, key, detach)
-                    .await?;
-            }
-            ServerSubcommand::Stop => {
-                server::stop().await?;
-            }
-            ServerSubcommand::Keygen { expire } => {
-                handlers::server_keygen_subcommand(expire).await?;
-            }
-        },
+        // Some(MicrosandboxSubcommand::Server { subcommand }) => match subcommand {
+        //     ServerSubcommand::Start {
+        //         port,
+        //         path,
+        //         disable_default,
+        //         secure,
+        //         key,
+        //         detach,
+        //     } => {
+        //         handlers::server_start_subcommand(port, path, disable_default, secure, key, detach)
+        //             .await?;
+        //     }
+        //     ServerSubcommand::Stop => {
+        //         server::stop().await?;
+        //     }
+        //     ServerSubcommand::Keygen { expire } => {
+        //         handlers::server_keygen_subcommand(expire).await?;
+        //     }
+        // },
         Some(_) => (), // TODO: implement other subcommands
         None => {
             MicrosandboxArgs::command().print_help()?;

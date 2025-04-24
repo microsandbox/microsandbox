@@ -3,6 +3,7 @@
 //! This module provides structures and utilities for modifying Microsandbox
 //! configuration.
 
+use microsandbox_utils::MICROSANDBOX_CONFIG_FILENAME;
 use nondestructive::yaml;
 use sqlx::{Pool, Sqlite};
 use std::{
@@ -15,7 +16,6 @@ use typed_path::Utf8UnixPathBuf;
 use crate::{
     config::{EnvPair, Microsandbox, PathSegment, PortPair, Sandbox, START_SCRIPT_NAME},
     oci::Reference,
-    utils::MICROSANDBOX_CONFIG_FILENAME,
     MicrosandboxError, MicrosandboxResult,
 };
 

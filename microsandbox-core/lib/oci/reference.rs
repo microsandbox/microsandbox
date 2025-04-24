@@ -1,9 +1,6 @@
-use crate::{
-    config::{DEFAULT_OCI_REFERENCE_REPO_NAMESPACE, DEFAULT_OCI_REFERENCE_TAG},
-    error::MicrosandboxError,
-    utils::env::get_oci_registry,
-};
+use crate::error::MicrosandboxError;
 use getset::{Getters, Setters};
+use microsandbox_utils::{env, DEFAULT_OCI_REFERENCE_REPO_NAMESPACE, DEFAULT_OCI_REFERENCE_TAG};
 use oci_spec::image::Digest;
 use regex::Regex;
 use serde;
@@ -101,7 +98,7 @@ impl FromStr for Reference {
     /// Returns a [`MicrosandboxError::ImageReferenceError`] for parse failures.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
-        let default_registry = get_oci_registry();
+        let default_registry = env::get_oci_registry();
 
         if s.is_empty() {
             return Err(MicrosandboxError::ImageReferenceError(
@@ -286,10 +283,6 @@ fn extract_repository_and_tag(path: &str) -> Result<(String, String), Microsandb
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        config::{DEFAULT_OCI_REFERENCE_REPO_NAMESPACE, DEFAULT_OCI_REFERENCE_TAG},
-        utils::env::get_oci_registry,
-    };
 
     #[test]
     fn test_reference_valid_reference_with_registry_and_tag() {
@@ -314,7 +307,7 @@ mod tests {
     fn test_reference_default_registry_and_tag() {
         let s = "library/alpine";
         let reference = s.parse::<Reference>().unwrap();
-        let expected_registry = get_oci_registry();
+        let expected_registry = env::get_oci_registry();
         assert_eq!(reference.registry, expected_registry);
         assert_eq!(reference.repository, "library/alpine");
         match reference.selector {
@@ -458,7 +451,7 @@ mod tests {
     fn test_reference_no_registry_single_segment() {
         let s = "alpine";
         let reference = s.parse::<Reference>().unwrap();
-        let default_registry = get_oci_registry();
+        let default_registry = env::get_oci_registry();
         assert_eq!(reference.registry, default_registry);
         assert_eq!(
             reference.repository,
@@ -487,7 +480,7 @@ mod tests {
     fn test_reference_no_registry_multi_segment() {
         let s = "myorg/myrepo:stable";
         let reference = s.parse::<Reference>().unwrap();
-        let default_registry = get_oci_registry();
+        let default_registry = env::get_oci_registry();
         assert_eq!(reference.registry, default_registry);
         assert_eq!(reference.repository, "myorg/myrepo");
         match reference.selector {
