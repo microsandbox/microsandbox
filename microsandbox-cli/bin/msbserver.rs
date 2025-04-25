@@ -1,57 +1,29 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use axum::http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
     Method,
 };
 use clap::Parser;
-use microsandbox_server::{
-    config::{Config, DEFAULT_PORT},
-    route,
-    state::AppState,
-};
+use microsandbox_cli::{MicrosandboxCliResult, MsbserverArgs};
+use microsandbox_server::{route, state::AppState, Config};
 use microsandbox_utils::CHECKMARK;
 use tower_http::cors::{Any, CorsLayer};
-
-//--------------------------------------------------------------------------------------------------
-// Types: Args
-//--------------------------------------------------------------------------------------------------
-
-#[derive(Parser, Debug)]
-#[command(author, version, about = "Microsandbox Server")]
-struct Args {
-    /// Secret key used for JWT token generation and validation
-    #[arg(short = 'k', long = "key")]
-    key: Option<String>,
-
-    /// Port number to listen on
-    #[arg(long, default_value_t = DEFAULT_PORT)]
-    port: u16,
-
-    /// Directory for storing namespaces
-    #[arg(short = 'p', long = "path")]
-    namespace_path: Option<PathBuf>,
-
-    /// Run in development mode
-    #[arg(long, default_value_t = false)]
-    dev: bool,
-}
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Main
 //--------------------------------------------------------------------------------------------------
 
 #[tokio::main]
-pub async fn main() -> anyhow::Result<()> {
+pub async fn main() -> MicrosandboxCliResult<()> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
     // Parse command line arguments
-    let args = Args::parse();
+    let args = MsbserverArgs::parse();
 
-    if args.dev {
-        tracing::info!("Development mode: {}", args.dev);
-        #[cfg(feature = "cli")]
+    if args.dev_mode {
+        tracing::info!("Development mode: {}", args.dev_mode);
         println!(
             "{} Running in {} mode",
             &*CHECKMARK,
@@ -63,8 +35,8 @@ pub async fn main() -> anyhow::Result<()> {
     let config = Arc::new(Config::new(
         args.key,
         args.port,
-        args.namespace_path,
-        args.dev,
+        args.namespace_dir,
+        args.dev_mode,
     )?);
 
     // Create application state
@@ -81,7 +53,6 @@ pub async fn main() -> anyhow::Result<()> {
 
     // Start server
     tracing::info!("Starting server on {}", config.get_addr());
-    #[cfg(feature = "cli")]
     println!(
         "{} Server listening on {}",
         &*CHECKMARK,

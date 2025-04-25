@@ -647,22 +647,18 @@ pub enum ServerSubcommand {
         port: Option<u16>,
 
         /// Path to the namespace directory
+        #[arg(short = 'p', long = "path")]
+        namespace_dir: Option<PathBuf>,
+
+        /// Run server in development mode
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Disable default namespace
-        #[arg(long, default_value_t = false)]
-        disable_default: bool,
-
-        /// Make server require a secure API key
-        #[arg(long, default_value_t = false)]
-        secure: bool,
+        dev_mode: bool,
 
         /// Set secret key for server. Automatically generated if not provided.
         #[arg(long)]
         key: Option<String>,
 
-        /// Run server in the background``
+        /// Run server in the background
         #[arg(short, long)]
         detach: bool,
     },

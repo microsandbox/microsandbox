@@ -94,6 +94,8 @@ cp "$BUILD_DIR/msb" "$PACKAGE_DIR/"
 check_success "Failed to copy msb executable"
 cp "$BUILD_DIR/msbrun" "$PACKAGE_DIR/"
 check_success "Failed to copy msbrun executable"
+cp "$BUILD_DIR/msbserver" "$PACKAGE_DIR/"
+check_success "Failed to copy msbserver executable"
 
 # Copy alias executables
 cp "$BUILD_DIR/msr" "$PACKAGE_DIR/"

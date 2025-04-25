@@ -54,11 +54,14 @@ criterion = "0.5"
 tempfile = "3.15"
 test-log = "0.2"
 typed-path = "0.10"
+tower = { version = "0.5" }
+tower-http = { version = "0.6.2", features = ["cors"] }
 toml = "0.8"
 typed-builder = "0.21"
 uuid = { version = "1.11", features = ["v4"] }
 pretty-error-debug = "0.3"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls"] }
+
 regex = "1.10"
 async-recursion = "1.1"
 cfg-if = "1.0"
@@ -67,3 +70,4 @@ intaglio = "1.10"
 uzers = "0.12"
 console = "0.15"
 indicatif = "0.17"
+jsonwebtoken = "9.3"

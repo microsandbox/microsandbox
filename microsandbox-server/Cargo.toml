@@ -6,16 +6,12 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "mserver"
-path = "bin/mserver.rs"
-
 [lib]
 path = "lib/lib.rs"
 
 [dependencies]
-tower = { version = "0.5" }
-tower-http = { version = "0.6.2", features = ["cors"] }
+tower.workspace = true
+tower-http.workspace = true
 axum.workspace = true
 anyhow.workspace = true
 base64.workspace = true
@@ -33,6 +29,10 @@ clap.workspace = true
 indicatif = { workspace = true, optional = true }
 console = { workspace = true, optional = true }
 microsandbox-utils.workspace = true
+libc.workspace = true
+rand.workspace = true
+chrono.workspace = true
+jsonwebtoken.workspace = true
 
 [features]
 default = []

@@ -25,6 +25,7 @@ HOME_BIN := $(HOME)/.local/bin
 # -----------------------------------------------------------------------------
 MSB_RELEASE_BIN := target/release/msb
 MSBRUN_RELEASE_BIN := target/release/msbrun
+MSBSERVER_RELEASE_BIN := target/release/msbserver
 EXAMPLES_DIR := target/release/examples
 BENCHES_DIR := target/release
 BUILD_DIR := build
@@ -56,9 +57,10 @@ build: build_libkrun
 	@$(MAKE) _build_msb
 	@$(MAKE) _build_aliases
 
-_build_msb: $(MSB_RELEASE_BIN) $(MSBRUN_RELEASE_BIN)
+_build_msb: $(MSB_RELEASE_BIN) $(MSBRUN_RELEASE_BIN) $(MSBSERVER_RELEASE_BIN)
 	@cp $(MSB_RELEASE_BIN) $(BUILD_DIR)/
 	@cp $(MSBRUN_RELEASE_BIN) $(BUILD_DIR)/
+	@cp $(MSBSERVER_RELEASE_BIN) $(BUILD_DIR)/
 	@echo "Msb build artifacts copied to $(BUILD_DIR)/"
 
 _build_aliases:
@@ -75,7 +77,6 @@ $(MSB_RELEASE_BIN): build_libkrun
 	cd microsandbox-core
 ifeq ($(OS),Darwin)
 	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin msb --features cli $(FEATURES)
-	codesign --entitlements microsandbox.entitlements --force -s - $@
 else
 	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msb --features cli $(FEATURES)
 endif
@@ -89,6 +90,14 @@ else
 	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msbrun --features cli $(FEATURES)
 endif
 
+$(MSBSERVER_RELEASE_BIN): build_libkrun
+	cd microsandbox-core
+ifeq ($(OS),Darwin)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin msbserver --features cli $(FEATURES)
+else
+	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msbserver --features cli $(FEATURES)
+endif
+
 # -----------------------------------------------------------------------------
 # Installation
 # -----------------------------------------------------------------------------
@@ -97,6 +106,7 @@ install: build
 	install -d $(HOME_LIB)
 	install -m 755 $(BUILD_DIR)/msb $(HOME_BIN)/msb
 	install -m 755 $(BUILD_DIR)/msbrun $(HOME_BIN)/msbrun
+	install -m 755 $(BUILD_DIR)/msbserver $(HOME_BIN)/msbserver
 	install -m 755 $(BUILD_DIR)/msr $(HOME_BIN)/msr
 	install -m 755 $(BUILD_DIR)/msx $(HOME_BIN)/msx
 	install -m 755 $(BUILD_DIR)/msi $(HOME_BIN)/msi
@@ -123,6 +133,7 @@ clean:
 uninstall:
 	rm -f $(HOME_BIN)/msb
 	rm -f $(HOME_BIN)/msbrun
+	rm -f $(HOME_BIN)/msbserver
 	rm -f $(HOME_BIN)/msr
 	rm -f $(HOME_BIN)/msx
 	rm -f $(HOME_BIN)/msi

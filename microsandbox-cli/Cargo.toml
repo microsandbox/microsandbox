@@ -14,12 +14,17 @@ path = "bin/msb/main.rs"
 name = "msbrun"
 path = "bin/msbrun.rs"
 
+[[bin]]
+name = "msbserver"
+path = "bin/msbserver.rs"
+
 [lib]
 name = "microsandbox_cli"
 path = "lib/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 microsandbox-core = { version = "0.1.0-alpha.1", path = "../microsandbox-core", features = [
     "cli",
 ] }
@@ -35,6 +40,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 which = "7.0"
 console.workspace = true
+pretty-error-debug.workspace = true
+thiserror.workspace = true
+tower-http.workspace = true
 
 [dev-dependencies]
 serial_test = "3.2.0"

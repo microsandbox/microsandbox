@@ -1,8 +1,23 @@
+//! Error handling module for the microsandbox server.
+//!
+//! This module provides comprehensive error handling functionality including:
+//! - Custom error types for server operations
+//! - Error codes and responses for API communication
+//! - Authentication and authorization error handling
+//! - Validation error handling
+//!
+//! The module implements:
+//! - Error types with detailed error messages
+//! - HTTP status code mapping
+//! - Serializable error responses for API clients
+//! - Structured error codes for frontend handling
+
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
+use microsandbox_utils::MicrosandboxUtilsError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::error;
@@ -10,6 +25,65 @@ use tracing::error;
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// The result of a server-related operation.
+pub type MicrosandboxServerResult<T> = Result<T, MicrosandboxServerError>;
+
+/// Error returned when an unexpected internal error occurs
+#[derive(Error, Debug)]
+pub enum MicrosandboxServerError {
+    /// Error returned when the server fails to start
+    #[error("Server failed to start: {0}")]
+    StartError(String),
+
+    /// Error returned when the server fails to stop
+    #[error("Server failed to stop: {0}")]
+    StopError(String),
+
+    /// Error returned when the server key fails to generate
+    #[error("Server key failed to generate: {0}")]
+    KeyGenError(String),
+
+    /// Error returned when the server configuration fails
+    #[error("Server configuration failed: {0}")]
+    ConfigError(String),
+
+    /// Error returned when an I/O error occurs
+    #[error(transparent)]
+    IoError(#[from] std::io::Error),
+
+    /// Error returned from the microsandbox-utils crate
+    #[error(transparent)]
+    Utils(#[from] MicrosandboxUtilsError),
+}
+
+/// Represents all possible errors that can occur in the application
+#[derive(Error, Debug)]
+pub enum ServerError {
+    /// Error returned when authentication fails
+    #[error("Authentication failed: {0}")]
+    Authentication(AuthenticationError),
+
+    /// Error returned when a user doesn't have permission to access a resource
+    #[error("Authorization failed: {0}")]
+    AuthorizationError(AuthorizationError),
+
+    /// Error returned when a requested resource is not found
+    #[error("Resource not found: {0}")]
+    NotFound(String),
+
+    /// Error returned when a database operation fails
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+
+    /// Error returned when request validation fails (e.g., invalid input format)
+    #[error("Validation error: {0}")]
+    ValidationError(ValidationError),
+
+    /// Error returned when an unexpected internal error occurs
+    #[error("Internal server error: {0}")]
+    InternalError(String),
+}
 
 /// Error code structure to be sent to frontend
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -63,34 +137,6 @@ pub enum ErrorCode {
     DatabaseError = 5001,
     /// Error returned when an unexpected server error occurs
     InternalServerError = 5002,
-}
-
-/// Represents all possible errors that can occur in the application
-#[derive(Error, Debug)]
-pub enum ServerError {
-    /// Error returned when authentication fails
-    #[error("Authentication failed: {0}")]
-    Authentication(AuthenticationError),
-
-    /// Error returned when a user doesn't have permission to access a resource
-    #[error("Authorization failed: {0}")]
-    AuthorizationError(AuthorizationError),
-
-    /// Error returned when a requested resource is not found
-    #[error("Resource not found: {0}")]
-    NotFound(String),
-
-    /// Error returned when a database operation fails
-    #[error("Database error: {0}")]
-    DatabaseError(String),
-
-    /// Error returned when request validation fails (e.g., invalid input format)
-    #[error("Validation error: {0}")]
-    ValidationError(ValidationError),
-
-    /// Error returned when an unexpected internal error occurs
-    #[error("Internal server error: {0}")]
-    InternalError(String),
 }
 
 /// Represents different types of authentication failures

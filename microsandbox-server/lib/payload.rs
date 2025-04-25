@@ -1,3 +1,17 @@
+//! Request and response payload definitions for the microsandbox server.
+//!
+//! This module defines the data structures for:
+//! - API request payloads for sandbox operations
+//! - API response payloads for operation results
+//! - Error response structures and types
+//! - Status message formatting
+//!
+//! The module implements:
+//! - Request/response serialization and deserialization
+//! - Structured error responses with type categorization
+//! - Success message formatting for sandbox operations
+//! - Detailed error information handling
+
 use serde::{Deserialize, Serialize};
 
 //--------------------------------------------------------------------------------------------------

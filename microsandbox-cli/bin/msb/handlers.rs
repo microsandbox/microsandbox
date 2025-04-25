@@ -1,13 +1,16 @@
 use clap::{error::ErrorKind, CommandFactory};
-use microsandbox_cli::{AnsiStyles, MicrosandboxArgs, SelfAction};
+use microsandbox_cli::{
+    AnsiStyles, MicrosandboxArgs, MicrosandboxCliError, MicrosandboxCliResult, SelfAction,
+};
 use microsandbox_core::{
     management::{
         config::{self, Component, ComponentType},
         home, menv, orchestra, sandbox, toolchain,
     },
     oci::Reference,
-    MicrosandboxError, MicrosandboxResult,
+    MicrosandboxError,
 };
+use microsandbox_server::MicrosandboxServerResult;
 use microsandbox_utils::DEFAULT_SHELL;
 use std::path::PathBuf;
 use typed_path::Utf8UnixPathBuf;
@@ -66,7 +69,7 @@ pub async fn add_subcommand(
     scope: Option<String>,
     path: Option<PathBuf>,
     config: Option<String>,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "add", Some("[NAMES]"));
     unsupported_build_group_error(build, group, "add", Some("[NAMES]"));
 
@@ -87,7 +90,9 @@ pub async fn add_subcommand(
         scope,
     };
 
-    config::add(&names, &component, path.as_deref(), config.as_deref()).await
+    config::add(&names, &component, path.as_deref(), config.as_deref()).await?;
+
+    Ok(())
 }
 
 pub async fn remove_subcommand(
@@ -97,7 +102,7 @@ pub async fn remove_subcommand(
     names: Vec<String>,
     path: Option<PathBuf>,
     config: Option<String>,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "remove", Some("[NAMES]"));
     unsupported_build_group_error(build, group, "remove", Some("[NAMES]"));
     config::remove(
@@ -106,7 +111,9 @@ pub async fn remove_subcommand(
         path.as_deref(),
         config.as_deref(),
     )
-    .await
+    .await?;
+
+    Ok(())
 }
 
 pub async fn list_subcommand(
@@ -115,7 +122,7 @@ pub async fn list_subcommand(
     group: bool,
     path: Option<PathBuf>,
     config: Option<String>,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "list", None);
     unsupported_build_group_error(build, group, "list", None);
     let names = config::list(ComponentType::Sandbox, path.as_deref(), config.as_deref()).await?;
@@ -129,7 +136,7 @@ pub async fn list_subcommand(
 pub async fn init_subcommand(
     path: Option<PathBuf>,
     path_with_flag: Option<PathBuf>,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     let path = match (path, path_with_flag) {
         (Some(path), None) => Some(path),
         (None, Some(path)) => Some(path),
@@ -163,7 +170,7 @@ pub async fn run_subcommand(
     detach: bool,
     exec: Option<String>,
     args: Vec<String>,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     if build && sandbox {
         MicrosandboxArgs::command()
             .override_usage(usage("run", Some("[NAME]"), Some("<ARGS>")))
@@ -218,7 +225,7 @@ pub async fn script_run_subcommand(
     config: Option<String>,
     detach: bool,
     args: Vec<String>,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     if build && sandbox {
         MicrosandboxArgs::command()
             .override_usage(usage(&script, Some("[NAME]"), Some("<ARGS>")))
@@ -245,7 +252,9 @@ pub async fn script_run_subcommand(
         None,
         true,
     )
-    .await
+    .await?;
+
+    Ok(())
 }
 
 pub async fn exe_subcommand(
@@ -259,7 +268,7 @@ pub async fn exe_subcommand(
     scope: Option<String>,
     exec: Option<String>,
     args: Vec<String>,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     let (image, script) = parse_name_and_script(&name);
     let image = image.parse::<Reference>()?;
 
@@ -290,7 +299,9 @@ pub async fn exe_subcommand(
         args,
         true,
     )
-    .await
+    .await?;
+
+    Ok(())
 }
 
 pub async fn up_subcommand(
@@ -300,11 +311,13 @@ pub async fn up_subcommand(
     names: Vec<String>,
     path: Option<PathBuf>,
     config: Option<String>,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "up", Some("[NAMES]"));
     unsupported_build_group_error(build, group, "up", Some("[NAMES]"));
 
-    orchestra::up(names, path.as_deref(), config.as_deref()).await
+    orchestra::up(names, path.as_deref(), config.as_deref()).await?;
+
+    Ok(())
 }
 
 pub async fn down_subcommand(
@@ -314,11 +327,13 @@ pub async fn down_subcommand(
     names: Vec<String>,
     path: Option<PathBuf>,
     config: Option<String>,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "down", Some("[NAMES]"));
     unsupported_build_group_error(build, group, "down", Some("[NAMES]"));
 
-    orchestra::down(names, path.as_deref(), config.as_deref()).await
+    orchestra::down(names, path.as_deref(), config.as_deref()).await?;
+
+    Ok(())
 }
 
 /// Handle the `log` subcommand to show logs for a specific sandbox
@@ -331,7 +346,7 @@ pub async fn log_subcommand(
     config_file: Option<String>,
     follow: bool,
     tail: Option<usize>,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "log", Some("[NAME]"));
     unsupported_build_group_error(build, group, "log", Some("[NAME]"));
 
@@ -362,7 +377,7 @@ pub async fn log_subcommand(
 
     // Check if log file exists
     if !log_path.exists() {
-        return Err(MicrosandboxError::LogNotFound(format!(
+        return Err(MicrosandboxCliError::NotFound(format!(
             "Log file not found at {}",
             log_path.display()
         )));
@@ -380,7 +395,7 @@ pub async fn log_subcommand(
         // Wait for the tail process
         let status = child.wait().await?;
         if !status.success() {
-            return Err(MicrosandboxError::ProcessWaitError(format!(
+            return Err(MicrosandboxCliError::ProcessWaitError(format!(
                 "tail process exited with status: {}",
                 status
             )));
@@ -421,7 +436,7 @@ pub async fn clean_subcommand(
     path: Option<PathBuf>,
     config: Option<String>,
     force: bool,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxCliResult<()> {
     if global || all {
         // Global cleanup - clean the microsandbox home directory
         home::clean().await?;
@@ -444,44 +459,37 @@ pub async fn clean_subcommand(
     Ok(())
 }
 
-// pub async fn server_start_subcommand(
-//     port: Option<u16>,
-//     path: Option<PathBuf>,
-//     disable_default: bool,
-//     secure: bool,
-//     key: Option<String>,
-//     detach: bool,
-// ) -> MicrosandboxResult<()> {
-//     if !secure && key.is_some() {
-//         MicrosandboxArgs::command()
-//             .override_usage(usage("server start", Some("[OPTIONS]"), None))
-//             .error(
-//                 ErrorKind::InvalidValue,
-//                 format!(
-//                     "cannot specify `{}` flag without `{}` flag",
-//                     "--key".literal(),
-//                     "--secure".literal(),
-//                 ),
-//             )
-//             .exit();
-//     }
+pub async fn server_start_subcommand(
+    port: Option<u16>,
+    namespace_dir: Option<PathBuf>,
+    dev_mode: bool,
+    key: Option<String>,
+    detach: bool,
+) -> MicrosandboxCliResult<()> {
+    microsandbox_server::start(key, port, namespace_dir, dev_mode, detach).await?;
+    Ok(())
+}
 
-//     server::start(port, path, disable_default, secure, key, detach).await
-// }
+pub async fn server_stop_subcommand() -> MicrosandboxServerResult<()> {
+    microsandbox_server::stop().await?;
+    Ok(())
+}
 
-// pub async fn server_keygen_subcommand(expire: Option<String>) -> MicrosandboxResult<()> {
-//     // Convert the string duration to chrono::Duration
-//     let duration = if let Some(expire_str) = expire {
-//         Some(parse_duration_string(&expire_str)?)
-//     } else {
-//         None
-//     };
+pub async fn server_keygen_subcommand(expire: Option<String>) -> MicrosandboxCliResult<()> {
+    // Convert the string duration to chrono::Duration
+    let duration = if let Some(expire_str) = expire {
+        Some(parse_duration_string(&expire_str)?)
+    } else {
+        None
+    };
 
-//     server::keygen(duration).await
-// }
+    microsandbox_server::keygen(duration).await?;
+
+    Ok(())
+}
 
 /// Handle the self subcommand, which manages microsandbox itself
-pub async fn self_subcommand(action: SelfAction) -> MicrosandboxResult<()> {
+pub async fn self_subcommand(action: SelfAction) -> MicrosandboxCliResult<()> {
     match action {
         SelfAction::Upgrade => {
             MicrosandboxArgs::command()
@@ -595,11 +603,11 @@ fn parse_name_and_script(name_and_script: &str) -> (&str, Option<&str>) {
 }
 
 /// Parse a duration string like "1s", "1m", "3h", "2d" into a chrono::Duration
-fn parse_duration_string(duration_str: &str) -> MicrosandboxResult<chrono::Duration> {
+fn parse_duration_string(duration_str: &str) -> MicrosandboxCliResult<chrono::Duration> {
     let duration_str = duration_str.trim();
 
     if duration_str.is_empty() {
-        return Err(MicrosandboxError::InvalidArgument(
+        return Err(MicrosandboxCliError::InvalidArgument(
             "Empty duration string".to_string(),
         ));
     }
@@ -613,14 +621,14 @@ fn parse_duration_string(duration_str: &str) -> MicrosandboxResult<chrono::Durat
     );
 
     if value_str.is_empty() {
-        return Err(MicrosandboxError::InvalidArgument(format!(
+        return Err(MicrosandboxCliError::InvalidArgument(format!(
             "Invalid duration format: {}. Expected format like 1s, 2m, 3h, 4d, 5w, 6mo, 7y",
             duration_str
         )));
     }
 
     let value: i64 = value_str.parse().map_err(|_| {
-        MicrosandboxError::InvalidArgument(format!(
+        MicrosandboxCliError::InvalidArgument(format!(
             "Invalid numeric value in duration: {}",
             value_str
         ))
@@ -629,7 +637,7 @@ fn parse_duration_string(duration_str: &str) -> MicrosandboxResult<chrono::Durat
     // Safety check for very large numbers
     if value < 0 || value > 8760 {
         // 8760 is the number of hours in a year
-        return Err(MicrosandboxError::InvalidArgument(format!(
+        return Err(MicrosandboxCliError::InvalidArgument(format!(
             "Duration value too large or negative: {}. Maximum allowed is 8760 hours (1 year)",
             value
         )));
@@ -650,7 +658,7 @@ fn parse_duration_string(duration_str: &str) -> MicrosandboxResult<chrono::Durat
             Ok(chrono::Duration::days(value * 365))
         }
         "" => Ok(chrono::Duration::hours(value)), // Default to hours if no unit specified
-        _ => Err(MicrosandboxError::InvalidArgument(format!(
+        _ => Err(MicrosandboxCliError::InvalidArgument(format!(
             "Invalid duration unit: {}. Expected one of: s, m, h, d, w, mo, y",
             unit
         ))),

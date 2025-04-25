@@ -172,6 +172,7 @@ install_files() {
     info "Installing executables..."
     install -m 755 msb "$BIN_DIR/" || { error "Failed to install msb"; exit 1; }
     install -m 755 msbrun "$BIN_DIR/" || { error "Failed to install msbrun"; exit 1; }
+    install -m 755 msbserver "$BIN_DIR/" || { error "Failed to install msbserver"; exit 1; }
 
     # Install alias executables
     install -m 755 msr "$BIN_DIR/" || { error "Failed to install msr"; exit 1; }
@@ -181,7 +182,6 @@ install_files() {
     # Self codesign on macOS
     if [ "$OS" = "darwin" ]; then
         info "Attempting to codesign executables on macOS..."
-        codesign --force -s - "$BIN_DIR/msb" 2>/dev/null || true
         codesign --force -s - "$BIN_DIR/msbrun" 2>/dev/null || true
         info "Codesigning done"
     fi
@@ -325,6 +325,7 @@ main() {
     info "Executables installed to: $BIN_DIR"
     info "  - msb: main microsandbox command"
     info "  - msbrun: microsandbox runtime executable"
+    info "  - msbserver: microsandbox server executable"
     info "  - msr: alias for 'msb run'"
     info "  - msx: alias for 'msb exe'"
     info "  - msi: alias for 'msb install'"

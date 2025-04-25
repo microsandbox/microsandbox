@@ -1,9 +1,25 @@
+//! Configuration module for the microsandbox server.
+//!
+//! This module handles server configuration including:
+//! - Server settings and environment variables
+//! - JWT token configuration
+//! - Namespace management
+//! - Development and production mode settings
+//!
+//! The module provides:
+//! - Configuration structure for server settings
+//! - Default values for server configuration
+//! - Environment-based configuration loading
+//! - Namespace directory management
+
 use std::{net::SocketAddr, path::PathBuf, sync::LazyLock};
 
 use base64::{prelude::BASE64_STANDARD, Engine};
 use getset::Getters;
 use microsandbox_utils::env;
 use serde::Deserialize;
+
+use crate::{MicrosandboxServerError, MicrosandboxServerResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -23,6 +39,9 @@ pub const DEFAULT_JWT_HEADER: LazyLock<String> =
 ///
 /// Example: <MICROSANDBOX_HOME_DIR>/<NAMESPACES_SUBDIR>
 pub const NAMESPACES_SUBDIR: &str = "namespaces";
+
+/// The header name for the proxy authorization
+pub const PROXY_AUTH_HEADER: &str = "Proxy-Authorization";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -57,12 +76,16 @@ impl Config {
         port: u16,
         namespace_dir: Option<PathBuf>,
         dev_mode: bool,
-    ) -> anyhow::Result<Self> {
+    ) -> MicrosandboxServerResult<Self> {
         // Check key requirement based on dev mode
         let key = match key {
             Some(k) => Some(k),
             None if dev_mode => None,
-            None => anyhow::bail!("No key provided. A key is required when not in dev mode"),
+            None => {
+                return Err(MicrosandboxServerError::ConfigError(
+                    "No key provided. A key is required when not in dev mode".to_string(),
+                ));
+            }
         };
 
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
