@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use microsandbox_utils::{
     env, DEFAULT_MSBRUN_EXE_PATH, EXTRACTED_LAYER_SUFFIX, LAYERS_SUBDIR, LOG_SUBDIR,
     MICROSANDBOX_CONFIG_FILENAME, MICROSANDBOX_ENV_DIR, MSBRUN_EXE_ENV_VAR, OCI_DB_FILENAME,
-    PATCH_SUBDIR, RW_SUBDIR, SANDBOX_DB_FILENAME, SANDBOX_SCRIPT_DIR, SHELL_SCRIPT_NAME,
+    PATCH_SUBDIR, RW_SUBDIR, SANDBOX_DB_FILENAME, SANDBOX_DIR, SCRIPTS_DIR, SHELL_SCRIPT_NAME,
 };
 use sqlx::{Pool, Sqlite};
 use tempfile;
@@ -167,7 +167,7 @@ pub async fn run(
     // Otherwise, use the script name.
     let exec_path = match exec {
         Some(exec) => exec.to_string(),
-        None => format!("/{}/{}", SANDBOX_SCRIPT_DIR, script_name),
+        None => format!("/{}/{}/{}", SANDBOX_DIR, SCRIPTS_DIR, script_name),
     };
 
     tracing::info!("starting sandbox supervisor...");
@@ -525,7 +525,7 @@ async fn setup_image_rootfs(
 
     // Create the scripts directory
     let patch_dir = menv_path.join(PATCH_SUBDIR).join(&namespaced_name);
-    let script_dir = patch_dir.join(SANDBOX_SCRIPT_DIR);
+    let script_dir = patch_dir.join(SANDBOX_DIR).join(SCRIPTS_DIR);
     fs::create_dir_all(&script_dir).await?;
     tracing::info!("script_dir: {}", script_dir.display());
 
@@ -556,8 +556,8 @@ async fn setup_image_rootfs(
     if should_patch {
         tracing::info!("patching sandbox - config has changed");
 
-        // If `/.sandbox_scripts` exists at the top layer, delete it
-        let rw_scripts_dir = top_rw_path.join(SANDBOX_SCRIPT_DIR);
+        // If `/.sandbox` exists at the top layer, delete it
+        let rw_scripts_dir = top_rw_path.join(SANDBOX_DIR);
         if rw_scripts_dir.exists() {
             fs::remove_dir_all(&rw_scripts_dir).await?;
         }
@@ -601,7 +601,7 @@ async fn setup_native_rootfs(
     script_name: &str,
 ) -> MicrosandboxResult<Rootfs> {
     // Create the scripts directory
-    let scripts_dir = root_path.join(SANDBOX_SCRIPT_DIR);
+    let scripts_dir = root_path.join(SANDBOX_DIR).join(SCRIPTS_DIR);
     fs::create_dir_all(&scripts_dir).await?;
 
     // Validate script exists

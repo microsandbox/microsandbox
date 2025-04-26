@@ -50,7 +50,12 @@ pub const SANDBOX_DB_FILENAME: &str = "sandbox.db";
 pub const OCI_DB_FILENAME: &str = "oci.db";
 
 /// The directory on the microvm where sandbox scripts are stored
-pub const SANDBOX_SCRIPT_DIR: &str = ".sandbox_scripts";
+pub const SANDBOX_DIR: &str = ".sandbox";
+
+/// The directory on the microvm where sandbox scripts are stored
+///
+/// Example: <SANDBOX_DIR>/<SCRIPTS_DIR>
+pub const SCRIPTS_DIR: &str = "scripts";
 
 /// The suffix added to extracted layer directories
 ///
