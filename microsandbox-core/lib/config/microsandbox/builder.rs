@@ -56,7 +56,7 @@ pub struct MicrosandboxBuilder {
 /// - `exports`: The files to export
 /// - `scope`: The network scope for the sandbox
 /// - `proxy`: The proxy to use
-pub struct SandboxBuilder<I, S> {
+pub struct SandboxBuilder<I> {
     version: Option<Version>,
     meta: Option<Meta>,
     image: I,
@@ -69,8 +69,9 @@ pub struct SandboxBuilder<I, S> {
     groups: HashMap<String, SandboxGroup>,
     depends_on: Vec<String>,
     workdir: Option<Utf8UnixPathBuf>,
-    shell: S,
+    shell: Option<String>,
     scripts: HashMap<String, String>,
+    exec: Option<String>,
     imports: HashMap<String, Utf8UnixPathBuf>,
     exports: HashMap<String, Utf8UnixPathBuf>,
     scope: NetworkScope,
@@ -130,21 +131,21 @@ impl MicrosandboxBuilder {
     }
 }
 
-impl<I, S> SandboxBuilder<I, S> {
+impl<I> SandboxBuilder<I> {
     /// Sets the version of the sandbox
-    pub fn version(mut self, version: impl Into<Version>) -> SandboxBuilder<I, S> {
+    pub fn version(mut self, version: impl Into<Version>) -> SandboxBuilder<I> {
         self.version = Some(version.into());
         self
     }
 
     /// Sets the metadata for the sandbox
-    pub fn meta(mut self, meta: Meta) -> SandboxBuilder<I, S> {
+    pub fn meta(mut self, meta: Meta) -> SandboxBuilder<I> {
         self.meta = Some(meta);
         self
     }
 
     /// Sets the image for the sandbox
-    pub fn image(self, image: impl Into<ReferenceOrPath>) -> SandboxBuilder<ReferenceOrPath, S> {
+    pub fn image(self, image: impl Into<ReferenceOrPath>) -> SandboxBuilder<ReferenceOrPath> {
         SandboxBuilder {
             version: self.version,
             meta: self.meta,
@@ -160,6 +161,7 @@ impl<I, S> SandboxBuilder<I, S> {
             workdir: self.workdir,
             shell: self.shell,
             scripts: self.scripts,
+            exec: self.exec,
             imports: self.imports,
             exports: self.exports,
             scope: self.scope,
@@ -167,37 +169,37 @@ impl<I, S> SandboxBuilder<I, S> {
     }
 
     /// Sets the maximum amount of memory allowed for the sandbox
-    pub fn memory(mut self, memory: u32) -> SandboxBuilder<I, S> {
+    pub fn memory(mut self, memory: u32) -> SandboxBuilder<I> {
         self.memory = Some(memory);
         self
     }
 
     /// Sets the maximum number of CPUs allowed for the sandbox
-    pub fn cpus(mut self, cpus: u8) -> SandboxBuilder<I, S> {
+    pub fn cpus(mut self, cpus: u8) -> SandboxBuilder<I> {
         self.cpus = Some(cpus);
         self
     }
 
     /// Sets the volumes to mount for the sandbox
-    pub fn volumes(mut self, volumes: impl IntoIterator<Item = PathPair>) -> SandboxBuilder<I, S> {
+    pub fn volumes(mut self, volumes: impl IntoIterator<Item = PathPair>) -> SandboxBuilder<I> {
         self.volumes = volumes.into_iter().collect();
         self
     }
 
     /// Sets the ports to expose for the sandbox
-    pub fn ports(mut self, ports: impl IntoIterator<Item = PortPair>) -> SandboxBuilder<I, S> {
+    pub fn ports(mut self, ports: impl IntoIterator<Item = PortPair>) -> SandboxBuilder<I> {
         self.ports = ports.into_iter().collect();
         self
     }
 
     /// Sets the environment variables for the sandbox
-    pub fn envs(mut self, envs: impl IntoIterator<Item = EnvPair>) -> SandboxBuilder<I, S> {
+    pub fn envs(mut self, envs: impl IntoIterator<Item = EnvPair>) -> SandboxBuilder<I> {
         self.envs = envs.into_iter().collect();
         self
     }
 
     /// Sets the environment file for the sandbox
-    pub fn env_file(mut self, env_file: impl Into<Utf8UnixPathBuf>) -> SandboxBuilder<I, S> {
+    pub fn env_file(mut self, env_file: impl Into<Utf8UnixPathBuf>) -> SandboxBuilder<I> {
         self.env_file = Some(env_file.into());
         self
     }
@@ -206,55 +208,41 @@ impl<I, S> SandboxBuilder<I, S> {
     pub fn groups(
         mut self,
         groups: impl IntoIterator<Item = (String, SandboxGroup)>,
-    ) -> SandboxBuilder<I, S> {
+    ) -> SandboxBuilder<I> {
         self.groups = groups.into_iter().collect();
         self
     }
 
     /// Sets the sandboxes that the sandbox depends on
-    pub fn depends_on(
-        mut self,
-        depends_on: impl IntoIterator<Item = String>,
-    ) -> SandboxBuilder<I, S> {
+    pub fn depends_on(mut self, depends_on: impl IntoIterator<Item = String>) -> SandboxBuilder<I> {
         self.depends_on = depends_on.into_iter().collect();
         self
     }
 
     /// Sets the working directory for the sandbox
-    pub fn workdir(mut self, workdir: impl Into<Utf8UnixPathBuf>) -> SandboxBuilder<I, S> {
+    pub fn workdir(mut self, workdir: impl Into<Utf8UnixPathBuf>) -> SandboxBuilder<I> {
         self.workdir = Some(workdir.into());
         self
     }
 
     /// Sets the shell for the sandbox
-    pub fn shell(self, shell: impl AsRef<str>) -> SandboxBuilder<I, String> {
-        SandboxBuilder {
-            version: self.version,
-            meta: self.meta,
-            image: self.image,
-            memory: self.memory,
-            cpus: self.cpus,
-            volumes: self.volumes,
-            ports: self.ports,
-            envs: self.envs,
-            env_file: self.env_file,
-            groups: self.groups,
-            depends_on: self.depends_on,
-            workdir: self.workdir,
-            shell: shell.as_ref().to_string(),
-            scripts: self.scripts,
-            imports: self.imports,
-            exports: self.exports,
-            scope: self.scope,
-        }
+    pub fn shell(mut self, shell: impl AsRef<str>) -> SandboxBuilder<I> {
+        self.shell = Some(shell.as_ref().to_string());
+        self
     }
 
     /// Sets the scripts for the sandbox
     pub fn scripts(
         mut self,
         scripts: impl IntoIterator<Item = (String, String)>,
-    ) -> SandboxBuilder<I, S> {
+    ) -> SandboxBuilder<I> {
         self.scripts = scripts.into_iter().collect();
+        self
+    }
+
+    /// Sets the exec command for the sandbox
+    pub fn exec(mut self, exec: impl AsRef<str>) -> SandboxBuilder<I> {
+        self.exec = Some(exec.as_ref().to_string());
         self
     }
 
@@ -262,7 +250,7 @@ impl<I, S> SandboxBuilder<I, S> {
     pub fn imports(
         mut self,
         imports: impl IntoIterator<Item = (String, Utf8UnixPathBuf)>,
-    ) -> SandboxBuilder<I, S> {
+    ) -> SandboxBuilder<I> {
         self.imports = imports.into_iter().collect();
         self
     }
@@ -271,19 +259,19 @@ impl<I, S> SandboxBuilder<I, S> {
     pub fn exports(
         mut self,
         exports: impl IntoIterator<Item = (String, Utf8UnixPathBuf)>,
-    ) -> SandboxBuilder<I, S> {
+    ) -> SandboxBuilder<I> {
         self.exports = exports.into_iter().collect();
         self
     }
 
     /// Sets the network scope for the sandbox
-    pub fn scope(mut self, scope: NetworkScope) -> SandboxBuilder<I, S> {
+    pub fn scope(mut self, scope: NetworkScope) -> SandboxBuilder<I> {
         self.scope = scope;
         self
     }
 }
 
-impl SandboxBuilder<ReferenceOrPath, String> {
+impl SandboxBuilder<ReferenceOrPath> {
     /// Builds the sandbox
     pub fn build(self) -> Sandbox {
         Sandbox {
@@ -300,6 +288,7 @@ impl SandboxBuilder<ReferenceOrPath, String> {
             workdir: self.workdir,
             shell: self.shell,
             scripts: self.scripts,
+            exec: self.exec,
             imports: self.imports,
             exports: self.exports,
             scope: self.scope,
@@ -311,7 +300,7 @@ impl SandboxBuilder<ReferenceOrPath, String> {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl Default for SandboxBuilder<(), String> {
+impl Default for SandboxBuilder<()> {
     fn default() -> Self {
         Self {
             version: None,
@@ -326,8 +315,9 @@ impl Default for SandboxBuilder<(), String> {
             groups: HashMap::new(),
             depends_on: Vec::new(),
             workdir: None,
-            shell: DEFAULT_SHELL.to_string(),
+            shell: Some(DEFAULT_SHELL.to_string()),
             scripts: HashMap::new(),
+            exec: None,
             imports: HashMap::new(),
             exports: HashMap::new(),
             scope: NetworkScope::default(),

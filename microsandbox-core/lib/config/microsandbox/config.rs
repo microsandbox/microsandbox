@@ -1,7 +1,6 @@
 //! Microsandbox configuration types and helpers.
 
 use std::{
-    borrow::Cow,
     collections::HashMap,
     fmt::{self, Display},
     net::Ipv4Addr,
@@ -10,7 +9,6 @@ use std::{
 
 use getset::Getters;
 use ipnetwork::Ipv4Network as Ipv4Net;
-use microsandbox_utils::DEFAULT_SHELL;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
@@ -174,14 +172,19 @@ pub struct Build {
     pub(crate) workdir: Option<Utf8UnixPathBuf>,
 
     /// The shell to use.
-    #[serde(default = "Build::default_shell")]
-    #[builder(default = Build::default_shell())]
-    pub(crate) shell: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[builder(default, setter(strip_option))]
+    pub(crate) shell: Option<String>,
 
     /// The scripts that can be run.
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     #[builder(default)]
     pub(crate) scripts: HashMap<String, String>,
+
+    /// The exec command to run.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[builder(default, setter(strip_option))]
+    pub(crate) exec: Option<String>,
 
     /// The files to import.
     #[serde(
@@ -304,11 +307,16 @@ pub struct Sandbox {
     pub(crate) workdir: Option<Utf8UnixPathBuf>,
 
     /// The shell to use.
-    pub(crate) shell: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) shell: Option<String>,
 
     /// The scripts that can be run.
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub(crate) scripts: HashMap<String, String>,
+
+    /// The exec command to run.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) exec: Option<String>,
 
     /// The files to import.
     #[serde(
@@ -403,7 +411,11 @@ impl Microsandbox {
 
     /// Validates the configuration.
     pub fn validate(&self) -> MicrosandboxResult<()> {
-        // TODO: Add validation logic here
+        // Validate all sandboxes
+        for sandbox in self.sandboxes.values() {
+            sandbox.validate()?;
+        }
+
         Ok(())
     }
 
@@ -415,31 +427,25 @@ impl Microsandbox {
     }
 }
 
-impl Build {
-    /// Returns the default shell.
-    pub fn default_shell() -> String {
-        DEFAULT_SHELL.to_string()
-    }
-}
-
 impl Sandbox {
     /// Returns a builder for the sandbox.
     ///
     /// See [`SandboxBuilder`] for options.
-    pub fn builder() -> SandboxBuilder<(), String> {
+    pub fn builder() -> SandboxBuilder<()> {
         SandboxBuilder::default()
     }
 
-    /// Returns the scripts defined for the sandbox, with the default script added if it is not
-    /// defined.
-    pub fn get_full_scripts(&self) -> Cow<HashMap<String, String>> {
-        if self.scripts.contains_key(START_SCRIPT_NAME) {
-            Cow::Borrowed(&self.scripts)
-        } else {
-            let mut scripts = self.scripts.clone();
-            scripts.insert(START_SCRIPT_NAME.to_string(), self.shell.clone());
-            Cow::Owned(scripts)
+    /// Validates the configuration.
+    pub fn validate(&self) -> MicrosandboxResult<()> {
+        // Error if start and exec are both not defined
+        if self.scripts.get(START_SCRIPT_NAME).is_none()
+            && self.exec.is_none()
+            && self.shell.is_none()
+        {
+            return Err(MicrosandboxError::MissingStartOrExecOrShell);
         }
+
+        Ok(())
     }
 }
 
@@ -613,7 +619,6 @@ mod tests {
             sandboxes:
               test:
                 image: "alpine:latest"
-                shell: "/bin/sh"
         "#;
 
         let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
@@ -627,40 +632,9 @@ mod tests {
         assert!(sandbox.ports.is_empty());
         assert!(sandbox.envs.is_empty());
         assert!(sandbox.workdir.is_none());
-        assert_eq!(sandbox.shell, "/bin/sh");
+        assert!(sandbox.shell.is_none());
         assert!(sandbox.scripts.is_empty());
         assert_eq!(sandbox.scope, NetworkScope::Group);
-    }
-
-    #[test]
-    fn test_microsandbox_config_default_script_behavior() {
-        let yaml = r#"
-            sandboxes:
-              test1:
-                image: "alpine:latest"
-                shell: "/bin/sh"
-              test2:
-                image: "alpine:latest"
-                shell: "/bin/sh"
-                scripts:
-                  start: "echo 'custom start'"
-        "#;
-
-        let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
-        let sandboxes = &config.sandboxes;
-
-        // Test sandbox with no scripts (should use shell as default)
-        let sandbox1 = sandboxes.get("test1").unwrap();
-        let scripts1 = sandbox1.get_full_scripts();
-        assert_eq!(scripts1.get(START_SCRIPT_NAME).unwrap(), "/bin/sh");
-
-        // Test sandbox with explicit start script
-        let sandbox2 = sandboxes.get("test2").unwrap();
-        let scripts2 = sandbox2.get_full_scripts();
-        assert_eq!(
-            scripts2.get(START_SCRIPT_NAME).unwrap(),
-            "echo 'custom start'"
-        );
     }
 
     #[test]
@@ -757,7 +731,7 @@ mod tests {
             sandbox.workdir.as_ref().unwrap(),
             &Utf8UnixPathBuf::from("/app")
         );
-        assert_eq!(sandbox.shell, "/bin/sh");
+        assert_eq!(sandbox.shell, Some("/bin/sh".to_string()));
         assert_eq!(
             sandbox.scripts.get("start").unwrap(),
             "echo 'Hello, World!'"
@@ -858,7 +832,7 @@ mod tests {
             base_build.workdir.as_ref().unwrap(),
             &Utf8UnixPathBuf::from("/build")
         );
-        assert_eq!(base_build.shell, "/bin/bash");
+        assert_eq!(base_build.shell, Some("/bin/bash".to_string()));
         assert_eq!(
             base_build.scripts.get("build").unwrap(),
             "pip install -r requirements.txt"

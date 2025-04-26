@@ -3,6 +3,7 @@ use microsandbox_cli::{
     AnsiStyles, MicrosandboxArgs, MicrosandboxCliError, MicrosandboxCliResult, SelfAction,
 };
 use microsandbox_core::{
+    config::START_SCRIPT_NAME,
     management::{
         config::{self, Component, ComponentType},
         home, menv, orchestra, sandbox, toolchain,
@@ -10,8 +11,7 @@ use microsandbox_core::{
     oci::Reference,
 };
 use microsandbox_server::MicrosandboxServerResult;
-use microsandbox_utils::DEFAULT_SHELL;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 use typed_path::Utf8UnixPathBuf;
 
 //--------------------------------------------------------------------------------------------------
@@ -63,6 +63,7 @@ pub async fn add_subcommand(
     workdir: Option<Utf8UnixPathBuf>,
     shell: Option<String>,
     scripts: Vec<(String, String)>,
+    start: Option<String>,
     imports: Vec<(String, String)>,
     exports: Vec<(String, String)>,
     scope: Option<String>,
@@ -71,6 +72,15 @@ pub async fn add_subcommand(
 ) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "add", Some("[NAMES]"));
     unsupported_build_group_error(build, group, "add", Some("[NAMES]"));
+
+    let mut scripts = scripts
+        .into_iter()
+        .map(|(k, v)| (k, v.into()))
+        .collect::<HashMap<String, String>>();
+
+    if let Some(start) = start {
+        scripts.insert(START_SCRIPT_NAME.to_string(), start.into());
+    }
 
     let component = Component::Sandbox {
         image,
@@ -82,8 +92,8 @@ pub async fn add_subcommand(
         env_file,
         depends_on,
         workdir,
-        shell: Some(shell.unwrap_or(DEFAULT_SHELL.to_string())),
-        scripts: scripts.into_iter().map(|(k, v)| (k, v.into())).collect(),
+        shell,
+        scripts,
         imports: imports.into_iter().map(|(k, v)| (k, v.into())).collect(),
         exports: exports.into_iter().map(|(k, v)| (k, v.into())).collect(),
         scope,

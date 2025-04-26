@@ -11,7 +11,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use microsandbox_utils::{
-    env, DEFAULT_MSBRUN_EXE_PATH, EXTRACTED_LAYER_SUFFIX, LAYERS_SUBDIR, LOG_SUBDIR,
+    env, DEFAULT_MSBRUN_EXE_PATH, DEFAULT_SHELL, EXTRACTED_LAYER_SUFFIX, LAYERS_SUBDIR, LOG_SUBDIR,
     MICROSANDBOX_CONFIG_FILENAME, MICROSANDBOX_ENV_DIR, MSBRUN_EXE_ENV_VAR, OCI_DB_FILENAME,
     PATCH_SUBDIR, RW_SUBDIR, SANDBOX_DB_FILENAME, SANDBOX_DIR, SCRIPTS_DIR, SHELL_SCRIPT_NAME,
 };
@@ -96,11 +96,6 @@ pub async fn run(
     exec: Option<&str>,
     use_image_defaults: bool,
 ) -> MicrosandboxResult<()> {
-    let script_name = match script_name {
-        Some(script_name) => script_name,
-        None => START_SCRIPT_NAME,
-    };
-
     // Load the configuration
     let (config, canonical_project_dir, config_file) =
         config::load_config(project_dir, config_file).await?;
@@ -139,7 +134,6 @@ pub async fn run(
                 &config_file,
                 &config_last_modified,
                 &sandbox_pool,
-                script_name,
             )
             .await?
         }
@@ -152,23 +146,45 @@ pub async fn run(
                 &config_file,
                 &config_last_modified,
                 &sandbox_pool,
-                script_name,
                 use_image_defaults,
             )
             .await?
         }
     };
 
+    let exec_path = match exec {
+        Some(exec) => exec.to_string(),
+        None => match script_name {
+            Some(script_name) => {
+                // Validate script exists
+                if script_name != SHELL_SCRIPT_NAME
+                    && !sandbox_config.get_scripts().contains_key(script_name)
+                {
+                    return Err(MicrosandboxError::ScriptNotFoundInSandbox(
+                        script_name.to_string(),
+                        sandbox_name.to_string(),
+                    ));
+                }
+
+                format!("{}/{}/{}", SANDBOX_DIR, SCRIPTS_DIR, script_name)
+            }
+            None => match sandbox_config.get_exec() {
+                Some(exec) => exec.to_string(),
+                None => match sandbox_config.get_scripts().get(START_SCRIPT_NAME) {
+                    Some(script) => script.to_string(),
+                    None => sandbox_config
+                        .get_shell()
+                        .as_ref()
+                        .ok_or(MicrosandboxError::MissingStartOrExecOrShell)?
+                        .to_string(),
+                },
+            },
+        },
+    };
+
     // Log directory
     let log_dir = menv_path.join(LOG_SUBDIR);
     fs::create_dir_all(&log_dir).await?;
-
-    // Get the exec path. If exec is provided, use it as the exec path.
-    // Otherwise, use the script name.
-    let exec_path = match exec {
-        Some(exec) => exec.to_string(),
-        None => format!("/{}/{}/{}", SANDBOX_DIR, SCRIPTS_DIR, script_name),
-    };
 
     tracing::info!("starting sandbox supervisor...");
     tracing::debug!("rootfs: {:?}", rootfs);
@@ -479,7 +495,6 @@ async fn setup_image_rootfs(
     config_file: &str,
     config_last_modified: &DateTime<Utc>,
     sandbox_pool: &Pool<Sqlite>,
-    script_name: &str,
     use_image_defaults: bool,
 ) -> MicrosandboxResult<Rootfs> {
     // Pull the image from the registry
@@ -529,15 +544,6 @@ async fn setup_image_rootfs(
     fs::create_dir_all(&script_dir).await?;
     tracing::info!("script_dir: {}", script_dir.display());
 
-    // Validate script exists
-    let scripts = sandbox_config.get_full_scripts();
-    if script_name != SHELL_SCRIPT_NAME && !scripts.contains_key(script_name) {
-        return Err(MicrosandboxError::ScriptNotFoundInSandbox(
-            script_name.to_string(),
-            sandbox_name.to_string(),
-        ));
-    }
-
     // Create the top root path
     let top_rw_path = menv_path.join(RW_SUBDIR).join(&namespaced_name);
     fs::create_dir_all(&top_rw_path).await?;
@@ -563,8 +569,15 @@ async fn setup_image_rootfs(
         }
 
         // Patch with sandbox scripts
-        rootfs::patch_with_sandbox_scripts(&script_dir, scripts, sandbox_config.get_shell())
-            .await?;
+        rootfs::patch_with_sandbox_scripts(
+            &script_dir,
+            &sandbox_config.get_scripts(),
+            sandbox_config
+                .get_shell()
+                .as_ref()
+                .unwrap_or(&DEFAULT_SHELL.to_string()),
+        )
+        .await?;
 
         // Patch with default DNS settings - check all layers
         let mut all_layers = layer_paths.clone();
@@ -598,20 +611,10 @@ async fn setup_native_rootfs(
     config_file: &str,
     config_last_modified: &DateTime<Utc>,
     sandbox_pool: &Pool<Sqlite>,
-    script_name: &str,
 ) -> MicrosandboxResult<Rootfs> {
     // Create the scripts directory
     let scripts_dir = root_path.join(SANDBOX_DIR).join(SCRIPTS_DIR);
     fs::create_dir_all(&scripts_dir).await?;
-
-    // Validate script exists
-    let scripts = sandbox_config.get_full_scripts();
-    if script_name != SHELL_SCRIPT_NAME && !scripts.contains_key(script_name) {
-        return Err(MicrosandboxError::ScriptNotFoundInSandbox(
-            script_name.to_string(),
-            sandbox_name.to_string(),
-        ));
-    }
 
     // Check if we need to patch rootfs (scripts, volumes, etc.)
     let should_patch = has_sandbox_config_changed(
@@ -627,8 +630,15 @@ async fn setup_native_rootfs(
         tracing::info!("patching sandbox - config has changed");
 
         // Patch with sandbox scripts
-        rootfs::patch_with_sandbox_scripts(&scripts_dir, scripts, sandbox_config.get_shell())
-            .await?;
+        rootfs::patch_with_sandbox_scripts(
+            &scripts_dir,
+            &sandbox_config.get_scripts(),
+            sandbox_config
+                .get_shell()
+                .as_ref()
+                .unwrap_or(&DEFAULT_SHELL.to_string()),
+        )
+        .await?;
 
         // Patch with default DNS settings - for native rootfs, just pass the single root path
         rootfs::patch_with_default_dns_settings(&[root_path.to_path_buf()]).await?;

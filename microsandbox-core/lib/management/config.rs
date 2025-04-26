@@ -14,7 +14,7 @@ use tokio::fs;
 use typed_path::Utf8UnixPathBuf;
 
 use crate::{
-    config::{EnvPair, Microsandbox, PathSegment, PortPair, Sandbox, START_SCRIPT_NAME},
+    config::{EnvPair, Microsandbox, PathSegment, PortPair, Sandbox},
     oci::Reference,
     MicrosandboxError, MicrosandboxResult,
 };
@@ -553,21 +553,18 @@ pub async fn apply_image_defaults(
             }
         }
 
-        // Apply entrypoint and cmd as start script if no start script is defined
-        let shell = sandbox_config.shell.clone();
-        if !sandbox_config.scripts.contains_key(START_SCRIPT_NAME) {
-            let mut script_content = String::new();
+        // Apply entrypoint and cmd as exec if no exec is defined
+        if sandbox_config.get_exec().is_none() {
+            let mut cmd_line = String::new();
+            let mut has_entrypoint_or_cmd = false;
 
             // Try to use entrypoint and cmd from image config
-            let mut has_entrypoint_or_cmd = false;
             if let Some(entrypoint_json) = &config.config_entrypoint_json {
                 if let Ok(entrypoint) = serde_json::from_str::<Vec<String>>(entrypoint_json) {
                     if !entrypoint.is_empty() {
                         has_entrypoint_or_cmd = true;
-                        script_content.push_str(&format!("#!{}\n", shell));
 
                         // Format the entrypoint command with proper escaping
-                        let mut cmd_line = String::new();
                         for (i, arg) in entrypoint.iter().enumerate() {
                             if i > 0 {
                                 cmd_line.push(' ');
@@ -602,19 +599,15 @@ pub async fn apply_image_defaults(
                             }
                         }
 
-                        tracing::debug!("entrypoint start script content: {}", script_content);
-
-                        script_content.push_str(&cmd_line);
+                        tracing::debug!("entrypoint exec content: {}", cmd_line);
                     }
                 }
             } else if let Some(cmd_json) = &config.config_cmd_json {
                 if let Ok(cmd) = serde_json::from_str::<Vec<String>>(cmd_json) {
                     if !cmd.is_empty() {
                         has_entrypoint_or_cmd = true;
-                        script_content.push_str(&format!("#!{}\n", shell));
 
                         // Format the cmd command with proper escaping
-                        let mut cmd_line = String::new();
                         for (i, arg) in cmd.iter().enumerate() {
                             if i > 0 {
                                 cmd_line.push(' ');
@@ -627,23 +620,20 @@ pub async fn apply_image_defaults(
                             }
                         }
 
-                        tracing::debug!("cmd start script content: {}", script_content);
-
-                        script_content.push_str(&cmd_line);
+                        tracing::debug!("cmd exec content: {}", cmd_line);
                     }
                 }
             }
 
-            // If no entrypoint or cmd, use shell as fallback
-            if !has_entrypoint_or_cmd {
-                tracing::debug!("using shell as fallback start script");
-                script_content = shell;
+            // If we found an entrypoint or cmd, set it as the exec
+            if has_entrypoint_or_cmd {
+                tracing::debug!("setting exec to: {}", cmd_line);
+                sandbox_config.exec = Some(cmd_line);
+            } else if let Some(shell_value) = &sandbox_config.shell {
+                // If no entrypoint or cmd, use shell as fallback
+                tracing::debug!("using shell as fallback exec");
+                sandbox_config.exec = Some(shell_value.clone());
             }
-
-            // Add the script to the sandbox config
-            sandbox_config
-                .scripts
-                .insert(START_SCRIPT_NAME.to_string(), script_content);
         }
 
         // Combine exposed ports

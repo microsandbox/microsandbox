@@ -262,7 +262,7 @@ pub enum MicrosandboxError {
     NotImplemented(String),
 
     /// An error that occurred when a sandbox was not found in the configuration
-    #[error("cannot find sandbox: '{0}' at '{1}'")]
+    #[error("cannot find sandbox: '{0}' in '{1}'")]
     SandboxNotFoundInConfig(String, PathBuf),
 
     /// An error that occurs when an invalid log level is used.
@@ -288,6 +288,10 @@ pub enum MicrosandboxError {
     /// An error that occurred when an invalid network scope was used.
     #[error("invalid network scope: {0}")]
     InvalidNetworkScope(String),
+
+    /// An error that occurred when a start script or exec command or shell is missing.
+    #[error("missing start script or exec command or shell")]
+    MissingStartOrExecOrShell,
 }
 
 /// An error that occurred when an invalid MicroVm configuration was used.

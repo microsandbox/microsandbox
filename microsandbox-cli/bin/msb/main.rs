@@ -55,6 +55,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             workdir,
             shell,
             scripts,
+            start,
             imports,
             exports,
             scope,
@@ -63,7 +64,7 @@ async fn main() -> MicrosandboxCliResult<()> {
         }) => {
             handlers::add_subcommand(
                 sandbox, build, group, names, image, memory, cpus, volumes, ports, envs, env_file,
-                depends_on, workdir, shell, scripts, imports, exports, scope, path, config,
+                depends_on, workdir, shell, scripts, start, imports, exports, scope, path, config,
             )
             .await?;
         }

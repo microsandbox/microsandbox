@@ -120,6 +120,10 @@ pub enum MicrosandboxSubcommand {
         #[arg(long = "script", name = "SCRIPT", value_parser = parse_key_val::<String, String>)]
         scripts: Vec<(String, String)>,
 
+        /// Start script
+        #[arg(long)]
+        start: Option<String>,
+
         /// Files to import, format: <name>=<path>
         #[arg(long = "import", name = "IMPORT", value_parser = parse_key_val::<String, String>)]
         imports: Vec<(String, String)>,

@@ -5,7 +5,6 @@
 //! Container Initiative) specifications.
 
 use std::{
-    borrow::Cow,
     collections::HashMap,
     fs::Permissions,
     os::unix::fs::PermissionsExt,
@@ -86,7 +85,7 @@ impl Drop for PermissionGuard {
 /// * `shell_path` - Path to the shell binary within the rootfs (e.g. "/bin/sh")
 pub async fn patch_with_sandbox_scripts(
     scripts_dir: &Path,
-    scripts: Cow<'_, HashMap<String, String>>,
+    scripts: &HashMap<String, String>,
     shell_path: impl AsRef<Path>,
 ) -> MicrosandboxResult<()> {
     // Remove the scripts directory if it exists
