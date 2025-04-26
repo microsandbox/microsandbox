@@ -33,6 +33,7 @@ libc.workspace = true
 rand.workspace = true
 chrono.workspace = true
 jsonwebtoken.workspace = true
+microsandbox-core.workspace = true
 
 [features]
 default = []

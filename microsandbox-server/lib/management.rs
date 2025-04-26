@@ -17,7 +17,8 @@ use std::{path::PathBuf, process::Stdio};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{EncodingKey, Header};
 use microsandbox_utils::{
-    env, term, DEFAULT_MSERVER_EXE_PATH, MSERVER_EXE_ENV_VAR, SERVER_KEY_FILE, SERVER_PID_FILE,
+    env, term, DEFAULT_MSBSERVER_EXE_PATH, MSBSERVER_EXE_ENV_VAR, NAMESPACES_SUBDIR,
+    SERVER_KEY_FILE, SERVER_PID_FILE,
 };
 use rand::{distr::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,7 @@ const KEYGEN_MSG: &str = "Generate new API key";
 struct Claims {
     exp: u64,
     iat: u64,
+    namespace: String,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -69,6 +71,10 @@ pub async fn start(
     // Ensure microsandbox home directory exists
     let microsandbox_home_path = env::get_microsandbox_home_path();
     fs::create_dir_all(&microsandbox_home_path).await?;
+
+    // Ensure namespace directory exists
+    let namespace_path = microsandbox_home_path.join(NAMESPACES_SUBDIR);
+    fs::create_dir_all(&namespace_path).await?;
 
     #[cfg(feature = "cli")]
     let start_server_sp = term::create_spinner(START_SERVER_MSG.to_string(), None, None);
@@ -114,18 +120,21 @@ pub async fn start(
     }
 
     // Get the path to the msbrun executable
-    let mserver_path =
-        microsandbox_utils::path::resolve_env_path(MSERVER_EXE_ENV_VAR, &*DEFAULT_MSERVER_EXE_PATH)
-            .map_err(|e| {
-                #[cfg(feature = "cli")]
-                term::finish_with_error(&start_server_sp);
-                e
-            })?;
+    let msbserver_path = microsandbox_utils::path::resolve_env_path(
+        MSBSERVER_EXE_ENV_VAR,
+        &*DEFAULT_MSBSERVER_EXE_PATH,
+    )
+    .map_err(|e| {
+        #[cfg(feature = "cli")]
+        term::finish_with_error(&start_server_sp);
+        e
+    })?;
 
-    let mut command = Command::new(mserver_path);
+    let mut command = Command::new(msbserver_path);
 
-    // Store the port for later use in the success message
-    let server_port = port.unwrap_or(8080); // Default port is 8080 if not specified
+    if dev_mode {
+        command.arg("--dev");
+    }
 
     if let Some(port) = port {
         command.arg("--port").arg(port.to_string());
@@ -218,22 +227,6 @@ pub async fn start(
 
     #[cfg(feature = "cli")]
     start_server_sp.finish();
-
-    // Show success message with server address
-    #[cfg(feature = "cli")]
-    println!(
-        "Started sandbox server at {} (PID: {})",
-        console::style(format!("http://localhost:{}", server_port))
-            .cyan()
-            .underlined(),
-        pid
-    );
-
-    tracing::info!(
-        "Started sandbox server at http://localhost:{} (PID: {})",
-        server_port,
-        pid
-    );
 
     if detach {
         return Ok(());
@@ -382,16 +375,13 @@ pub async fn stop() -> MicrosandboxServerResult<()> {
     #[cfg(feature = "cli")]
     stop_server_sp.finish();
 
-    #[cfg(feature = "cli")]
-    println!("Stopped sandbox server (PID: {})", pid);
-
     tracing::info!("stopped sandbox server process (PID: {})", pid);
 
     Ok(())
 }
 
 /// Generate a new API key (JWT token)
-pub async fn keygen(expire: Option<Duration>) -> MicrosandboxServerResult<()> {
+pub async fn keygen(expire: Option<Duration>, namespace: String) -> MicrosandboxServerResult<()> {
     let microsandbox_home_path = env::get_microsandbox_home_path();
     let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
 
@@ -431,6 +421,7 @@ pub async fn keygen(expire: Option<Duration>) -> MicrosandboxServerResult<()> {
     let claims = Claims {
         exp: expiry.timestamp() as u64,
         iat: now.timestamp() as u64,
+        namespace,
     };
 
     // Encode the token
@@ -456,13 +447,17 @@ pub async fn keygen(expire: Option<Duration>) -> MicrosandboxServerResult<()> {
     #[cfg(feature = "cli")]
     keygen_sp.finish();
 
-    tracing::info!("Generated API token with expiry {}", expiry_str);
+    tracing::info!(
+        "Generated API token with namespace {} and expiry {}",
+        claims.namespace,
+        expiry_str
+    );
 
     #[cfg(feature = "cli")]
     {
-        println!("Generated new API token:");
-        println!("{}", console::style(&token_str).cyan());
-        println!("Token expires: {}", expiry_str);
+        println!("Token: {}", console::style(&token_str).cyan());
+        println!("Token expires: {}", console::style(&expiry_str).cyan());
+        println!("Namespace: {}", console::style(&claims.namespace).cyan());
     }
 
     Ok(())

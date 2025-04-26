@@ -17,8 +17,8 @@ pub const OCI_REGISTRY_ENV_VAR: &str = "OCI_REGISTRY_DOMAIN";
 /// Environment variable for the msbrun binary path
 pub const MSBRUN_EXE_ENV_VAR: &str = "MSBRUN_EXE";
 
-/// Environment variable for the mserver binary path
-pub const MSERVER_EXE_ENV_VAR: &str = "MSERVER_EXE";
+/// Environment variable for the msbserver binary path
+pub const MSBSERVER_EXE_ENV_VAR: &str = "MSBSERVER_EXE";
 
 //--------------------------------------------------------------------------------------------------
 // Functions

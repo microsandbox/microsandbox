@@ -651,7 +651,7 @@ pub enum ServerSubcommand {
         namespace_dir: Option<PathBuf>,
 
         /// Run server in development mode
-        #[arg(short, long)]
+        #[arg(long = "dev")]
         dev_mode: bool,
 
         /// Set secret key for server. Automatically generated if not provided.
@@ -672,6 +672,14 @@ pub enum ServerSubcommand {
         /// Token expiration duration. format: 1s, 2m, 3h, 4d, 5w, 6mo, 7y
         #[arg(long)]
         expire: Option<String>,
+
+        /// Namespace for the API key
+        #[arg(short = 'n', long, required_unless_present = "all_namespaces")]
+        namespace: Option<String>,
+
+        /// Allow access to all namespaces
+        #[arg(short = 'a', long, conflicts_with = "namespace")]
+        all_namespaces: bool,
     },
 }
 

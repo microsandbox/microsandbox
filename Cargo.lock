@@ -1777,6 +1777,7 @@ dependencies = [
  "indicatif",
  "jsonwebtoken",
  "libc",
+ "microsandbox-core",
  "microsandbox-utils",
  "pretty-error-debug",
  "rand 0.9.0",

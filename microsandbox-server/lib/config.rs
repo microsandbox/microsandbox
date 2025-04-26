@@ -16,7 +16,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::LazyLock};
 
 use base64::{prelude::BASE64_STANDARD, Engine};
 use getset::Getters;
-use microsandbox_utils::env;
+use microsandbox_utils::{env, NAMESPACES_SUBDIR};
 use serde::Deserialize;
 
 use crate::{MicrosandboxServerError, MicrosandboxServerResult};
@@ -26,19 +26,11 @@ use crate::{MicrosandboxServerError, MicrosandboxServerResult};
 //--------------------------------------------------------------------------------------------------
 
 /// Default port number for the server if not specified in environment variables
-pub const DEFAULT_PORT: u16 = 6666;
-
-/// Default namespace name.
-pub const DEFAULT_NAMESPACE_NAME: &str = "Default";
+pub const DEFAULT_PORT: u16 = 5555;
 
 /// Default JWT header for HS256 algorithm in base64
 pub const DEFAULT_JWT_HEADER: LazyLock<String> =
     LazyLock::new(|| BASE64_STANDARD.encode("{\"typ\":\"JWT\",\"alg\":\"HS256\"}"));
-
-/// The directory for server namespaces
-///
-/// Example: <MICROSANDBOX_HOME_DIR>/<NAMESPACES_SUBDIR>
-pub const NAMESPACES_SUBDIR: &str = "namespaces";
 
 /// The header name for the proxy authorization
 pub const PROXY_AUTH_HEADER: &str = "Proxy-Authorization";

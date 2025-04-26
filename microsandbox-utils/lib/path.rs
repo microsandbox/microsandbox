@@ -29,11 +29,6 @@ pub const RW_SUBDIR: &str = "rw";
 /// Example: <PROJECT_ROOT>/<MICROSANDBOX_ENV_DIR>/<PATCH_SUBDIR>
 pub const PATCH_SUBDIR: &str = "patch";
 
-/// The directory where base store blocks are stored
-///
-/// Example: <PROJECT_ROOT>/<MICROSANDBOX_ENV_DIR>/<BLOCKS_SUBDIR>
-pub const BLOCKS_SUBDIR: &str = "blocks";
-
 /// The directory where project logs are stored
 ///
 /// Example: <PROJECT_ROOT>/<MICROSANDBOX_ENV_DIR>/<LOG_SUBDIR>
@@ -43,11 +38,6 @@ pub const LOG_SUBDIR: &str = "log";
 ///
 /// Example: <MICROSANDBOX_HOME_DIR>/<LAYERS_SUBDIR>
 pub const LAYERS_SUBDIR: &str = "layers";
-
-/// The directory where microsandbox's installed binaries are stored
-///
-/// Example: <MICROSANDBOX_HOME_DIR>/<BIN_SUBDIR>
-pub const BIN_SUBDIR: &str = "bin";
 
 /// The filename for the project active sandbox database
 ///
@@ -76,6 +66,11 @@ pub const MICROSANDBOX_CONFIG_FILENAME: &str = "Sandboxfile";
 ///
 /// Example: <PROJECT_ROOT>/<MICROSANDBOX_ENV_DIR>/<PATCH_SUBDIR>/<CONFIG_NAME>/<SHELL_SCRIPT_NAME>
 pub const SHELL_SCRIPT_NAME: &str = "shell";
+
+/// The directory where namespaces are stored
+///
+/// Example: <MICROSANDBOX_HOME_DIR>/<NAMESPACES_SUBDIR>
+pub const NAMESPACES_SUBDIR: &str = "namespaces";
 
 /// The PID file for the server
 ///

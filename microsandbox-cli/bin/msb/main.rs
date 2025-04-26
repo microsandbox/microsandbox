@@ -210,8 +210,12 @@ async fn main() -> MicrosandboxCliResult<()> {
             ServerSubcommand::Stop => {
                 handlers::server_stop_subcommand().await?;
             }
-            ServerSubcommand::Keygen { expire } => {
-                handlers::server_keygen_subcommand(expire).await?;
+            ServerSubcommand::Keygen {
+                expire,
+                namespace,
+                all_namespaces,
+            } => {
+                handlers::server_keygen_subcommand(expire, namespace, all_namespaces).await?;
             }
         },
         Some(_) => (), // TODO: implement other subcommands

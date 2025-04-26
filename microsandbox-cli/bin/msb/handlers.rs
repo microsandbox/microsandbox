@@ -8,7 +8,6 @@ use microsandbox_core::{
         home, menv, orchestra, sandbox, toolchain,
     },
     oci::Reference,
-    MicrosandboxError,
 };
 use microsandbox_server::MicrosandboxServerResult;
 use microsandbox_utils::DEFAULT_SHELL;
@@ -44,7 +43,7 @@ pub fn log_level(args: &MicrosandboxArgs) {
 
     // Set RUST_LOG environment variable only if a level is specified
     if let Some(level) = level {
-        std::env::set_var("RUST_LOG", format!("micro={},msb={}", level, level));
+        std::env::set_var("RUST_LOG", format!("microsandbox={},msb={}", level, level));
     }
 }
 
@@ -475,7 +474,11 @@ pub async fn server_stop_subcommand() -> MicrosandboxServerResult<()> {
     Ok(())
 }
 
-pub async fn server_keygen_subcommand(expire: Option<String>) -> MicrosandboxCliResult<()> {
+pub async fn server_keygen_subcommand(
+    expire: Option<String>,
+    namespace: Option<String>,
+    all_namespaces: bool,
+) -> MicrosandboxCliResult<()> {
     // Convert the string duration to chrono::Duration
     let duration = if let Some(expire_str) = expire {
         Some(parse_duration_string(&expire_str)?)
@@ -483,7 +486,15 @@ pub async fn server_keygen_subcommand(expire: Option<String>) -> MicrosandboxCli
         None
     };
 
-    microsandbox_server::keygen(duration).await?;
+    // Determine the namespace to use
+    let namespace_value = if all_namespaces {
+        "*".to_string()
+    } else {
+        // namespace must be Some because of required_unless_present in the arg definition
+        namespace.unwrap_or_default()
+    };
+
+    microsandbox_server::keygen(duration, namespace_value).await?;
 
     Ok(())
 }
