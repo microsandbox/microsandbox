@@ -430,19 +430,19 @@ pub async fn log_subcommand(
 pub async fn clean_subcommand(
     _sandbox: bool,
     name: Option<String>,
-    global: bool,
+    user: bool,
     all: bool,
     path: Option<PathBuf>,
     config: Option<String>,
     force: bool,
 ) -> MicrosandboxCliResult<()> {
-    if global || all {
-        // Global cleanup - clean the microsandbox home directory
+    if user || all {
+        // User-level cleanup - clean the microsandbox home directory
         home::clean().await?;
-        tracing::info!("global microsandbox home directory cleaned");
+        tracing::info!("user microsandbox home directory cleaned");
     }
 
-    if !global || all {
+    if !user || all {
         // Local project cleanup
         if let Some(sandbox_name) = name {
             // Clean specific sandbox if sandbox name is provided

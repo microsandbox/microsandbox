@@ -185,13 +185,13 @@ async fn main() -> MicrosandboxCliResult<()> {
         Some(MicrosandboxSubcommand::Clean {
             sandbox,
             name,
-            global,
+            user,
             all,
             path,
             config,
             force,
         }) => {
-            handlers::clean_subcommand(sandbox, name, global, all, path, config, force).await?;
+            handlers::clean_subcommand(sandbox, name, user, all, path, config, force).await?;
         }
         Some(MicrosandboxSubcommand::Self_ { action }) => {
             handlers::self_subcommand(action).await?;

@@ -535,12 +535,12 @@ pub enum MicrosandboxSubcommand {
         #[arg()]
         name: Option<String>,
 
-        /// Clean globally. This cleans $MICROSANDBOX_HOME
-        #[arg(long)]
-        global: bool,
+        /// Clean user-level caches. This cleans $MICROSANDBOX_HOME
+        #[arg(short, long)]
+        user: bool,
 
         /// Clean all
-        #[arg(long)]
+        #[arg(short, long)]
         all: bool,
 
         /// Project path
