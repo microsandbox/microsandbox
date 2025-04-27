@@ -18,7 +18,7 @@ pub struct MicrosandboxArgs {
     pub subcommand: Option<MicrosandboxSubcommand>,
 
     /// Show version
-    #[arg(short = 'v', long, global = true)]
+    #[arg(short = 'V', long, global = true)]
     pub version: bool,
 
     /// Show logs with error level
@@ -89,7 +89,7 @@ pub enum MicrosandboxSubcommand {
         cpus: Option<u32>,
 
         /// Volume mappings, format: <host_path>:<container_path>
-        #[arg(long = "volume", name = "VOLUME")]
+        #[arg(short, long = "volume", name = "VOLUME")]
         volumes: Vec<String>,
 
         /// Port mappings, format: <host_port>:<container_port>
@@ -345,7 +345,7 @@ pub enum MicrosandboxSubcommand {
         memory: Option<u32>,
 
         /// Volume mappings, format: <host_path>:<container_path>
-        #[arg(long = "volume", name = "VOLUME")]
+        #[arg(short, long = "volume", name = "VOLUME")]
         volumes: Vec<String>,
 
         /// Port mappings, format: <host_port>:<container_port>
@@ -397,7 +397,7 @@ pub enum MicrosandboxSubcommand {
         memory: Option<u32>,
 
         /// Volume mappings, format: <host_path>:<container_path>
-        #[arg(long = "volume", name = "VOLUME")]
+        #[arg(short, long = "volume", name = "VOLUME")]
         volumes: Vec<String>,
 
         /// Port mappings, format: <host_port>:<container_port>
