@@ -39,6 +39,11 @@ pub const LOG_SUBDIR: &str = "log";
 /// Example: <MICROSANDBOX_HOME_DIR>/<LAYERS_SUBDIR>
 pub const LAYERS_SUBDIR: &str = "layers";
 
+/// The directory where installed sandboxes are stored
+///
+/// Example: <MICROSANDBOX_HOME_DIR>/<INSTALLS_SUBDIR>
+pub const INSTALLS_SUBDIR: &str = "installs";
+
 /// The filename for the project active sandbox database
 ///
 /// Example: <PROJECT_ROOT>/<MICROSANDBOX_ENV_DIR>/<SANDBOX_DB_FILENAME>

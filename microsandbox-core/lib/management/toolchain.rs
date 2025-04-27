@@ -14,6 +14,33 @@ use crate::MicrosandboxResult;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Clean up user-installed microsandbox scripts
+///
+/// This removes all scripts in ~/.local/bin that contain the MSB-ALIAS marker,
+/// except for the core toolchain scripts (msi, msx, msr).
+///
+/// ## Arguments
+/// * `force` - Whether to force cleaning even if script files exist
+///
+/// ## Example
+/// ```no_run
+/// use microsandbox_core::management::toolchain;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// // Clean all user-installed scripts
+/// toolchain::clean(true).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn clean() -> MicrosandboxResult<()> {
+    let bin_dir = XDG_HOME_DIR.join(XDG_BIN_DIR);
+
+    // Clean all user scripts with MSB-ALIAS markers
+    clean_user_scripts(&bin_dir).await?;
+
+    Ok(())
+}
+
 /// Uninstall the Microsandbox toolchain.
 ///
 /// This removes all installed binaries and libraries related to Microsandbox from
@@ -26,13 +53,16 @@ use crate::MicrosandboxResult;
 /// use microsandbox_core::management::toolchain;
 ///
 /// # async fn example() -> anyhow::Result<()> {
+/// // Remove core toolchain binaries and libraries
 /// toolchain::uninstall().await?;
 /// # Ok(())
 /// # }
 /// ```
 pub async fn uninstall() -> MicrosandboxResult<()> {
+    let bin_dir = XDG_HOME_DIR.join(XDG_BIN_DIR);
+
     // Uninstall executables
-    uninstall_executables().await?;
+    uninstall_executables(&bin_dir).await?;
 
     // Uninstall libraries
     uninstall_libraries().await?;
@@ -48,11 +78,9 @@ pub async fn uninstall() -> MicrosandboxResult<()> {
 //--------------------------------------------------------------------------------------------------
 
 /// Uninstall Microsandbox executables from the user's system.
-async fn uninstall_executables() -> MicrosandboxResult<()> {
-    let bin_dir = XDG_HOME_DIR.join(XDG_BIN_DIR);
-
+async fn uninstall_executables(bin_dir: &Path) -> MicrosandboxResult<()> {
     // List of executable files to remove
-    let executables = ["msb", "msbrun", "msr", "msx", "msi"];
+    let executables = ["msb", "msbrun", "msr", "msx", "msi", "msbserver"];
 
     for executable in executables {
         let executable_path = bin_dir.join(executable);
@@ -116,6 +144,57 @@ async fn uninstall_versioned_libraries(lib_dir: &Path, lib_prefix: &str) -> Micr
             }
         }
     }
+
+    Ok(())
+}
+
+/// Clean all user scripts with MSB-ALIAS markers from the specified bin directory
+async fn clean_user_scripts(bin_dir: &Path) -> MicrosandboxResult<()> {
+    // Exit early if bin directory doesn't exist
+    if !bin_dir.exists() {
+        tracing::info!("bin directory not found: {}", bin_dir.display());
+        return Ok(());
+    }
+
+    // Core executables that should not be removed by clean
+    let protected_executables = ["msi", "msx", "msr"];
+
+    // Get all files in the bin directory
+    let mut entries = fs::read_dir(bin_dir).await?;
+    let mut removed_count = 0;
+
+    // Check each file for MSB-ALIAS marker
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+
+        // Skip directories and non-files
+        if !path.is_file() {
+            continue;
+        }
+
+        // Skip protected executables
+        if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+            if protected_executables.contains(&filename) {
+                tracing::debug!("skipping protected executable: {}", filename);
+                continue;
+            }
+        }
+
+        // Read file content and check for MSB-ALIAS marker
+        if let Ok(content) = fs::read_to_string(&path).await {
+            if content.contains("# MSB-ALIAS:") {
+                // This is a microsandbox alias script, remove it
+                fs::remove_file(&path).await?;
+                tracing::info!("removed user script: {}", path.display());
+                removed_count += 1;
+            }
+        }
+    }
+
+    tracing::info!(
+        "removed {} user scripts with MSB-ALIAS markers",
+        removed_count
+    );
 
     Ok(())
 }

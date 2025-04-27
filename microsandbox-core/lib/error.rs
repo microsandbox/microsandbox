@@ -292,6 +292,10 @@ pub enum MicrosandboxError {
     /// An error that occurred when a start script or exec command or shell is missing.
     #[error("missing start script or exec command or shell")]
     MissingStartOrExecOrShell,
+
+    /// An error that occurred when trying to install a script with the same name as an existing command.
+    #[error("{0}")]
+    CommandExists(String),
 }
 
 /// An error that occurred when an invalid MicroVm configuration was used.

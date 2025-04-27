@@ -147,6 +147,28 @@ async fn main() -> MicrosandboxCliResult<()> {
             )
             .await?;
         }
+        Some(MicrosandboxSubcommand::Install {
+            image: _image,
+            name,
+            alias,
+            cpus,
+            memory,
+            volumes,
+            ports,
+            envs,
+            workdir,
+            scope,
+            exec,
+            args,
+        }) => {
+            handlers::install_subcommand(
+                name, alias, cpus, memory, volumes, ports, envs, workdir, scope, exec, args,
+            )
+            .await?;
+        }
+        Some(MicrosandboxSubcommand::Uninstall { script }) => {
+            handlers::uninstall_subcommand(script).await?;
+        }
         Some(MicrosandboxSubcommand::Apply { path, config }) => {
             orchestra::apply(path.as_deref(), config.as_deref()).await?;
         }

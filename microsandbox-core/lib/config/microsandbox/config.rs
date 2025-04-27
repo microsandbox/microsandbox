@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 
-use getset::Getters;
+use getset::{Getters, Setters};
 use ipnetwork::Ipv4Network as Ipv4Net;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -255,8 +255,8 @@ pub struct GroupNetwork {
 }
 
 /// The sandbox to run.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Getters)]
-#[getset(get = "pub with_prefix")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Getters, Setters)]
+#[getset(get = "pub with_prefix", set = "pub with_prefix")]
 pub struct Sandbox {
     /// The version of the sandbox.
     #[serde(skip_serializing_if = "Option::is_none", default)]

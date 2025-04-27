@@ -8,8 +8,6 @@
 use crate::MicrosandboxResult;
 
 #[cfg(feature = "cli")]
-use console::style;
-#[cfg(feature = "cli")]
 use microsandbox_utils::term;
 use microsandbox_utils::{
     DEFAULT_CONFIG, LOG_SUBDIR, MICROSANDBOX_CONFIG_FILENAME, MICROSANDBOX_ENV_DIR, PATCH_SUBDIR,
@@ -149,7 +147,7 @@ pub async fn clean(
             #[cfg(feature = "cli")]
             println!(
                 "Configuration file exists. Use {} to clean the entire environment",
-                style("--force").yellow()
+                console::style("--force").yellow()
             );
 
             tracing::info!(
@@ -200,7 +198,7 @@ pub async fn clean(
             println!(
                 "Sandbox '{}' exists in configuration. Use {} to clean it",
                 sandbox_name,
-                style("--force").yellow()
+                console::style("--force").yellow()
             );
 
             tracing::info!(

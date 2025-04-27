@@ -283,7 +283,7 @@ pub async fn exe_subcommand(
 
     if matches!((script, &exec), (Some(_), Some(_))) {
         MicrosandboxArgs::command()
-            .override_usage(usage("tmp", Some("[NAME[~SCRIPT]]"), Some("<ARGS>")))
+            .override_usage(usage("exe", Some("[NAME[~SCRIPT]]"), Some("<ARGS>")))
             .error(
                 ErrorKind::ArgumentConflict,
                 format!(
@@ -448,8 +448,15 @@ pub async fn clean_subcommand(
 ) -> MicrosandboxCliResult<()> {
     if user || all {
         // User-level cleanup - clean the microsandbox home directory
-        home::clean().await?;
+        home::clean(force).await?;
         tracing::info!("user microsandbox home directory cleaned");
+
+        // User-level cleanup - clean the user scripts (MSB-ALIAS)
+        if force {
+            toolchain::clean().await?;
+        }
+
+        tracing::info!("user microsandbox scripts cleaned");
     }
 
     if !user || all {
@@ -523,10 +530,95 @@ pub async fn self_subcommand(action: SelfAction) -> MicrosandboxCliResult<()> {
         }
         SelfAction::Uninstall => {
             // Clean the home directory first
-            home::clean().await?;
+            home::clean(true).await?;
+
+            // Clean user scripts
+            toolchain::clean().await?;
 
             // Then uninstall the binaries and libraries
             toolchain::uninstall().await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Handles the install subcommand for installing sandbox scripts from images
+pub async fn install_subcommand(
+    name: String,
+    alias: Option<String>,
+    cpus: Option<u8>,
+    memory: Option<u32>,
+    volumes: Vec<String>,
+    ports: Vec<String>,
+    envs: Vec<String>,
+    workdir: Option<Utf8UnixPathBuf>,
+    scope: Option<String>,
+    exec: Option<String>,
+    args: Vec<String>,
+) -> MicrosandboxCliResult<()> {
+    let (image, script) = parse_name_and_script(&name);
+    let image = image.parse::<Reference>()?;
+
+    if matches!((script, &exec), (Some(_), Some(_))) {
+        MicrosandboxArgs::command()
+            .override_usage(usage(
+                "install",
+                Some("[NAME[~SCRIPT]] [ALIAS]"),
+                Some("<ARGS>"),
+            ))
+            .error(
+                ErrorKind::ArgumentConflict,
+                format!(
+                    "cannot specify both a script and an `{}` option.",
+                    "--exec".placeholder()
+                ),
+            )
+            .exit();
+    }
+
+    // If extra args are provided, show a warning as they will be ignored during install
+    if !args.is_empty() {
+        tracing::warn!("Extra arguments will be ignored during install. They will be passed to the sandbox when the alias is used.");
+    }
+
+    home::install(
+        &image,
+        script,
+        alias.as_deref(),
+        cpus,
+        memory,
+        volumes,
+        ports,
+        envs,
+        workdir,
+        scope,
+        exec.as_deref(),
+        args,
+        true,
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Handles the uninstall subcommand for removing installed script aliases
+pub async fn uninstall_subcommand(script: Option<String>) -> MicrosandboxCliResult<()> {
+    match script {
+        Some(script_name) => {
+            // Uninstall the specified script
+            home::uninstall(&script_name).await?;
+            tracing::info!("Successfully uninstalled script: {}", script_name);
+        }
+        None => {
+            // No script specified, print error message
+            MicrosandboxArgs::command()
+                .override_usage(usage("uninstall", Some("[SCRIPT]"), None))
+                .error(
+                    ErrorKind::InvalidValue,
+                    "Please specify the name of the script to uninstall.",
+                )
+                .exit();
         }
     }
 
