@@ -240,6 +240,15 @@ async fn main() -> MicrosandboxCliResult<()> {
             } => {
                 handlers::server_keygen_subcommand(expire, namespace, all_namespaces).await?;
             }
+            ServerSubcommand::Log {
+                sandbox,
+                name,
+                namespace,
+                follow,
+                tail,
+            } => {
+                handlers::server_log_subcommand(sandbox, name, namespace, follow, tail).await?;
+            }
         },
         Some(_) => (), // TODO: implement other subcommands
         None => {

@@ -5,7 +5,7 @@
 //! necessary components for running sandboxes, including configuration files,
 //! databases, and log directories.
 
-use crate::MicrosandboxResult;
+use crate::{MicrosandboxError, MicrosandboxResult};
 
 #[cfg(feature = "cli")]
 use microsandbox_utils::term;
@@ -16,7 +16,7 @@ use microsandbox_utils::{
 use std::path::{Path, PathBuf};
 use tokio::{fs, io::AsyncWriteExt};
 
-use super::db;
+use super::{config, db};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -251,6 +251,117 @@ pub async fn clean(
 
     #[cfg(feature = "cli")]
     clean_sandbox_sp.finish();
+
+    Ok(())
+}
+
+/// Show logs for a sandbox
+///
+/// This function can show logs for a sandbox in either follow mode or regular mode.
+/// In follow mode, it uses `tail -f` to continuously show new log entries.
+/// In regular mode, it shows either all logs or the last N lines.
+///
+/// ## Arguments
+/// * `project_dir` - Optional path where the microsandbox environment is located.
+///                   If None, uses current directory
+/// * `config_file` - Optional path to the Microsandbox config file. If None, uses default filename
+/// * `sandbox_name` - Name of the sandbox to show logs for
+/// * `follow` - Whether to follow the log file (tail -f mode)
+/// * `tail` - Optional number of lines to show from the end
+///
+/// ## Example
+/// ```no_run
+/// use microsandbox_core::management::menv;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// // Show all logs for a sandbox
+/// menv::show_log(None, None, "my-sandbox", false, None).await?;
+///
+/// // Show last 100 lines of logs
+/// menv::show_log(None, None, "my-sandbox", false, Some(100)).await?;
+///
+/// // Follow logs in real-time
+/// menv::show_log(None, None, "my-sandbox", true, None).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn show_log(
+    project_dir: Option<impl AsRef<Path>>,
+    config_file: Option<&str>,
+    sandbox_name: &str,
+    follow: bool,
+    tail: Option<usize>,
+) -> MicrosandboxResult<()> {
+    // Check if tail command exists when follow mode is requested
+    if follow {
+        let tail_exists = which::which("tail").is_ok();
+        if !tail_exists {
+            return Err(MicrosandboxError::CommandNotFound(
+                "tail command not found. Please install it to use the follow (-f) option."
+                    .to_string(),
+            ));
+        }
+    }
+
+    // Load the configuration to get canonical paths
+    let (_, canonical_project_dir, config_file) =
+        config::load_config(project_dir.as_ref().map(|p| p.as_ref()), config_file).await?;
+
+    // Construct log file path using the hierarchical structure: <project_dir>/.menv/log/<config>/<sandbox>.log
+    let log_path = canonical_project_dir
+        .join(MICROSANDBOX_ENV_DIR)
+        .join(LOG_SUBDIR)
+        .join(&config_file)
+        .join(format!("{}.log", sandbox_name));
+
+    // Check if log file exists
+    if !log_path.exists() {
+        return Err(MicrosandboxError::LogNotFound(format!(
+            "Log file not found at {}",
+            log_path.display()
+        )));
+    }
+
+    if follow {
+        // For follow mode, use tokio::process::Command to run `tail -f`
+        let mut child = tokio::process::Command::new("tail")
+            .arg("-f")
+            .arg(&log_path)
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()?;
+
+        // Wait for the tail process
+        let status = child.wait().await?;
+        if !status.success() {
+            return Err(MicrosandboxError::ProcessWaitError(format!(
+                "tail process exited with status: {}",
+                status
+            )));
+        }
+    } else {
+        // Read the file contents
+        let contents = tokio::fs::read_to_string(&log_path).await?;
+
+        // Split into lines
+        let lines: Vec<&str> = contents.lines().collect();
+
+        // If tail is specified, only show the last N lines
+        let lines_to_print = if let Some(n) = tail {
+            if n >= lines.len() {
+                &lines[..]
+            } else {
+                &lines[lines.len() - n..]
+            }
+        } else {
+            &lines[..]
+        };
+
+        // Print the lines
+        for line in lines_to_print {
+            println!("{}", line);
+        }
+    }
 
     Ok(())
 }

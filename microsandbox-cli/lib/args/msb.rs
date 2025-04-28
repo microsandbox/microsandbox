@@ -197,7 +197,7 @@ pub enum MicrosandboxSubcommand {
         config: Option<String>,
     },
 
-    /// Show logs of a running build, sandbox, or group
+    /// Show logs of a build, sandbox, or group
     #[command(name = "log")]
     Log {
         /// Whether command should apply to a sandbox
@@ -229,7 +229,7 @@ pub enum MicrosandboxSubcommand {
         follow: bool,
 
         /// Number of lines to show from the end
-        #[arg(short = 'n', long)]
+        #[arg(short, long)]
         tail: Option<usize>,
     },
 
@@ -288,7 +288,7 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         exec: Option<String>,
 
-        /// Additional arguments after `--`
+        /// Additional arguments after `--`. Passed to the script or exec.
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -320,7 +320,7 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         detach: bool,
 
-        /// Additional arguments after `--`
+        /// Additional arguments after `--`. Passed to the shell.
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -368,7 +368,7 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         exec: Option<String>,
 
-        /// Additional arguments after `--`
+        /// Additional arguments after `--`. Passed to the script or exec.
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -420,7 +420,7 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         exec: Option<String>,
 
-        /// Additional arguments after `--`
+        /// Additional arguments after `--`. Passed to the script or exec.
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -684,6 +684,30 @@ pub enum ServerSubcommand {
         /// Allow access to all namespaces
         #[arg(short = 'a', long, conflicts_with = "namespace")]
         all_namespaces: bool,
+    },
+
+    /// Show logs of a sandbox
+    #[command(name = "log")]
+    Log {
+        /// Whether command should apply to a sandbox
+        #[arg(short, long)]
+        sandbox: bool,
+
+        /// Name of the component
+        #[arg(required = true)]
+        name: String,
+
+        /// Namespace for the logs
+        #[arg(short, long)]
+        namespace: String,
+
+        /// Follow the logs
+        #[arg(short, long)]
+        follow: bool,
+
+        /// Number of lines to show from the end
+        #[arg(short, long)]
+        tail: Option<usize>,
     },
 }
 

@@ -294,8 +294,12 @@ pub enum MicrosandboxError {
     MissingStartOrExecOrShell,
 
     /// An error that occurred when trying to install a script with the same name as an existing command.
-    #[error("{0}")]
+    #[error("command already exists: {0}")]
     CommandExists(String),
+
+    /// An error that occurred when a command was not found.
+    #[error("command not found: {0}")]
+    CommandNotFound(String),
 }
 
 /// An error that occurred when an invalid MicroVm configuration was used.

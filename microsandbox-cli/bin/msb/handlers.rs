@@ -11,6 +11,7 @@ use microsandbox_core::{
     oci::Reference,
 };
 use microsandbox_server::MicrosandboxServerResult;
+use microsandbox_utils::{env, NAMESPACES_SUBDIR};
 use std::{collections::HashMap, path::PathBuf};
 use typed_path::Utf8UnixPathBuf;
 
@@ -19,8 +20,6 @@ use typed_path::Utf8UnixPathBuf;
 //--------------------------------------------------------------------------------------------------
 
 const SANDBOX_SCRIPT_SEPARATOR: char = '~';
-const MICROSANDBOX_ENV_DIR: &str = ".menv";
-const LOG_SUBDIR: &str = "log";
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Handlers
@@ -373,65 +372,14 @@ pub async fn log_subcommand(
         }
     }
 
-    // Load the configuration to get canonical paths
-    let (_, canonical_project_dir, config_file) =
-        config::load_config(project_dir.as_deref(), config_file.as_deref()).await?;
-
-    // Construct log file path using the hierarchical structure: <project_dir>/.menv/log/<config>/<sandbox>.log
-    let log_path = canonical_project_dir
-        .join(MICROSANDBOX_ENV_DIR)
-        .join(LOG_SUBDIR)
-        .join(&config_file)
-        .join(format!("{}.log", name));
-
-    // Check if log file exists
-    if !log_path.exists() {
-        return Err(MicrosandboxCliError::NotFound(format!(
-            "Log file not found at {}",
-            log_path.display()
-        )));
-    }
-
-    if follow {
-        // For follow mode, use tokio::process::Command to run `tail -f`
-        let mut child = tokio::process::Command::new("tail")
-            .arg("-f")
-            .arg(&log_path)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()?;
-
-        // Wait for the tail process
-        let status = child.wait().await?;
-        if !status.success() {
-            return Err(MicrosandboxCliError::ProcessWaitError(format!(
-                "tail process exited with status: {}",
-                status
-            )));
-        }
-    } else {
-        // Read the file contents
-        let contents = tokio::fs::read_to_string(&log_path).await?;
-
-        // Split into lines
-        let lines: Vec<&str> = contents.lines().collect();
-
-        // If tail is specified, only show the last N lines
-        let lines_to_print = if let Some(n) = tail {
-            if n >= lines.len() {
-                &lines[..]
-            } else {
-                &lines[lines.len() - n..]
-            }
-        } else {
-            &lines[..]
-        };
-
-        // Print the lines
-        for line in lines_to_print {
-            println!("{}", line);
-        }
-    }
+    menv::show_log(
+        project_dir.as_ref(),
+        config_file.as_deref(),
+        &name,
+        follow,
+        tail,
+    )
+    .await?;
 
     Ok(())
 }
@@ -621,6 +569,31 @@ pub async fn uninstall_subcommand(script: Option<String>) -> MicrosandboxCliResu
                 .exit();
         }
     }
+
+    Ok(())
+}
+
+pub async fn server_log_subcommand(
+    _sandbox: bool,
+    name: String,
+    namespace: String,
+    follow: bool,
+    tail: Option<usize>,
+) -> MicrosandboxCliResult<()> {
+    // Ensure microsandbox home directory exists
+    let namespace_path = env::get_microsandbox_home_path()
+        .join(NAMESPACES_SUBDIR)
+        .join(&namespace);
+
+    if !namespace_path.exists() {
+        return Err(MicrosandboxCliError::NotFound(format!(
+            "Namespace '{}' not found",
+            namespace
+        )));
+    }
+
+    // Reuse the same log viewing functionality
+    menv::show_log(Some(namespace_path), None, &name, follow, tail).await?;
 
     Ok(())
 }

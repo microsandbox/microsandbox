@@ -199,10 +199,7 @@ pub async fn install(
 
     // Check if a command with this name already exists in the system PATH
     if command_exists(&alias_name) {
-        return Err(MicrosandboxError::CommandExists(format!(
-            "A command with the name '{}' already exists in your PATH. Please choose a different alias name.",
-            alias_name
-        )));
+        return Err(MicrosandboxError::CommandExists(alias_name));
     }
 
     // Initialize .menv in the installs directory if it doesn't exist
