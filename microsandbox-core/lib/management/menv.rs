@@ -366,6 +366,121 @@ pub async fn show_log(
     Ok(())
 }
 
+/// Show a formatted list of sandboxes
+///
+/// This function can display sandbox information from any config in a standardized format.
+///
+/// ## Arguments
+/// * `sandboxes` - A reference to a HashMap of sandbox configurations
+///
+/// ## Example
+/// ```no_run
+/// use microsandbox_core::management::menv;
+/// use microsandbox_core::management::config;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// // Show all sandboxes for a local project
+/// let (config, _, _) = config::load_config(None, None).await?;
+/// menv::show_list(config.get_sandboxes());
+///
+/// // Show all sandboxes for a remote namespace
+/// let (config, _, _) = config::load_config(Some(namespace_path), None).await?;
+/// menv::show_list(config.get_sandboxes());
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "cli")]
+pub fn show_list<'a, I>(sandboxes: I)
+where
+    I: IntoIterator<Item = (&'a String, &'a crate::config::Sandbox)>,
+{
+    use console::style;
+    use std::collections::HashMap;
+
+    // Convert the iterator into a HashMap for easier processing
+    let sandboxes: HashMap<&String, &crate::config::Sandbox> = sandboxes.into_iter().collect();
+
+    if sandboxes.is_empty() {
+        println!("No sandboxes found");
+        return;
+    }
+
+    for (i, (name, sandbox)) in sandboxes.iter().enumerate() {
+        // Number and name
+        println!("\n{}. {}", style(i + 1).bold(), style(*name).bold());
+
+        // Image
+        println!(
+            "   {}: {}",
+            style("Image").dim(),
+            sandbox.get_image().to_string()
+        );
+
+        // Resources
+        let mut resources = Vec::new();
+        if let Some(cpus) = sandbox.get_cpus() {
+            resources.push(format!("{} CPUs", cpus));
+        }
+        if let Some(memory) = sandbox.get_memory() {
+            resources.push(format!("{} MiB", memory));
+        }
+        if !resources.is_empty() {
+            println!("   {}: {}", style("Resources").dim(), resources.join(", "));
+        }
+
+        // Network
+        println!(
+            "   {}: {}",
+            style("Network").dim(),
+            format!("{:?}", sandbox.get_scope())
+        );
+
+        // Ports
+        if !sandbox.get_ports().is_empty() {
+            let ports = sandbox
+                .get_ports()
+                .iter()
+                .map(|p| format!("{}:{}", p.get_host(), p.get_guest()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("   {}: {}", style("Ports").dim(), ports);
+        }
+
+        // Volumes
+        if !sandbox.get_volumes().is_empty() {
+            let volumes = sandbox
+                .get_volumes()
+                .iter()
+                .map(|v| format!("{}:{}", v.get_host(), v.get_guest()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("   {}: {}", style("Volumes").dim(), volumes);
+        }
+
+        // Scripts
+        if !sandbox.get_scripts().is_empty() {
+            let scripts = sandbox
+                .get_scripts()
+                .keys()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("   {}: {}", style("Scripts").dim(), scripts);
+        }
+
+        // Dependencies
+        if !sandbox.get_depends_on().is_empty() {
+            println!(
+                "   {}: {}",
+                style("Depends On").dim(),
+                sandbox.get_depends_on().join(", ")
+            );
+        }
+    }
+
+    println!("\n{}: {}", style("Total").dim(), sandboxes.len());
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------

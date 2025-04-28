@@ -133,10 +133,11 @@ pub async fn list_subcommand(
 ) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "list", None);
     unsupported_build_group_error(build, group, "list", None);
-    let names = config::list(ComponentType::Sandbox, path.as_deref(), config.as_deref()).await?;
-    for name in names {
-        println!("{}", name);
-    }
+
+    let (config, _, _) = config::load_config(path.as_deref(), config.as_deref()).await?;
+
+    // Use the new show_list function to display sandboxes
+    menv::show_list(config.get_sandboxes());
 
     Ok(())
 }
@@ -596,6 +597,34 @@ pub async fn server_log_subcommand(
     menv::show_log(Some(namespace_path), None, &name, follow, tail).await?;
 
     Ok(())
+}
+
+pub async fn server_list_subcommand(namespace: String) -> MicrosandboxCliResult<()> {
+    // Ensure microsandbox home directory exists
+    let namespace_path = env::get_microsandbox_home_path()
+        .join(NAMESPACES_SUBDIR)
+        .join(&namespace);
+
+    if !namespace_path.exists() {
+        return Err(MicrosandboxCliError::NotFound(format!(
+            "Namespace '{}' not found",
+            namespace
+        )));
+    }
+
+    // Load configuration from the namespace directory
+    let config_result = config::load_config(Some(namespace_path.as_path()), None).await;
+    match config_result {
+        Ok((config, _, _)) => {
+            // Use the common show_list function to display sandboxes
+            menv::show_list(config.get_sandboxes());
+            Ok(())
+        }
+        Err(err) => Err(MicrosandboxCliError::ConfigError(format!(
+            "Failed to load configuration from namespace '{}': {}",
+            namespace, err
+        ))),
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -709,6 +709,14 @@ pub enum ServerSubcommand {
         #[arg(short, long)]
         tail: Option<usize>,
     },
+
+    /// List sandboxes in a namespace
+    #[command(name = "list")]
+    List {
+        /// Namespace to list sandboxes from
+        #[arg(short, long, required = true)]
+        namespace: String,
+    },
 }
 
 /// Actions for the self subcommand

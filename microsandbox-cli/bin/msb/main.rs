@@ -249,6 +249,9 @@ async fn main() -> MicrosandboxCliResult<()> {
             } => {
                 handlers::server_log_subcommand(sandbox, name, namespace, follow, tail).await?;
             }
+            ServerSubcommand::List { namespace } => {
+                handlers::server_list_subcommand(namespace).await?;
+            }
         },
         Some(_) => (), // TODO: implement other subcommands
         None => {

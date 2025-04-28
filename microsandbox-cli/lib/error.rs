@@ -33,4 +33,8 @@ pub enum MicrosandboxCliError {
     /// Process wait error
     #[error("process wait error: {0}")]
     ProcessWaitError(String),
+
+    /// Configuration error
+    #[error("configuration error: {0}")]
+    ConfigError(String),
 }
