@@ -152,35 +152,8 @@ pub async fn run(
         }
     };
 
-    let exec_path = match exec {
-        Some(exec) => exec.to_string(),
-        None => match script_name {
-            Some(script_name) => {
-                // Validate script exists
-                if script_name != SHELL_SCRIPT_NAME
-                    && !sandbox_config.get_scripts().contains_key(script_name)
-                {
-                    return Err(MicrosandboxError::ScriptNotFoundInSandbox(
-                        script_name.to_string(),
-                        sandbox_name.to_string(),
-                    ));
-                }
-
-                format!("{}/{}/{}", SANDBOX_DIR, SCRIPTS_DIR, script_name)
-            }
-            None => match sandbox_config.get_exec() {
-                Some(exec) => exec.to_string(),
-                None => match sandbox_config.get_scripts().get(START_SCRIPT_NAME) {
-                    Some(script) => script.to_string(),
-                    None => sandbox_config
-                        .get_shell()
-                        .as_ref()
-                        .ok_or(MicrosandboxError::MissingStartOrExecOrShell)?
-                        .to_string(),
-                },
-            },
-        },
-    };
+    // Determine the exec path
+    let exec_path = determine_exec_path(exec, script_name, &sandbox_config, sandbox_name)?;
 
     // Log directory
     let log_dir = menv_path.join(LOG_SUBDIR);
@@ -678,4 +651,149 @@ async fn has_sandbox_config_changed(
         }
         None => true, // No existing sandbox, need to patch
     })
+}
+
+/// Determines the execution path for a sandbox based on the provided configuration.
+///
+/// The function follows this priority order:
+/// 1. Use the explicit exec command if provided
+/// 2. Use the specified script name if provided
+/// 3. Use the start script if it exists
+/// 4. Use the exec command from sandbox config if it exists
+/// 5. Fall back to the shell command from sandbox config
+///
+/// For script paths, escape sequences like `\\`, `\"`, `\'` are properly unescaped
+/// to their literal character representations.
+///
+/// ## Arguments
+///
+/// * `exec` - Optional explicit command to execute
+/// * `script_name` - Optional name of the script to run
+/// * `sandbox_config` - The sandbox configuration
+/// * `sandbox_name` - The name of the sandbox (for error reporting)
+///
+/// ## Returns
+///
+/// Returns the execution path string or a `MicrosandboxError` if no valid
+/// execution path could be determined.
+pub fn determine_exec_path(
+    exec: Option<&str>,
+    script_name: Option<&str>,
+    sandbox_config: &Sandbox,
+    sandbox_name: &str,
+) -> MicrosandboxResult<String> {
+    match exec {
+        Some(exec) => Ok(exec.to_string()),
+        None => match script_name {
+            Some(script_name) => {
+                // Validate script exists
+                if script_name != SHELL_SCRIPT_NAME
+                    && !sandbox_config.get_scripts().contains_key(script_name)
+                {
+                    return Err(MicrosandboxError::ScriptNotFoundInSandbox(
+                        script_name.to_string(),
+                        sandbox_name.to_string(),
+                    ));
+                }
+
+                Ok(format!("{}/{}/{}", SANDBOX_DIR, SCRIPTS_DIR, script_name))
+            }
+            None => match sandbox_config.get_scripts().get(START_SCRIPT_NAME) {
+                Some(_) => Ok(format!(
+                    "{}/{}/{}",
+                    SANDBOX_DIR, SCRIPTS_DIR, START_SCRIPT_NAME
+                )),
+                None => match sandbox_config.get_exec() {
+                    Some(exec) => Ok(exec.to_string()),
+                    None => sandbox_config
+                        .get_shell()
+                        .as_ref()
+                        .map(|s| s.to_string())
+                        .ok_or(MicrosandboxError::MissingStartOrExecOrShell),
+                },
+            },
+        },
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NetworkScope;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_determine_exec_path() {
+        // Create a test sandbox with scripts and exec/shell options
+        let mut scripts = HashMap::new();
+        scripts.insert(
+            START_SCRIPT_NAME.to_string(),
+            "echo \\'hello world\\'".to_string(),
+        );
+        scripts.insert("test_script".to_string(), "echo test".to_string());
+
+        let sandbox = Sandbox::builder()
+            .image(ReferenceOrPath::Path("/some/path".into()))
+            .scripts(scripts)
+            .exec("ls -la \\\"quotes\\\"".to_string())
+            .shell("/bin/bash".to_string())
+            .scope(NetworkScope::Public)
+            .build();
+
+        // Test with explicit exec
+        let result =
+            determine_exec_path(Some("explicit command"), None, &sandbox, "test_sandbox").unwrap();
+        assert_eq!(result, "explicit command");
+
+        // Test with script_name
+        let result =
+            determine_exec_path(None, Some("test_script"), &sandbox, "test_sandbox").unwrap();
+        assert_eq!(
+            result,
+            format!("{}/{}/{}", SANDBOX_DIR, SCRIPTS_DIR, "test_script")
+        );
+
+        // Test with start script (with escaped characters)
+        let result = determine_exec_path(None, None, &sandbox, "test_sandbox").unwrap();
+        assert_eq!(result, "echo 'hello world'");
+
+        // Test exec command with escaped characters
+        // First remove the start script to test fallback to exec
+        let sandbox_no_start = Sandbox::builder()
+            .image(ReferenceOrPath::Path("/some/path".into()))
+            .exec("ls -la \\\"quotes\\\"".to_string())
+            .shell("/bin/bash".to_string())
+            .scope(NetworkScope::Public)
+            .build();
+
+        let result = determine_exec_path(None, None, &sandbox_no_start, "test_sandbox").unwrap();
+        assert_eq!(result, "ls -la \"quotes\"");
+
+        // Test shell fallback
+        let sandbox_no_exec = Sandbox::builder()
+            .image(ReferenceOrPath::Path("/some/path".into()))
+            .shell("/bin/bash".to_string())
+            .scope(NetworkScope::Public)
+            .build();
+
+        let result = determine_exec_path(None, None, &sandbox_no_exec, "test_sandbox").unwrap();
+        assert_eq!(result, "/bin/bash");
+
+        // Test error case - script not found
+        let result = determine_exec_path(None, Some("nonexistent"), &sandbox, "test_sandbox");
+        assert!(result.is_err());
+
+        // Test error case - no shell, exec, or start script
+        let sandbox_no_nothing = Sandbox::builder()
+            .image(ReferenceOrPath::Path("/some/path".into()))
+            .scope(NetworkScope::Public)
+            .build();
+
+        let result = determine_exec_path(None, None, &sandbox_no_nothing, "test_sandbox");
+        assert!(result.is_err());
+    }
 }

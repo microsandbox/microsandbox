@@ -146,7 +146,7 @@ pub enum MicrosandboxSubcommand {
     },
 
     /// Remove a sandbox from the project
-    #[command(name = "remove")]
+    #[command(name = "remove", alias = "rm")]
     Remove {
         /// Whether command should apply to a sandbox
         #[arg(short, long)]
@@ -444,7 +444,7 @@ pub enum MicrosandboxSubcommand {
         config: Option<String>,
     },
 
-    /// Start project sandboxes
+    /// Run a project's sandboxes
     #[command(name = "up")]
     Up {
         /// Whether command should apply to a sandbox
@@ -472,7 +472,7 @@ pub enum MicrosandboxSubcommand {
         config: Option<String>,
     },
 
-    /// Stop project sandboxes
+    /// Stop a project's sandboxes
     #[command(name = "down")]
     Down {
         /// Whether command should apply to a sandbox
@@ -500,8 +500,8 @@ pub enum MicrosandboxSubcommand {
         config: Option<String>,
     },
 
-    /// Show running status
-    #[command(name = "status")]
+    /// Show statuses of a project's running sandboxes
+    #[command(name = "status", alias = "ps", alias = "stat")]
     Status {
         /// Whether command should apply to a sandbox
         #[arg(short, long)]
@@ -515,9 +515,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         group: bool,
 
-        /// Name of the component
-        #[arg(required = true)]
-        name: String,
+        /// Names of components to show status for
+        #[arg()]
+        names: Vec<String>,
 
         /// Project path
         #[arg(short, long)]
@@ -604,6 +604,10 @@ pub enum MicrosandboxSubcommand {
         layer_path: Option<PathBuf>,
     },
 
+    /// Login to a registry
+    #[command(name = "login")]
+    Login,
+
     /// Push an image
     #[command(name = "push")]
     Push {
@@ -683,7 +687,7 @@ pub enum ServerSubcommand {
 
         /// Allow access to all namespaces
         #[arg(short = 'a', long, conflicts_with = "namespace")]
-        all_namespaces: bool,
+        all: bool,
     },
 
     /// Show logs of a sandbox
@@ -714,6 +718,22 @@ pub enum ServerSubcommand {
     #[command(name = "list")]
     List {
         /// Namespace to list sandboxes from
+        #[arg(short, long, required = true)]
+        namespace: String,
+    },
+
+    /// Show server status
+    #[command(name = "status")]
+    Status {
+        /// Whether command should apply to a sandbox
+        #[arg(short, long)]
+        sandbox: bool,
+
+        /// Name of the component
+        #[arg()]
+        names: Vec<String>,
+
+        /// Namespace to show status for
         #[arg(short, long, required = true)]
         namespace: String,
     },

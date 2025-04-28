@@ -25,6 +25,7 @@ const SANDBOX_SCRIPT_SEPARATOR: char = '~';
 // Functions: Handlers
 //--------------------------------------------------------------------------------------------------
 
+/// Set the log level based on the command line arguments
 pub fn log_level(args: &MicrosandboxArgs) {
     let level = if args.trace {
         Some("trace")
@@ -194,7 +195,7 @@ pub async fn run_subcommand(
             .exit();
     }
 
-    unsupported_build_group_error(build, sandbox, "run", Some("[NAME]"));
+    unsupported_build_group_error(build, false, "run", Some("[NAME]"));
 
     let (sandbox, script) = parse_name_and_script(&name);
     if matches!((script, &exec), (Some(_), Some(_))) {
@@ -249,7 +250,7 @@ pub async fn script_run_subcommand(
             .exit();
     }
 
-    unsupported_build_group_error(build, sandbox, &script, Some("[NAME]"));
+    unsupported_build_group_error(build, false, &script, Some("[NAME]"));
 
     sandbox::run(
         &name,
@@ -341,6 +342,23 @@ pub async fn down_subcommand(
     unsupported_build_group_error(build, group, "down", Some("[NAMES]"));
 
     orchestra::down(names, path.as_deref(), config.as_deref()).await?;
+
+    Ok(())
+}
+
+/// Handle the status subcommand to show resource usage stats for specified sandboxes
+pub async fn status_subcommand(
+    sandbox: bool,
+    build: bool,
+    group: bool,
+    names: Vec<String>,
+    path: Option<PathBuf>,
+    config: Option<String>,
+) -> MicrosandboxCliResult<()> {
+    trio_conflict_error(build, sandbox, group, "status", Some("[NAMES]"));
+    unsupported_build_group_error(build, group, "status", Some("[NAMES]"));
+
+    orchestra::show_status(&names, path.as_deref(), config.as_deref()).await?;
 
     Ok(())
 }
@@ -443,7 +461,7 @@ pub async fn server_stop_subcommand() -> MicrosandboxServerResult<()> {
 pub async fn server_keygen_subcommand(
     expire: Option<String>,
     namespace: Option<String>,
-    all_namespaces: bool,
+    all: bool,
 ) -> MicrosandboxCliResult<()> {
     // Convert the string duration to chrono::Duration
     let duration = if let Some(expire_str) = expire {
@@ -453,7 +471,7 @@ pub async fn server_keygen_subcommand(
     };
 
     // Determine the namespace to use
-    let namespace_value = if all_namespaces {
+    let namespace_value = if all {
         "*".to_string()
     } else {
         // namespace must be Some because of required_unless_present in the arg definition
@@ -469,13 +487,11 @@ pub async fn server_keygen_subcommand(
 pub async fn self_subcommand(action: SelfAction) -> MicrosandboxCliResult<()> {
     match action {
         SelfAction::Upgrade => {
-            MicrosandboxArgs::command()
-                .override_usage(usage("self", Some("upgrade"), None))
-                .error(
-                    ErrorKind::InvalidValue,
-                    "Upgrade functionality is not yet implemented",
-                )
-                .exit();
+            println!(
+                "{} upgrade functionality is not yet implemented",
+                "error:".error()
+            );
+            return Ok(());
         }
         SelfAction::Uninstall => {
             // Clean the home directory first
@@ -625,6 +641,48 @@ pub async fn server_list_subcommand(namespace: String) -> MicrosandboxCliResult<
             namespace, err
         ))),
     }
+}
+
+pub async fn server_status_subcommand(
+    _sandbox: bool,
+    names: Vec<String>,
+    namespace: String,
+) -> MicrosandboxCliResult<()> {
+    // Ensure microsandbox home directory exists
+    let namespace_path = env::get_microsandbox_home_path()
+        .join(NAMESPACES_SUBDIR)
+        .join(&namespace);
+
+    if !namespace_path.exists() {
+        return Err(MicrosandboxCliError::NotFound(format!(
+            "Namespace '{}' not found",
+            namespace
+        )));
+    }
+
+    orchestra::show_status(&names, Some(namespace_path.as_path()), None).await?;
+
+    Ok(())
+}
+
+pub async fn login_subcommand() -> MicrosandboxCliResult<()> {
+    println!(
+        "{} login functionality is not yet implemented",
+        "error:".error()
+    );
+    Ok(())
+}
+
+pub async fn push_subcommand(
+    _image: bool,
+    _image_group: bool,
+    _name: String,
+) -> MicrosandboxCliResult<()> {
+    println!(
+        "{} push functionality is not yet implemented",
+        "error:".error()
+    );
+    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------

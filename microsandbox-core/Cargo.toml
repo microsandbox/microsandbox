@@ -50,6 +50,7 @@ typed-path.workspace = true
 uuid.workspace = true
 xattr.workspace = true
 sysinfo = "0.34"
+psutil = "3.2.2"
 nix = { version = "0.29", features = ["mount", "user", "fs"] }
 tar = "0.4"
 flate2 = "1.0"
@@ -76,6 +77,8 @@ rand.workspace = true
 indicatif = { workspace = true, optional = true }
 console = { workspace = true, optional = true }
 which = "7.0"
+crossterm = { version = "0.29.0", features = ["events"] }
+atty = "0.2.14"
 
 [dev-dependencies]
 test-log.workspace = true

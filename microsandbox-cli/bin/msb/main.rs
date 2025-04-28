@@ -192,6 +192,16 @@ async fn main() -> MicrosandboxCliResult<()> {
         }) => {
             handlers::down_subcommand(sandbox, build, group, names, path, config).await?;
         }
+        Some(MicrosandboxSubcommand::Status {
+            sandbox,
+            build,
+            group,
+            names,
+            path,
+            config,
+        }) => {
+            handlers::status_subcommand(sandbox, build, group, names, path, config).await?;
+        }
         Some(MicrosandboxSubcommand::Log {
             sandbox,
             build,
@@ -236,9 +246,9 @@ async fn main() -> MicrosandboxCliResult<()> {
             ServerSubcommand::Keygen {
                 expire,
                 namespace,
-                all_namespaces,
+                all,
             } => {
-                handlers::server_keygen_subcommand(expire, namespace, all_namespaces).await?;
+                handlers::server_keygen_subcommand(expire, namespace, all).await?;
             }
             ServerSubcommand::Log {
                 sandbox,
@@ -252,7 +262,24 @@ async fn main() -> MicrosandboxCliResult<()> {
             ServerSubcommand::List { namespace } => {
                 handlers::server_list_subcommand(namespace).await?;
             }
+            ServerSubcommand::Status {
+                sandbox,
+                names,
+                namespace,
+            } => {
+                handlers::server_status_subcommand(sandbox, names, namespace).await?;
+            }
         },
+        Some(MicrosandboxSubcommand::Login) => {
+            handlers::login_subcommand().await?;
+        }
+        Some(MicrosandboxSubcommand::Push {
+            image,
+            image_group,
+            name,
+        }) => {
+            handlers::push_subcommand(image, image_group, name).await?;
+        }
         Some(_) => (), // TODO: implement other subcommands
         None => {
             MicrosandboxArgs::command().print_help()?;
