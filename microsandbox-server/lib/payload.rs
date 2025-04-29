@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 pub struct SandboxStartRequest {
     /// Sandbox name
-    pub sandbox_name: String,
+    pub sandbox: String,
 
     /// Optional namespace
     pub namespace: String,
@@ -35,7 +35,7 @@ pub struct SandboxStartRequest {
 #[derive(Debug, Deserialize)]
 pub struct SandboxStopRequest {
     /// Sandbox name
-    pub sandbox_name: String,
+    pub sandbox: String,
 
     /// Optional namespace
     pub namespace: String,
@@ -55,7 +55,7 @@ pub struct RunCodeRequest {
     pub namespace: String,
 
     /// Sandbox name
-    pub sandbox_name: String,
+    pub sandbox: String,
 }
 
 /// JSON-RPC response

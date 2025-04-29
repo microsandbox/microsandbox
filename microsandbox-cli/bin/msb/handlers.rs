@@ -655,21 +655,38 @@ pub async fn server_list_subcommand(namespace: String) -> MicrosandboxCliResult<
 pub async fn server_status_subcommand(
     _sandbox: bool,
     names: Vec<String>,
-    namespace: String,
+    namespace: Option<String>,
 ) -> MicrosandboxCliResult<()> {
-    // Ensure microsandbox home directory exists
-    let namespace_path = env::get_microsandbox_home_path()
-        .join(NAMESPACES_SUBDIR)
-        .join(&namespace);
+    // Get the microsandbox home path
+    let microsandbox_home_path = env::get_microsandbox_home_path();
+    let namespaces_path = microsandbox_home_path.join(NAMESPACES_SUBDIR);
 
-    if !namespace_path.exists() {
-        return Err(MicrosandboxCliError::NotFound(format!(
-            "Namespace '{}' not found",
-            namespace
-        )));
+    // Check if we need to show all namespaces or just one
+    if let Some(namespace) = namespace {
+        // Single namespace mode
+        let namespace_path = namespaces_path.join(&namespace);
+
+        if !namespace_path.exists() {
+            return Err(MicrosandboxCliError::NotFound(format!(
+                "Namespace '{}' not found",
+                namespace
+            )));
+        }
+
+        orchestra::show_status(&names, Some(namespace_path.as_path()), None).await?;
+    } else {
+        // All namespaces mode
+        // First check if namespaces directory exists
+        if !namespaces_path.exists() {
+            return Err(MicrosandboxCliError::NotFound(
+                "No namespaces directory found".to_string(),
+            ));
+        }
+
+        // Show status for all namespaces, passing the parent directory
+        // instead of a pre-collected list of namespace directories
+        orchestra::show_status_namespaces(&names, namespaces_path.as_path()).await?;
     }
-
-    orchestra::show_status(&names, Some(namespace_path.as_path()), None).await?;
 
     Ok(())
 }

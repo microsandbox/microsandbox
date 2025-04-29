@@ -50,7 +50,7 @@ pub async fn sandbox_up(
         .join(&payload.namespace);
     let config_file = MICROSANDBOX_CONFIG_FILENAME;
     let config_path = namespace_dir.join(config_file);
-    let sandbox_name = &payload.sandbox_name;
+    let sandbox = &payload.sandbox;
 
     // Create namespace directory if it doesn't exist
     if !namespace_dir.exists() {
@@ -83,7 +83,7 @@ pub async fn sandbox_up(
         return Err(ServerError::ValidationError(
             crate::error::ValidationError::InvalidInput(format!(
                 "No configuration provided and no existing configuration found for sandbox '{}'",
-                sandbox_name
+                sandbox
             )),
         ));
     }
@@ -104,14 +104,14 @@ pub async fn sandbox_up(
         // Check if the sandboxes configuration exists and contains our sandbox
         let has_sandbox_config = config_yaml
             .get("sandboxes")
-            .and_then(|sandboxes| sandboxes.get(sandbox_name))
+            .and_then(|sandboxes| sandboxes.get(sandbox))
             .is_some();
 
         if !has_sandbox_config {
             return Err(ServerError::ValidationError(
                 crate::error::ValidationError::InvalidInput(format!(
                     "Sandbox '{}' not found in existing configuration",
-                    sandbox_name
+                    sandbox
                 )),
             ));
         }
@@ -278,7 +278,7 @@ pub async fn sandbox_up(
 
             // Replace or add the sandbox in the config
             sandboxes_map.insert(
-                serde_yaml::Value::String(sandbox_name.clone()),
+                serde_yaml::Value::String(sandbox.clone()),
                 serde_yaml::Value::Mapping(sandbox_map),
             );
 
@@ -297,31 +297,31 @@ pub async fn sandbox_up(
 
     // If sandbox is already running, stop it first
     if let Err(e) = orchestra::down(
-        vec![sandbox_name.clone()],
+        vec![sandbox.clone()],
         Some(&namespace_dir),
         Some(config_file),
     )
     .await
     {
         // Log the error but continue - this might just mean the sandbox wasn't running
-        tracing::warn!("Error stopping sandbox {}: {}", sandbox_name, e);
+        tracing::warn!("Error stopping sandbox {}: {}", sandbox, e);
     }
 
     // Start the sandbox
     orchestra::up(
-        vec![sandbox_name.clone()],
+        vec![sandbox.clone()],
         Some(&namespace_dir),
         Some(config_file),
     )
     .await
     .map_err(|e| {
-        ServerError::InternalError(format!("Failed to start sandbox {}: {}", sandbox_name, e))
+        ServerError::InternalError(format!("Failed to start sandbox {}: {}", payload.sandbox, e))
     })?;
 
     Ok((
         StatusCode::OK,
         Json(RegularMessageResponse {
-            message: format!("Sandbox {} started successfully", sandbox_name),
+            message: format!("Sandbox {} started successfully", payload.sandbox),
         }),
     ))
 }
@@ -335,7 +335,7 @@ pub async fn sandbox_down(
     Ok((
         StatusCode::OK,
         Json(RegularMessageResponse {
-            message: format!("Sandbox stop requested for: {}", payload.sandbox_name),
+            message: format!("Sandbox stop requested for: {}", payload.sandbox),
         }),
     ))
 }
@@ -389,7 +389,7 @@ pub async fn run_code(
     // TODO: Implement code execution logic
     let result = format!(
         "Code execution requested in sandbox: {} (namespace: {})",
-        payload.sandbox_name, payload.namespace
+        payload.sandbox, payload.namespace
     );
 
     let response = JsonRpcResponse {
@@ -408,7 +408,7 @@ pub async fn run_code(
 /// Handler for proxy requests
 pub async fn proxy_request(
     State(_state): State<AppState>,
-    Path((namespace, sandbox_name, path)): Path<(String, String, PathBuf)>,
+    Path((namespace, sandbox, path)): Path<(String, String, PathBuf)>,
     req: Request<Body>,
 ) -> ServerResult<impl IntoResponse> {
     // In a real implementation, this would use the middleware::proxy_uri function
@@ -418,7 +418,7 @@ pub async fn proxy_request(
 
     // Calculate target URI using our middleware function
     let original_uri = req.uri().clone();
-    let _target_uri = middleware::proxy_uri(original_uri, &namespace, &sandbox_name);
+    let _target_uri = middleware::proxy_uri(original_uri, &namespace, &sandbox);
 
     // In a production system, this handler would forward the request to the target URI
     // For now, we'll just return information about what would be proxied
@@ -426,7 +426,7 @@ pub async fn proxy_request(
     let response = format!(
         "Axum Proxy Request\n\nNamespace: {}\nSandbox: {}\nPath: {}\nMethod: {}\nHeaders: {:?}",
         namespace,
-        sandbox_name,
+        sandbox,
         path_str,
         req.method(),
         req.headers()

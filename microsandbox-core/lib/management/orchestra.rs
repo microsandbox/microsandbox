@@ -579,6 +579,84 @@ pub async fn show_status(
     Ok(())
 }
 
+/// Show status of sandboxes across multiple namespaces
+///
+/// This function displays the status of sandboxes from multiple namespaces in a consolidated view.
+/// It's useful for server mode when you want to see all sandboxes across all namespaces.
+///
+/// ## Arguments
+///
+/// * `names` - List of sandbox names to show status for. If empty, shows all sandboxes.
+/// * `namespaces_parent_dir` - The parent directory containing namespace directories
+///
+/// ## Returns
+///
+/// Returns `MicrosandboxResult<()>` indicating success or failure. Possible failures include:
+/// - Config file not found or invalid
+/// - Database errors
+/// - Sandbox status retrieval failures
+///
+/// ## Example
+///
+/// ```no_run
+/// use std::path::PathBuf;
+/// use microsandbox_core::management::orchestra;
+///
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     // Get all namespace directories
+///     let namespaces = vec![
+///         PathBuf::from("/path/to/namespaces/ns1"),
+///         PathBuf::from("/path/to/namespaces/ns2"),
+///     ];
+///
+///     // Show status for all sandboxes in all namespaces
+///     orchestra::show_status_namespaces(&[], namespaces.iter().map(|p| p.as_path()).collect()).await?;
+///
+///     // Or show status for specific sandboxes
+///     orchestra::show_status_namespaces(
+///         &["sandbox1".to_string(), "sandbox2".to_string()],
+///         namespaces.iter().map(|p| p.as_path()).collect()
+///     ).await?;
+///
+///     Ok(())
+/// }
+/// ```
+pub async fn show_status_namespaces(
+    names: &[String],
+    namespaces_parent_dir: &Path,
+) -> MicrosandboxResult<()> {
+    // Check if we're in a TTY to determine if we should do live updates
+    let is_tty = atty::is(atty::Stream::Stdout);
+    let live_view = is_tty;
+    let update_interval = std::time::Duration::from_secs(2);
+
+    if live_view {
+        println!("{}", style("Press Ctrl+C to exit live view").dim());
+        // Use a loop with tokio sleep for live updates
+        loop {
+            // Clear the screen by printing ANSI escape code
+            print!("\x1B[2J\x1B[1;1H");
+
+            display_status_namespaces(names, namespaces_parent_dir).await?;
+
+            // Show update message
+            println!(
+                "\n{}",
+                style("Updating every 2 seconds. Press Ctrl+C to exit.").dim()
+            );
+
+            // Wait for the update interval
+            tokio::time::sleep(update_interval).await;
+        }
+    } else {
+        // Just display once for non-TTY
+        display_status_namespaces(names, namespaces_parent_dir).await?;
+    }
+
+    Ok(())
+}
+
 // Extracted the status display logic to a separate function
 async fn display_status(
     names: &[String],
@@ -649,47 +727,7 @@ async fn display_status(
     println!("{}", style("─".repeat(80)).dim());
 
     for status in statuses {
-        let status_text = if status.running {
-            style("RUNNING").green()
-        } else {
-            style("STOPPED").red()
-        };
-
-        let pids = if status.running {
-            format!(
-                "{}/{}",
-                status.supervisor_pid.unwrap_or(0),
-                status.microvm_pid.unwrap_or(0)
-            )
-        } else {
-            "-".to_string()
-        };
-
-        let cpu = if let Some(cpu_usage) = status.cpu_usage {
-            format!("{:.1}%", cpu_usage)
-        } else {
-            "-".to_string()
-        };
-
-        let memory = if let Some(memory_usage) = status.memory_usage {
-            format!("{} MiB", memory_usage)
-        } else {
-            "-".to_string()
-        };
-
-        let disk = if let Some(disk_usage) = status.disk_usage {
-            if disk_usage > 1024 * 1024 * 1024 {
-                format!("{:.2} GB", disk_usage as f64 / (1024.0 * 1024.0 * 1024.0))
-            } else if disk_usage > 1024 * 1024 {
-                format!("{:.2} MB", disk_usage as f64 / (1024.0 * 1024.0))
-            } else if disk_usage > 1024 {
-                format!("{:.2} KB", disk_usage as f64 / 1024.0)
-            } else {
-                format!("{} B", disk_usage)
-            }
-        } else {
-            "-".to_string()
-        };
+        let (status_text, pids, cpu, memory, disk) = format_status_columns(&status);
 
         println!(
             "{:<15} {:<10} {:<15} {:<12} {:<12} {:<12}",
@@ -705,9 +743,248 @@ async fn display_status(
     Ok(())
 }
 
+// Update display_status_namespaces to discover namespaces dynamically
+async fn display_status_namespaces(
+    names: &[String],
+    namespaces_parent_dir: &Path,
+) -> MicrosandboxResult<()> {
+    // Create a struct to hold status with namespace info
+    #[derive(Clone)]
+    struct NamespacedStatus {
+        namespace: String,
+        status: SandboxStatus,
+    }
+
+    // Collect statuses from all namespaces
+    let mut all_statuses = Vec::new();
+    let mut namespace_count = 0;
+
+    // Check if the parent directory exists
+    if !namespaces_parent_dir.exists() {
+        return Err(MicrosandboxError::PathNotFound(format!(
+            "Namespaces directory not found at {}",
+            namespaces_parent_dir.display()
+        )));
+    }
+
+    // Scan the parent directory for namespaces
+    let mut entries = tokio::fs::read_dir(namespaces_parent_dir).await?;
+    let mut namespace_dirs = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_dir() {
+            namespace_dirs.push(path);
+        }
+    }
+
+    // Process each namespace directory
+    for namespace_dir in &namespace_dirs {
+        // Extract namespace name from path
+        let namespace = namespace_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        namespace_count += 1;
+
+        // Get statuses for this namespace
+        match status(names.to_vec(), Some(namespace_dir), None).await {
+            Ok(statuses) => {
+                // Add namespace info to each status
+                for status in statuses {
+                    all_statuses.push(NamespacedStatus {
+                        namespace: namespace.clone(),
+                        status,
+                    });
+                }
+            }
+            Err(e) => {
+                // Log error but continue with other namespaces
+                tracing::warn!("Error getting status for namespace {}: {}", namespace, e);
+            }
+        }
+    }
+
+    // Sort the statuses with the same criteria as display_status
+    // But also group by namespace
+    all_statuses.sort_by(|a, b| {
+        // First compare by namespace
+        let namespace_order = a.namespace.cmp(&b.namespace);
+        if namespace_order != std::cmp::Ordering::Equal {
+            return namespace_order;
+        }
+
+        // Then compare by running status (running sandboxes first)
+        let running_order = b.status.running.cmp(&a.status.running);
+        if running_order != std::cmp::Ordering::Equal {
+            return running_order;
+        }
+
+        // Then compare by CPU usage (highest first)
+        let cpu_order = b
+            .status
+            .cpu_usage
+            .partial_cmp(&a.status.cpu_usage)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        if cpu_order != std::cmp::Ordering::Equal {
+            return cpu_order;
+        }
+
+        // Then compare by memory usage (highest first)
+        let memory_order = b
+            .status
+            .memory_usage
+            .partial_cmp(&a.status.memory_usage)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        if memory_order != std::cmp::Ordering::Equal {
+            return memory_order;
+        }
+
+        // Then compare by disk usage (highest first)
+        let disk_order = b
+            .status
+            .disk_usage
+            .partial_cmp(&a.status.disk_usage)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        if disk_order != std::cmp::Ordering::Equal {
+            return disk_order;
+        }
+
+        // Finally sort by name (alphabetical)
+        a.status.name.cmp(&b.status.name)
+    });
+
+    // Get current timestamp
+    let now = chrono::Local::now();
+    let timestamp = now.format("%Y-%m-%d %H:%M:%S");
+
+    // Display timestamp
+    println!("{}", style(format!("Last updated: {}", timestamp)).dim());
+
+    // Print a table-like output with status information
+    println!(
+        "\n{:<15} {:<15} {:<10} {:<15} {:<12} {:<12} {:<12}",
+        style("NAMESPACE").bold(),
+        style("SANDBOX").bold(),
+        style("STATUS").bold(),
+        style("PIDS").bold(),
+        style("CPU").bold(),
+        style("MEMORY").bold(),
+        style("DISK").bold()
+    );
+
+    println!("{}", style("─".repeat(95)).dim());
+
+    let mut current_namespace = String::new();
+
+    // Capture sandboxes count
+    let sandboxes_count = all_statuses.len();
+
+    // Display all statuses
+    for namespaced_status in all_statuses {
+        let status = namespaced_status.status;
+
+        // Show namespace only if it changes
+        let namespace_display = if current_namespace != namespaced_status.namespace {
+            current_namespace = namespaced_status.namespace.clone();
+            current_namespace.clone() // Store the actual value to display
+        } else {
+            String::new() // Empty string when we don't want to show it
+        };
+
+        // Style the namespace based on whether it's empty or not
+        let styled_namespace = if !namespace_display.is_empty() {
+            style(&namespace_display).bold().blue()
+        } else {
+            style(&namespace_display).dim()
+        };
+
+        let (status_text, pids, cpu, memory, disk) = format_status_columns(&status);
+
+        println!(
+            "{:<15} {:<15} {:<10} {:<15} {:<12} {:<12} {:<12}",
+            styled_namespace,
+            style(&status.name).bold(),
+            status_text,
+            pids,
+            cpu,
+            memory,
+            disk
+        );
+    }
+
+    // Show summary with the captured counts
+    println!(
+        "\n{}: {}, {}: {}",
+        style("Total Namespaces").dim(),
+        namespace_count,
+        style("Total Sandboxes").dim(),
+        sandboxes_count
+    );
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Formats the status columns for display
+fn format_status_columns(
+    status: &SandboxStatus,
+) -> (
+    console::StyledObject<String>,
+    String,
+    String,
+    String,
+    String,
+) {
+    let status_text = if status.running {
+        style("RUNNING".to_string()).green()
+    } else {
+        style("STOPPED".to_string()).red()
+    };
+
+    let pids = if status.running {
+        format!(
+            "{}/{}",
+            status.supervisor_pid.unwrap_or(0),
+            status.microvm_pid.unwrap_or(0)
+        )
+    } else {
+        "-".to_string()
+    };
+
+    let cpu = if let Some(cpu_usage) = status.cpu_usage {
+        format!("{:.1}%", cpu_usage)
+    } else {
+        "-".to_string()
+    };
+
+    let memory = if let Some(memory_usage) = status.memory_usage {
+        format!("{} MiB", memory_usage)
+    } else {
+        "-".to_string()
+    };
+
+    let disk = if let Some(disk_usage) = status.disk_usage {
+        if disk_usage > 1024 * 1024 * 1024 {
+            format!("{:.2} GB", disk_usage as f64 / (1024.0 * 1024.0 * 1024.0))
+        } else if disk_usage > 1024 * 1024 {
+            format!("{:.2} MB", disk_usage as f64 / (1024.0 * 1024.0))
+        } else if disk_usage > 1024 {
+            format!("{:.2} KB", disk_usage as f64 / 1024.0)
+        } else {
+            format!("{} B", disk_usage)
+        }
+    } else {
+        "-".to_string()
+    };
+
+    (status_text, pids, cpu, memory, disk)
+}
 
 /// Validate that all requested sandbox names exist in the configuration
 fn validate_sandbox_names(

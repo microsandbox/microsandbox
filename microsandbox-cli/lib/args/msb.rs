@@ -729,9 +729,9 @@ pub enum ServerSubcommand {
         #[arg()]
         names: Vec<String>,
 
-        /// Namespace to show status for
-        #[arg(short, long, required = true)]
-        namespace: String,
+        /// Namespace to show status for. If not provided, shows status for all namespaces.
+        #[arg(short, long)]
+        namespace: Option<String>,
     },
 
     /// SSH into a sandbox

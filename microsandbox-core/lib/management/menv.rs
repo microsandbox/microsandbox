@@ -406,8 +406,12 @@ where
     }
 
     for (i, (name, sandbox)) in sandboxes.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+
         // Number and name
-        println!("\n{}. {}", style(i + 1).bold(), style(*name).bold());
+        println!("{}. {}", style(i + 1).bold(), style(*name).bold());
 
         // Image
         println!(
