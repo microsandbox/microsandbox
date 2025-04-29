@@ -483,6 +483,21 @@ pub async fn server_keygen_subcommand(
     Ok(())
 }
 
+/// Handles the server ssh subcommand, which spawns a new SSH session into a sandbox
+pub async fn server_ssh_subcommand(
+    _namespace: String,
+    _sandbox: bool,
+    _name: String,
+) -> MicrosandboxCliResult<()> {
+    MicrosandboxArgs::command()
+        .override_usage(usage("ssh", Some("[NAME]"), None))
+        .error(
+            ErrorKind::InvalidValue,
+            "SSH functionality is not yet implemented",
+        )
+        .exit();
+}
+
 /// Handle the self subcommand, which manages microsandbox itself
 pub async fn self_subcommand(action: SelfAction) -> MicrosandboxCliResult<()> {
     match action {

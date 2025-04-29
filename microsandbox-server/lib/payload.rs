@@ -26,6 +26,9 @@ pub struct SandboxStartRequest {
 
     /// Optional namespace
     pub namespace: String,
+
+    /// Optional sandbox configuration
+    pub config: Option<SandboxConfig>,
 }
 
 /// Request payload for stopping a sandbox
@@ -97,3 +100,49 @@ pub struct SandboxConfigResponse {}
 /// Status of an individual sandbox
 #[derive(Debug, Serialize)]
 pub struct SandboxStatus {}
+
+/// Configuration for a sandbox
+/// Similar to microsandbox-core's Sandbox but with optional fields for update operations
+#[derive(Debug, Deserialize)]
+pub struct SandboxConfig {
+    /// The image to use (optional for updates)
+    pub image: Option<String>,
+
+    /// The amount of memory in MiB to use
+    pub memory: Option<u32>,
+
+    /// The number of vCPUs to use
+    pub cpus: Option<u8>,
+
+    /// The volumes to mount
+    #[serde(default)]
+    pub volumes: Vec<String>,
+
+    /// The ports to expose
+    #[serde(default)]
+    pub ports: Vec<String>,
+
+    /// The environment variables to use
+    #[serde(default)]
+    pub envs: Vec<String>,
+
+    /// The sandboxes to depend on
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+
+    /// The working directory to use
+    pub workdir: Option<String>,
+
+    /// The shell to use (optional for updates)
+    pub shell: Option<String>,
+
+    /// The scripts that can be run
+    #[serde(default)]
+    pub scripts: std::collections::HashMap<String, String>,
+
+    /// The exec command to run
+    pub exec: Option<String>,
+
+    /// The network scope for the sandbox
+    pub scope: Option<String>,
+}

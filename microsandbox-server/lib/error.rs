@@ -26,8 +26,11 @@ use tracing::error;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// The result of a server-related operation.
+/// The result of microsandbox-server operations in general.
 pub type MicrosandboxServerResult<T> = Result<T, MicrosandboxServerError>;
+
+/// The result of server-related operations.
+pub type ServerResult<T> = Result<T, ServerError>;
 
 /// Error returned when an unexpected internal error occurs
 #[derive(Error, Debug)]

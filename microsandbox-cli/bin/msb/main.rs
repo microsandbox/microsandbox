@@ -269,6 +269,13 @@ async fn main() -> MicrosandboxCliResult<()> {
             } => {
                 handlers::server_status_subcommand(sandbox, names, namespace).await?;
             }
+            ServerSubcommand::Ssh {
+                namespace,
+                sandbox,
+                name,
+            } => {
+                handlers::server_ssh_subcommand(namespace, sandbox, name).await?;
+            }
         },
         Some(MicrosandboxSubcommand::Login) => {
             handlers::login_subcommand().await?;

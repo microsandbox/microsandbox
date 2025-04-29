@@ -45,7 +45,7 @@ pub const DEFAULT_OCI_REFERENCE_REPO_NAMESPACE: &str = "library";
 
 /// The default configuration file content
 pub const DEFAULT_CONFIG: &str = r#"# Sandbox configurations
-sandboxes: []
+sandboxes: {}
 "#;
 
 /// The default shell to use for the sandbox.

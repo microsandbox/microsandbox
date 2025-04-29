@@ -632,7 +632,7 @@ pub enum MicrosandboxSubcommand {
         action: SelfAction,
     },
 
-    /// Start a server for orchestrating sandboxes
+    /// Start a sandbox server for orchestrating and working with sandboxes
     #[command(name = "server")]
     Server {
         /// The subcommand to run
@@ -682,11 +682,11 @@ pub enum ServerSubcommand {
         expire: Option<String>,
 
         /// Namespace for the API key
-        #[arg(short = 'n', long, required_unless_present = "all_namespaces")]
+        #[arg(short, long, required_unless_present = "all")]
         namespace: Option<String>,
 
         /// Allow access to all namespaces
-        #[arg(short = 'a', long, conflicts_with = "namespace")]
+        #[arg(short, long, conflicts_with = "namespace")]
         all: bool,
     },
 
@@ -736,6 +736,22 @@ pub enum ServerSubcommand {
         /// Namespace to show status for
         #[arg(short, long, required = true)]
         namespace: String,
+    },
+
+    /// SSH into a sandbox
+    #[command(name = "ssh")]
+    Ssh {
+        /// Namespace for the SSH key
+        #[arg(short, long, required = true)]
+        namespace: String,
+
+        /// Whether to SSH into a sandbox
+        #[arg(short, long)]
+        sandbox: bool,
+
+        /// Name of the sandbox
+        #[arg(required = true)]
+        name: String,
     },
 }
 

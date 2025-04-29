@@ -208,7 +208,7 @@ pub async fn up(
             tracing::info!("starting sandbox: {}", sandbox_name);
             sandbox::run(
                 sandbox_name,
-                Some(START_SCRIPT_NAME),
+                None,
                 Some(&canonical_project_dir),
                 Some(&config_file),
                 vec![],

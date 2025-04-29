@@ -26,8 +26,8 @@ use crate::{handler, middleware as app_middleware, state::AppState};
 pub fn create_router(state: AppState) -> Router {
     // Create REST API routes
     let rest_api = Router::new()
-        .route("/sandbox-start", post(handler::sandbox_start))
-        .route("/sandbox-stop", post(handler::sandbox_stop))
+        .route("/sandbox-up", post(handler::sandbox_up))
+        .route("/sandbox-down", post(handler::sandbox_down))
         .route("/sandbox-config", get(handler::sandbox_config))
         .route("/health", get(handler::health))
         .route("/system-status", get(handler::system_status))
