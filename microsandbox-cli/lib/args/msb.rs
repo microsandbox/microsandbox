@@ -681,13 +681,9 @@ pub enum ServerSubcommand {
         #[arg(long)]
         expire: Option<String>,
 
-        /// Namespace for the API key
-        #[arg(short, long, required_unless_present = "all")]
+        /// Namespace for the API key. If not specified, generates a key for all namespaces.
+        #[arg(short, long)]
         namespace: Option<String>,
-
-        /// Allow access to all namespaces
-        #[arg(short, long, conflicts_with = "namespace")]
-        all: bool,
     },
 
     /// Show logs of a sandbox

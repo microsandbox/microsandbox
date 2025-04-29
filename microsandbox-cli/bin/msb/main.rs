@@ -243,12 +243,8 @@ async fn main() -> MicrosandboxCliResult<()> {
             ServerSubcommand::Stop => {
                 handlers::server_stop_subcommand().await?;
             }
-            ServerSubcommand::Keygen {
-                expire,
-                namespace,
-                all,
-            } => {
-                handlers::server_keygen_subcommand(expire, namespace, all).await?;
+            ServerSubcommand::Keygen { expire, namespace } => {
+                handlers::server_keygen_subcommand(expire, namespace).await?;
             }
             ServerSubcommand::Log {
                 sandbox,

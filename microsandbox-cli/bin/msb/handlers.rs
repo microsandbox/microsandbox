@@ -461,7 +461,6 @@ pub async fn server_stop_subcommand() -> MicrosandboxServerResult<()> {
 pub async fn server_keygen_subcommand(
     expire: Option<String>,
     namespace: Option<String>,
-    all: bool,
 ) -> MicrosandboxCliResult<()> {
     // Convert the string duration to chrono::Duration
     let duration = if let Some(expire_str) = expire {
@@ -470,13 +469,8 @@ pub async fn server_keygen_subcommand(
         None
     };
 
-    // Determine the namespace to use
-    let namespace_value = if all {
-        "*".to_string()
-    } else {
-        // namespace must be Some because of required_unless_present in the arg definition
-        namespace.unwrap_or_default()
-    };
+    // If namespace is None, use "*" to represent all namespaces
+    let namespace_value = namespace.unwrap_or_else(|| "*".to_string());
 
     microsandbox_server::keygen(duration, namespace_value).await?;
 
