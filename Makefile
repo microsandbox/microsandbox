@@ -15,6 +15,13 @@ ifeq ($(ARCH),x86_64)
 endif
 
 # -----------------------------------------------------------------------------
+# Build Configuration
+# -----------------------------------------------------------------------------
+BUILD_TYPE ?= release
+CARGO_BUILD_MODE := $(if $(filter debug,$(BUILD_TYPE)),,--release)
+CARGO_TARGET_DIR := target/$(if $(filter debug,$(BUILD_TYPE)),debug,release)
+
+# -----------------------------------------------------------------------------
 # Installation Paths
 # -----------------------------------------------------------------------------
 HOME_LIB := $(HOME)/.local/lib
@@ -23,9 +30,9 @@ HOME_BIN := $(HOME)/.local/bin
 # -----------------------------------------------------------------------------
 # Build Paths and Directories
 # -----------------------------------------------------------------------------
-MSB_RELEASE_BIN := target/release/msb
-MSBRUN_RELEASE_BIN := target/release/msbrun
-MSBSERVER_RELEASE_BIN := target/release/msbserver
+MSB_BIN := $(CARGO_TARGET_DIR)/msb
+MSBRUN_BIN := $(CARGO_TARGET_DIR)/msbrun
+MSBSERVER_BIN := $(CARGO_TARGET_DIR)/msbserver
 EXAMPLES_DIR := target/release/examples
 BENCHES_DIR := target/release
 BUILD_DIR := build
@@ -57,11 +64,12 @@ build: build_libkrun
 	@$(MAKE) _build_msb
 	@$(MAKE) _build_aliases
 
-_build_msb: $(MSB_RELEASE_BIN) $(MSBRUN_RELEASE_BIN) $(MSBSERVER_RELEASE_BIN)
-	@cp $(MSB_RELEASE_BIN) $(BUILD_DIR)/
-	@cp $(MSBRUN_RELEASE_BIN) $(BUILD_DIR)/
-	@cp $(MSBSERVER_RELEASE_BIN) $(BUILD_DIR)/
-	@echo "Msb build artifacts copied to $(BUILD_DIR)/"
+_build_msb: $(MSB_BIN) $(MSBRUN_BIN) $(MSBSERVER_BIN)
+	@mkdir -p $(BUILD_DIR)
+	@cp $(MSB_BIN) $(BUILD_DIR)/
+	@cp $(MSBRUN_BIN) $(BUILD_DIR)/
+	@cp $(MSBSERVER_BIN) $(BUILD_DIR)/
+	@echo "Msb build artifacts ($(BUILD_TYPE) mode) copied to $(BUILD_DIR)/"
 
 _build_aliases:
 	@mkdir -p $(BUILD_DIR)
@@ -73,35 +81,36 @@ _build_aliases:
 # -----------------------------------------------------------------------------
 # Binary Building
 # -----------------------------------------------------------------------------
-$(MSB_RELEASE_BIN): build_libkrun
+$(MSB_BIN): build_libkrun
 	cd microsandbox-core
 ifeq ($(OS),Darwin)
-	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin msb --features cli $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build $(CARGO_BUILD_MODE) --bin msb --features cli $(FEATURES)
 else
-	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msb --features cli $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build $(CARGO_BUILD_MODE) --bin msb --features cli $(FEATURES)
 endif
 
-$(MSBRUN_RELEASE_BIN): build_libkrun
+$(MSBRUN_BIN): build_libkrun
 	cd microsandbox-core
 ifeq ($(OS),Darwin)
-	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin msbrun --features cli $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build $(CARGO_BUILD_MODE) --bin msbrun --features cli $(FEATURES)
 	codesign --entitlements microsandbox.entitlements --force -s - $@
 else
-	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msbrun --features cli $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build $(CARGO_BUILD_MODE) --bin msbrun --features cli $(FEATURES)
 endif
 
-$(MSBSERVER_RELEASE_BIN): build_libkrun
+$(MSBSERVER_BIN): build_libkrun
 	cd microsandbox-core
 ifeq ($(OS),Darwin)
-	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build --release --bin msbserver --features cli $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,@executable_path/../lib,-rpath,@executable_path" cargo build $(CARGO_BUILD_MODE) --bin msbserver --features cli $(FEATURES)
 else
-	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build --release --bin msbserver --features cli $(FEATURES)
+	RUSTFLAGS="-C link-args=-Wl,-rpath,\$$ORIGIN/../lib,-rpath,\$$ORIGIN" cargo build $(CARGO_BUILD_MODE) --bin msbserver --features cli $(FEATURES)
 endif
 
 # -----------------------------------------------------------------------------
 # Installation
 # -----------------------------------------------------------------------------
 install: build
+	@echo "Installing $(BUILD_TYPE) build..."
 	install -d $(HOME_BIN)
 	install -d $(HOME_LIB)
 	install -m 755 $(BUILD_DIR)/msb $(HOME_BIN)/msb
@@ -122,6 +131,7 @@ install: build
 	else \
 		echo "Warning: libkrun library not found in build directory"; \
 	fi
+	@echo "Installation of $(BUILD_TYPE) build complete."
 
 # -----------------------------------------------------------------------------
 # Maintenance
