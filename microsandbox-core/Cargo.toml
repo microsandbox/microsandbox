@@ -50,8 +50,16 @@ typed-path.workspace = true
 uuid.workspace = true
 xattr.workspace = true
 sysinfo = "0.34"
+regex.workspace = true
 psutil = "3.3.0"
-nix = { version = "0.30", features = ["mount", "user", "fs"] }
+nix = { workspace = true, features = [
+    "mount",
+    "user",
+    "fs",
+    "process",
+    "term",
+    "signal",
+] }
 tar = "0.4"
 flate2 = "1.0"
 walkdir = "2.4"

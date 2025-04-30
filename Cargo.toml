@@ -21,7 +21,7 @@ base64 = "0.22"
 dirs = "6.0"
 hex = "0.4"
 libc = "0.2"
-nix = "0.29"
+nix = "0.30"
 axum = "0.8"
 bytes = "1.9"
 serde = { version = "1.0", features = ["derive"] }
@@ -62,6 +62,7 @@ uuid = { version = "1.11", features = ["v4"] }
 pretty-error-debug = "0.3"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls"] }
 serde_yaml = "0.9"
+regex = "1.10"
 async-recursion = "1.1"
 cfg-if = "1.0"
 nfsserve = "0.10"

@@ -27,10 +27,15 @@ pub fn create_router(state: AppState) -> Router {
     // Create REST API routes - only health endpoint remains here
     let rest_api = Router::new().route("/health", get(handler::health));
 
-    // Create JSON-RPC routes - a single endpoint that handles all RPC methods
-    let rpc_api = Router::new().route("/", post(handler::json_rpc_handler));
+    // Create JSON-RPC routes with authentication - a single endpoint that handles all RPC methods
+    let rpc_api = Router::new()
+        .route("/", post(handler::json_rpc_handler))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            app_middleware::auth_middleware,
+        ));
 
-    // Create proxy routes - now nested under /proxy path
+    // Create proxy routes - nested under /proxy path, now without auth middleware
     let proxy_routes = Router::new()
         .route(
             "/{namespace}/{sandbox_name}/{*path}",

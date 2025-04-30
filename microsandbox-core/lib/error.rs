@@ -1,5 +1,4 @@
 use microsandbox_utils::MicrosandboxUtilsError;
-use nix::errno::Errno;
 use sqlx::migrate::MigrateError;
 use std::{
     error::Error,
@@ -174,9 +173,9 @@ pub enum MicrosandboxError {
     #[error("strip prefix error: {0}")]
     StripPrefix(#[from] StripPrefixError),
 
-    /// An error that occurred during a system call
-    #[error("system call error: {0}")]
-    SystemCall(#[from] Errno),
+    /// An error that occurred during a nix operation
+    #[error("nix error: {0}")]
+    NixError(#[from] nix::Error),
 
     /// An error that occurred when converting system time
     #[error("system time error: {0}")]

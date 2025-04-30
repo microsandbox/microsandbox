@@ -28,8 +28,7 @@ use crate::{
     middleware,
     payload::{JsonRpcResponse, RegularMessageResponse, SandboxStartRequest, SandboxStopRequest},
     state::AppState,
-    SandboxConfigResponse, SandboxStatus, SandboxStatusResponse, ServerResult,
-    SystemStatusResponse,
+    SandboxStatus, SandboxStatusResponse, ServerResult,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -86,6 +85,11 @@ pub async fn json_rpc_handler(
                     ))
                 })?;
 
+            // Access validation can be done here using the headers in the original request
+            // We can extract the API key from headers and validate it has access to the
+            // requested namespace
+            // This is now handled by the auth middleware
+
             // Call the sandbox_up_impl function
             let result = sandbox_start_impl(state, start_request).await?;
 
@@ -117,36 +121,6 @@ pub async fn json_rpc_handler(
 
             // Call the sandbox_down_impl function
             let result = sandbox_stop_impl(state, stop_request).await?;
-
-            // Create JSON-RPC response
-            let response = JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                result: serde_json::to_value(result).map_err(|e| {
-                    ServerError::InternalError(format!("JSON serialization error: {}", e))
-                })?,
-                id: id_value,
-            };
-
-            Ok((StatusCode::OK, Json(response)))
-        }
-        Some("system.getStatus") => {
-            // Call the system_status_impl function
-            let result = system_get_status_impl().await?;
-
-            // Create JSON-RPC response
-            let response = JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                result: serde_json::to_value(result).map_err(|e| {
-                    ServerError::InternalError(format!("JSON serialization error: {}", e))
-                })?,
-                id: id_value,
-            };
-
-            Ok((StatusCode::OK, Json(response)))
-        }
-        Some("sandbox.getConfig") => {
-            // Call the sandbox_config_impl function
-            let result = sandbox_get_config_impl().await?;
 
             // Create JSON-RPC response
             let response = JsonRpcResponse {
@@ -509,20 +483,6 @@ async fn sandbox_stop_impl(state: AppState, params: SandboxStopRequest) -> Serve
 
     // Return success message
     Ok(format!("Sandbox {} stopped successfully", params.sandbox))
-}
-
-/// Implementation for system status
-async fn system_get_status_impl() -> ServerResult<SystemStatusResponse> {
-    // TODO: Implement system status logic
-
-    Ok(SystemStatusResponse {})
-}
-
-/// Implementation for sandbox configuration
-async fn sandbox_get_config_impl() -> ServerResult<SandboxConfigResponse> {
-    // TODO: Implement sandbox configuration logic
-
-    Ok(SandboxConfigResponse {})
 }
 
 /// Implementation for sandbox status

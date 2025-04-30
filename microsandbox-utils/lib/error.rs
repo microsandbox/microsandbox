@@ -33,7 +33,7 @@ pub enum MicrosandboxUtilsError {
     #[error("runtime error: {0}")]
     Runtime(String),
 
-    /// An error from the nix crate
+    /// An error that occurred during a nix operation
     #[error("nix error: {0}")]
     NixError(#[from] nix::Error),
 

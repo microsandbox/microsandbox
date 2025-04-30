@@ -49,11 +49,17 @@ const KEYGEN_MSG: &str = "Generate new API key";
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Claims for the JWT token
 #[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    exp: u64,
-    iat: u64,
-    namespace: String,
+pub struct Claims {
+    /// Expiration time
+    pub exp: u64,
+
+    /// Issued at time
+    pub iat: u64,
+
+    /// Namespace
+    pub namespace: String,
 }
 
 //--------------------------------------------------------------------------------------------------
