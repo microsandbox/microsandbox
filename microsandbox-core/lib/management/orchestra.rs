@@ -21,9 +21,26 @@ use nix::{
     sys::signal::{self, Signal},
     unistd::Pid,
 };
-use std::path::{Path, PathBuf};
+use once_cell::sync::Lazy;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::RwLock,
+    time::{Duration, Instant},
+};
 
 use super::{config, db, menv, sandbox};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// TTL for cached directory sizes.
+const DISK_SIZE_TTL: Duration = Duration::from_secs(30);
+
+/// Global cache path -> (size, last_updated)
+static DISK_SIZE_CACHE: Lazy<RwLock<HashMap<String, (u64, Instant)>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -1083,26 +1100,42 @@ fn validate_sandbox_names(
     Ok(())
 }
 
-/// Recursively calculate the size of a directory
+/// Recursively calculate the size of a directory, but cache the result for a short period so that
+/// callers (status refresh every ~2 s) don't hammer the filesystem.
 async fn get_directory_size(path: &str) -> MicrosandboxResult<u64> {
-    let mut total_size: u64 = 0;
-    let mut stack = vec![PathBuf::from(path)];
-
-    while let Some(path) = stack.pop() {
-        let mut entries = tokio::fs::read_dir(&path).await?;
-
-        while let Some(entry) = entries.next_entry().await? {
-            let metadata = entry.metadata().await?;
-
-            if metadata.is_file() {
-                total_size += metadata.len();
-            } else if metadata.is_dir() {
-                stack.push(entry.path());
+    // First attempt to serve from cache
+    {
+        let cache = DISK_SIZE_CACHE.read().unwrap();
+        if let Some((size, ts)) = cache.get(path) {
+            if ts.elapsed() < DISK_SIZE_TTL {
+                return Ok(*size);
             }
         }
     }
 
-    Ok(total_size)
+    // Need to (re)compute – perform blocking walk in a separate thread so we don't block Tokio
+    let path_buf = PathBuf::from(path);
+    let size = tokio::task::spawn_blocking(move || -> MicrosandboxResult<u64> {
+        use walkdir::WalkDir;
+
+        let mut total: u64 = 0;
+        for entry in WalkDir::new(&path_buf).follow_links(false) {
+            let entry = entry?; // propagates walkdir::Error (already covered in MicrosandboxError)
+            if entry.file_type().is_file() {
+                total += entry.metadata()?.len();
+            }
+        }
+        Ok(total)
+    })
+    .await??; // first ? = JoinError, second ? = inner MicrosandboxError
+
+    // Update cache
+    {
+        let mut cache = DISK_SIZE_CACHE.write().unwrap();
+        cache.insert(path.to_string(), (size, Instant::now()));
+    }
+
+    Ok(size)
 }
 
 /// Checks if specified sandboxes from the configuration are running.

@@ -50,8 +50,8 @@ typed-path.workspace = true
 uuid.workspace = true
 xattr.workspace = true
 sysinfo = "0.34"
-psutil = "3.2.2"
-nix = { version = "0.29", features = ["mount", "user", "fs"] }
+psutil = "3.3.0"
+nix = { version = "0.30", features = ["mount", "user", "fs"] }
 tar = "0.4"
 flate2 = "1.0"
 walkdir = "2.4"
@@ -68,7 +68,6 @@ bon = "3.3.0"
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 sqlx.workspace = true
 microsandbox-utils.workspace = true
-regex.workspace = true
 async-recursion.workspace = true
 file-lock = "2.1.11"
 nondestructive = { version = "0.0.26", features = ["serde"] }
@@ -79,6 +78,7 @@ console = { workspace = true, optional = true }
 which = "7.0"
 crossterm.workspace = true
 atty.workspace = true
+once_cell = "1.18"
 
 [dev-dependencies]
 test-log.workspace = true
