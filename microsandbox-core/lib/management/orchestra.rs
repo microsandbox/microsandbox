@@ -43,6 +43,38 @@ static DISK_SIZE_CACHE: Lazy<RwLock<HashMap<String, (u64, Instant)>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Information about a sandbox's resource usage
+#[derive(Debug, Clone)]
+pub struct SandboxStatus {
+    /// The name of the sandbox
+    pub name: String,
+
+    /// Whether the sandbox is running
+    pub running: bool,
+
+    /// The PID of the supervisor process
+    pub supervisor_pid: Option<u32>,
+
+    /// The PID of the microVM process
+    pub microvm_pid: Option<u32>,
+
+    /// CPU usage percentage
+    pub cpu_usage: Option<f32>,
+
+    /// Memory usage in MiB
+    pub memory_usage: Option<u64>,
+
+    /// Disk usage of the RW layer in bytes
+    pub disk_usage: Option<u64>,
+
+    /// Rootfs paths
+    pub rootfs_paths: Option<String>,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -321,34 +353,6 @@ pub async fn down(
     }
 
     Ok(())
-}
-
-/// Information about a sandbox's resource usage
-#[derive(Debug, Clone)]
-pub struct SandboxStatus {
-    /// The name of the sandbox
-    pub name: String,
-
-    /// Whether the sandbox is running
-    pub running: bool,
-
-    /// The PID of the supervisor process
-    pub supervisor_pid: Option<u32>,
-
-    /// The PID of the microVM process
-    pub microvm_pid: Option<u32>,
-
-    /// CPU usage percentage
-    pub cpu_usage: Option<f32>,
-
-    /// Memory usage in MiB
-    pub memory_usage: Option<u64>,
-
-    /// Disk usage of the RW layer in bytes
-    pub disk_usage: Option<u64>,
-
-    /// Rootfs paths
-    pub rootfs_paths: Option<String>,
 }
 
 /// Gets status information about specified sandboxes.

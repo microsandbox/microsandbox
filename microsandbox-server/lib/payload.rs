@@ -42,6 +42,16 @@ pub struct SandboxStopRequest {
     pub namespace: String,
 }
 
+/// Request payload for getting sandbox status
+#[derive(Debug, Deserialize)]
+pub struct SandboxStatusRequest {
+    /// Optional sandbox name - if not provided, all sandboxes in the namespace will be included
+    pub sandbox: Option<String>,
+
+    /// Namespace - use "*" to get status from all namespaces
+    pub namespace: String,
+}
+
 /// Configuration for a sandbox
 /// Similar to microsandbox-core's Sandbox but with optional fields for update operations
 #[derive(Debug, Deserialize)]
@@ -149,4 +159,22 @@ pub struct SandboxConfigResponse {}
 
 /// Status of an individual sandbox
 #[derive(Debug, Serialize)]
-pub struct SandboxStatus {}
+pub struct SandboxStatus {
+    /// Namespace the sandbox belongs to
+    pub namespace: String,
+
+    /// The name of the sandbox
+    pub name: String,
+
+    /// Whether the sandbox is running
+    pub running: bool,
+
+    /// CPU usage percentage
+    pub cpu_usage: Option<f32>,
+
+    /// Memory usage in MiB
+    pub memory_usage: Option<u64>,
+
+    /// Disk usage of the RW layer in bytes
+    pub disk_usage: Option<u64>,
+}

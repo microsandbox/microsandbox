@@ -448,8 +448,9 @@ pub async fn server_start_subcommand(
     dev_mode: bool,
     key: Option<String>,
     detach: bool,
+    reset_key: bool,
 ) -> MicrosandboxCliResult<()> {
-    microsandbox_server::start(key, port, namespace_dir, dev_mode, detach).await?;
+    microsandbox_server::start(key, port, namespace_dir, dev_mode, detach, reset_key).await?;
     Ok(())
 }
 

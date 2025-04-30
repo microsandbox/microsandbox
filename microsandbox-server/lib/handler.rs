@@ -26,7 +26,10 @@ use tokio::fs as tokio_fs;
 use crate::{
     error::ServerError,
     middleware,
-    payload::{JsonRpcResponse, RegularMessageResponse, SandboxStartRequest, SandboxStopRequest},
+    payload::{
+        JsonRpcResponse, RegularMessageResponse, SandboxStartRequest, SandboxStatusRequest,
+        SandboxStopRequest,
+    },
     state::AppState,
     SandboxStatus, SandboxStatusResponse, ServerResult,
 };
@@ -134,8 +137,22 @@ pub async fn json_rpc_handler(
             Ok((StatusCode::OK, Json(response)))
         }
         Some("sandbox.getStatus") => {
-            // Call the sandbox_status_impl function
-            let result = sandbox_get_status_impl().await?;
+            // Parse the params into a SandboxStatusRequest
+            let params = payload.get("params").ok_or_else(|| {
+                ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
+                    "Missing params field".to_string(),
+                ))
+            })?;
+
+            let status_request: SandboxStatusRequest = serde_json::from_value(params.clone())
+                .map_err(|e| {
+                    ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
+                        format!("Invalid params for sandbox.getStatus: {}", e),
+                    ))
+                })?;
+
+            // Call the sandbox_status_impl function with state and request
+            let result = sandbox_get_status_impl(state.clone(), status_request).await?;
 
             // Create JSON-RPC response
             let response = JsonRpcResponse {
@@ -162,6 +179,10 @@ pub async fn json_rpc_handler(
 
 /// Implementation for starting a sandbox
 async fn sandbox_start_impl(state: AppState, params: SandboxStartRequest) -> ServerResult<String> {
+    // Validate sandbox name and namespace
+    validate_sandbox_name(&params.sandbox)?;
+    validate_namespace(&params.namespace)?;
+
     let namespace_dir = state
         .get_config()
         .get_namespace_dir()
@@ -442,6 +463,10 @@ async fn sandbox_start_impl(state: AppState, params: SandboxStartRequest) -> Ser
 
 /// Implementation for stopping a sandbox
 async fn sandbox_stop_impl(state: AppState, params: SandboxStopRequest) -> ServerResult<String> {
+    // Validate sandbox name and namespace
+    validate_sandbox_name(&params.sandbox)?;
+    validate_namespace(&params.namespace)?;
+
     let namespace_dir = state
         .get_config()
         .get_namespace_dir()
@@ -486,13 +511,128 @@ async fn sandbox_stop_impl(state: AppState, params: SandboxStopRequest) -> Serve
 }
 
 /// Implementation for sandbox status
-async fn sandbox_get_status_impl() -> ServerResult<SandboxStatusResponse> {
-    // TODO: Implement sandbox status logic
-    let sandbox1 = SandboxStatus {};
-    let sandbox2 = SandboxStatus {};
+async fn sandbox_get_status_impl(
+    state: AppState,
+    params: SandboxStatusRequest,
+) -> ServerResult<SandboxStatusResponse> {
+    // Validate namespace - special handling for '*' wildcard
+    if params.namespace != "*" {
+        validate_namespace(&params.namespace)?;
+    }
+
+    // Validate sandbox name if provided
+    if let Some(sandbox) = &params.sandbox {
+        validate_sandbox_name(sandbox)?;
+    }
+
+    let namespaces_dir = state.get_config().get_namespace_dir();
+
+    // Check if the namespaces directory exists
+    if !namespaces_dir.exists() {
+        return Err(ServerError::InternalError(format!(
+            "Namespaces directory '{}' does not exist",
+            namespaces_dir.display()
+        )));
+    }
+
+    // Get all sandboxes statuses based on the request
+    let mut all_statuses = Vec::new();
+
+    // If namespace is "*", get statuses from all namespaces
+    if params.namespace == "*" {
+        // Read namespaces directory
+        let mut entries = tokio::fs::read_dir(&namespaces_dir).await.map_err(|e| {
+            ServerError::InternalError(format!("Failed to read namespaces directory: {}", e))
+        })?;
+
+        // Process each namespace directory
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            ServerError::InternalError(format!("Failed to read namespace directory entry: {}", e))
+        })? {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let namespace = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Get statuses for this namespace, filtered by sandbox name if provided
+            let sandbox_names = if let Some(sandbox) = &params.sandbox {
+                vec![sandbox.clone()]
+            } else {
+                vec![]
+            };
+
+            match orchestra::status(sandbox_names, Some(&path), None).await {
+                Ok(statuses) => {
+                    for status in statuses {
+                        // Convert from orchestra::SandboxStatus to our SandboxStatus
+                        all_statuses.push(SandboxStatus {
+                            namespace: namespace.clone(),
+                            name: status.name,
+                            running: status.running,
+                            cpu_usage: status.cpu_usage,
+                            memory_usage: status.memory_usage,
+                            disk_usage: status.disk_usage,
+                        });
+                    }
+                }
+                Err(e) => {
+                    // Log the error but continue with other namespaces
+                    tracing::warn!("Error getting status for namespace {}: {}", namespace, e);
+                }
+            }
+        }
+    } else {
+        // Get status for a specific namespace
+        let namespace_dir = namespaces_dir.join(&params.namespace);
+
+        // Check if the namespace directory exists
+        if !namespace_dir.exists() {
+            return Err(ServerError::ValidationError(
+                crate::error::ValidationError::InvalidInput(format!(
+                    "Namespace directory '{}' does not exist",
+                    params.namespace
+                )),
+            ));
+        }
+
+        // Get statuses for this namespace, filtered by sandbox name if provided
+        let sandbox_names = if let Some(sandbox) = &params.sandbox {
+            vec![sandbox.clone()]
+        } else {
+            vec![]
+        };
+
+        match orchestra::status(sandbox_names, Some(&namespace_dir), None).await {
+            Ok(statuses) => {
+                for status in statuses {
+                    // Convert from orchestra::SandboxStatus to our SandboxStatus
+                    all_statuses.push(SandboxStatus {
+                        namespace: params.namespace.clone(),
+                        name: status.name,
+                        running: status.running,
+                        cpu_usage: status.cpu_usage,
+                        memory_usage: status.memory_usage,
+                        disk_usage: status.disk_usage,
+                    });
+                }
+            }
+            Err(e) => {
+                return Err(ServerError::InternalError(format!(
+                    "Error getting status for namespace {}: {}",
+                    params.namespace, e
+                )));
+            }
+        }
+    }
 
     Ok(SandboxStatusResponse {
-        sandboxes: vec![sandbox1, sandbox2],
+        sandboxes: all_statuses,
     })
 }
 
@@ -544,3 +684,98 @@ pub async fn proxy_fallback() -> ServerResult<impl IntoResponse> {
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Validates a sandbox name
+fn validate_sandbox_name(name: &str) -> ServerResult<()> {
+    // Check name length
+    if name.is_empty() {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput("Sandbox name cannot be empty".to_string()),
+        ));
+    }
+
+    if name.len() > 63 {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(
+                "Sandbox name cannot exceed 63 characters".to_string(),
+            ),
+        ));
+    }
+
+    // Check name characters
+    let valid_chars = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+
+    if !valid_chars {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(
+                "Sandbox name can only contain alphanumeric characters, hyphens, or underscores"
+                    .to_string(),
+            ),
+        ));
+    }
+
+    // Must start with an alphanumeric character
+    if !name.chars().next().unwrap().is_ascii_alphanumeric() {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(
+                "Sandbox name must start with an alphanumeric character".to_string(),
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validates a namespace
+fn validate_namespace(namespace: &str) -> ServerResult<()> {
+    // Check namespace length
+    if namespace.is_empty() {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput("Namespace cannot be empty".to_string()),
+        ));
+    }
+
+    if namespace.len() > 63 {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(
+                "Namespace cannot exceed 63 characters".to_string(),
+            ),
+        ));
+    }
+
+    // Check for wildcard namespace - only valid for queries, not for creation
+    if namespace == "*" {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(
+                "Wildcard namespace (*) is not valid for sandbox creation".to_string(),
+            ),
+        ));
+    }
+
+    // Check namespace characters
+    let valid_chars = namespace
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+
+    if !valid_chars {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(
+                "Namespace can only contain alphanumeric characters, hyphens, or underscores"
+                    .to_string(),
+            ),
+        ));
+    }
+
+    // Must start with an alphanumeric character
+    if !namespace.chars().next().unwrap().is_ascii_alphanumeric() {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(
+                "Namespace must start with an alphanumeric character".to_string(),
+            ),
+        ));
+    }
+
+    Ok(())
+}

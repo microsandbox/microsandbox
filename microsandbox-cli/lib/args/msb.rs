@@ -663,12 +663,16 @@ pub enum ServerSubcommand {
         dev_mode: bool,
 
         /// Set secret key for server. Automatically generated if not provided.
-        #[arg(long)]
+        #[arg(short, long)]
         key: Option<String>,
 
         /// Run server in the background
         #[arg(short, long)]
         detach: bool,
+
+        /// Reset the server key
+        #[arg(short, long)]
+        reset_key: bool,
     },
 
     /// Stop the sandbox server

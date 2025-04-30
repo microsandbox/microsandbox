@@ -236,9 +236,17 @@ async fn main() -> MicrosandboxCliResult<()> {
                 dev_mode,
                 key,
                 detach,
+                reset_key,
             } => {
-                handlers::server_start_subcommand(port, namespace_dir, dev_mode, key, detach)
-                    .await?;
+                handlers::server_start_subcommand(
+                    port,
+                    namespace_dir,
+                    dev_mode,
+                    key,
+                    detach,
+                    reset_key,
+                )
+                .await?;
             }
             ServerSubcommand::Stop => {
                 handlers::server_stop_subcommand().await?;

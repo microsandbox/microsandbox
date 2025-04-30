@@ -73,6 +73,7 @@ pub async fn start(
     namespace_dir: Option<PathBuf>,
     dev_mode: bool,
     detach: bool,
+    reset_key: bool,
 ) -> MicrosandboxServerResult<()> {
     // Ensure microsandbox home directory exists
     let microsandbox_home_path = env::get_microsandbox_home_path();
@@ -114,14 +115,12 @@ pub async fn start(
             } else {
                 // Process not running, clean up stale PID file
                 tracing::warn!("found stale PID file for process {}. Cleaning up.", pid);
-                let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
-                clean(&pid_file_path, &key_file_path).await?;
+                clean(&pid_file_path).await?;
             }
         } else {
             // Invalid PID in file, clean up
             tracing::warn!("found invalid PID in server.pid file. Cleaning up.");
-            let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
-            clean(&pid_file_path, &key_file_path).await?;
+            clean(&pid_file_path).await?;
         }
     }
 
@@ -155,29 +154,49 @@ pub async fn start(
         // Create a key file with either the provided key or a generated one
         let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
 
+        // Store if a key was provided before consuming the option
+        let key_provided = key.is_some();
+
         let server_key = if let Some(key) = key {
+            // Use the provided key
             command.arg("--key").arg(&key);
             key
+        } else if key_file_path.exists() && !reset_key {
+            // Use existing key file if it exists and reset_key is not set
+            let existing_key = fs::read_to_string(&key_file_path).await.map_err(|e| {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&start_server_sp);
+
+                MicrosandboxServerError::StartError(format!(
+                    "failed to read existing key file {}: {}",
+                    key_file_path.display(),
+                    e
+                ))
+            })?;
+            command.arg("--key").arg(&existing_key);
+            existing_key
         } else {
-            // Generate a random key
+            // Generate a new random key
             let generated_key = generate_random_key();
             command.arg("--key").arg(&generated_key);
             generated_key
         };
 
-        // Write the key to file
-        fs::write(&key_file_path, &server_key).await.map_err(|e| {
-            #[cfg(feature = "cli")]
-            term::finish_with_error(&start_server_sp);
+        // Write the key to file (if it's a new key or we're resetting)
+        if !key_file_path.exists() || key_provided || reset_key {
+            fs::write(&key_file_path, &server_key).await.map_err(|e| {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&start_server_sp);
 
-            MicrosandboxServerError::StartError(format!(
-                "failed to write key file {}: {}",
-                key_file_path.display(),
-                e
-            ))
-        })?;
+                MicrosandboxServerError::StartError(format!(
+                    "failed to write key file {}: {}",
+                    key_file_path.display(),
+                    e
+                ))
+            })?;
 
-        tracing::info!("created server key file at {}", key_file_path.display());
+            tracing::info!("created server key file at {}", key_file_path.display());
+        }
     }
 
     if detach {
@@ -238,8 +257,6 @@ pub async fn start(
         return Ok(());
     }
 
-    let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
-
     // Set up signal handlers for graceful shutdown
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| {
@@ -266,8 +283,8 @@ pub async fn start(
                     status
                 );
 
-                // Clean up files if process fails
-                clean(&pid_file_path, &key_file_path).await?;
+                // Clean up PID file if process fails
+                clean(&pid_file_path).await?;
 
                 #[cfg(feature = "cli")]
                 term::finish_with_error(&start_server_sp);
@@ -278,8 +295,8 @@ pub async fn start(
                 )));
             }
 
-            // Clean up both files on successful exit
-            clean(&pid_file_path, &key_file_path).await?;
+            // Clean up PID file on successful exit
+            clean(&pid_file_path).await?;
         }
         _ = sigterm.recv() => {
             tracing::info!("received SIGTERM signal");
@@ -294,8 +311,8 @@ pub async fn start(
                 tracing::error!("error waiting for child after SIGTERM: {}", e);
             }
 
-            // Clean up files after signal
-            clean(&pid_file_path, &key_file_path).await?;
+            // Clean up PID file after signal
+            clean(&pid_file_path).await?;
 
             // Exit with a message
             tracing::info!("server terminated by SIGTERM signal");
@@ -313,8 +330,8 @@ pub async fn start(
                 tracing::error!("error waiting for child after SIGINT: {}", e);
             }
 
-            // Clean up files after signal
-            clean(&pid_file_path, &key_file_path).await?;
+            // Clean up PID file after signal
+            clean(&pid_file_path).await?;
 
             // Exit with a message
             tracing::info!("server terminated by SIGINT signal");
@@ -328,7 +345,6 @@ pub async fn start(
 pub async fn stop() -> MicrosandboxServerResult<()> {
     let microsandbox_home_path = env::get_microsandbox_home_path();
     let pid_file_path = microsandbox_home_path.join(SERVER_PID_FILE);
-    let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
 
     #[cfg(feature = "cli")]
     let stop_server_sp = term::create_spinner(STOP_SERVER_MSG.to_string(), None, None);
@@ -354,8 +370,8 @@ pub async fn stop() -> MicrosandboxServerResult<()> {
         if libc::kill(pid, libc::SIGTERM) != 0 {
             // If process doesn't exist, clean up PID file and return error
             if std::io::Error::last_os_error().raw_os_error().unwrap() == libc::ESRCH {
-                // Delete PID and key files
-                clean(&pid_file_path, &key_file_path).await?;
+                // Delete only the PID file
+                clean(&pid_file_path).await?;
 
                 #[cfg(feature = "cli")]
                 term::finish_with_error(&stop_server_sp);
@@ -375,8 +391,8 @@ pub async fn stop() -> MicrosandboxServerResult<()> {
         }
     }
 
-    // Clean up both PID and key files
-    clean(&pid_file_path, &key_file_path).await?;
+    // Clean up just the PID file
+    clean(&pid_file_path).await?;
 
     #[cfg(feature = "cli")]
     stop_server_sp.finish();
@@ -469,21 +485,12 @@ pub async fn keygen(expire: Option<Duration>, namespace: String) -> Microsandbox
     Ok(())
 }
 
-/// Clean up the PID and key files
-pub async fn clean(
-    pid_file_path: &PathBuf,
-    key_file_path: &PathBuf,
-) -> MicrosandboxServerResult<()> {
+/// Clean up the PID file
+pub async fn clean(pid_file_path: &PathBuf) -> MicrosandboxServerResult<()> {
     // Clean up PID file
     if pid_file_path.exists() {
         fs::remove_file(pid_file_path).await?;
         tracing::info!("removed server PID file at {}", pid_file_path.display());
-    }
-
-    // Clean up key file
-    if key_file_path.exists() {
-        fs::remove_file(key_file_path).await?;
-        tracing::info!("removed server key file at {}", key_file_path.display());
     }
 
     Ok(())
