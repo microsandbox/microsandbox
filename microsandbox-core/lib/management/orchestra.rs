@@ -10,6 +10,11 @@
 //! - `down`: Gracefully shut down all running sandboxes
 //! - `apply`: Reconcile running sandboxes with configuration
 
+use crate::{
+    config::{Microsandbox, START_SCRIPT_NAME},
+    MicrosandboxError, MicrosandboxResult,
+};
+
 use console::style;
 use microsandbox_utils::{MICROSANDBOX_ENV_DIR, SANDBOX_DB_FILENAME};
 use nix::{
@@ -18,13 +23,7 @@ use nix::{
 };
 use std::path::{Path, PathBuf};
 
-use crate::{
-    config::{Microsandbox, START_SCRIPT_NAME},
-    management::{config, sandbox},
-    MicrosandboxError, MicrosandboxResult,
-};
-
-use super::{db, menv};
+use super::{config, db, menv, sandbox};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -778,6 +777,13 @@ async fn display_status_namespaces(
         }
     }
 
+    // Sort namespace dirs alphabetically (initial sort to ensure deterministic behavior)
+    namespace_dirs.sort_by(|a, b| {
+        let a_name = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let b_name = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        a_name.cmp(b_name)
+    });
+
     // Process each namespace directory
     for namespace_dir in &namespace_dirs {
         // Extract namespace name from path
@@ -807,54 +813,16 @@ async fn display_status_namespaces(
         }
     }
 
-    // Sort the statuses with the same criteria as display_status
-    // But also group by namespace
-    all_statuses.sort_by(|a, b| {
-        // First compare by namespace
-        let namespace_order = a.namespace.cmp(&b.namespace);
-        if namespace_order != std::cmp::Ordering::Equal {
-            return namespace_order;
-        }
+    // Group the statuses by namespace
+    let mut statuses_by_namespace: std::collections::HashMap<String, Vec<SandboxStatus>> =
+        std::collections::HashMap::new();
 
-        // Then compare by running status (running sandboxes first)
-        let running_order = b.status.running.cmp(&a.status.running);
-        if running_order != std::cmp::Ordering::Equal {
-            return running_order;
-        }
-
-        // Then compare by CPU usage (highest first)
-        let cpu_order = b
-            .status
-            .cpu_usage
-            .partial_cmp(&a.status.cpu_usage)
-            .unwrap_or(std::cmp::Ordering::Equal);
-        if cpu_order != std::cmp::Ordering::Equal {
-            return cpu_order;
-        }
-
-        // Then compare by memory usage (highest first)
-        let memory_order = b
-            .status
-            .memory_usage
-            .partial_cmp(&a.status.memory_usage)
-            .unwrap_or(std::cmp::Ordering::Equal);
-        if memory_order != std::cmp::Ordering::Equal {
-            return memory_order;
-        }
-
-        // Then compare by disk usage (highest first)
-        let disk_order = b
-            .status
-            .disk_usage
-            .partial_cmp(&a.status.disk_usage)
-            .unwrap_or(std::cmp::Ordering::Equal);
-        if disk_order != std::cmp::Ordering::Equal {
-            return disk_order;
-        }
-
-        // Finally sort by name (alphabetical)
-        a.status.name.cmp(&b.status.name)
-    });
+    for namespaced_status in all_statuses {
+        statuses_by_namespace
+            .entry(namespaced_status.namespace)
+            .or_default()
+            .push(namespaced_status.status);
+    }
 
     // Get current timestamp
     let now = chrono::Local::now();
@@ -863,56 +831,148 @@ async fn display_status_namespaces(
     // Display timestamp
     println!("{}", style(format!("Last updated: {}", timestamp)).dim());
 
-    // Print a table-like output with status information
-    println!(
-        "\n{:<15} {:<15} {:<10} {:<15} {:<12} {:<12} {:<12}",
-        style("NAMESPACE").bold(),
-        style("SANDBOX").bold(),
-        style("STATUS").bold(),
-        style("PIDS").bold(),
-        style("CPU").bold(),
-        style("MEMORY").bold(),
-        style("DISK").bold()
-    );
+    // Prepare namespaces with their activity metrics for sorting
+    #[derive(Clone)]
+    struct NamespaceActivity {
+        name: String,
+        running_count: usize,
+        total_cpu: f32,
+        total_memory: u64,
+        statuses: Vec<SandboxStatus>,
+    }
 
-    println!("{}", style("─".repeat(95)).dim());
+    let mut namespace_activities = Vec::new();
 
-    let mut current_namespace = String::new();
+    // Calculate activity metrics for each namespace
+    for (namespace, statuses) in statuses_by_namespace {
+        if statuses.is_empty() {
+            continue;
+        }
+
+        let running_count = statuses.iter().filter(|s| s.running).count();
+        let total_cpu: f32 = statuses.iter().filter_map(|s| s.cpu_usage).sum();
+        let total_memory: u64 = statuses.iter().filter_map(|s| s.memory_usage).sum();
+
+        namespace_activities.push(NamespaceActivity {
+            name: namespace,
+            running_count,
+            total_cpu,
+            total_memory,
+            statuses,
+        });
+    }
+
+    // Sort namespaces by activity level (running count first, then resource usage)
+    namespace_activities.sort_by(|a, b| {
+        // First by number of running sandboxes (descending)
+        let running_order = b.running_count.cmp(&a.running_count);
+        if running_order != std::cmp::Ordering::Equal {
+            return running_order;
+        }
+
+        // Then by total CPU usage (descending)
+        let cpu_order = b
+            .total_cpu
+            .partial_cmp(&a.total_cpu)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        if cpu_order != std::cmp::Ordering::Equal {
+            return cpu_order;
+        }
+
+        // Then by total memory usage (descending)
+        let memory_order = b.total_memory.cmp(&a.total_memory);
+        if memory_order != std::cmp::Ordering::Equal {
+            return memory_order;
+        }
+
+        // Finally by name (alphabetical) as a stable tiebreaker
+        a.name.cmp(&b.name)
+    });
 
     // Capture sandboxes count
-    let sandboxes_count = all_statuses.len();
+    let mut total_sandboxes = 0;
+    let mut is_first = true;
 
-    // Display all statuses
-    for namespaced_status in all_statuses {
-        let status = namespaced_status.status;
+    // Display namespaces and their statuses with headers
+    for activity in namespace_activities {
+        // Add spacing between namespaces
+        if !is_first {
+            println!();
+        }
+        is_first = false;
 
-        // Show namespace only if it changes
-        let namespace_display = if current_namespace != namespaced_status.namespace {
-            current_namespace = namespaced_status.namespace.clone();
-            current_namespace.clone() // Store the actual value to display
-        } else {
-            String::new() // Empty string when we don't want to show it
-        };
+        // Print namespace header
+        print_namespace_header(&activity.name);
 
-        // Style the namespace based on whether it's empty or not
-        let styled_namespace = if !namespace_display.is_empty() {
-            style(&namespace_display).bold().blue()
-        } else {
-            style(&namespace_display).dim()
-        };
+        // Sort the statuses in a stable order
+        let mut statuses = activity.statuses;
+        statuses.sort_by(|a, b| {
+            // First compare by running status (running sandboxes first)
+            let running_order = b.running.cmp(&a.running);
+            if running_order != std::cmp::Ordering::Equal {
+                return running_order;
+            }
 
-        let (status_text, pids, cpu, memory, disk) = format_status_columns(&status);
+            // Then compare by CPU usage (highest first)
+            let cpu_order = b
+                .cpu_usage
+                .partial_cmp(&a.cpu_usage)
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if cpu_order != std::cmp::Ordering::Equal {
+                return cpu_order;
+            }
 
+            // Then compare by memory usage (highest first)
+            let memory_order = b
+                .memory_usage
+                .partial_cmp(&a.memory_usage)
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if memory_order != std::cmp::Ordering::Equal {
+                return memory_order;
+            }
+
+            // Then compare by disk usage (highest first)
+            let disk_order = b
+                .disk_usage
+                .partial_cmp(&a.disk_usage)
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if disk_order != std::cmp::Ordering::Equal {
+                return disk_order;
+            }
+
+            // Finally sort by name (alphabetical)
+            a.name.cmp(&b.name)
+        });
+
+        total_sandboxes += statuses.len();
+
+        // Print a table header for this namespace's sandboxes
         println!(
-            "{:<15} {:<15} {:<10} {:<15} {:<12} {:<12} {:<12}",
-            styled_namespace,
-            style(&status.name).bold(),
-            status_text,
-            pids,
-            cpu,
-            memory,
-            disk
+            "\n{:<15} {:<10} {:<15} {:<12} {:<12} {:<12}",
+            style("SANDBOX").bold(),
+            style("STATUS").bold(),
+            style("PIDS").bold(),
+            style("CPU").bold(),
+            style("MEMORY").bold(),
+            style("DISK").bold()
         );
+
+        println!("{}", style("─".repeat(80)).dim());
+
+        // Display the statuses for this namespace
+        for status in statuses {
+            let (status_text, pids, cpu, memory, disk) = format_status_columns(&status);
+
+            println!(
+                "{:<15} {:<10} {:<15} {:<12} {:<12} {:<12}",
+                style(&status.name).bold(),
+                status_text,
+                pids,
+                cpu,
+                memory,
+                disk
+            );
+        }
     }
 
     // Show summary with the captured counts
@@ -921,10 +981,19 @@ async fn display_status_namespaces(
         style("Total Namespaces").dim(),
         namespace_count,
         style("Total Sandboxes").dim(),
-        sandboxes_count
+        total_sandboxes
     );
 
     Ok(())
+}
+
+/// Prints a stylized header for namespace display
+fn print_namespace_header(namespace: &str) {
+    // Create the simple title text without padding
+    let title = format!("NAMESPACE: {}", namespace);
+
+    // Print the title with white color and underline styling
+    println!("\n{}", style(title).white().bold().underlined());
 }
 
 //--------------------------------------------------------------------------------------------------

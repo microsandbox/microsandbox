@@ -713,9 +713,9 @@ pub enum ServerSubcommand {
     /// List sandboxes in a namespace
     #[command(name = "list")]
     List {
-        /// Namespace to list sandboxes from
-        #[arg(short, long, required = true)]
-        namespace: String,
+        /// Namespace to list sandboxes from. If not provided, lists sandboxes from all namespaces.
+        #[arg(short, long)]
+        namespace: Option<String>,
     },
 
     /// Show server status

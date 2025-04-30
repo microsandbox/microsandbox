@@ -624,32 +624,51 @@ pub async fn server_log_subcommand(
     Ok(())
 }
 
-pub async fn server_list_subcommand(namespace: String) -> MicrosandboxCliResult<()> {
-    // Ensure microsandbox home directory exists
-    let namespace_path = env::get_microsandbox_home_path()
-        .join(NAMESPACES_SUBDIR)
-        .join(&namespace);
+pub async fn server_list_subcommand(namespace: Option<String>) -> MicrosandboxCliResult<()> {
+    // Get the microsandbox home path
+    let microsandbox_home_path = env::get_microsandbox_home_path();
+    let namespaces_path = microsandbox_home_path.join(NAMESPACES_SUBDIR);
 
-    if !namespace_path.exists() {
-        return Err(MicrosandboxCliError::NotFound(format!(
-            "Namespace '{}' not found",
-            namespace
-        )));
-    }
+    // Check if we need to show all namespaces or just one
+    if let Some(namespace) = namespace {
+        // Single namespace mode
+        let namespace_path = namespaces_path.join(&namespace);
 
-    // Load configuration from the namespace directory
-    let config_result = config::load_config(Some(namespace_path.as_path()), None).await;
-    match config_result {
-        Ok((config, _, _)) => {
-            // Use the common show_list function to display sandboxes
-            menv::show_list(config.get_sandboxes());
-            Ok(())
+        if !namespace_path.exists() {
+            return Err(MicrosandboxCliError::NotFound(format!(
+                "Namespace '{}' not found",
+                namespace
+            )));
         }
-        Err(err) => Err(MicrosandboxCliError::ConfigError(format!(
-            "Failed to load configuration from namespace '{}': {}",
-            namespace, err
-        ))),
+
+        // Load configuration from the namespace directory
+        let config_result = config::load_config(Some(namespace_path.as_path()), None).await;
+        match config_result {
+            Ok((config, _, _)) => {
+                // Use the common show_list function to display sandboxes
+                menv::show_list(config.get_sandboxes());
+            }
+            Err(err) => {
+                return Err(MicrosandboxCliError::ConfigError(format!(
+                    "Failed to load configuration from namespace '{}': {}",
+                    namespace, err
+                )));
+            }
+        }
+    } else {
+        // All namespaces mode - use the dedicated function
+        match menv::show_list_namespaces(namespaces_path.as_path()).await {
+            Ok(_) => (),
+            Err(err) => {
+                return Err(MicrosandboxCliError::NamespaceError(format!(
+                    "Failed to list namespaces: {}",
+                    err
+                )));
+            }
+        }
     }
+
+    Ok(())
 }
 
 pub async fn server_status_subcommand(
@@ -685,7 +704,15 @@ pub async fn server_status_subcommand(
 
         // Show status for all namespaces, passing the parent directory
         // instead of a pre-collected list of namespace directories
-        orchestra::show_status_namespaces(&names, namespaces_path.as_path()).await?;
+        match orchestra::show_status_namespaces(&names, namespaces_path.as_path()).await {
+            Ok(_) => (),
+            Err(err) => {
+                return Err(MicrosandboxCliError::NamespaceError(format!(
+                    "Failed to show namespace statuses: {}",
+                    err
+                )));
+            }
+        }
     }
 
     Ok(())
@@ -821,7 +848,7 @@ fn parse_duration_string(duration_str: &str) -> MicrosandboxCliResult<chrono::Du
 
     if value_str.is_empty() {
         return Err(MicrosandboxCliError::InvalidArgument(format!(
-            "Invalid duration format: {}. Expected format like 1s, 2m, 3h, 4d, 5w, 6mo, 7y",
+            "Invalid duration: {}. No numeric value found.",
             duration_str
         )));
     }
@@ -833,30 +860,15 @@ fn parse_duration_string(duration_str: &str) -> MicrosandboxCliResult<chrono::Du
         ))
     })?;
 
-    // Safety check for very large numbers
-    if value < 0 || value > 8760 {
-        // 8760 is the number of hours in a year
-        return Err(MicrosandboxCliError::InvalidArgument(format!(
-            "Duration value too large or negative: {}. Maximum allowed is 8760 hours (1 year)",
-            value
-        )));
-    }
-
     match unit {
         "s" => Ok(chrono::Duration::seconds(value)),
         "m" => Ok(chrono::Duration::minutes(value)),
         "h" => Ok(chrono::Duration::hours(value)),
         "d" => Ok(chrono::Duration::days(value)),
         "w" => Ok(chrono::Duration::weeks(value)),
-        "mo" => {
-            // Approximate a month as 30 days
-            Ok(chrono::Duration::days(value * 30))
-        }
-        "y" => {
-            // Approximate a year as 365 days
-            Ok(chrono::Duration::days(value * 365))
-        }
-        "" => Ok(chrono::Duration::hours(value)), // Default to hours if no unit specified
+        "mo" => Ok(chrono::Duration::days(value * 30)), // Approximate
+        "y" => Ok(chrono::Duration::days(value * 365)), // Approximate
+        "" => Ok(chrono::Duration::hours(value)),       // Default to hours if no unit specified
         _ => Err(MicrosandboxCliError::InvalidArgument(format!(
             "Invalid duration unit: {}. Expected one of: s, m, h, d, w, mo, y",
             unit

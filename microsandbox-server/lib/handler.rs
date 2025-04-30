@@ -315,7 +315,10 @@ pub async fn sandbox_up(
     )
     .await
     .map_err(|e| {
-        ServerError::InternalError(format!("Failed to start sandbox {}: {}", payload.sandbox, e))
+        ServerError::InternalError(format!(
+            "Failed to start sandbox {}: {}",
+            payload.sandbox, e
+        ))
     })?;
 
     Ok((
