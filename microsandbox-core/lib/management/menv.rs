@@ -610,7 +610,6 @@ pub async fn show_list_namespaces(
             // Only print if there are sandboxes
             if sandbox_count > 0 {
                 print_namespace_header(&data.name);
-                println!();
                 show_list(config.get_sandboxes());
             }
         } else if let Some(err) = &data.error {
@@ -640,7 +639,10 @@ pub fn print_namespace_header(namespace: &str) {
     let title = format!("NAMESPACE: {}", namespace);
 
     // Print the title with white color and underline styling
-    println!("\n{}", style(title).white().bold().underlined());
+    println!("\n{}", style(title).white().bold());
+
+    // Print a separator line
+    println!("{}", style("─".repeat(80)).dim());
 }
 
 //--------------------------------------------------------------------------------------------------

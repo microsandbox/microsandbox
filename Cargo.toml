@@ -72,3 +72,4 @@ console = "0.15"
 indicatif = "0.17"
 jsonwebtoken = "9.3"
 atty = "0.2"
+crossterm = { version = "0.29.0", features = ["events"] }

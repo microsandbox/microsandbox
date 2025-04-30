@@ -24,19 +24,13 @@ use crate::{handler, middleware as app_middleware, state::AppState};
 
 /// Create a new router with the given state
 pub fn create_router(state: AppState) -> Router {
-    // Create REST API routes
-    let rest_api = Router::new()
-        .route("/sandbox-up", post(handler::sandbox_up))
-        .route("/sandbox-down", post(handler::sandbox_down))
-        .route("/sandbox-config", get(handler::sandbox_config))
-        .route("/health", get(handler::health))
-        .route("/system-status", get(handler::system_status))
-        .route("/sandbox-status", get(handler::sandbox_status));
+    // Create REST API routes - only health endpoint remains here
+    let rest_api = Router::new().route("/health", get(handler::health));
 
-    // Create JSON-RPC routes
-    let rpc_api = Router::new().route("/run", post(handler::run_code));
+    // Create JSON-RPC routes - a single endpoint that handles all RPC methods
+    let rpc_api = Router::new().route("/", post(handler::json_rpc_handler));
 
-    // Create proxy routes - directly on the root path as requested
+    // Create proxy routes - now nested under /proxy path
     let proxy_routes = Router::new()
         .route(
             "/{namespace}/{sandbox_name}/{*path}",
@@ -52,7 +46,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .nest("/api/v1", rest_api)
         .nest("/api/v1/rpc", rpc_api)
-        .merge(proxy_routes) // Use merge instead of nest to have the proxy routes directly on root
+        .nest("/proxy", proxy_routes) // Changed from merge to nest with /proxy path
         .layer(middleware::from_fn(app_middleware::logging_middleware))
         .with_state(state)
 }

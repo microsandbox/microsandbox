@@ -13,6 +13,7 @@
 //! - Detailed error information handling
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 //--------------------------------------------------------------------------------------------------
 // Types: REST API Requests
@@ -40,66 +41,6 @@ pub struct SandboxStopRequest {
     /// Optional namespace
     pub namespace: String,
 }
-
-//--------------------------------------------------------------------------------------------------
-// Types: JSON-RPC Payloads
-//--------------------------------------------------------------------------------------------------
-
-/// JSON-RPC request for running code in a sandbox
-#[derive(Debug, Deserialize)]
-pub struct RunCodeRequest {
-    /// Code to execute
-    pub code: String,
-
-    /// Namespace for the sandbox
-    pub namespace: String,
-
-    /// Sandbox name
-    pub sandbox: String,
-}
-
-/// JSON-RPC response
-#[derive(Debug, Serialize)]
-pub struct JsonRpcResponse<T> {
-    /// JSON-RPC version
-    pub jsonrpc: String,
-
-    /// Result of the operation
-    pub result: T,
-
-    /// Request ID
-    pub id: Option<u64>,
-}
-
-//--------------------------------------------------------------------------------------------------
-// Types: Responses
-//--------------------------------------------------------------------------------------------------
-
-/// Response type for regular message responses
-#[derive(Debug, Serialize)]
-pub struct RegularMessageResponse {
-    /// Message indicating the status of the sandbox operation
-    pub message: String,
-}
-
-/// System status response
-#[derive(Debug, Serialize)]
-pub struct SystemStatusResponse {}
-
-/// Sandbox status response
-#[derive(Debug, Serialize)]
-pub struct SandboxStatusResponse {
-    /// List of sandbox statuses
-    pub sandboxes: Vec<SandboxStatus>,
-}
-
-/// Sandbox configuration response
-#[derive(Debug, Serialize)]
-pub struct SandboxConfigResponse {}
-
-/// Status of an individual sandbox
-#[derive(Debug, Serialize)]
-pub struct SandboxStatus {}
 
 /// Configuration for a sandbox
 /// Similar to microsandbox-core's Sandbox but with optional fields for update operations
@@ -146,3 +87,66 @@ pub struct SandboxConfig {
     /// The network scope for the sandbox
     pub scope: Option<String>,
 }
+
+//--------------------------------------------------------------------------------------------------
+// Types: JSON-RPC Payloads
+//--------------------------------------------------------------------------------------------------
+
+/// Generic JSON-RPC request
+#[derive(Debug, Deserialize)]
+pub struct JsonRpcRequest<T> {
+    /// JSON-RPC version
+    pub jsonrpc: String,
+
+    /// Method to call
+    pub method: String,
+
+    /// Parameters for the method
+    pub params: T,
+
+    /// Request ID
+    pub id: Option<u64>,
+}
+
+/// JSON-RPC response
+#[derive(Debug, Serialize)]
+pub struct JsonRpcResponse {
+    /// JSON-RPC version
+    pub jsonrpc: String,
+
+    /// Result of the operation
+    pub result: Value,
+
+    /// Request ID
+    pub id: Option<u64>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Types: Responses
+//--------------------------------------------------------------------------------------------------
+
+/// Response type for regular message responses
+#[derive(Debug, Serialize)]
+pub struct RegularMessageResponse {
+    /// Message indicating the status of the sandbox operation
+    pub message: String,
+}
+
+/// System status response
+#[derive(Debug, Serialize)]
+pub struct SystemStatusResponse {}
+
+/// Sandbox status response
+#[derive(Debug, Serialize)]
+pub struct SandboxStatusResponse {
+    /// List of sandbox statuses
+    pub sandboxes: Vec<SandboxStatus>,
+}
+
+/// Sandbox configuration response
+#[derive(Debug, Serialize)]
+pub struct SandboxConfigResponse {}
+
+/// Status of an individual sandbox
+#[derive(Debug, Serialize)]
+pub struct SandboxStatus {}

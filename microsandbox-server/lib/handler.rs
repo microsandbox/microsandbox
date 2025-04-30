@@ -26,31 +26,175 @@ use tokio::fs as tokio_fs;
 use crate::{
     error::ServerError,
     middleware,
-    payload::{
-        JsonRpcResponse, RegularMessageResponse, RunCodeRequest, SandboxStartRequest,
-        SandboxStopRequest,
-    },
+    payload::{JsonRpcResponse, RegularMessageResponse, SandboxStartRequest, SandboxStopRequest},
     state::AppState,
     SandboxConfigResponse, SandboxStatus, SandboxStatusResponse, ServerResult,
     SystemStatusResponse,
 };
 
 //--------------------------------------------------------------------------------------------------
-// REST API Handlers
+// Functions: REST API Handlers
 //--------------------------------------------------------------------------------------------------
 
-/// Handler for starting a sandbox
-pub async fn sandbox_up(
+/// Handler for health check
+pub async fn health() -> ServerResult<impl IntoResponse> {
+    Ok((
+        StatusCode::OK,
+        Json(RegularMessageResponse {
+            message: "Service is healthy".to_string(),
+        }),
+    ))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: JSON-RPC Handlers
+//--------------------------------------------------------------------------------------------------
+
+/// Main JSON-RPC handler that dispatches to the appropriate method
+pub async fn json_rpc_handler(
     State(state): State<AppState>,
-    Json(payload): Json<SandboxStartRequest>,
+    Json(payload): Json<serde_json::Value>,
 ) -> ServerResult<impl IntoResponse> {
+    // Extract method field from the request
+    let method = payload.get("method").and_then(|m| m.as_str());
+
+    // Check for required JSON-RPC fields
+    if payload.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(
+                "Invalid or missing jsonrpc version field".to_string(),
+            ),
+        ));
+    }
+
+    let id = payload.get("id").cloned();
+    let id_value = id.and_then(|i| i.as_u64());
+
+    match method {
+        Some("sandbox.start") => {
+            // Parse the params into a SandboxStartRequest
+            let params = payload.get("params").ok_or_else(|| {
+                ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
+                    "Missing params field".to_string(),
+                ))
+            })?;
+
+            let start_request: SandboxStartRequest = serde_json::from_value(params.clone())
+                .map_err(|e| {
+                    ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
+                        format!("Invalid params for sandbox.start: {}", e),
+                    ))
+                })?;
+
+            // Call the sandbox_up_impl function
+            let result = sandbox_start_impl(state, start_request).await?;
+
+            // Create JSON-RPC response
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: serde_json::to_value(result).map_err(|e| {
+                    ServerError::InternalError(format!("JSON serialization error: {}", e))
+                })?,
+                id: id_value,
+            };
+
+            Ok((StatusCode::OK, Json(response)))
+        }
+        Some("sandbox.stop") => {
+            // Parse the params into a SandboxStopRequest
+            let params = payload.get("params").ok_or_else(|| {
+                ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
+                    "Missing params field".to_string(),
+                ))
+            })?;
+
+            let stop_request: SandboxStopRequest =
+                serde_json::from_value(params.clone()).map_err(|e| {
+                    ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
+                        format!("Invalid params for sandbox.stop: {}", e),
+                    ))
+                })?;
+
+            // Call the sandbox_down_impl function
+            let result = sandbox_stop_impl(state, stop_request).await?;
+
+            // Create JSON-RPC response
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: serde_json::to_value(result).map_err(|e| {
+                    ServerError::InternalError(format!("JSON serialization error: {}", e))
+                })?,
+                id: id_value,
+            };
+
+            Ok((StatusCode::OK, Json(response)))
+        }
+        Some("system.getStatus") => {
+            // Call the system_status_impl function
+            let result = system_get_status_impl().await?;
+
+            // Create JSON-RPC response
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: serde_json::to_value(result).map_err(|e| {
+                    ServerError::InternalError(format!("JSON serialization error: {}", e))
+                })?,
+                id: id_value,
+            };
+
+            Ok((StatusCode::OK, Json(response)))
+        }
+        Some("sandbox.getConfig") => {
+            // Call the sandbox_config_impl function
+            let result = sandbox_get_config_impl().await?;
+
+            // Create JSON-RPC response
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: serde_json::to_value(result).map_err(|e| {
+                    ServerError::InternalError(format!("JSON serialization error: {}", e))
+                })?,
+                id: id_value,
+            };
+
+            Ok((StatusCode::OK, Json(response)))
+        }
+        Some("sandbox.getStatus") => {
+            // Call the sandbox_status_impl function
+            let result = sandbox_get_status_impl().await?;
+
+            // Create JSON-RPC response
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: serde_json::to_value(result).map_err(|e| {
+                    ServerError::InternalError(format!("JSON serialization error: {}", e))
+                })?,
+                id: id_value,
+            };
+
+            Ok((StatusCode::OK, Json(response)))
+        }
+        Some(unknown_method) => Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(format!(
+                "Unknown method: {}",
+                unknown_method
+            )),
+        )),
+        None => Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput("Missing method field".to_string()),
+        )),
+    }
+}
+
+/// Implementation for starting a sandbox
+async fn sandbox_start_impl(state: AppState, params: SandboxStartRequest) -> ServerResult<String> {
     let namespace_dir = state
         .get_config()
         .get_namespace_dir()
-        .join(&payload.namespace);
+        .join(&params.namespace);
     let config_file = MICROSANDBOX_CONFIG_FILENAME;
     let config_path = namespace_dir.join(config_file);
-    let sandbox = &payload.sandbox;
+    let sandbox = &params.sandbox;
 
     // Create namespace directory if it doesn't exist
     if !namespace_dir.exists() {
@@ -72,7 +216,7 @@ pub async fn sandbox_up(
     }
 
     // Check if we have a valid configuration to proceed with
-    let has_config_in_request = payload
+    let has_config_in_request = params
         .config
         .as_ref()
         .and_then(|c| c.image.as_ref())
@@ -118,7 +262,7 @@ pub async fn sandbox_up(
     }
 
     // If config is provided and we have an image, we need to update the config file
-    if let Some(config) = &payload.config {
+    if let Some(config) = &params.config {
         if config.image.is_some() {
             // Ensure config file exists
             if !config_path.exists() {
@@ -315,97 +459,85 @@ pub async fn sandbox_up(
     )
     .await
     .map_err(|e| {
-        ServerError::InternalError(format!(
-            "Failed to start sandbox {}: {}",
-            payload.sandbox, e
-        ))
+        ServerError::InternalError(format!("Failed to start sandbox {}: {}", params.sandbox, e))
     })?;
 
-    Ok((
-        StatusCode::OK,
-        Json(RegularMessageResponse {
-            message: format!("Sandbox {} started successfully", payload.sandbox),
-        }),
-    ))
+    // Return success message
+    Ok(format!("Sandbox {} started successfully", params.sandbox))
 }
 
-/// Handler for stopping a sandbox
-pub async fn sandbox_down(
-    State(_state): State<AppState>,
-    Json(payload): Json<SandboxStopRequest>,
-) -> ServerResult<impl IntoResponse> {
-    // TODO: Implement sandbox stop logic
-    Ok((
-        StatusCode::OK,
-        Json(RegularMessageResponse {
-            message: format!("Sandbox stop requested for: {}", payload.sandbox),
-        }),
-    ))
+/// Implementation for stopping a sandbox
+async fn sandbox_stop_impl(state: AppState, params: SandboxStopRequest) -> ServerResult<String> {
+    let namespace_dir = state
+        .get_config()
+        .get_namespace_dir()
+        .join(&params.namespace);
+    let config_file = MICROSANDBOX_CONFIG_FILENAME;
+    let sandbox = &params.sandbox;
+
+    // Verify that the namespace directory exists
+    if !namespace_dir.exists() {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(format!(
+                "Namespace directory '{}' does not exist",
+                params.namespace
+            )),
+        ));
+    }
+
+    // Verify that the config file exists
+    let config_path = namespace_dir.join(config_file);
+    if !config_path.exists() {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(format!(
+                "Configuration file not found for namespace '{}'",
+                params.namespace
+            )),
+        ));
+    }
+
+    // Stop the sandbox using orchestra::down
+    orchestra::down(
+        vec![sandbox.clone()],
+        Some(&namespace_dir),
+        Some(config_file),
+    )
+    .await
+    .map_err(|e| {
+        ServerError::InternalError(format!("Failed to stop sandbox {}: {}", params.sandbox, e))
+    })?;
+
+    // Return success message
+    Ok(format!("Sandbox {} stopped successfully", params.sandbox))
 }
 
-/// Handler for health check
-pub async fn health() -> ServerResult<impl IntoResponse> {
-    Ok((
-        StatusCode::OK,
-        Json(RegularMessageResponse {
-            message: "Service is healthy".to_string(),
-        }),
-    ))
+/// Implementation for system status
+async fn system_get_status_impl() -> ServerResult<SystemStatusResponse> {
+    // TODO: Implement system status logic
+
+    Ok(SystemStatusResponse {})
 }
 
-/// Handler for system status
-pub async fn system_status(State(_state): State<AppState>) -> ServerResult<impl IntoResponse> {
-    let status = SystemStatusResponse {};
+/// Implementation for sandbox configuration
+async fn sandbox_get_config_impl() -> ServerResult<SandboxConfigResponse> {
+    // TODO: Implement sandbox configuration logic
 
-    Ok((StatusCode::OK, Json(status)))
+    Ok(SandboxConfigResponse {})
 }
 
-/// Handler for sandbox configuration
-pub async fn sandbox_config(State(_state): State<AppState>) -> ServerResult<impl IntoResponse> {
-    let response = SandboxConfigResponse {};
-
-    Ok((StatusCode::OK, Json(response)))
-}
-
-/// Handler for sandbox status
-pub async fn sandbox_status(State(_state): State<AppState>) -> ServerResult<impl IntoResponse> {
-    // TODO: Implement actual sandbox status logic
+/// Implementation for sandbox status
+async fn sandbox_get_status_impl() -> ServerResult<SandboxStatusResponse> {
+    // TODO: Implement sandbox status logic
     let sandbox1 = SandboxStatus {};
     let sandbox2 = SandboxStatus {};
 
-    let response = SandboxStatusResponse {
+    Ok(SandboxStatusResponse {
         sandboxes: vec![sandbox1, sandbox2],
-    };
-
-    Ok((StatusCode::OK, Json(response)))
+    })
 }
 
 //--------------------------------------------------------------------------------------------------
-// JSON-RPC Handlers
-//--------------------------------------------------------------------------------------------------
-
-/// Handler for running code in a sandbox
-pub async fn run_code(
-    State(_state): State<AppState>,
-    Json(payload): Json<RunCodeRequest>,
-) -> ServerResult<impl IntoResponse> {
-    // TODO: Implement code execution logic
-    let result = format!(
-        "Code execution requested in sandbox: {} (namespace: {})",
-        payload.sandbox, payload.namespace
-    );
-
-    let response = JsonRpcResponse {
-        jsonrpc: "2.0".to_string(),
-        result,
-        id: Some(1),
-    };
-
-    Ok((StatusCode::OK, Json(response)))
-}
-
-//--------------------------------------------------------------------------------------------------
-// Proxy Handlers
+// Functions: Proxy Handlers
 //--------------------------------------------------------------------------------------------------
 
 /// Handler for proxy requests
@@ -448,3 +580,7 @@ pub async fn proxy_request(
 pub async fn proxy_fallback() -> ServerResult<impl IntoResponse> {
     Ok((StatusCode::NOT_FOUND, "Resource not found"))
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------

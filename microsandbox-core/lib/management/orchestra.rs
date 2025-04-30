@@ -656,6 +656,10 @@ pub async fn show_status_namespaces(
     Ok(())
 }
 
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
 // Extracted the status display logic to a separate function
 async fn display_status(
     names: &[String],
@@ -948,7 +952,7 @@ async fn display_status_namespaces(
 
         // Print a table header for this namespace's sandboxes
         println!(
-            "\n{:<15} {:<10} {:<15} {:<12} {:<12} {:<12}",
+            "{:<15} {:<10} {:<15} {:<12} {:<12} {:<12}",
             style("SANDBOX").bold(),
             style("STATUS").bold(),
             style("PIDS").bold(),
@@ -993,12 +997,11 @@ fn print_namespace_header(namespace: &str) {
     let title = format!("NAMESPACE: {}", namespace);
 
     // Print the title with white color and underline styling
-    println!("\n{}", style(title).white().bold().underlined());
-}
+    println!("\n{}", style(title).white().bold());
 
-//--------------------------------------------------------------------------------------------------
-// Functions: Helpers
-//--------------------------------------------------------------------------------------------------
+    // Print a separator line
+    println!("{}", style("─".repeat(80)).dim());
+}
 
 /// Formats the status columns for display
 fn format_status_columns(
