@@ -43,7 +43,7 @@ error() {
 }
 
 # Default values
-VERSION="0.2.1"
+VERSION="0.1.0"
 NO_CLEANUP=false
 TEMP_DIR="/tmp/microsandbox-install"
 GITHUB_REPO="microsandbox/microsandbox"
