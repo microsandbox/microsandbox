@@ -4,10 +4,7 @@ use nix::{
     unistd::Pid,
 };
 use std::{
-    os::{
-        fd::AsFd,
-        unix::io::{AsRawFd, FromRawFd, IntoRawFd},
-    },
+    os::unix::io::{AsRawFd, FromRawFd, IntoRawFd},
     path::PathBuf,
     process::Stdio,
 };
@@ -106,7 +103,7 @@ where
             tracing::info!("running in an interactive terminal");
             // Create a new pseudo terminal and set master to non-blocking mode
             let pty = openpty(None, None)?;
-            let master_fd = pty.master.as_fd();
+            let master_fd = pty.master.as_raw_fd();
             {
                 let flags = OFlag::from_bits_truncate(fcntl(master_fd, FcntlArg::F_GETFL)?);
                 let new_flags = flags | OFlag::O_NONBLOCK;
@@ -144,11 +141,10 @@ where
 
             // Set up master file handles for asynchronous I/O
             let master_fd_owned = pty.master;
-            let master_write_fd = nix::unistd::dup(master_fd_owned.as_fd())?;
+            let master_write_fd = nix::unistd::dup(master_fd_owned.as_raw_fd())?;
             let master_read_file =
                 unsafe { std::fs::File::from_raw_fd(master_fd_owned.into_raw_fd()) };
-            let master_write_file =
-                unsafe { std::fs::File::from_raw_fd(master_write_fd.as_raw_fd()) };
+            let master_write_file = unsafe { std::fs::File::from_raw_fd(master_write_fd) };
 
             let master_read = AsyncFd::new(master_read_file)?;
             let master_write = File::from_std(master_write_file);
