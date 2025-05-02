@@ -1,162 +1,121 @@
-# Contributing to microsandbox
+# 🚀 Contributing to Microsandbox
 
-We welcome everyone to contribute what and where they can. Whether you are brand
-new, just want to contribute a little bit, or want to contribute a lot there is
-probably something you can help out with. Check out our
-[good first issues][good-first-issues] label for in the issues tab to see a list
-of issue that good for those new to the project.
+Hello there! Whether you're a seasoned developer or just getting started, we're thrilled that you're interested in contributing to Microsandbox. This community thrives because of people like you!
 
-## Where to Get Help
+## 👋 Welcome, New Contributors!
 
-The main way to get help is by sending an email to [appcypher@outlook.com][support-email].
-Though, this guide should help you get started. It may be slightly lengthy, but it's
-designed for those who are new so please don't let length intimidate you.
+Never contributed to open source before? No problem! We've all been there. We've tagged issues with [good first issues][good-first-issues] to help you find a comfortable starting point. Remember, every expert was once a beginner!
 
-## Code of Conduct
+## 🤔 Need Help?
 
-Please be kind, inclusive, and considerate when interacting when interacting
-with others and follow our [code of conduct](./CODE_OF_CONDUCT.md).
+We're here for you! Reach out to us at [team@microsandbox.dev][support-email] with any questions. This guide is designed to help you get started, so don't worry if it seems detailed - it's meant to be thorough, not intimidating!
 
-## How to Contribute
+## 💖 Code of Conduct
 
-If the code adds a feature that is not already present in an issue, you can
-create a new issue for the feature and add the pull request to it. If the code
-adds a feature that is not already present in an issue, you can create a new
-issue for the feature and add the pull request to it.
+Our community values kindness and inclusivity. Please take a moment to read our [code of conduct](./CODE_OF_CONDUCT.md) and help us maintain a welcoming environment for everyone.
 
-### Contributing by Adding a Topic for Discussion
+## 🛠️ How to Contribute
+
+There are many ways to contribute to Microsandbox, and we appreciate them all! Here's how to get started:
+
+### 💡 Contributing Ideas and Feedback
 
 #### Issues
 
-If you have found a bug and would like to report it or if you have a feature
-that you feel we should add, then we'd love it if you opened an issue! ❤️
-Before you do, please search the other issues to avoid creating a duplicate
-issue.
+Found a bug or have a feature idea? We'd love to hear about it! ❤️
 
-To submit a new issue just hit the issue button and a choice between two
-templates should appear. Then, follow along with the template you chose. If you
-don't know how to fill in all parts of the template go ahead and skip those
-parts. You can edit the issue later.
+Before creating a new issue, please search existing ones to avoid duplicates. Then just hit the issue button, choose a template, and share your thoughts. Don't worry if you can't fill out the entire template - share what you can and you can always update it later.
 
-#### Discussion
+#### Discussions
 
-If you have a new discussion you want to start but it isn't a bug or feature
-add, then you can start a [GitHub discussion][gh-discussions]. Some examples of
-what kinds of things that are good discussion topics can include, but are not
-limited to the following:
+For topics that aren't quite bugs or feature requests, start a [GitHub discussion][gh-discussions]. Great discussion topics include:
 
-- Community announcements and/or asking the community for feedback
-- Discussing a new release
-- Asking questions, Q&A that isn't for sure a bug report
+- Community announcements or asking for feedback
+- Discussing upcoming releases
+- General questions about the project
+- Sharing your experience with Microsandbox
 
-### Contributing through Code
+### 💻 Contributing Code
 
-In order to contribute through code follow the steps below. Note that you don't
-need to be the best programmer to contribute.
+You don't need to be an expert programmer to contribute code! Here's a friendly step-by-step guide:
 
-1.  **Pick a feature** you would like to add or a bug you would like to fix
+1. **Find something to work on**
 
-    - If you wish to contribute but what you want to fix/add is not already
-      covered in an existing issue, please open a new issue.
+   - Browse our existing issues or create a new one if you have a fresh idea
 
-2.  **Discuss** the issue with the rest of the community
+2. **Join the conversation**
 
-    - Before you write any code, it is recommended that you discuss your
-      intention to write the code on the issue you are attempting to edit.
-    - This helps to stop you from wasting your time duplicating the work of
-      others that maybe working on the same issue; at the same time.
-    - This step also allows you to get helpful pointers on the community on some
-      problems they may have encountered on similar issues.
+   - Comment on the issue you'd like to work on
+   - This helps prevent duplicate work and lets you get valuable input from the community
+   - Don't be shy - we're a friendly bunch!
 
-3.  **Fork** the repository
+3. **Fork the repository**
 
-    - A fork creates a copy of the code on your Github, so you can work on it
-      separately from everyone else.
-    - You can learn more about forking [here][forking].
+   - This creates your own copy of the code to work with
+   - New to forking? Learn more [here][forking]
 
-4.  Ensure that you have **commit signing** enabled
+4. **Set up commit signing**
 
-    - This ensures that the code you submit was committed by you and not someone
-      else who claims to be you.
-    - You can learn more about how to setup commit signing [here][commit-signing].
-    - If you have already made some commits that you wish to put in a pull
-      request without signing them, then you can follow [this guide][post-signing]
-      on how to fix that.
+   - This verifies that commits come from you
+   - Follow [this guide][commit-signing] to set it up
+   - Already made unsigned commits? No worries! [Here's how to fix that][post-signing]
 
-5.  **Clone** the repository to your local computer
+5. **Clone the repository**
 
-    - This puts a copy of your fork on your computer so you can edit it
-    - You can learn more about cloning repositories [here][git-clone].
+   - This puts your fork on your local machine
+   - Need help? Check out [this guide][git-clone]
 
-6.  **Build** the project
+6. **Build the project**
 
-    - For a detailed look on how to build microsandbox look at our
-      [README file](./README.md).
+   - Follow the instructions in our [README file](./README.md)
+   - If you run into any issues, remember we're just an email away!
 
-7.  **Start writing** your code
+7. **Make your changes**
 
-    - Open up your favorite code editor and make the changes that you wanted to
-      make to the repository.
-    - Make sure to test your code with the test command(s) found in our
-      [README file](./README.md).
+   - Open your favorite editor and start coding
+   - Test your changes using the commands in our README
+   - Take breaks and have fun with it!
 
-8.  **Write tests** for your code
+8. **Write tests**
 
-    - If you are adding a new feature, you should write tests that ensure that
-      if someone make changes to the code it cannot break your new feature
-      without breaking the test.
-    - If your code adds a new feature, you should also write at least one
-      documentation test. The documentation test's purpose is to demonstrate and
-      document how to use the API feature.
-    - If your code fixes a bug, you should write tests that ensure that if
-      someone makes code changes in the future the bug does not re-emerge
-      without breaking test.
-    - Please create integration tests, if the addition is large enough to
-      warrant them, and unit tests.
-      - Unit tests are tests that ensure the functionality of a single
-        function or small section of code.
-      - Integration tests test large large sections of code.
-      - Read more about the differences [here][unit-and-integration].
-    - For more information on test organization, take a look [here][test-org].
+   - For new features: Write tests that protect your feature from breaking
+   - For bug fixes: Write tests that ensure the bug won't return
+   - Consider adding documentation tests to show how to use your new feature
+   - Don't stress about getting testing perfect - we can help guide you
 
-9.  Ensure that the code that you made follows our Rust **coding guidelines**
+9. **Follow coding guidelines**
 
-    - You can find a list of some Rust guidelines [here][rust-style-guide]. This
-      is a courtesy to the programmers that come after you. The easier your code
-      is to read, the easier it will be for the next person to make modifications.
-    - If you find it difficult to follow the guidelines or if the guidelines or
-      unclear, please reach out to us through our email linked above, or you
-      can just continue and leave a comment at the pull request stage.
+   - Check out our [Rust style guide][rust-style-guide] for reference
+   - Clean, readable code helps everyone who comes after you
+   - If you're unsure about anything, just do your best and mention it in your PR
 
-10. **Commit and Push** your code
+10. **Commit and push your changes**
 
-    - This sends your changes to your repository branch.
-    - You can learn more about committing code [here][commiting-code] and
-      pushing it to a remote repository [here][push-remote].
-    - We use conventional commits for the names and description of commits.
-      You can find out more about them [here][conventional-commits].
+    - Send your work to your GitHub repository
+    - We use [conventional commits][conventional-commits] for naming
+    - New to Git? Learn about [committing code][committing-code] and [pushing][push-remote]
 
-11. The final step is to create **pull request** to our main branch 🎉
-    - A pull request is how you merge the code you just worked so hard on with
-      the code everyone else has access to.
-    - Once you have submitted your pull request, we will review your code and
-      check to make sure the code implements the feature or fixes the bug. We
-      may leave some feedback and suggest edits. You can make the changes we
-      suggest by committing more code to your fork.
-    - You can learn more about pull requests [here][prs].
+11. **Open a pull request** 🎉
+    - This is how your code gets merged into the main project
+    - We'll review your code and may suggest some changes
+    - Every pull request helps us grow, so thank you in advance!
+    - Learn more about [pull requests here][prs]
+
+## 🙏 Thank You!
+
+Every contribution, no matter how small, makes a difference. We're grateful for your interest in making Microsandbox better for everyone!
 
 [conventional-commits]: https://www.conventionalcommits.org/en/v1.0.0/
-[commiting-code]: https://docs.github.com/en/desktop/contributing-and-collaborating-using-github-desktop/making-changes-in-a-branch/committing-and-reviewing-changes-to-your-project
+[committing-code]: https://docs.github.com/en/desktop/contributing-and-collaborating-using-github-desktop/making-changes-in-a-branch/committing-and-reviewing-changes-to-your-project
 [commit-signing]: https://www.freecodecamp.org/news/what-is-commit-signing-in-git/
 [forking]: https://docs.github.com/en/get-started/quickstart/fork-a-repo
 [gh-discussions]: https://docs.github.com/en/discussions
 [git-clone]: https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository
-
-[good-first-issues]: [https://build.prestashop-project.org/news/a-definition-of-the-good-first-issue-label/]
+[good-first-issues]: https://github.com/monoceros-alpha/monocore/labels/good%20first%20issue
 [post-signing]: https://dev.to/jmarhee/signing-existing-commits-with-gpg-5b58
 [prs]: https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-pull-requests
 [push-remote]: https://docs.github.com/en/get-started/using-git/pushing-commits-to-a-remote-repository
 [rust-style-guide]: https://rust-lang.github.io/api-guidelines/about.html
 [test-org]: https://doc.rust-lang.org/book/ch11-03-test-organization.html
-[support-email]: mailto:appcypher@outlook.com
+[support-email]: mailto:team@microsandbox.dev
 [unit-and-integration]: https://www.geeksforgeeks.org/difference-between-unit-testing-and-integration-testing/

@@ -3,7 +3,7 @@
 //! This module provides structures and utilities for modifying Microsandbox
 //! configuration.
 
-use microsandbox_utils::MICROSANDBOX_CONFIG_FILENAME;
+use microsandbox_utils::{DEFAULT_SHELL, MICROSANDBOX_CONFIG_FILENAME};
 use nondestructive::yaml;
 use sqlx::{Pool, Sqlite};
 use std::{
