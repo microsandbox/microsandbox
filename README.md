@@ -1,44 +1,457 @@
-<div align="center">
-  <a href="https://github.com/microsandbox/microsandbox" target="_blank">
-    <img src="https://raw.githubusercontent.com/microsandbox/microsandbox/main/assets/logo-purple-gradient.png" alt="microsandbox logo" width="100"></img>
+<a href="./#gh-dark-mode-only" target="_blank">
+    <img width="100%" src="./assets/microsandbox-banner-xl-dark.png" alt="microsandbox-banner-xl-dark">
+</a>
+<a href="./#gh-light-mode-only" target="_blank">
+    <img width="100%" src="./assets/microsandbox-banner-xl.png" alt="microsandbox-banner-xl">
+</a>
+
+<div align="center"><b>———&nbsp;&nbsp;&nbsp;secure self-hosted sandboxes for your ai agents&nbsp;&nbsp;&nbsp;———</b></div>
+
+<br />
+<br />
+
+<div align='center'><a href="./"><img align="centre" width="400" alt="floating-sandbox-bot" src="https://github.com/user-attachments/assets/52ea427f-f2d0-4b7b-bc23-8e729d28453b"></a></div>
+
+<br />
+
+<div align='center'>
+  <a href="https://discord.gg/T95Y3XnEAK" target="_blank">
+    <img src="https://img.shields.io/badge/discord -%2300acee.svg?color=mediumslateblue&style=for-the-badge&logo=discord&logoColor=white" alt=discord style="margin-bottom: 5px;"/>
   </a>
-
-  <h1 align="center">microsandbox</h1>
-
-  <p>
-    <a href="https://discord.gg/T95Y3XnEAK">
-      <img src="https://img.shields.io/static/v1?label=Discord&message=join%20us!&color=mediumslateblue&logo=discord&logoColor=white" alt="Discord">
-    </a>
-    <a href="https://github.com/microsandbox/microsandbox/actions?query=">
-      <img src="https://github.com/microsandbox/microsandbox/actions/workflows/tests_and_checks.yml/badge.svg" alt="Build Status">
-    </a>
-    <a href="https://crates.io/crates/microsandbox">
-      <img src="https://img.shields.io/crates/v/microsandbox?label=crates&logo=rust" alt="Microsandbox Crate">
-    </a>
-    <a href="https://docs.rs/microsandbox">
-      <img src="https://img.shields.io/static/v1?label=Docs&message=docs.rs&color=blue&logo=docs.rs" alt="Microsandbox Docs">
-    </a>
-    <a href="https://github.com/microsandbox/microsandbox/blob/main/LICENSE">
-      <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?logo=apache&logoColor=white" alt="License">
-    </a>
-  </p>
+  <a href="https://x.com/microsandbox" target="_blank">
+    <img src="https://img.shields.io/badge/x (twitter)-%2300acee.svg?color=000000&style=for-the-badge&logo=x&logoColor=white" alt=x style="margin-bottom: 5px;"/>
+  </a>
+  <a href="https://www.reddit.com/r/microsandbox" target="_blank">
+    <img src="https://img.shields.io/badge/reddit-%2300acee.svg?color=fe4609&style=for-the-badge&logo=reddit&logoColor=white" alt=reddit style="margin-bottom: 5px;"/>
+  </a>
 </div>
 
-> [!WARNING]
-> This project is currently undergoing significant architectural changes and active development. As a result, comprehensive documentation and a detailed README will be provided once the core components stabilize. Stay tuned for updates.
+# <sub><img height="18" src="https://octicons-col.vercel.app/question/A770EF">&nbsp;&nbsp;WHY MICROSANDBOX?</sub>
 
-<!--
-![web-light](https://github.com/user-attachments/assets/e6a01e6d-c23f-4c04-bfbf-3e0cb283e0a9)
-![web-dark](https://github.com/user-attachments/assets/3048a39a-c3cb-4f6e-9bc0-49b404abed03)
-![microsandbox-needs-you](https://github.com/user-attachments/assets/f7f56f5c-8604-47df-a908-73b6a88266dc)
-![host-light](https://github.com/user-attachments/assets/337b3d5f-9c33-4126-ae55-aca33abbf73e)
-![host-dark](https://github.com/user-attachments/assets/3c542e78-b5a0-4525-8a2a-376447d786fd)
-![floating-sandbox-bot](https://github.com/user-attachments/assets/52ea427f-f2d0-4b7b-bc23-8e729d28453b)
-![data-light](https://github.com/user-attachments/assets/3a330ea5-85b5-4176-8fe7-a43d59733cf1)
-![data-dark](https://github.com/user-attachments/assets/3794e426-a223-4064-8939-025c7bbaf5ea)
-![data_analysis_chart](https://github.com/user-attachments/assets/766c9fdf-6178-4fdf-9500-df6484866df4)
-![coding-light](https://github.com/user-attachments/assets/1bfe7223-869b-4782-9fce-3620c4400bbf)
-![coding-dark](https://github.com/user-attachments/assets/37c14bf1-e2f7-4af3-804e-5901de845715)
-![microsandbox-banner-xl](https://github.com/user-attachments/assets/9ee5ce3c-5c07-401b-b47d-640bac6b0e60)
-![microsandbox-banner-xl-dark](https://github.com/user-attachments/assets/3aad3c63-8115-4bda-b7a5-4cc07426b6ba)
--->
+Building AI agents that generate and execute code? — You'll need **secure sandboxes**<sup>✨</sup>!
+
+To run your ai-generated code, you could try a few things:
+
+- **Run directly on machine?** — Risky for your user's machine
+- **Run in docker containers?** — Limited isolation for untrusted code
+- **Run in traditional VMs?** — Minutes to start up, heavy resource usage
+- **Run in cloud sandboxes?** — Can get expensive fast and less control over your infra
+
+**microsandbox** gives you the best of all the worlds, all on your own infrastructure:
+
+- <div><img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF">&nbsp;&nbsp;True VM-Level Security Isolation with Fast Startup Times</div>
+- <div><img height="15" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;Self-Hosted with Full Control</div>
+- <div><img height="15" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;Fast Local Development Iteration Cycles</div>
+- <div><img height="15" src="https://octicons-col.vercel.app/sync/A770EF">&nbsp;&nbsp;Seamless Transition from Local to Production</div>
+- <div><img height="15" src="https://octicons-col.vercel.app/lock/A770EF">&nbsp;&nbsp;Data Sovereignty and Privacy</div>
+- <div><img height="15" src="https://octicons-col.vercel.app/stack/A770EF">&nbsp;&nbsp;Compatible with Standard Container Images</div>
+- <div><img height="15" src="https://octicons-col.vercel.app/code-square/A770EF">&nbsp;&nbsp;Wide SDK Ecosystem (10+ Languages)</div>
+- <div><img height="15" src="https://octicons-col.vercel.app/plug/A770EF">&nbsp;&nbsp;Integration with Any MCP Enabled AI</div>
+
+<div align='center'>• • •</div>
+
+# <sub><img height="18" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;QUICK START</sub>
+
+Get started with microsandbox in three straightforward steps.
+
+<h4><img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;&nbsp;<span>1</span>&nbsp;&nbsp;·&nbsp;&nbsp;Get API Key</h3>
+
+1. Get your [API key](#self-hosting).
+2. Configure API key and URL environment variables or save them to a `.env` file within your project.
+
+```env
+MSB_SERVER_URL=http://localhost:5555
+MSB_API_KEY=msb_***
+```
+
+##
+
+<h4><img height="13" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;&nbsp;<span>2</span>&nbsp;&nbsp;·&nbsp;&nbsp;Install SDK</h3>
+
+##### JavaScript
+
+```sh
+npm install microsandbox
+```
+
+##### Python
+
+```sh
+pip install microsandbox
+```
+
+##### Rust
+
+```sh
+cargo add microsandbox
+```
+
+> [!NOTE]
+> There are [SDKs](./sdk) for other languages as well! Join us in expanding support for your favorite language.
+>
+> <div align="left">
+>   <a href="./sdk/c"><img src="https://img.shields.io/badge/C-A8B9CC?style=flat-square&logo=c&logoColor=white" alt="C"></a>
+>   <a href="./sdk/cpp"><img src="https://img.shields.io/badge/C++-00599C?style=flat-square&logo=c%2B%2B&logoColor=white" alt="C++"></a>
+>   <a href="./sdk/crystal"><img src="https://img.shields.io/badge/Crystal-000000?style=flat-square&logo=crystal&logoColor=white" alt="Crystal"></a>
+>   <a href="./sdk/csharp"><img src="https://img.shields.io/badge/C%23-239120?style=flat-square&logo=c-sharp&logoColor=white" alt="C#"></a>
+>   <a href="./sdk/dart"><img src="https://img.shields.io/badge/Dart-0175C2?style=flat-square&logo=dart&logoColor=white" alt="Dart"></a>
+>   <a href="./sdk/elixir"><img src="https://img.shields.io/badge/Elixir-4B275F?style=flat-square&logo=elixir&logoColor=white" alt="Elixir"></a>
+>   <a href="./sdk/elm"><img src="https://img.shields.io/badge/Elm-1293D8?style=flat-square&logo=elm&logoColor=white" alt="Elm"></a>
+>   <a href="./sdk/erlang"><img src="https://img.shields.io/badge/Erlang-A90533?style=flat-square&logo=erlang&logoColor=white" alt="Erlang"></a>
+>   <a href="./sdk/fsharp"><img src="https://img.shields.io/badge/F%23-378BBA?style=flat-square&logo=f-sharp&logoColor=white" alt="F#"></a>
+>   <a href="./sdk/go"><img src="https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go"></a>
+>   <a href="./sdk/haskell"><img src="https://img.shields.io/badge/Haskell-5D4F85?style=flat-square&logo=haskell&logoColor=white" alt="Haskell"></a>
+>   <a href="./sdk/java"><img src="https://img.shields.io/badge/Java-ED8B00?style=flat-square&logo=java&logoColor=white" alt="Java"></a>
+>   <a href="./sdk/javascript"><img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat-square&logo=javascript&logoColor=black" alt="JavaScript"></a>
+>   <a href="./sdk/julia"><img src="https://img.shields.io/badge/Julia-9558B2?style=flat-square&logo=julia&logoColor=white" alt="Julia"></a>
+>   <a href="./sdk/kotlin"><img src="https://img.shields.io/badge/Kotlin-0095D5?style=flat-square&logo=kotlin&logoColor=white" alt="Kotlin"></a>
+>   <a href="./sdk/lua"><img src="https://img.shields.io/badge/Lua-2C2D72?style=flat-square&logo=lua&logoColor=white" alt="Lua"></a>
+>   <a href="./sdk/nim"><img src="https://img.shields.io/badge/Nim-FFE953?style=flat-square&logo=nim&logoColor=black" alt="Nim"></a>
+>   <a href="./sdk/objc"><img src="https://img.shields.io/badge/Objective--C-438EFF?style=flat-square&logo=apple&logoColor=white" alt="Objective-C"></a>
+>   <a href="./sdk/ocaml"><img src="https://img.shields.io/badge/OCaml-EC6813?style=flat-square&logo=ocaml&logoColor=white" alt="OCaml"></a>
+>   <a href="./sdk/php"><img src="https://img.shields.io/badge/PHP-777BB4?style=flat-square&logo=php&logoColor=white" alt="PHP"></a>
+>   <a href="./sdk/python"><img src="https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
+>   <a href="./sdk/r"><img src="https://img.shields.io/badge/R-276DC3?style=flat-square&logo=r&logoColor=white" alt="R"></a>
+>   <a href="./sdk/ruby"><img src="https://img.shields.io/badge/Ruby-CC342D?style=flat-square&logo=ruby&logoColor=white" alt="Ruby"></a>
+>   <a href="./sdk/rust"><img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./sdk/scala"><img src="https://img.shields.io/badge/Scala-DC322F?style=flat-square&logo=scala&logoColor=white" alt="Scala"></a>
+>   <a href="./sdk/swift"><img src="https://img.shields.io/badge/Swift-FA7343?style=flat-square&logo=swift&logoColor=white" alt="Swift"></a>
+>   <a href="./sdk/zig"><img src="https://img.shields.io/badge/Zig-F7A41D?style=flat-square&logo=zig&logoColor=white" alt="Zig"></a>
+> </div>
+
+##
+
+<h4><img height="13" src="https://octicons-col.vercel.app/file-binary/A770EF">&nbsp;&nbsp;&nbsp;<span>3</span>&nbsp;&nbsp;·&nbsp;&nbsp;Execute Code in Sandbox</h3>
+
+`microsandbox` offers a growing list of sandbox environment types optimized for different execution requirements. Choose the appropriate sandbox (e.g., PythonSandbox or NodeSandbox) to run your code in a secure tailored environment.
+
+##### JavaScript
+
+```js
+import { NodeSandbox } from "microsandbox";
+
+const sb = await NodeSandbox.create();
+
+await sb.run("var name = 'JavaScript'");
+await sb.run("console.log(`Hello ${name}!`)");
+
+console.log(await sb.output()); // prints Hello JavaScript!
+```
+
+##### Python
+
+```py
+import asyncio
+from microsandbox import PythonSandbox
+
+async def main():
+    async with PythonSandbox.create() as sb:
+        await sb.run("name = 'Python'")
+        await sb.run("print(f'Hello {name}!')")
+
+    print(await sb.output()) # prints Hello Python!
+
+asyncio.run(main())
+```
+
+##### Rust
+
+```rs
+use microsandbox::RustSandbox;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error> {
+    let sb = RustSandbox::create().await?;
+
+    sb.run(r#"let name = "Rust";"#).await?;
+    sb.run(r#"println!("Hello {name}");"#).await?;
+
+    println!("{}", sb.output().await?); // prints Hello Rust!
+
+    Ok(())
+}
+```
+
+> [!NOTE]
+>
+> For more examples covering multiple languages and sandbox types, [check out the examples folder](./sdk-examples)
+
+<br />
+
+<!-- TODO: https://github.com/user-attachments/assets/ba466d45-75dd-45ac-917b-0a56c5742e23 -->
+
+<div align='center'>• • •</div>
+
+# <sub><img height="18" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;SELF HOSTING</sub>
+
+With self hosting, your data and code stay on your servers making security compliance easy. Also, having a local setup lets you test and move through ideas fast while debugging issues more reliably.
+
+Let's help you start your first self-hosted sandbox server. It's easy!
+
+##
+
+#### 1. Install CLI
+
+```sh
+curl -sSL https://get.microsandbox.dev | sh
+```
+
+This will install the `msb` CLI tool, which helps you manage sandboxes locally.
+
+> [!IMPORTANT]
+>
+> The CLI is currently only available for macOS and Linux. **[Windows support is coming soon!](https://github.com/microsandbox/microsandbox/issues/47)**
+>
+> **Platform-specific requirements:**
+>
+> - <a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/linux/black" height="14"/></a><a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/linux/white" height="14"/></a> **Linux** — KVM virtualization must be enabled
+> - <a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/apple" height="14"/></a><a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/apple/white" height="14"/></a> **macOS** — Requires Apple Silicon (M1/M2/M3/M4)
+
+##
+
+#### 2. Start Sandbox Server
+
+```sh
+msb server start
+```
+
+##
+
+#### 3. Generate API Key
+
+```sh
+msb server keygen
+```
+
+##
+
+After starting the server and generating your key, [configure the two environment variables](#1get-api-key) to connect your SDK to your self-hosted sandbox server automatically.
+
+> [!TIP]
+>
+> Run `msb server stop` to stop the server.
+>
+> See `msb server --help` to see all the available options.
+
+<div align='center'>• • •</div>
+
+# <sub><img height="18" src="https://octicons-col.vercel.app/light-bulb/A770EF">&nbsp;&nbsp;USE CASES</sub>
+
+<a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img align="right" width="400" alt="coding-dark" src="https://github.com/user-attachments/assets/37c14bf1-e2f7-4af3-804e-5901de845715"></a>
+<a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img align="right" width="400" alt="coding-light" src="https://github.com/user-attachments/assets/1bfe7223-869b-4782-9fce-3620c4400bbf"></a>
+
+### Coding & Dev Environments
+
+Empower your AI agents to write and execute real code using professional development tools without compromising security. When your users ask their AI to create a web app, fix a bug, or spin up a prototype, it can handle everything from Git operations to dependency management to testing—all safely contained in a secure sandbox.
+
+Your AI can spin up complete development environments in milliseconds, install dependencies, and execute programs with full system access. The security isolation ensures malicious code can't escape, while the lightning-fast startup means developers don't experience the lag of traditional sandboxes. Perfect for AI pair programming, educational coding platforms, and automated code generation workflows that need both safety and performance.
+
+<!-- TODO: <div align="center"><a href="https://microsandbox.dev/docs/examples/coding">✨ See coding examples ✨</a></div> -->
+
+<!-- Transparent pixel to create line break after floating image -->
+
+<img width="2000" height="0" src="https://github.com/user-attachments/assets/ee14e6f7-20b8-4391-9091-8e8e25561929"><br>
+
+<a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img align="left" width="400" alt="data-dark" src="https://github.com/user-attachments/assets/3794e426-a223-4064-8939-025c7bbaf5ea"></a>
+<a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img align="left" width="400" alt="data-light" src="https://github.com/user-attachments/assets/3a330ea5-85b5-4176-8fe7-a43d59733cf1"></a>
+
+### Data Analysis
+
+Turn raw numbers into meaningful insights with AI that works for you. Your AI agents can process spreadsheets, create beautiful charts, and generate reports without putting your system at risk. Whether analyzing customer feedback, sales trends, or research data, everything happens in a protected environment where code can't access your sensitive files.
+
+Microsandbox lets your AI securely process data with specialized libraries like NumPy, Pandas, and TensorFlow while generating visualizations that bring insights to life. The sandbox architecture ensures sensitive data remains protected during analysis, with only cleaned results being exported back to your application. Ideal for financial analysis tools, privacy-focused data processing, medical research applications, and any scenario where data security is paramount but computational power is essential.
+
+<!-- TODO: <div align="center"><a href="https://microsandbox.dev/docs/examples/data-analysis">📊 Explore data examples 📊</a></div> -->
+
+<!-- Transparent pixel to create line break after floating image -->
+
+<img width="2000" height="0" src="https://github.com/user-attachments/assets/ee14e6f7-20b8-4391-9091-8e8e25561929"><br>
+
+<a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img align="right" width="400" alt="web-dark" src="https://github.com/user-attachments/assets/3048a39a-c3cb-4f6e-9bc0-49b404abed03"></a>
+<a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img align="right" width="400" alt="web-light" src="https://github.com/user-attachments/assets/e6a01e6d-c23f-4c04-bfbf-3e0cb283e0a9"></a>
+
+### Web Browsing Agent
+
+Create AI assistants that can safely navigate the web on behalf of your users. Need to check prices across different stores, gather information from multiple news sites, or automate form submissions? Your AI can handle these tasks in a contained environment where website interactions can't affect your main system.
+
+With microsandbox, your AI can navigate websites, extract data, interact with web forms, and even handle authentication flows securely. Even if it visits potentially harmful websites, the sandbox keeps everything isolated, delivering only the useful information back to your application. This makes it perfect for price comparison tools, research assistants, and content aggregators that need to interact with the web without compromising security.
+
+<!-- TODO: <div align="center"><a href="https://microsandbox.dev/docs/examples/web-browsing">🌐 View web examples 🌐</a></div> -->
+
+<!-- Transparent pixel to create line break after floating image -->
+
+<img width="2000" height="0" src="https://github.com/user-attachments/assets/ee14e6f7-20b8-4391-9091-8e8e25561929"><br>
+
+<a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img align="left" width="400" alt="host-dark" src="https://github.com/user-attachments/assets/3c542e78-b5a0-4525-8a2a-376447d786fd"></a>
+<a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img align="left" width="400" alt="host-light" src="https://github.com/user-attachments/assets/337b3d5f-9c33-4126-ae55-aca33abbf73e"></a>
+
+### Instant App Hosting
+
+Share working applications and demos in seconds without deployment hassles. When your AI creates a useful tool, calculator, visualization, or prototype, users can immediately access it through a simple link. No waiting for server provisioning or DNS setup—just instant, secure access to the application.
+
+Zero-configuration deployment means your AI-generated code can be immediately useful without complex setup. Each app runs in its own protected space with clearly defined resource limits, and everything cleans up automatically when no longer needed. Educational platforms can host student projects, AI assistants can create live demonstrations, and end-users get immediate value without waiting for traditional deployment pipelines.
+
+<!-- TODO: <div align="center"><a href="https://microsandbox.dev/docs/examples/app-hosting">🚀 Try hosting examples 🚀</a></div> -->
+
+<!-- Transparent pixel to create line break after floating image -->
+
+<img width="2000" height="0" src="https://github.com/user-attachments/assets/ee14e6f7-20b8-4391-9091-8e8e25561929"><br>
+
+<div align='center'>• • •</div>
+
+# <sub><img height="18" src="https://octicons-col.vercel.app/device-desktop/A770EF">&nbsp;&nbsp;LOCAL SANDBOX MANAGEMENT&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
+
+The `msb` CLI brings the familiar feel of package managers to sandbox development. Think of it like npm or cargo, but for sandboxes! Create a simple Sandboxfile, define your environments, and run them with easy commands.
+
+> [!WARNING]
+>
+> `msb` CLI is beta software.
+
+##
+
+#### Create a Sandbox Project
+
+```sh
+msb init
+```
+
+This creates a `Sandboxfile` in the current directory, which serves as the configuration manifest for your sandbox environments.
+
+##
+
+#### Add a Sandbox to the Project
+
+```sh
+msb add app \
+    --image python \
+    --cpus 1 \
+    --memory 1024 \
+    --start 'python -c "print(\"hello\")"'
+```
+
+The command above registers a new sandbox named `app` in your Sandboxfile, configured to use the `python` image.
+
+You should now have a `Sandboxfile` containing a sandbox named **`app`**:
+
+```sh
+cat Sandboxfile
+```
+
+```yaml
+# Sandbox configurations
+sandboxes:
+  app:
+    image: python
+    memory: 1024
+    cpus: 1
+    scripts:
+      start: python -c "print(\"hello\")"
+```
+
+> [!TIP]
+>
+> Run `msb <subcommand> --help` to see all the options available for a subcommand.
+>
+> For example, `msb add --help`.
+
+##
+
+#### Running a Sandbox
+
+##### Run a Sandbox Defined in Your Project
+
+```sh
+msb run --sandbox app
+```
+
+_**or**_
+
+```sh
+msb r app
+```
+
+_**or**_
+
+```sh
+msr app
+```
+
+This executes the default _start_ script of your sandbox. For more control, you can directly specify which script to run — `msr app~start`.
+
+When running project sandboxes, all file changes and installations made inside the sandbox are automatically persisted to the `./menv` directory. This means you can stop and restart your sandbox any time without losing your work. Your development environment will be exactly as you left it.
+
+##### Run an Temporary Sandbox
+
+For experimentation or one-off tasks, temporary sandboxes provide a clean environment that leaves no trace:
+
+```sh
+msb exe --image python
+```
+
+_**or**_
+
+```sh
+msb x python
+```
+
+_**or**_
+
+```sh
+msx python
+```
+
+Temporary sandboxes are perfect for isolating programs you get from the internet. Once you exit the sandbox, all changes are completely discarded.
+
+##
+
+#### Installing Sandboxes
+
+The `msb install` command sets up a sandbox as a system-wide executable. It installs a slim launcher program that allows you to start your sandbox from anywhere in your system with a simple command.
+
+```sh
+msb install --image alpine
+```
+
+_**or**_
+
+```sh
+msb i alpine
+```
+
+_**or**_
+
+```sh
+msi alpine
+```
+
+After installation, you can start your sandbox by simply typing its name in any terminal:
+
+```sh
+alpine
+```
+
+This makes frequently used sandboxes incredibly convenient to access — no need to navigate to specific directories or remember complex commands. Just type the sandbox name and it launches immediately with all your configured settings.
+
+> [!TIP]
+> You can give your sandbox a descriptive, easy-to-remember name during installation:
+>
+> ```sh
+> msi alpine:20250108 slim-linux
+> ```
+>
+> This allows you to create multiple instances of the same sandbox image with different names and configurations. For example:
+>
+> - `msi python python-data-science` - A Python environment for data analysis
+> - `msi python python-web` - A Python environment for web development
+>
+> Installed sandboxes maintain their state between sessions, so you can pick up exactly where you left off each time you launch them.
+
+<br />
+
+<!-- TODO: <a href="https://asciinema.org/a/646222" target="_blank"><img width="2000" src="https://asciinema.org/a/646222.svg" /></a> -->
+
+<div align='center'>• • •</div>
+
+# <sub><img height="18" src="https://octicons-col.vercel.app/law/A770EF">&nbsp;&nbsp;LICENSE</sub>
+
+This project is licensed under the [Apache License 2.0](./LICENSE).
