@@ -1,53 +1,71 @@
+<div align="center">
+<img src="https://github.com/user-attachments/assets/f7f56f5c-8604-47df-a908-73b6a88266dc" alt="microsandbox-needs-you" width="600">
+</div>
+
 # Microsandbox SDKs
 
-This directory contains SDKs for various programming languages that interact with the Microsandbox service.
+This directory contains SDKs for various programming languages that interact with the sandbox server.
 
-## Standardization
+# <sub><img height="18" src="https://octicons-col.vercel.app/people/A770EF">&nbsp;&nbsp;Join Our Community of Builders!</sub>
 
-All SDKs in this repository follow these standardized requirements:
+**We Need YOU!** Microsandbox project is calling for heroes like you! While we've made great progress with JavaScript, Python, and Rust SDKs, there's a vast landscape of programming languages waiting to be supported.
 
-- **Version**: 0.1.0 (using semantic versioning)
-- **Package Name**: `microsandbox` (with appropriate variations for language-specific conventions)
-- **Product Website**: https://microsandbox.dev
-- **Homepage**: https://github.com/microsandbox/microsandbox
-- **Repository**: https://github.com/microsandbox/microsandbox
-- **Contact Email**: team@microsandbox.dev
-- **License**: Apache-2.0
+Each new SDK we add opens Microsandbox to entirely new communities of developers, enabling secure code execution across more ecosystems. Whether you're passionate about Go, Ruby, Java, or any of the languages marked with ✗ below, your expertise could make a tremendous difference.
 
-The full Apache-2.0 license can be found in the project's root directory at `./LICENSE`.
+**Why contribute?**
 
-## Available SDKs
+- Build something that thousands of developers will use
+- Sharpen your skills in language interoperability
+- Join a supportive open source community
+- Leave your mark on a critical piece of developer infrastructure
 
-This repository includes SDKs for the following languages:
+Even if you're new to open source, we welcome contributions of all sizes - from documentation improvements to full SDK implementations. No contribution is too small, and our team is here to guide you through the process.
 
-- [C](./c/README.md)
-- [C++](./cpp/README.md)
-- [C#](./csharp/README.md)
-- [Crystal](./crystal/README.md)
-- [Dart](./dart/README.md)
-- [Elixir](./elixir/README.md)
-- [Elm](./elm/README.md)
-- [Erlang](./erlang/README.md)
-- [F#](./fsharp/README.md)
-- [Go](./go/README.md)
-- [Haskell](./haskell/README.md)
-- [Java](./java/README.md)
-- [JavaScript](./javascript/README.md)
-- [Julia](./julia/README.md)
-- [Kotlin](./kotlin/README.md)
-- [Lua](./lua/README.md)
-- [Nim](./nim/README.md)
-- [Objective-C](./objc/README.md)
-- [OCaml](./ocaml/README.md)
-- [PHP](./php/README.md)
-- [Python](./python/README.md)
-- [R](./r/README.md)
-- [Ruby](./ruby/README.md)
-- [Rust](./rust/README.md)
-- [Scala](./scala/README.md)
-- [Swift](./swift/README.md)
-- [Zig](./zig/README.md)
+**Ready to answer the call?** Check out our [CONTRIBUTING.md](../CONTRIBUTING.md) to get started, or open an issue to discuss your ideas. The future of secure, portable code execution needs your help!
 
-## Contributing
+<div align='center'>• • •</div>
 
-To add a new SDK or improve an existing one, please follow the standardization guidelines above. For more details on contributing, see the main [CONTRIBUTING.md](../CONTRIBUTING.md) file.
+# <sub><img height="18" src="https://octicons-col.vercel.app/table/A770EF">&nbsp;&nbsp;SDK SUPPORT LEVELS</sub>
+
+Each language SDK has a different level of maturity and feature support. Below is a comprehensive overview of the current support status for each language:
+
+<div align="center">
+
+|  Language   | Code Run | Command Run | Filesystem Access | Streaming Data | Sandbox Metrics | Package Manager |
+| :---------: | :------: | :---------: | :---------------: | :------------: | :-------------: | :-------------: |
+| JavaScript  |    ✓     |      ✓      |         ✓         |       ✓        |        ✓        |       npm       |
+|   Python    |    ✓     |      ✓      |         ✓         |       ✓        |        ✓        |       pip       |
+|    Rust     |    ✓     |      ✓      |         ✓         |       ✓        |        ✓        |      cargo      |
+|     Go      |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |     go mod      |
+|    Ruby     |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |       gem       |
+|    Java     |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |  maven/gradle   |
+|     PHP     |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|     C#      |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|    Swift    |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|   Kotlin    |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|      C      |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|     C++     |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|    Julia    |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|    Scala    |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|      R      |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|    Dart     |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|   Haskell   |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|   Elixir    |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|   Crystal   |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|     Nim     |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|    OCaml    |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|     F#      |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|   Erlang    |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|     Elm     |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+| Objective-C |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|     Lua     |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+|     Zig     |    ✗     |      ✗      |         ✗         |       ✗        |        ✗        |        -        |
+
+</div>
+
+**Feature Legend:**
+
+- ✓ — Supported
+- ✗ — Not currently supported
+
+<div align='center'>• • •</div>
