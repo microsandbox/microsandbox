@@ -4,6 +4,7 @@ members = [
     "microsandbox-core",
     "microsandbox-utils",
     "microsandbox-server",
+    "microsandbox-portal",
 ]
 resolver = "2"
 

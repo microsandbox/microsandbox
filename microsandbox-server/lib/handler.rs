@@ -19,16 +19,18 @@ use axum::{
 };
 use microsandbox_core::management::{menv, orchestra};
 use microsandbox_utils::{DEFAULT_CONFIG, MICROSANDBOX_CONFIG_FILENAME};
+use serde_json::{self, json};
 use serde_yaml;
 use std::path::PathBuf;
 use tokio::fs as tokio_fs;
+use tracing::debug;
 
 use crate::{
     error::ServerError,
     middleware,
     payload::{
-        JsonRpcResponse, RegularMessageResponse, SandboxStartRequest, SandboxStatusRequest,
-        SandboxStopRequest,
+        JsonRpcError, JsonRpcRequest, JsonRpcResponse, RegularMessageResponse, SandboxStartParams,
+        SandboxStatusParams, SandboxStopParams, JSONRPC_VERSION,
     },
     state::AppState,
     SandboxStatus, SandboxStatusResponse, ServerResult,
@@ -55,96 +57,66 @@ pub async fn health() -> ServerResult<impl IntoResponse> {
 /// Main JSON-RPC handler that dispatches to the appropriate method
 pub async fn json_rpc_handler(
     State(state): State<AppState>,
-    Json(payload): Json<serde_json::Value>,
+    Json(request): Json<JsonRpcRequest>,
 ) -> ServerResult<impl IntoResponse> {
-    // Extract method field from the request
-    let method = payload.get("method").and_then(|m| m.as_str());
+    debug!(?request, "Received JSON-RPC request");
 
     // Check for required JSON-RPC fields
-    if payload.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
-        return Err(ServerError::ValidationError(
-            crate::error::ValidationError::InvalidInput(
-                "Invalid or missing jsonrpc version field".to_string(),
-            ),
+    if request.jsonrpc != JSONRPC_VERSION {
+        let error = JsonRpcError {
+            code: -32600,
+            message: "Invalid or missing jsonrpc version field".to_string(),
+            data: None,
+        };
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(JsonRpcResponse::error(error, request.id.clone())),
         ));
     }
 
-    let id = payload.get("id").cloned();
-    let id_value = id.and_then(|i| i.as_u64());
+    let method = request.method.as_str();
+    let id = request.id.clone();
 
     match method {
-        Some("sandbox.start") => {
+        "sandbox.start" => {
             // Parse the params into a SandboxStartRequest
-            let params = payload.get("params").ok_or_else(|| {
-                ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
-                    "Missing params field".to_string(),
-                ))
-            })?;
-
-            let start_request: SandboxStartRequest = serde_json::from_value(params.clone())
-                .map_err(|e| {
+            let start_params: SandboxStartParams =
+                serde_json::from_value(request.params.clone()).map_err(|e| {
                     ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
                         format!("Invalid params for sandbox.start: {}", e),
                     ))
                 })?;
 
-            // Access validation can be done here using the headers in the original request
-            // We can extract the API key from headers and validate it has access to the
-            // requested namespace
-            // This is now handled by the auth middleware
-
             // Call the sandbox_up_impl function
-            let result = sandbox_start_impl(state, start_request).await?;
+            let result = sandbox_start_impl(state, start_params).await?;
 
-            // Create JSON-RPC response
-            let response = JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                result: serde_json::to_value(result).map_err(|e| {
-                    ServerError::InternalError(format!("JSON serialization error: {}", e))
-                })?,
-                id: id_value,
-            };
-
-            Ok((StatusCode::OK, Json(response)))
+            // Create JSON-RPC response with success
+            Ok((
+                StatusCode::OK,
+                Json(JsonRpcResponse::success(json!(result), id)),
+            ))
         }
-        Some("sandbox.stop") => {
+        "sandbox.stop" => {
             // Parse the params into a SandboxStopRequest
-            let params = payload.get("params").ok_or_else(|| {
-                ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
-                    "Missing params field".to_string(),
-                ))
-            })?;
-
-            let stop_request: SandboxStopRequest =
-                serde_json::from_value(params.clone()).map_err(|e| {
+            let stop_params: SandboxStopParams = serde_json::from_value(request.params.clone())
+                .map_err(|e| {
                     ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
                         format!("Invalid params for sandbox.stop: {}", e),
                     ))
                 })?;
 
             // Call the sandbox_down_impl function
-            let result = sandbox_stop_impl(state, stop_request).await?;
+            let result = sandbox_stop_impl(state, stop_params).await?;
 
-            // Create JSON-RPC response
-            let response = JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                result: serde_json::to_value(result).map_err(|e| {
-                    ServerError::InternalError(format!("JSON serialization error: {}", e))
-                })?,
-                id: id_value,
-            };
-
-            Ok((StatusCode::OK, Json(response)))
+            // Create JSON-RPC response with success
+            Ok((
+                StatusCode::OK,
+                Json(JsonRpcResponse::success(json!(result), id)),
+            ))
         }
-        Some("sandbox.getStatus") => {
+        "sandbox.getStatus" => {
             // Parse the params into a SandboxStatusRequest
-            let params = payload.get("params").ok_or_else(|| {
-                ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
-                    "Missing params field".to_string(),
-                ))
-            })?;
-
-            let status_request: SandboxStatusRequest = serde_json::from_value(params.clone())
+            let status_params: SandboxStatusParams = serde_json::from_value(request.params.clone())
                 .map_err(|e| {
                     ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
                         format!("Invalid params for sandbox.getStatus: {}", e),
@@ -152,33 +124,30 @@ pub async fn json_rpc_handler(
                 })?;
 
             // Call the sandbox_status_impl function with state and request
-            let result = sandbox_get_status_impl(state.clone(), status_request).await?;
+            let result = sandbox_get_status_impl(state.clone(), status_params).await?;
 
-            // Create JSON-RPC response
-            let response = JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                result: serde_json::to_value(result).map_err(|e| {
-                    ServerError::InternalError(format!("JSON serialization error: {}", e))
-                })?,
-                id: id_value,
-            };
-
-            Ok((StatusCode::OK, Json(response)))
+            // Create JSON-RPC response with success
+            Ok((
+                StatusCode::OK,
+                Json(JsonRpcResponse::success(json!(result), id)),
+            ))
         }
-        Some(unknown_method) => Err(ServerError::ValidationError(
-            crate::error::ValidationError::InvalidInput(format!(
-                "Unknown method: {}",
-                unknown_method
-            )),
-        )),
-        None => Err(ServerError::ValidationError(
-            crate::error::ValidationError::InvalidInput("Missing method field".to_string()),
-        )),
+        _ => {
+            let error = JsonRpcError {
+                code: -32601,
+                message: format!("Method not found: {}", method),
+                data: None,
+            };
+            Ok((
+                StatusCode::NOT_FOUND,
+                Json(JsonRpcResponse::error(error, id)),
+            ))
+        }
     }
 }
 
 /// Implementation for starting a sandbox
-async fn sandbox_start_impl(state: AppState, params: SandboxStartRequest) -> ServerResult<String> {
+async fn sandbox_start_impl(state: AppState, params: SandboxStartParams) -> ServerResult<String> {
     // Validate sandbox name and namespace
     validate_sandbox_name(&params.sandbox)?;
     validate_namespace(&params.namespace)?;
@@ -462,7 +431,7 @@ async fn sandbox_start_impl(state: AppState, params: SandboxStartRequest) -> Ser
 }
 
 /// Implementation for stopping a sandbox
-async fn sandbox_stop_impl(state: AppState, params: SandboxStopRequest) -> ServerResult<String> {
+async fn sandbox_stop_impl(state: AppState, params: SandboxStopParams) -> ServerResult<String> {
     // Validate sandbox name and namespace
     validate_sandbox_name(&params.sandbox)?;
     validate_namespace(&params.namespace)?;
@@ -513,7 +482,7 @@ async fn sandbox_stop_impl(state: AppState, params: SandboxStopRequest) -> Serve
 /// Implementation for sandbox status
 async fn sandbox_get_status_impl(
     state: AppState,
-    params: SandboxStatusRequest,
+    params: SandboxStatusParams,
 ) -> ServerResult<SandboxStatusResponse> {
     // Validate namespace - special handling for '*' wildcard
     if params.namespace != "*" {
