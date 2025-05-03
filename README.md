@@ -448,7 +448,7 @@ This makes frequently used sandboxes incredibly convenient to access — no need
 
 <br />
 
-<!-- TODO: <a href="https://asciinema.org/a/646222" target="_blank"><img width="2000" src="https://asciinema.org/a/646222.svg" /></a> -->
+<a href="https://asciinema.org/a/7eOFf2Ovigi473FsKgr3Lpve1" target="_blank"><img src="https://asciinema.org/a/7eOFf2Ovigi473FsKgr3Lpve1.svg" /></a>
 
 <div align='center'>• • •</div>
 
