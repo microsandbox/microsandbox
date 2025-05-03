@@ -16,12 +16,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// JSON-RPC version - always "2.0"
+pub const JSONRPC_VERSION: &str = "2.0";
+
+//--------------------------------------------------------------------------------------------------
 // Types: REST API Requests
 //--------------------------------------------------------------------------------------------------
 
 /// Request payload for starting a sandbox
 #[derive(Debug, Deserialize)]
-pub struct SandboxStartRequest {
+pub struct SandboxStartParams {
     /// Sandbox name
     pub sandbox: String,
 
@@ -34,7 +41,7 @@ pub struct SandboxStartRequest {
 
 /// Request payload for stopping a sandbox
 #[derive(Debug, Deserialize)]
-pub struct SandboxStopRequest {
+pub struct SandboxStopParams {
     /// Sandbox name
     pub sandbox: String,
 
@@ -44,7 +51,7 @@ pub struct SandboxStopRequest {
 
 /// Request payload for getting sandbox status
 #[derive(Debug, Deserialize)]
-pub struct SandboxStatusRequest {
+pub struct SandboxStatusParams {
     /// Optional sandbox name - if not provided, all sandboxes in the namespace will be included
     pub sandbox: Option<String>,
 
@@ -102,33 +109,91 @@ pub struct SandboxConfig {
 // Types: JSON-RPC Payloads
 //--------------------------------------------------------------------------------------------------
 
-/// Generic JSON-RPC request
-#[derive(Debug, Deserialize)]
-pub struct JsonRpcRequest<T> {
-    /// JSON-RPC version
+/// JSON-RPC request structure
+#[derive(Debug, Deserialize, Serialize)]
+pub struct JsonRpcRequest {
+    /// JSON-RPC version, must be "2.0"
     pub jsonrpc: String,
 
-    /// Method to call
+    /// Method name
     pub method: String,
 
-    /// Parameters for the method
-    pub params: T,
+    /// Optional parameters for the method
+    #[serde(default)]
+    pub params: Value,
 
     /// Request ID
-    pub id: Option<u64>,
+    pub id: Value,
 }
 
-/// JSON-RPC response
-#[derive(Debug, Serialize)]
+/// JSON-RPC response structure
+#[derive(Debug, Deserialize, Serialize)]
 pub struct JsonRpcResponse {
-    /// JSON-RPC version
+    /// JSON-RPC version, always "2.0"
     pub jsonrpc: String,
 
-    /// Result of the operation
-    pub result: Value,
+    /// Result of the method execution (if successful)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
 
-    /// Request ID
-    pub id: Option<u64>,
+    /// Error details (if failed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JsonRpcError>,
+
+    /// Response ID (same as request ID)
+    pub id: Value,
+}
+
+/// JSON-RPC error structure
+#[derive(Debug, Deserialize, Serialize)]
+pub struct JsonRpcError {
+    /// Error code
+    pub code: i32,
+
+    /// Error message
+    pub message: String,
+
+    /// Optional error data
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl JsonRpcRequest {
+    /// Create a new JSON-RPC request
+    pub fn new(method: String, params: Value, id: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method,
+            params,
+            id,
+        }
+    }
+}
+
+impl JsonRpcResponse {
+    /// Create a new successful JSON-RPC response
+    pub fn success(result: Value, id: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            result: Some(result),
+            error: None,
+            id,
+        }
+    }
+
+    /// Create a new error JSON-RPC response
+    pub fn error(error: JsonRpcError, id: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            result: None,
+            error: Some(error),
+            id,
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
