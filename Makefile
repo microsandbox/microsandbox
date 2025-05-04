@@ -1,5 +1,5 @@
 # =============================================================================
-# Microsandbox Makefile - Build, install, and run microsandbox components
+# Microsandbox Makefile - Build and install microsandbox components
 # =============================================================================
 
 # -----------------------------------------------------------------------------
