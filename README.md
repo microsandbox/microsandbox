@@ -452,6 +452,14 @@ This makes frequently used sandboxes incredibly convenient to access — no need
 
 <div align='center'>• • •</div>
 
+# <sub><img height="18" src="https://octicons-col.vercel.app/gear/A770EF">&nbsp;&nbsp;DEVELOPMENT</sub>
+
+Interested in contributing to microsandbox? Check out our [Development Guide](./DEVELOPMENT.md) for instructions on setting up your development environment, building the project, running tests, and creating releases.
+
+For contribution guidelines, please refer to [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+<div align='center'>• • •</div>
+
 # <sub><img height="18" src="https://octicons-col.vercel.app/law/A770EF">&nbsp;&nbsp;LICENSE</sub>
 
 This project is licensed under the [Apache License 2.0](./LICENSE).
