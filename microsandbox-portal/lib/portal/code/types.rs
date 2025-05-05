@@ -27,8 +27,8 @@
 //! The design accounts for concurrent use by leveraging thread-safe primitives and
 //! message passing through channels to communicate between components.
 
-use crossbeam_channel::Sender;
 use thiserror::Error;
+use tokio::sync::mpsc::Sender;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -41,7 +41,7 @@ pub enum Language {
     #[cfg(feature = "python")]
     Python,
     /// Node.js/JavaScript support
-    #[cfg(feature = "javascript")]
+    #[cfg(feature = "nodejs")]
     Node,
     /// Rust language support
     #[cfg(feature = "rust")]
@@ -110,6 +110,7 @@ pub(crate) enum Cmd {
         id: String,
         code: String,
         language: Language,
+        resp_tx: Sender<Resp>,
     },
     /// Shutdown the reactor and all engines
     Shutdown,
@@ -148,19 +149,20 @@ pub enum Resp {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Trait Implementations
+// Traits
 //--------------------------------------------------------------------------------------------------
 
 /// Trait defining common engine operations
 ///
 /// This trait must be implemented by each language-specific engine.
 /// It defines the core operations that all engines must support.
+#[async_trait::async_trait]
 pub trait Engine: Send + 'static {
     /// Initialize the engine
     ///
     /// This method is called when the engine is first created to set up
     /// any necessary resources, start the evaluation context, etc.
-    fn initialize(&mut self) -> Result<(), EngineError>;
+    async fn initialize(&mut self) -> Result<(), EngineError>;
 
     /// Evaluate code and send responses through the channel
     ///
@@ -172,11 +174,16 @@ pub trait Engine: Send + 'static {
     /// * `id` - A unique identifier for this evaluation
     /// * `code` - The code to evaluate
     /// * `sender` - A channel for sending evaluation responses
-    fn eval(&mut self, id: String, code: String, sender: &Sender<Resp>) -> Result<(), EngineError>;
+    async fn eval(
+        &mut self,
+        id: String,
+        code: String,
+        sender: &Sender<Resp>,
+    ) -> Result<(), EngineError>;
 
     /// Shutdown the engine
     ///
     /// This method is called when the engine is being shut down to clean up
     /// resources, terminate processes, etc.
-    fn shutdown(&mut self);
+    async fn shutdown(&mut self);
 }

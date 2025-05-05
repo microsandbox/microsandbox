@@ -20,7 +20,7 @@
 //! The module uses feature flags to conditionally include language engines:
 //!
 //! - `python`: Enables the Python engine
-//! - `javascript`: Enables the Node.js engine
+//! - `nodejs`: Enables the Node.js engine
 //! - `rust`: Enables the Rust engine
 //!
 //! # Thread Safety
@@ -45,14 +45,13 @@
 //!     handle.shutdown()?;
 //!     Ok(())
 //! }
+//! ```
 
-/// ```
-use crossbeam_channel::bounded;
-use std::thread;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
-#[cfg(feature = "javascript")]
-use super::node;
+#[cfg(feature = "nodejs")]
+use super::nodejs;
 #[cfg(feature = "python")]
 use super::python;
 #[cfg(feature = "rust")]
@@ -61,7 +60,7 @@ use super::rust;
 use super::types::{Cmd, Engine, EngineError, EngineHandle, Language, Line, Resp, Stream};
 
 //--------------------------------------------------------------------------------------------------
-// Internal Types
+// Types
 //--------------------------------------------------------------------------------------------------
 
 /// All available REPL engines
@@ -71,8 +70,8 @@ use super::types::{Cmd, Engine, EngineError, EngineHandle, Language, Line, Resp,
 struct Engines {
     #[cfg(feature = "python")]
     python: Box<dyn Engine>,
-    #[cfg(feature = "javascript")]
-    node: Box<dyn Engine>,
+    #[cfg(feature = "nodejs")]
+    nodejs: Box<dyn Engine>,
     #[cfg(feature = "rust")]
     rust: Box<dyn Engine>,
 }
@@ -101,7 +100,7 @@ impl EngineHandle {
     ///
     /// Returns an `EngineError` if the evaluation fails or if the reactor
     /// thread is not available.
-    pub fn eval<S: Into<String>>(
+    pub async fn eval<S: Into<String>>(
         &self,
         code: S,
         language: Language,
@@ -109,9 +108,9 @@ impl EngineHandle {
         let id = Uuid::new_v4().to_string();
         let code = code.into();
 
-        // Create bounded channels for receiving results
-        let (_resp_sender, resp_receiver) = bounded::<Resp>(100);
-        let (line_sender, line_receiver) = bounded::<Line>(100);
+        // Create channel for receiving results
+        let (resp_tx, mut resp_rx) = mpsc::channel::<Resp>(100);
+        let (line_tx, mut line_rx) = mpsc::channel::<Line>(100);
 
         // Send evaluation command to reactor
         self.cmd_sender
@@ -119,40 +118,46 @@ impl EngineHandle {
                 id: id.clone(),
                 code,
                 language,
+                resp_tx,
             })
+            .await
             .map_err(|_| EngineError::Unavailable("Reactor thread not available".to_string()))?;
 
-        // Process responses in a separate thread
-        thread::spawn(move || {
-            while let Ok(resp) = resp_receiver.recv() {
+        // Process responses in a separate task
+        let process_handle = tokio::spawn(async move {
+            while let Some(resp) = resp_rx.recv().await {
                 match resp {
                     Resp::Line {
                         id: _,
                         stream,
                         text,
                     } => {
-                        let _ = line_sender.send(Line { stream, text });
+                        let _ = line_tx.send(Line { stream, text }).await;
                     }
                     Resp::Done { id: _ } => {
                         break;
                     }
                     Resp::Error { id: _, message } => {
-                        let _ = line_sender.send(Line {
-                            stream: Stream::Stderr,
-                            text: format!("Error: {}", message),
-                        });
+                        let _ = line_tx
+                            .send(Line {
+                                stream: Stream::Stderr,
+                                text: format!("Error: {}", message),
+                            })
+                            .await;
                         break;
                     }
                 }
             }
-            drop(line_sender); // Close channel when done
         });
 
         // Collect all lines
         let mut lines = Vec::new();
-        while let Ok(line) = line_receiver.recv() {
+        while let Some(line) = line_rx.recv().await {
             lines.push(line);
         }
+
+        // Wait for processing to complete
+        let _ = process_handle.await;
 
         Ok(lines)
     }
@@ -165,9 +170,10 @@ impl EngineHandle {
     /// # Errors
     ///
     /// Returns an `EngineError` if the reactor thread is not available.
-    pub fn shutdown(&self) -> Result<(), EngineError> {
+    pub async fn shutdown(&self) -> Result<(), EngineError> {
         self.cmd_sender
             .send(Cmd::Shutdown)
+            .await
             .map_err(|_| EngineError::Unavailable("Reactor thread not available".to_string()))?;
         Ok(())
     }
@@ -190,74 +196,74 @@ impl EngineHandle {
 /// # Errors
 ///
 /// Returns an `EngineError` if any of the engines fail to initialize.
-pub fn start_engines() -> Result<EngineHandle, EngineError> {
-    let (cmd_sender, cmd_receiver) = bounded::<Cmd>(100);
+pub async fn start_engines() -> Result<EngineHandle, EngineError> {
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Cmd>(100);
 
-    // Spawn reactor thread
-    thread::spawn(move || {
-        let mut engines = initialize_engines().expect("Failed to initialize engines");
+    // Spawn reactor task
+    tokio::spawn(async move {
+        // Initialize engines asynchronously
+        let mut engines = initialize_engines()
+            .await
+            .expect("Failed to initialize engines");
 
         // Process commands until shutdown
-        while let Ok(cmd) = cmd_receiver.recv() {
+        while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
-                Cmd::Eval { id, code, language } => {
-                    let (resp_sender, _) = bounded::<Resp>(100);
-                    match language {
-                        #[cfg(feature = "python")]
-                        Language::Python => {
-                            if let Err(e) = engines.python.eval(id.clone(), code, &resp_sender) {
-                                let _ = resp_sender.send(Resp::Error {
+                Cmd::Eval {
+                    id,
+                    code,
+                    language,
+                    resp_tx,
+                } => match language {
+                    #[cfg(feature = "python")]
+                    Language::Python => {
+                        if let Err(e) = engines.python.eval(id.clone(), code, &resp_tx).await {
+                            let _ = resp_tx
+                                .send(Resp::Error {
                                     id,
                                     message: e.to_string(),
-                                });
-                            }
-                        }
-                        #[cfg(feature = "javascript")]
-                        Language::Node => {
-                            if let Err(e) = engines.node.eval(id.clone(), code, &resp_sender) {
-                                let _ = resp_sender.send(Resp::Error {
-                                    id,
-                                    message: e.to_string(),
-                                });
-                            }
-                        }
-                        #[cfg(feature = "rust")]
-                        Language::Rust => {
-                            if let Err(e) = engines.rust.eval(id.clone(), code, &resp_sender) {
-                                let _ = resp_sender.send(Resp::Error {
-                                    id,
-                                    message: e.to_string(),
-                                });
-                            }
-                        }
-                        #[cfg(not(any(
-                            feature = "python",
-                            feature = "javascript",
-                            feature = "rust"
-                        )))]
-                        _ => {
-                            let _ = resp_sender.send(Resp::Error {
-                                id,
-                                message: "Unsupported language".to_string(),
-                            });
+                                })
+                                .await;
                         }
                     }
-                }
+                    #[cfg(feature = "nodejs")]
+                    Language::Node => {
+                        if let Err(e) = engines.nodejs.eval(id.clone(), code, &resp_tx).await {
+                            let _ = resp_tx
+                                .send(Resp::Error {
+                                    id,
+                                    message: e.to_string(),
+                                })
+                                .await;
+                        }
+                    }
+                    #[cfg(feature = "rust")]
+                    Language::Rust => {
+                        if let Err(e) = engines.rust.eval(id.clone(), code, &resp_tx).await {
+                            let _ = resp_tx
+                                .send(Resp::Error {
+                                    id,
+                                    message: e.to_string(),
+                                })
+                                .await;
+                        }
+                    }
+                },
                 Cmd::Shutdown => {
                     // Shutdown all engines
                     #[cfg(feature = "python")]
-                    engines.python.shutdown();
-                    #[cfg(feature = "javascript")]
-                    engines.node.shutdown();
+                    engines.python.shutdown().await;
+                    #[cfg(feature = "nodejs")]
+                    engines.nodejs.shutdown().await;
                     #[cfg(feature = "rust")]
-                    engines.rust.shutdown();
+                    engines.rust.shutdown().await;
                     break;
                 }
             }
         }
     });
 
-    Ok(EngineHandle { cmd_sender })
+    Ok(EngineHandle { cmd_sender: cmd_tx })
 }
 
 /// Initialize all engines
@@ -272,27 +278,27 @@ pub fn start_engines() -> Result<EngineHandle, EngineError> {
 /// # Errors
 ///
 /// Returns an `EngineError` if any of the engines fail to initialize.
-fn initialize_engines() -> Result<Engines, EngineError> {
+async fn initialize_engines() -> Result<Engines, EngineError> {
     #[cfg(feature = "python")]
     let mut python_engine = python::create_engine()?;
-    #[cfg(feature = "javascript")]
-    let mut node_engine = node::create_engine()?;
+    #[cfg(feature = "nodejs")]
+    let mut nodejs_engine = nodejs::create_engine()?;
     #[cfg(feature = "rust")]
     let mut rust_engine = rust::create_engine()?;
 
-    // Initialize each engine
+    // Initialize each engine asynchronously
     #[cfg(feature = "python")]
-    python_engine.initialize()?;
-    #[cfg(feature = "javascript")]
-    node_engine.initialize()?;
+    python_engine.initialize().await?;
+    #[cfg(feature = "nodejs")]
+    nodejs_engine.initialize().await?;
     #[cfg(feature = "rust")]
-    rust_engine.initialize()?;
+    rust_engine.initialize().await?;
 
     Ok(Engines {
         #[cfg(feature = "python")]
         python: python_engine,
-        #[cfg(feature = "javascript")]
-        node: node_engine,
+        #[cfg(feature = "nodejs")]
+        nodejs: nodejs_engine,
         #[cfg(feature = "rust")]
         rust: rust_engine,
     })

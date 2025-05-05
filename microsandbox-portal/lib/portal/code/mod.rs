@@ -35,7 +35,7 @@
 //!     #[cfg(feature = "python")]
 //!     let python_result = handle.eval("print('Hello from Python')", Language::Python)?;
 //!
-//!     #[cfg(feature = "javascript")]
+//!     #[cfg(feature = "nodejs")]
 //!     let js_result = handle.eval("console.log('Hello from JavaScript')", Language::Node)?;
 //!
 //!     #[cfg(feature = "rust")]
@@ -60,8 +60,8 @@ pub mod rust;
 #[cfg(feature = "python")]
 pub mod python;
 
-#[cfg(feature = "javascript")]
-pub mod node;
+#[cfg(feature = "nodejs")]
+pub mod nodejs;
 
 pub mod engine;
 pub mod types;
