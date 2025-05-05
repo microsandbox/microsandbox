@@ -1,13 +1,13 @@
-//! Python engine implementation for code execution in a sandboxed environment.
+//! Node.js engine implementation for code execution in a sandboxed environment.
 //!
-//! This module provides a Python-based code execution engine that:
-//! - Runs Python code in an interactive subprocess
+//! This module provides a Node.js-based code execution engine that:
+//! - Runs Node.js code in a subprocess with a custom REPL configuration
 //! - Captures and streams stdout/stderr output
 //! - Manages process lifecycle and cleanup
-//! - Provides non-blocking evaluation of Python code
+//! - Provides non-blocking evaluation of JavaScript code
 //!
-//! The engine uses Python's interactive mode with customized settings to
-//! disable prompts and ensure unbuffered output for real-time streaming.
+//! The engine uses a custom REPL configuration that disables terminal features
+//! and prompts for cleaner output handling.
 
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
@@ -25,13 +25,13 @@ use super::types::{Engine, EngineError, Resp, Stream};
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Python engine implementation using subprocess
-pub struct PythonEngine {
+/// Node.js engine implementation using subprocess
+pub struct NodeEngine {
     process_control_tx: Option<Sender<ProcessControl>>,
     eval_tx: Option<Sender<EvalRequest>>,
 }
 
-/// Commands for controlling the Python process
+/// Commands for controlling the Node.js process
 enum ProcessControl {
     Shutdown,
 }
@@ -48,9 +48,9 @@ struct EvalRequest {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl PythonEngine {
+impl NodeEngine {
     fn new() -> Self {
-        PythonEngine {
+        NodeEngine {
             process_control_tx: None,
             eval_tx: None,
         }
@@ -62,7 +62,7 @@ impl PythonEngine {
 //--------------------------------------------------------------------------------------------------
 
 #[async_trait]
-impl Engine for PythonEngine {
+impl Engine for NodeEngine {
     async fn initialize(&mut self) -> Result<(), EngineError> {
         // Create channels for process control and evaluation requests
         let (process_control_tx, mut process_control_rx) = mpsc::channel::<ProcessControl>(10);
@@ -71,12 +71,15 @@ impl Engine for PythonEngine {
         self.process_control_tx = Some(process_control_tx);
         self.eval_tx = Some(eval_tx);
 
-        // Start the Python process manager in a separate task
+        // Start the Node.js process manager in a separate task
         tokio::spawn(async move {
-            // Start Python process with interactive mode
-            // -q: hide banner, -u: unbuffered, -i: interactive, clear prompts
-            let mut process = match Command::new("python3")
-                .args(&["-q", "-u", "-i", "-c", "import sys; sys.ps1=sys.ps2=''"])
+            // Start Node.js process with custom REPL
+            // Custom REPL starts with no prompt, no terminal features, and ignores undefined
+            let mut process = match Command::new("node")
+                .args(&[
+                    "-e",
+                    "require('repl').start({prompt:'', terminal:false, ignoreUndefined:true})",
+                ])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -84,7 +87,7 @@ impl Engine for PythonEngine {
             {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("Failed to start Python process: {}", e);
+                    eprintln!("Failed to start Node.js process: {}", e);
                     return;
                 }
             };
@@ -93,7 +96,7 @@ impl Engine for PythonEngine {
             let mut stdin = match process.stdin.take() {
                 Some(s) => s,
                 None => {
-                    eprintln!("Failed to open Python stdin");
+                    eprintln!("Failed to open Node.js stdin");
                     return;
                 }
             };
@@ -102,7 +105,7 @@ impl Engine for PythonEngine {
             let stdout = match process.stdout.take() {
                 Some(s) => s,
                 None => {
-                    eprintln!("Failed to open Python stdout");
+                    eprintln!("Failed to open Node.js stdout");
                     return;
                 }
             };
@@ -110,7 +113,7 @@ impl Engine for PythonEngine {
             let stderr = match process.stderr.take() {
                 Some(s) => s,
                 None => {
-                    eprintln!("Failed to open Python stderr");
+                    eprintln!("Failed to open Node.js stderr");
                     return;
                 }
             };
@@ -131,14 +134,22 @@ impl Engine for PythonEngine {
 
                     match line_result {
                         Ok(Some(line)) => {
-                            // Send to active evaluation if one exists
-                            if let Some((id, sender)) = stdout_eval_clone.lock().unwrap().as_ref() {
-                                // Use block_on to send the message
-                                let _ = runtime.block_on(sender.send(Resp::Line {
-                                    id: id.clone(),
-                                    stream: Stream::Stdout,
-                                    text: line,
-                                }));
+                            // Skip Node.js REPL response tags '>' and '..'
+                            if !line.trim().is_empty()
+                                && !line.starts_with('>')
+                                && !line.starts_with("..")
+                            {
+                                // Send to active evaluation if one exists
+                                if let Some((id, sender)) =
+                                    stdout_eval_clone.lock().unwrap().as_ref()
+                                {
+                                    // Use block_on to send the message
+                                    let _ = runtime.block_on(sender.send(Resp::Line {
+                                        id: id.clone(),
+                                        stream: Stream::Stdout,
+                                        text: line,
+                                    }));
+                                }
                             }
                         }
                         Ok(None) => break, // EOF
@@ -206,43 +217,23 @@ impl Engine for PythonEngine {
 
                         // Execute the code
                         let result = async {
-                            // Ensure the code ends with a newline to trigger execution
-                            // For Python specifically, we need to ensure an empty line at the end
-                            // to properly terminate any indented blocks
-                            let code_with_newlines = match code.chars().last() {
-                                // If no newline at all, add two
-                                None => String::from("\n\n"),
-                                Some('\n') => {
-                                    // Check if it already ends with double newline
-                                    if code.ends_with("\n\n") {
-                                        code
-                                    } else {
-                                        // Add one more newline to terminate indentation blocks
-                                        format!("{}\n", code)
-                                    }
-                                },
-                                // If no trailing newline, add two
-                                Some(_) => format!("{}\n\n", code),
-                            };
+                            // Write code to Node.js process
+                            stdin.write_all(code.as_bytes()).await.map_err(|e| {
+                                EngineError::Evaluation(format!("Failed to send code to Node.js: {}", e))
+                            })?;
 
-                            // Write code to Python process
-                            stdin.write_all(code_with_newlines.as_bytes()).await.map_err(|e| {
-                                EngineError::Evaluation(format!("Failed to send code to Python: {}", e))
+                            // Add newline to execute the code
+                            stdin.write_all(b"\n").await.map_err(|e| {
+                                EngineError::Evaluation(format!("Failed to send newline to Node.js: {}", e))
                             })?;
 
                             // Flush to ensure code is processed
                             stdin.flush().await.map_err(|e| {
-                                EngineError::Evaluation(format!("Failed to flush code to Python: {}", e))
+                                EngineError::Evaluation(format!("Failed to flush code to Node.js: {}", e))
                             })?;
 
                             // Give time for execution
-                            // For complex code blocks, give more time
-                            let wait_time = if code_with_newlines.lines().count() > 5 {
-                                1000 // More time for larger code blocks
-                            } else {
-                                500  // Default time
-                            };
-                            sleep(Duration::from_millis(wait_time)).await;
+                            sleep(Duration::from_millis(500)).await;
 
                             // Signal completion
                             let _ = resp_tx.send(Resp::Done { id }).await;
@@ -259,11 +250,11 @@ impl Engine for PythonEngine {
                         let _ = done_tx.send(result);
                     }
                     _ = stdout_done_rx.recv() => {
-                        eprintln!("Python stdout handler exited");
+                        eprintln!("Node.js stdout handler exited");
                         break;
                     }
                     _ = stderr_done_rx.recv() => {
-                        eprintln!("Python stderr handler exited");
+                        eprintln!("Node.js stderr handler exited");
                         break;
                     }
                 }
@@ -286,10 +277,9 @@ impl Engine for PythonEngine {
         code: String,
         sender: &Sender<Resp>,
     ) -> Result<(), EngineError> {
-        let eval_tx = self
-            .eval_tx
-            .as_ref()
-            .ok_or_else(|| EngineError::Unavailable("Python engine not initialized".to_string()))?;
+        let eval_tx = self.eval_tx.as_ref().ok_or_else(|| {
+            EngineError::Unavailable("Node.js engine not initialized".to_string())
+        })?;
 
         // Create a oneshot channel for the result
         let (done_tx, done_rx) = oneshot::channel();
@@ -303,12 +293,12 @@ impl Engine for PythonEngine {
                 done_tx,
             })
             .await
-            .map_err(|_| EngineError::Unavailable("Python process channel closed".to_string()))?;
+            .map_err(|_| EngineError::Unavailable("Node.js process channel closed".to_string()))?;
 
         // Wait for completion
         done_rx
             .await
-            .map_err(|_| EngineError::Unavailable("Python evaluation cancelled".to_string()))?
+            .map_err(|_| EngineError::Unavailable("Node.js evaluation cancelled".to_string()))?
     }
 
     async fn shutdown(&mut self) {
@@ -329,7 +319,7 @@ impl Engine for PythonEngine {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Create a new Python engine instance
+/// Create a new Node.js engine instance
 pub fn create_engine() -> Result<Box<dyn Engine>, EngineError> {
-    Ok(Box::new(PythonEngine::new()))
+    Ok(Box::new(NodeEngine::new()))
 }

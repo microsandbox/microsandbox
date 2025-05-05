@@ -19,7 +19,7 @@ path = "bin/portal.rs"
 
 [dependencies]
 axum = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "rt-multi-thread", "macros"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tower = { workspace = true }
@@ -30,12 +30,13 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 microsandbox-utils = { workspace = true }
 clap = { workspace = true }
-crossbeam-channel = "0.5"
 uuid = { version = "1.4", features = ["v4"] }
 evcxr = { version = "0.19", optional = true }
+async-trait = "0.1"
+crossbeam-channel = "0.5"
 
 [features]
-default = ["python", "javascript", "rust"] # TODO: Remove javascript and rust
+default = []
 python = []
-javascript = []
+nodejs = []
 rust = ["evcxr"]
