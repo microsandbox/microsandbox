@@ -11,6 +11,7 @@ pub mod handler;
 pub mod payload;
 pub mod portal;
 pub mod route;
+pub mod state;
 
 //--------------------------------------------------------------------------------------------------
 // Exports
@@ -21,3 +22,4 @@ pub use handler::*;
 pub use payload::*;
 pub use portal::*;
 pub use route::*;
+pub use state::*;

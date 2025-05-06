@@ -28,6 +28,7 @@ pub fn create_router(state: AppState) -> Router {
     let rest_api = Router::new().route("/health", get(handler::health));
 
     // Create JSON-RPC routes with authentication - a single endpoint that handles all RPC methods
+    // This now mirrors the structure used in microsandbox-portal
     let rpc_api = Router::new()
         .route("/", post(handler::json_rpc_handler))
         .layer(middleware::from_fn_with_state(
@@ -35,23 +36,10 @@ pub fn create_router(state: AppState) -> Router {
             app_middleware::auth_middleware,
         ));
 
-    // Create proxy routes - nested under /proxy path, now without auth middleware
-    let proxy_routes = Router::new()
-        .route(
-            "/{namespace}/{sandbox_name}/{*path}",
-            get(handler::proxy_request),
-        )
-        .fallback(handler::proxy_fallback)
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            app_middleware::proxy_middleware,
-        ));
-
     // Combine all routes with logging middleware
     Router::new()
         .nest("/api/v1", rest_api)
         .nest("/api/v1/rpc", rpc_api)
-        .nest("/proxy", proxy_routes) // Changed from merge to nest with /proxy path
         .layer(middleware::from_fn(app_middleware::logging_middleware))
         .with_state(state)
 }

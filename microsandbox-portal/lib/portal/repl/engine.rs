@@ -48,7 +48,6 @@
 //! ```
 
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 #[cfg(feature = "nodejs")]
 use super::nodejs;
@@ -91,6 +90,7 @@ impl EngineHandle {
     ///
     /// * `code` - The code to evaluate
     /// * `language` - The language to use for evaluation
+    /// * `execution_id` - A unique identifier for this evaluation
     ///
     /// # Returns
     ///
@@ -104,18 +104,18 @@ impl EngineHandle {
         &self,
         code: S,
         language: Language,
+        execution_id: S,
     ) -> Result<Vec<Line>, EngineError> {
-        let id = Uuid::new_v4().to_string();
         let code = code.into();
-
+        let execution_id = execution_id.into();
         // Create channel for receiving results
         let (resp_tx, mut resp_rx) = mpsc::channel::<Resp>(100);
         let (line_tx, mut line_rx) = mpsc::channel::<Line>(100);
 
-        // Send evaluation command to reactor
+        // Send evaluation command to reactor using the provided execution_id
         self.cmd_sender
             .send(Cmd::Eval {
-                id: id.clone(),
+                id: execution_id,
                 code,
                 language,
                 resp_tx,

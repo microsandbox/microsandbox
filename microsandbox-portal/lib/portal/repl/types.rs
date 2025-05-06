@@ -40,9 +40,11 @@ pub enum Language {
     /// Python language support
     #[cfg(feature = "python")]
     Python,
+
     /// Node.js/JavaScript support
     #[cfg(feature = "nodejs")]
     Node,
+
     /// Rust language support
     #[cfg(feature = "rust")]
     Rust,
@@ -53,6 +55,7 @@ pub enum Language {
 pub enum Stream {
     /// Standard output stream
     Stdout,
+
     /// Standard error stream
     Stderr,
 }
@@ -62,6 +65,7 @@ pub enum Stream {
 pub struct Line {
     /// Stream type (stdout/stderr)
     pub stream: Stream,
+
     /// Line content
     pub text: String,
 }
@@ -112,6 +116,7 @@ pub(crate) enum Cmd {
         language: Language,
         resp_tx: Sender<Resp>,
     },
+
     /// Shutdown the reactor and all engines
     Shutdown,
 }
@@ -133,11 +138,13 @@ pub enum Resp {
         /// Line content
         text: String,
     },
+
     /// Evaluation completed successfully
     Done {
         /// Unique identifier for the evaluation
         id: String,
     },
+
     /// Evaluation resulted in an error
     Error {
         /// Unique identifier for the evaluation
@@ -186,4 +193,17 @@ pub trait Engine: Send + 'static {
     /// This method is called when the engine is being shut down to clean up
     /// resources, terminate processes, etc.
     async fn shutdown(&mut self);
+}
+
+// -------------------------------------------------------------------------------------------------
+// Trait Implementations
+// -------------------------------------------------------------------------------------------------
+
+// Add Debug implementation for EngineHandle
+impl std::fmt::Debug for EngineHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineHandle")
+            .field("cmd_sender", &"<channel>")
+            .finish()
+    }
 }

@@ -55,6 +55,9 @@ pub struct Config {
 
     /// Address to listen on
     addr: SocketAddr,
+
+    /// URL for the portal service
+    portal_url: String,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -84,11 +87,16 @@ impl Config {
         let namespace_dir = namespace_dir
             .unwrap_or_else(|| env::get_microsandbox_home_path().join(NAMESPACES_SUBDIR));
 
+        // Get portal URL from environment or use default
+        let portal_url = std::env::var("MICROSANDBOX_PORTAL_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:5556".to_string());
+
         Ok(Self {
             key,
             namespace_dir,
             dev_mode,
             addr,
+            portal_url,
         })
     }
 }

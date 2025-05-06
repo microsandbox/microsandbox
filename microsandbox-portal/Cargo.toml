@@ -17,8 +17,16 @@ path = "bin/python-portal.rs"
 name = "portal"
 path = "bin/portal.rs"
 
+[[example]]
+name = "rpc_repl"
+path = "examples/rpc_repl.rs"
+
+[[example]]
+name = "repl"
+path = "examples/repl.rs"
+
 [dependencies]
-axum = { workspace = true }
+axum = { workspace = true, features = ["macros"] }
 tokio = { workspace = true, features = ["full", "rt-multi-thread", "macros"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -34,9 +42,13 @@ uuid = { version = "1.4", features = ["v4"] }
 evcxr = { version = "0.19", optional = true }
 async-trait = "0.1"
 crossbeam-channel = "0.5"
+reqwest = { version = "0.11", features = ["json"], optional = true }
 
 [features]
 default = []
 python = []
 nodejs = []
 rust = ["evcxr"]
+
+[dev-dependencies]
+reqwest = { version = "0.11", features = ["json"] }

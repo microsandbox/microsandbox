@@ -19,6 +19,7 @@ use axum::{
 };
 use microsandbox_core::management::{menv, orchestra};
 use microsandbox_utils::{DEFAULT_CONFIG, MICROSANDBOX_CONFIG_FILENAME};
+use reqwest;
 use serde_json::{self, json};
 use serde_yaml;
 use std::path::PathBuf;
@@ -78,6 +79,7 @@ pub async fn json_rpc_handler(
     let id = request.id.clone();
 
     match method {
+        // Server specific methods
         "sandbox.start" => {
             // Parse the params into a SandboxStartRequest
             let start_params: SandboxStartParams =
@@ -132,6 +134,16 @@ pub async fn json_rpc_handler(
                 Json(JsonRpcResponse::success(json!(result), id)),
             ))
         }
+
+        // Portal-forwarded methods
+        "sandbox.repl.run"
+        | "sandbox.repl.getOutput"
+        | "sandbox.command.execute"
+        | "sandbox.command.getOutput" => {
+            // Forward these RPC methods to the portal
+            forward_rpc_to_portal(state, request).await
+        }
+
         _ => {
             let error = JsonRpcError {
                 code: -32601,
@@ -144,6 +156,53 @@ pub async fn json_rpc_handler(
             ))
         }
     }
+}
+
+/// Forwards the JSON-RPC request to the portal service
+async fn forward_rpc_to_portal(
+    state: AppState,
+    request: JsonRpcRequest,
+) -> ServerResult<(StatusCode, Json<JsonRpcResponse>)> {
+    // Get the portal URL from configuration
+    let portal_url = state.get_config().get_portal_url();
+
+    // Create a full URL to the portal's JSON-RPC endpoint
+    let portal_rpc_url = format!("{}/api/v1/rpc", portal_url);
+
+    // Create an HTTP client
+    let client = reqwest::Client::new();
+
+    // Forward the request to the portal
+    let response = client
+        .post(&portal_rpc_url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| {
+            ServerError::InternalError(format!("Failed to forward RPC to portal: {}", e))
+        })?;
+
+    // Check if the request was successful
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+
+        return Err(ServerError::InternalError(format!(
+            "Portal returned error status {}: {}",
+            status, error_text
+        )));
+    }
+
+    // Parse the JSON-RPC response from the portal
+    let portal_response: JsonRpcResponse = response.json().await.map_err(|e| {
+        ServerError::InternalError(format!("Failed to parse portal response: {}", e))
+    })?;
+
+    // Return the portal's response directly
+    Ok((StatusCode::OK, Json(portal_response)))
 }
 
 /// Implementation for starting a sandbox
