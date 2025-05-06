@@ -45,7 +45,7 @@ To run your ai-generated code, you could try a few things:
 - <div><img height="15" src="https://octicons-col.vercel.app/sync/A770EF">&nbsp;&nbsp;Seamless Transition from Local to Production</div>
 - <div><img height="15" src="https://octicons-col.vercel.app/lock/A770EF">&nbsp;&nbsp;Data Sovereignty and Privacy</div>
 - <div><img height="15" src="https://octicons-col.vercel.app/stack/A770EF">&nbsp;&nbsp;Compatible with Standard Container Images</div>
-- <div><img height="15" src="https://octicons-col.vercel.app/code-square/A770EF">&nbsp;&nbsp;Wide SDK Ecosystem (10+ Languages)</div>
+- <div><img height="15" src="https://octicons-col.vercel.app/code-square/A770EF">&nbsp;&nbsp;Wide SDK Ecosystem</div>
 - <div><img height="15" src="https://octicons-col.vercel.app/plug/A770EF">&nbsp;&nbsp;Integration with Any MCP Enabled AI</div>
 
 <div align='center'>• • •</div>
