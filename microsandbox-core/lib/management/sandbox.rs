@@ -211,7 +211,30 @@ pub async fn run(
 
     // Volumes
     for volume in sandbox_config.get_volumes() {
-        command.arg("--mapped-dir").arg(volume.to_string());
+        match volume {
+            PathPair::Distinct { host, guest } => {
+                if host.is_absolute() {
+                    // Absolute host path, use as is
+                    command.arg("--mapped-dir").arg(volume.to_string());
+                } else {
+                    // Relative host path, join with project directory
+                    let host_path = canonical_project_dir.join(host.as_str());
+                    let combined_volume = format!("{}:{}", host_path.display(), guest);
+                    command.arg("--mapped-dir").arg(combined_volume);
+                }
+            }
+            PathPair::Same(path) => {
+                if path.is_absolute() {
+                    // Absolute path, use as is
+                    command.arg("--mapped-dir").arg(volume.to_string());
+                } else {
+                    // Relative path, join with project directory
+                    let host_path = canonical_project_dir.join(path.as_str());
+                    let combined_volume = format!("{}:{}", host_path.display(), path);
+                    command.arg("--mapped-dir").arg(combined_volume);
+                }
+            }
+        }
     }
 
     // Pass the rootfs
