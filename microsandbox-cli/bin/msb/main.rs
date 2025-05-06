@@ -33,11 +33,9 @@ async fn main() -> MicrosandboxCliResult<()> {
     }
 
     match args.subcommand {
-        Some(MicrosandboxSubcommand::Init {
-            path,
-            path_with_flag,
-        }) => {
-            handlers::init_subcommand(path, path_with_flag).await?;
+        Some(MicrosandboxSubcommand::Init { file }) => {
+            let (path, _) = handlers::parse_file_path(file);
+            handlers::init_subcommand(path).await?;
         }
         Some(MicrosandboxSubcommand::Add {
             sandbox,
@@ -59,9 +57,9 @@ async fn main() -> MicrosandboxCliResult<()> {
             imports,
             exports,
             scope,
-            path,
-            config,
+            file,
         }) => {
+            let (path, config) = handlers::parse_file_path(file);
             handlers::add_subcommand(
                 sandbox, build, group, names, image, memory, cpus, volumes, ports, envs, env_file,
                 depends_on, workdir, shell, scripts, start, imports, exports, scope, path, config,
@@ -73,18 +71,18 @@ async fn main() -> MicrosandboxCliResult<()> {
             build,
             group,
             names,
-            path,
-            config,
+            file,
         }) => {
+            let (path, config) = handlers::parse_file_path(file);
             handlers::remove_subcommand(sandbox, build, group, names, path, config).await?;
         }
         Some(MicrosandboxSubcommand::List {
             sandbox,
             build,
             group,
-            path,
-            config,
+            file,
         }) => {
+            let (path, config) = handlers::parse_file_path(file);
             handlers::list_subcommand(sandbox, build, group, path, config).await?;
         }
         Some(MicrosandboxSubcommand::Pull {
@@ -99,12 +97,12 @@ async fn main() -> MicrosandboxCliResult<()> {
             sandbox,
             build,
             name,
-            path,
-            config,
+            file,
             detach,
             exec,
             args,
         }) => {
+            let (path, config) = handlers::parse_file_path(file);
             handlers::run_subcommand(sandbox, build, name, path, config, detach, exec, args)
                 .await?;
         }
@@ -112,11 +110,11 @@ async fn main() -> MicrosandboxCliResult<()> {
             sandbox,
             build,
             name,
-            path,
-            config,
+            file,
             detach,
             args,
         }) => {
+            let (path, config) = handlers::parse_file_path(file);
             handlers::script_run_subcommand(
                 sandbox,
                 build,
@@ -169,7 +167,8 @@ async fn main() -> MicrosandboxCliResult<()> {
         Some(MicrosandboxSubcommand::Uninstall { script }) => {
             handlers::uninstall_subcommand(script).await?;
         }
-        Some(MicrosandboxSubcommand::Apply { path, config }) => {
+        Some(MicrosandboxSubcommand::Apply { file }) => {
+            let (path, config) = handlers::parse_file_path(file);
             orchestra::apply(path.as_deref(), config.as_deref()).await?;
         }
         Some(MicrosandboxSubcommand::Up {
@@ -177,9 +176,9 @@ async fn main() -> MicrosandboxCliResult<()> {
             build,
             group,
             names,
-            path,
-            config,
+            file,
         }) => {
+            let (path, config) = handlers::parse_file_path(file);
             handlers::up_subcommand(sandbox, build, group, names, path, config).await?;
         }
         Some(MicrosandboxSubcommand::Down {
@@ -187,9 +186,9 @@ async fn main() -> MicrosandboxCliResult<()> {
             build,
             group,
             names,
-            path,
-            config,
+            file,
         }) => {
+            let (path, config) = handlers::parse_file_path(file);
             handlers::down_subcommand(sandbox, build, group, names, path, config).await?;
         }
         Some(MicrosandboxSubcommand::Status {
@@ -197,9 +196,9 @@ async fn main() -> MicrosandboxCliResult<()> {
             build,
             group,
             names,
-            path,
-            config,
+            file,
         }) => {
+            let (path, config) = handlers::parse_file_path(file);
             handlers::status_subcommand(sandbox, build, group, names, path, config).await?;
         }
         Some(MicrosandboxSubcommand::Log {
@@ -207,11 +206,11 @@ async fn main() -> MicrosandboxCliResult<()> {
             build,
             group,
             name,
-            path,
-            config,
+            file,
             follow,
             tail,
         }) => {
+            let (path, config) = handlers::parse_file_path(file);
             handlers::log_subcommand(sandbox, build, group, name, path, config, follow, tail)
                 .await?;
         }
@@ -220,10 +219,10 @@ async fn main() -> MicrosandboxCliResult<()> {
             name,
             user,
             all,
-            path,
-            config,
+            file,
             force,
         }) => {
+            let (path, config) = handlers::parse_file_path(file);
             handlers::clean_subcommand(sandbox, name, user, all, path, config, force).await?;
         }
         Some(MicrosandboxSubcommand::Self_ { action }) => {

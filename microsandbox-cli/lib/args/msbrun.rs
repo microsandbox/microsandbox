@@ -79,6 +79,7 @@ pub enum McrunSubcommand {
         #[arg(last = true)]
         args: Vec<String>,
     },
+
     /// Run as supervisor
     Supervisor {
         /// Directory for log files

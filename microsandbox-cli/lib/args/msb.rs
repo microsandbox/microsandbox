@@ -48,13 +48,9 @@ pub enum MicrosandboxSubcommand {
     /// Initialize a new microsandbox project
     #[command(name = "init")]
     Init {
-        /// Specifies the directory to initialize the project in
-        #[arg(required = false, name = "PATH")]
-        path: Option<PathBuf>,
-
-        /// Specifies the directory to initialize the project in
-        #[arg(short, long = "path", name = "PATH\0")]
-        path_with_flag: Option<PathBuf>,
+        /// Path to the sandbox file or the project directory
+        #[arg(short, long)]
+        file: Option<PathBuf>,
     },
 
     /// Add a new sandbox to the project
@@ -93,7 +89,7 @@ pub enum MicrosandboxSubcommand {
         volumes: Vec<String>,
 
         /// Port mappings, format: <host_port>:<container_port>
-        #[arg(long = "port", name = "PORT")]
+        #[arg(short, long = "port", name = "PORT")]
         ports: Vec<String>,
 
         /// Environment variables, format: <key>=<value>
@@ -136,13 +132,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(long)]
         scope: Option<String>,
 
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
     },
 
     /// Remove a sandbox from the project
@@ -164,13 +156,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(required = true)]
         names: Vec<String>,
 
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
     },
 
     /// List sandboxs in the project
@@ -188,13 +176,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         group: bool,
 
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
     },
 
     /// Show logs of a build, sandbox, or group
@@ -216,13 +200,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(required = true)]
         name: String,
 
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
 
         /// Follow the logs
         #[arg(short, long)]
@@ -272,20 +252,16 @@ pub enum MicrosandboxSubcommand {
         #[arg(required = true, name = "NAME[~SCRIPT]")]
         name: String,
 
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
 
         /// Run sandbox in the background
         #[arg(short, long)]
         detach: bool,
 
         /// Execute a command within the sandbox
-        #[arg(short, long)]
+        #[arg(short, long, short_alias = 'x')]
         exec: Option<String>,
 
         /// Additional arguments after `--`. Passed to the script or exec.
@@ -308,13 +284,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(required = true)]
         name: String,
 
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
 
         /// Run sandbox in the background
         #[arg(short, long)]
@@ -349,7 +321,7 @@ pub enum MicrosandboxSubcommand {
         volumes: Vec<String>,
 
         /// Port mappings, format: <host_port>:<container_port>
-        #[arg(long = "port", name = "PORT")]
+        #[arg(short, long = "port", name = "PORT")]
         ports: Vec<String>,
 
         /// Environment variables, format: <key>=<value>
@@ -365,7 +337,7 @@ pub enum MicrosandboxSubcommand {
         scope: Option<String>,
 
         /// Execute a command within the sandbox
-        #[arg(short, long)]
+        #[arg(short, long, short_alias = 'x')]
         exec: Option<String>,
 
         /// Additional arguments after `--`. Passed to the script or exec.
@@ -401,7 +373,7 @@ pub enum MicrosandboxSubcommand {
         volumes: Vec<String>,
 
         /// Port mappings, format: <host_port>:<container_port>
-        #[arg(long = "port", name = "PORT")]
+        #[arg(short, long = "port", name = "PORT")]
         ports: Vec<String>,
 
         /// Environment variables, format: <key>=<value>
@@ -417,7 +389,7 @@ pub enum MicrosandboxSubcommand {
         scope: Option<String>,
 
         /// Execute a command within the sandbox
-        #[arg(short, long)]
+        #[arg(short, long, short_alias = 'x')]
         exec: Option<String>,
 
         /// Additional arguments after `--`. Passed to the script or exec.
@@ -435,13 +407,9 @@ pub enum MicrosandboxSubcommand {
     /// Start or stop project sandboxes based on configuration
     #[command(name = "apply")]
     Apply {
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
     },
 
     /// Run a project's sandboxes
@@ -463,13 +431,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(required = true)]
         names: Vec<String>,
 
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
     },
 
     /// Stop a project's sandboxes
@@ -491,13 +455,9 @@ pub enum MicrosandboxSubcommand {
         #[arg(required = true)]
         names: Vec<String>,
 
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
     },
 
     /// Show statuses of a project's running sandboxes
@@ -519,13 +479,9 @@ pub enum MicrosandboxSubcommand {
         #[arg()]
         names: Vec<String>,
 
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
     },
 
     /// Clean cached sandbox layers, metadata, etc.
@@ -547,16 +503,12 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         all: bool,
 
-        /// Project path
+        /// Path to the sandbox file or the project directory
         #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Config file path
-        #[arg(short, long)]
-        config: Option<String>,
+        file: Option<PathBuf>,
 
         /// Force clean
-        #[arg(short, long)]
+        #[arg(long)]
         force: bool,
     },
 

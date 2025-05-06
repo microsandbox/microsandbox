@@ -143,31 +143,8 @@ pub async fn list_subcommand(
     Ok(())
 }
 
-pub async fn init_subcommand(
-    path: Option<PathBuf>,
-    path_with_flag: Option<PathBuf>,
-) -> MicrosandboxCliResult<()> {
-    let path = match (path, path_with_flag) {
-        (Some(path), None) => Some(path),
-        (None, Some(path)) => Some(path),
-        (Some(_), Some(_)) => {
-            MicrosandboxArgs::command()
-                .override_usage(usage("init", Some("[PATH]"), None))
-                .error(
-                    ErrorKind::ArgumentConflict,
-                    format!(
-                        "cannot specify path both as a positional argument and with `{}` or `{}` flag",
-                        "--path".placeholder(),
-                        "-p".placeholder()
-                    ),
-                )
-                .exit();
-        }
-        (None, None) => None,
-    };
-
+pub async fn init_subcommand(path: Option<PathBuf>) -> MicrosandboxCliResult<()> {
     menv::initialize(path).await?;
-
     Ok(())
 }
 
@@ -827,6 +804,42 @@ fn parse_name_and_script(name_and_script: &str) -> (&str, Option<&str>) {
     };
 
     (name, script)
+}
+
+/// Parse a file path into project path and config file name.
+///
+/// If the file path is a directory, it is treated as the project path.
+/// If the file path is a file, its parent directory is treated as the project path
+/// and its name is treated as the config file.
+///
+/// # Arguments
+///
+/// * `file` - Optional file path that could be either a directory or a file
+///
+/// # Returns
+///
+/// Tuple of (Option<PathBuf>, Option<String>) for project path and config file name
+pub fn parse_file_path(file: Option<PathBuf>) -> (Option<PathBuf>, Option<String>) {
+    match file {
+        Some(file_path) => {
+            if file_path.is_dir() {
+                // If it's a directory, it's the project path
+                (Some(file_path), None)
+            } else {
+                // Otherwise, the parent directory is the project path
+                // and the file name is the config file name
+                let config_name = file_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(String::from);
+
+                let project_path = file_path.parent().map(PathBuf::from);
+
+                (project_path, config_name)
+            }
+        }
+        None => (None, None),
+    }
 }
 
 /// Parse a duration string like "1s", "1m", "3h", "2d" into a chrono::Duration

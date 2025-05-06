@@ -46,6 +46,7 @@ pub enum PathPair {
         /// The guest path.
         guest: Utf8UnixPathBuf,
     },
+
     /// The guest path and host path are the same.
     Same(Utf8UnixPathBuf),
 }
