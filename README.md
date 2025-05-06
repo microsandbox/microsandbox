@@ -33,7 +33,7 @@ Building AI agents that generate and execute code? — You'll need **secure sand
 To run your ai-generated code, you could try a few things:
 
 - **Run directly on machine?** — Risky for your user's machine
-- **Run in docker containers?** — Limited isolation for untrusted code
+- **Run in docker containers?** — Limited isolation for untrusted code <a href="./Microsandbox-vs-Docker.md">[→]</a>
 - **Run in traditional VMs?** — Minutes to start up, heavy resource usage
 - **Run in cloud sandboxes?** — Can get expensive fast and less control over your infra
 
