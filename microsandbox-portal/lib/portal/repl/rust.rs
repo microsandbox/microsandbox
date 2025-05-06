@@ -22,10 +22,13 @@ use super::types::{Engine, EngineError, Resp, Stream};
 struct EvalCmd {
     /// Unique identifier for the evaluation
     id: String,
+
     /// Code to evaluate
     code: String,
+
     /// Channel to send responses back to caller
     resp_tx: mpsc::Sender<Resp>,
+
     /// One-shot channel to signal completion
     done_tx: oneshot::Sender<Result<(), EngineError>>,
 }

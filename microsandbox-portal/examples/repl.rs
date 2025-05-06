@@ -1,13 +1,13 @@
-//! Example demonstrating the microsandbox-portal code evaluation system.
+//! Example demonstrating the microsandbox-portal code execution in REPL environment.
 //!
 //! This example showcases the core functionality of the microsandbox-portal,
-//! demonstrating code evaluation across multiple programming languages in a sandboxed
-//! environment. It includes examples of:
+//! demonstrating code execution in REPL environments across multiple programming languages
+//! in a sandboxed environment. It includes examples of:
 //!
-//! - Rust code evaluation (when `rust` feature is enabled)
-//! - Python code evaluation (when `python` feature is enabled)
-//! - Node.js code evaluation (when `nodejs` feature is enabled)
-//! - Stateful evaluation (maintaining state between evaluations)
+//! - Rust code execution in REPL (when `rust` feature is enabled)
+//! - Python code execution in REPL (when `python` feature is enabled)
+//! - Node.js code execution in REPL (when `nodejs` feature is enabled)
+//! - Stateful REPL sessions (maintaining state between executions)
 //! - Error handling
 //!
 //! # Running the Example
@@ -16,11 +16,11 @@
 //!
 //! ```bash
 //! # Run with all languages enabled
-//! cargo run --example eval --features "python nodejs rust"
+//! cargo run --example repl --features "python nodejs rust"
 //!
 //! # Run with specific languages
-//! cargo run --example eval --features "python rust"
-//! cargo run --example eval --features "nodejs"
+//! cargo run --example repl --features "python rust"
+//! cargo run --example repl --features "nodejs"
 //! ```
 //!
 //! # Requirements
@@ -33,7 +33,7 @@
 //!
 //! # Example Output
 //!
-//! The example will output results from each language evaluation, prefixed
+//! The example will output results from each language REPL execution, prefixed
 //! with the output stream (Stdout/Stderr). For instance:
 //!
 //! ```text
@@ -50,9 +50,9 @@
 //!
 //! This example is designed to demonstrate basic usage of the microsandbox-portal.
 //! In a real application, you might want to handle errors more gracefully and
-//! implement more sophisticated code evaluation strategies.
+//! implement more sophisticated code execution strategies in REPL environments.
 
-use microsandbox_portal::code::{start_engines, Language};
+use microsandbox_portal::portal::repl::{start_engines, Language};
 use std::error::Error;
 
 //--------------------------------------------------------------------------------------------------
@@ -65,39 +65,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let engine_handle = start_engines().await?;
     println!("✅ Engines started successfully");
 
-        // Example 1: Evaluate Rust code
-        #[cfg(feature = "rust")]
-        {
-            println!("\n🦀 Running Rust example:");
-            let rust_code = r#"
-    // Define a function
-    fn fibonacci(n: u32) -> u32 {
-        match n {
-            0 => 0,
-            1 => 1,
-            _ => fibonacci(n-1) + fibonacci(n-2),
-        }
-    }
-
-    // Use the function
-    println!("Fibonacci sequence:");
-    for i in 0..10 {
-        println!("fib({}) = {}", i, fibonacci(i));
-    }
-            "#;
-
-            let result = engine_handle.eval(rust_code, Language::Rust).await?;
-
-            // Print the output
-            for line in result {
-                println!("[{:?}] {}", line.stream, line.text);
-            }
-        }
-
-    // Example 2: Evaluate Python code
+    // Example 1: Execute Python code in REPL
     #[cfg(feature = "python")]
     {
-        println!("\n🐍 Running Python example:");
+        println!("\n🐍 Running Python example in REPL:");
         let python_code = r#"
 # Define a function
 def factorial(n):
@@ -118,7 +89,9 @@ for i, fruit in enumerate(fruits):
     print(f"{i+1}. {fruit}")
         "#;
 
-        let result = engine_handle.eval(python_code, Language::Python).await?;
+        let result = engine_handle
+            .eval(python_code, Language::Python, "123")
+            .await?;
 
         // Print the output
         for line in result {
@@ -126,10 +99,10 @@ for i, fruit in enumerate(fruits):
         }
     }
 
-    // Example 3: Evaluate Node.js code
+    // Example 2: Execute Node.js code in REPL
     #[cfg(feature = "nodejs")]
     {
-        println!("\n🟨 Running Node.js example:");
+        println!("\n🟨 Running Node.js example in REPL:");
         let javascript_code = r#"
 // Define a class
 class Person {
@@ -174,7 +147,9 @@ fetchData().then(result => {
 console.log("Waiting for data...");
         "#;
 
-        let result = engine_handle.eval(javascript_code, Language::Node).await?;
+        let result = engine_handle
+            .eval(javascript_code, Language::Node, "123")
+            .await?;
 
         // Print the output
         for line in result {
@@ -182,69 +157,107 @@ console.log("Waiting for data...");
         }
     }
 
-    // Example 4: Stateful evaluation with Python
-    #[cfg(feature = "python")]
-    {
-        println!("\n🔄 Python stateful evaluation example:");
-
-        // First evaluation - define a variable
-        let python_step1 = "x = 10";
-        let result1 = engine_handle.eval(python_step1, Language::Python).await?;
-        for line in result1 {
-            println!("[{:?}] {}", line.stream, line.text);
-        }
-
-        // Second evaluation - use the variable defined in the first step
-        let python_step2 = "print(f'x = {x}')\nx += 5\nprint(f'x + 5 = {x}')";
-        let result2 = engine_handle.eval(python_step2, Language::Python).await?;
-        for line in result2 {
-            println!("[{:?}] {}", line.stream, line.text);
-        }
-    }
-
-    // Example 5: Stateful evaluation with Node.js
-    #[cfg(feature = "nodejs")]
-    {
-        println!("\n🔄 Node.js stateful evaluation example:");
-
-        // First evaluation - define a variable
-        let nodejs_step1 = "let counter = 10;";
-        let result1 = engine_handle.eval(nodejs_step1, Language::Node).await?;
-        for line in result1 {
-            println!("[{:?}] {}", line.stream, line.text);
-        }
-
-        // Second evaluation - use the variable defined in the first step
-        let nodejs_step2 = "console.log(`counter = ${counter}`); counter += 5; console.log(`counter + 5 = ${counter}`);";
-        let result2 = engine_handle.eval(nodejs_step2, Language::Node).await?;
-        for line in result2 {
-            println!("[{:?}] {}", line.stream, line.text);
-        }
-    }
-
-    // Example 6: Stateful evaluation with Rust
+    // Example 3: Execute Rust code in REPL
     #[cfg(feature = "rust")]
     {
-        println!("\n🔄 Rust stateful evaluation example:");
+        println!("\n🦀 Running Rust example in REPL:");
+        let rust_code = r#"
+    // Define a function
+    fn fibonacci(n: u32) -> u32 {
+        match n {
+            0 => 0,
+            1 => 1,
+            _ => fibonacci(n-1) + fibonacci(n-2),
+        }
+    }
 
-        // First evaluation - define a variable
-        let rust_step1 = "let mut counter = 10;";
-        let result1 = engine_handle.eval(rust_step1, Language::Rust).await?;
+    // Use the function
+    println!("Fibonacci sequence:");
+    for i in 0..10 {
+        println!("fib({}) = {}", i, fibonacci(i));
+    }
+            "#;
+
+        let result = engine_handle.eval(rust_code, Language::Rust, "123").await?;
+
+        // Print the output
+        for line in result {
+            println!("[{:?}] {}", line.stream, line.text);
+        }
+    }
+
+    // Example 4: Stateful REPL session with Python
+    #[cfg(feature = "python")]
+    {
+        println!("\n🔄 Python stateful REPL session example:");
+
+        // First execution - define a variable
+        let python_step1 = "x = 10";
+        let result1 = engine_handle
+            .eval(python_step1, Language::Python, "123")
+            .await?;
         for line in result1 {
             println!("[{:?}] {}", line.stream, line.text);
         }
 
-        // Second evaluation - use the variable defined in the first step
-        let rust_step2 = "println!(\"counter = {}\", counter);\ncounter += 5;\nprintln!(\"counter + 5 = {}\", counter);";
-        let result2 = engine_handle.eval(rust_step2, Language::Rust).await?;
+        // Second execution - use the variable defined in the first step
+        let python_step2 = "print(f'The value of x is {x}')";
+        let result2 = engine_handle
+            .eval(python_step2, Language::Python, "123")
+            .await?;
         for line in result2 {
             println!("[{:?}] {}", line.stream, line.text);
         }
     }
 
-    // Shutdown the engines
-    engine_handle.shutdown().await?;
-    println!("\n✅ Engines shut down successfully");
+    // Example 5: Stateful REPL session with Node.js
+    #[cfg(feature = "nodejs")]
+    {
+        println!("\n🔄 Node.js stateful REPL session example:");
 
+        // First execution - define a variable
+        let nodejs_step1 = "const greeting = 'Hello from JavaScript!';";
+        let result1 = engine_handle
+            .eval(nodejs_step1, Language::Node, "123")
+            .await?;
+        for line in result1 {
+            println!("[{:?}] {}", line.stream, line.text);
+        }
+
+        // Second execution - use the variable defined in the first step
+        let nodejs_step2 = "console.log(greeting);";
+        let result2 = engine_handle
+            .eval(nodejs_step2, Language::Node, "123")
+            .await?;
+        for line in result2 {
+            println!("[{:?}] {}", line.stream, line.text);
+        }
+    }
+
+    // Example 6: Stateful REPL session with Rust
+    #[cfg(feature = "rust")]
+    {
+        println!("\n🔄 Rust stateful REPL session example:");
+
+        // First execution - define a variable
+        let rust_step1 = "let message = \"Hello from Rust!\";";
+        let result1 = engine_handle
+            .eval(rust_step1, Language::Rust, "123")
+            .await?;
+        for line in result1 {
+            println!("[{:?}] {}", line.stream, line.text);
+        }
+
+        // Second execution - use the variable defined in the first step
+        let rust_step2 = "println!(\"{}\", message);";
+        let result2 = engine_handle
+            .eval(rust_step2, Language::Rust, "123")
+            .await?;
+        for line in result2 {
+            println!("[{:?}] {}", line.stream, line.text);
+        }
+    }
+
+    println!("\nExample completed successfully!");
     Ok(())
 }

@@ -64,6 +64,45 @@ pub struct JsonRpcError {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: REST API Requests
+//--------------------------------------------------------------------------------------------------
+
+/// Request parameters for executing code in a REPL environment
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SandboxReplRunParams {
+    /// Code to be executed
+    pub code: String,
+
+    /// Programming language to use for execution
+    pub language: String,
+}
+
+/// Request parameters for retrieving output from a previous REPL execution
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SandboxReplGetOutputParams {
+    /// Unique identifier for the execution
+    pub execution_id: String,
+}
+
+/// Request parameters for executing a shell command
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SandboxCommandExecuteParams {
+    /// Command to execute
+    pub command: String,
+
+    /// Optional arguments for the command
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Request parameters for retrieving output from a previous command execution
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SandboxCommandGetOutputParams {
+    /// Unique identifier for the command execution
+    pub execution_id: String,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
