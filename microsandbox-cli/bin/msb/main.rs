@@ -73,8 +73,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             names,
             file,
         }) => {
-            let (path, config) = handlers::parse_file_path(file);
-            handlers::remove_subcommand(sandbox, build, group, names, path, config).await?;
+            handlers::remove_subcommand(sandbox, build, group, names, file).await?;
         }
         Some(MicrosandboxSubcommand::List {
             sandbox,
@@ -82,8 +81,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             group,
             file,
         }) => {
-            let (path, config) = handlers::parse_file_path(file);
-            handlers::list_subcommand(sandbox, build, group, path, config).await?;
+            handlers::list_subcommand(sandbox, build, group, file).await?;
         }
         Some(MicrosandboxSubcommand::Pull {
             image,
@@ -102,9 +100,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             exec,
             args,
         }) => {
-            let (path, config) = handlers::parse_file_path(file);
-            handlers::run_subcommand(sandbox, build, name, path, config, detach, exec, args)
-                .await?;
+            handlers::run_subcommand(sandbox, build, name, file, detach, exec, args).await?;
         }
         Some(MicrosandboxSubcommand::Shell {
             sandbox,
@@ -114,14 +110,12 @@ async fn main() -> MicrosandboxCliResult<()> {
             detach,
             args,
         }) => {
-            let (path, config) = handlers::parse_file_path(file);
             handlers::script_run_subcommand(
                 sandbox,
                 build,
                 name,
                 SHELL_SCRIPT.to_string(),
-                path,
-                config,
+                file,
                 detach,
                 args,
             )
@@ -178,8 +172,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             names,
             file,
         }) => {
-            let (path, config) = handlers::parse_file_path(file);
-            handlers::up_subcommand(sandbox, build, group, names, path, config).await?;
+            handlers::up_subcommand(sandbox, build, group, names, file).await?;
         }
         Some(MicrosandboxSubcommand::Down {
             sandbox,
@@ -188,8 +181,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             names,
             file,
         }) => {
-            let (path, config) = handlers::parse_file_path(file);
-            handlers::down_subcommand(sandbox, build, group, names, path, config).await?;
+            handlers::down_subcommand(sandbox, build, group, names, file).await?;
         }
         Some(MicrosandboxSubcommand::Status {
             sandbox,
@@ -198,8 +190,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             names,
             file,
         }) => {
-            let (path, config) = handlers::parse_file_path(file);
-            handlers::status_subcommand(sandbox, build, group, names, path, config).await?;
+            handlers::status_subcommand(sandbox, build, group, names, file).await?;
         }
         Some(MicrosandboxSubcommand::Log {
             sandbox,
@@ -210,9 +201,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             follow,
             tail,
         }) => {
-            let (path, config) = handlers::parse_file_path(file);
-            handlers::log_subcommand(sandbox, build, group, name, path, config, follow, tail)
-                .await?;
+            handlers::log_subcommand(sandbox, build, group, name, file, follow, tail).await?;
         }
         Some(MicrosandboxSubcommand::Clean {
             sandbox,
@@ -222,8 +211,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             file,
             force,
         }) => {
-            let (path, config) = handlers::parse_file_path(file);
-            handlers::clean_subcommand(sandbox, name, user, all, path, config, force).await?;
+            handlers::clean_subcommand(sandbox, name, user, all, file, force).await?;
         }
         Some(MicrosandboxSubcommand::Self_ { action }) => {
             handlers::self_subcommand(action).await?;

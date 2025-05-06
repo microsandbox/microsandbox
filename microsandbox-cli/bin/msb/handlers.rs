@@ -109,11 +109,12 @@ pub async fn remove_subcommand(
     build: bool,
     group: bool,
     names: Vec<String>,
-    path: Option<PathBuf>,
-    config: Option<String>,
+    file: Option<PathBuf>,
 ) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "remove", Some("[NAMES]"));
     unsupported_build_group_error(build, group, "remove", Some("[NAMES]"));
+
+    let (path, config) = parse_file_path(file);
     config::remove(
         ComponentType::Sandbox,
         &names,
@@ -129,12 +130,12 @@ pub async fn list_subcommand(
     sandbox: bool,
     build: bool,
     group: bool,
-    path: Option<PathBuf>,
-    config: Option<String>,
+    file: Option<PathBuf>,
 ) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "list", None);
     unsupported_build_group_error(build, group, "list", None);
 
+    let (path, config) = parse_file_path(file);
     let (config, _, _) = config::load_config(path.as_deref(), config.as_deref()).await?;
 
     // Use the new show_list function to display sandboxes
@@ -152,8 +153,7 @@ pub async fn run_subcommand(
     sandbox: bool,
     build: bool,
     name: String,
-    path: Option<PathBuf>,
-    config: Option<String>,
+    file: Option<PathBuf>,
     detach: bool,
     exec: Option<String>,
     args: Vec<String>,
@@ -188,6 +188,7 @@ pub async fn run_subcommand(
             .exit();
     }
 
+    let (path, config) = parse_file_path(file);
     sandbox::run(
         &sandbox,
         script,
@@ -208,8 +209,7 @@ pub async fn script_run_subcommand(
     build: bool,
     name: String,
     script: String,
-    path: Option<PathBuf>,
-    config: Option<String>,
+    file: Option<PathBuf>,
     detach: bool,
     args: Vec<String>,
 ) -> MicrosandboxCliResult<()> {
@@ -229,6 +229,7 @@ pub async fn script_run_subcommand(
 
     unsupported_build_group_error(build, false, &script, Some("[NAME]"));
 
+    let (path, config) = parse_file_path(file);
     sandbox::run(
         &name,
         Some(&script),
@@ -296,12 +297,12 @@ pub async fn up_subcommand(
     build: bool,
     group: bool,
     names: Vec<String>,
-    path: Option<PathBuf>,
-    config: Option<String>,
+    file: Option<PathBuf>,
 ) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "up", Some("[NAMES]"));
     unsupported_build_group_error(build, group, "up", Some("[NAMES]"));
 
+    let (path, config) = parse_file_path(file);
     orchestra::up(names, path.as_deref(), config.as_deref()).await?;
 
     Ok(())
@@ -312,12 +313,12 @@ pub async fn down_subcommand(
     build: bool,
     group: bool,
     names: Vec<String>,
-    path: Option<PathBuf>,
-    config: Option<String>,
+    file: Option<PathBuf>,
 ) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "down", Some("[NAMES]"));
     unsupported_build_group_error(build, group, "down", Some("[NAMES]"));
 
+    let (path, config) = parse_file_path(file);
     orchestra::down(names, path.as_deref(), config.as_deref()).await?;
 
     Ok(())
@@ -329,12 +330,12 @@ pub async fn status_subcommand(
     build: bool,
     group: bool,
     names: Vec<String>,
-    path: Option<PathBuf>,
-    config: Option<String>,
+    file: Option<PathBuf>,
 ) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "status", Some("[NAMES]"));
     unsupported_build_group_error(build, group, "status", Some("[NAMES]"));
 
+    let (path, config) = parse_file_path(file);
     orchestra::show_status(&names, path.as_deref(), config.as_deref()).await?;
 
     Ok(())
@@ -346,8 +347,7 @@ pub async fn log_subcommand(
     build: bool,
     group: bool,
     name: String,
-    project_dir: Option<PathBuf>,
-    config_file: Option<String>,
+    file: Option<PathBuf>,
     follow: bool,
     tail: Option<usize>,
 ) -> MicrosandboxCliResult<()> {
@@ -368,6 +368,7 @@ pub async fn log_subcommand(
         }
     }
 
+    let (project_dir, config_file) = parse_file_path(file);
     menv::show_log(
         project_dir.as_ref(),
         config_file.as_deref(),
@@ -386,8 +387,7 @@ pub async fn clean_subcommand(
     name: Option<String>,
     user: bool,
     all: bool,
-    path: Option<PathBuf>,
-    config: Option<String>,
+    file: Option<PathBuf>,
     force: bool,
 ) -> MicrosandboxCliResult<()> {
     if user || all {
@@ -408,11 +408,13 @@ pub async fn clean_subcommand(
         if let Some(sandbox_name) = name {
             // Clean specific sandbox if sandbox name is provided
             tracing::info!("cleaning sandbox: {}", sandbox_name);
+            let (path, config) = parse_file_path(file);
             menv::clean(path, config.as_deref(), Some(&sandbox_name), force).await?;
         } else {
             // Clean the entire .menv directory if no sandbox is specified
             tracing::info!("cleaning entire project environment");
-            menv::clean(path, None, None, force).await?;
+            let (path, config) = parse_file_path(file);
+            menv::clean(path, config.as_deref(), None, force).await?;
         }
     }
 
