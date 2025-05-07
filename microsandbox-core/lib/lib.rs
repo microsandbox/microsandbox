@@ -4,10 +4,10 @@
 //!
 //! microsandbox provides a robust foundation for running AI workloads in isolated microVMs. It handles:
 //! - VM lifecycle management
-//! - OCI image distribution
-//! - Service orchestration
-//! - Network isolation
-//! - Resource constraints
+//! - OCI image distribution and management
+//! - Service orchestration and coordination
+//! - Resource constraints and monitoring
+//! - Database persistence for system state
 //!
 //! # Key Features
 //!
@@ -16,48 +16,27 @@
 //! - **Fast Startup**: Millisecond-level VM provisioning
 //! - **Resource Control**: Fine-grained CPU, memory and network limits
 //! - **Simple API**: RESTful interface for service management
+//! - **Persistence**: Database-backed state management
 //!
 //! # Architecture
 //!
 //! microsandbox consists of several key components:
 //!
-//! - **VM**: Low-level microVM management using libkrun
-//! - **OCI**: Image pulling and layer management
-//! - **Orchestration**: Service lifecycle and coordination
+//! - **VM**: Low-level microVM configuration and management
+//! - **OCI**: Image pulling, layer handling, and registry interactions
+//! - **Management**: Orchestration, sandbox lifecycle, and coordination
 //! - **Runtime**: Process supervision and monitoring
-//! - **Server**: REST API for remote management
-//!
-//! # Usage Example
-//!
-//! ```no_run
-//! // TODO
-//! ```
+//! - **Models**: Database and persistence schema
 //!
 //! # Modules
 //!
-//! - [`cli`] - Command-line interface and argument parsing
 //! - [`config`] - Configuration types and validation
+//! - [`management`] - Central management for sandboxes, images, and orchestration
+//! - [`models`] - Database models and persistence schema
+//! - [`oci`] - OCI image and registry operations
 //! - [`runtime`] - Process supervision and monitoring
 //! - [`utils`] - Common utilities and helpers
 //! - [`vm`] - MicroVM configuration and control
-//!
-//! # Platform Support
-//!
-//! - Linux: Full support with optional overlayfs (experimental)
-//! - macOS: Full support with copy-based layer merging
-//! - Windows: Not currently supported
-//!
-//! # Future Improvements
-//!
-//! The current experimental overlayfs support will be replaced by monofs,
-//! a more robust distributed filesystem designed specifically for container workloads.
-//! monofs will provide:
-//!
-//! - Content-addressed storage
-//! - Immutable data structures
-//! - Copy-on-write semantics
-//! - Proper whiteout handling
-//! - Cross-platform support
 
 #![warn(missing_docs)]
 
