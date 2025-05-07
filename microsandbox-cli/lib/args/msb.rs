@@ -161,7 +161,7 @@ pub enum MicrosandboxSubcommand {
         file: Option<PathBuf>,
     },
 
-    /// List sandboxs in the project
+    /// List sandboxes defined in the project
     #[command(name = "list")]
     List {
         /// Whether command should apply to a sandbox
@@ -237,7 +237,7 @@ pub enum MicrosandboxSubcommand {
         level: Option<usize>,
     },
 
-    /// Run a sandbox script
+    /// Run a sandbox defined in the project
     #[command(name = "run", alias = "r")]
     Run {
         /// Whether command should apply to a sandbox
@@ -536,7 +536,7 @@ pub enum MicrosandboxSubcommand {
         snapshot: bool,
     },
 
-    /// Pull an image
+    /// Pull image from a registry
     #[command(name = "pull")]
     Pull {
         /// Whether command should apply to an image
@@ -560,7 +560,7 @@ pub enum MicrosandboxSubcommand {
     #[command(name = "login")]
     Login,
 
-    /// Push an image
+    /// Push image to a registry
     #[command(name = "push")]
     Push {
         /// Whether command should apply to an image
@@ -592,7 +592,7 @@ pub enum MicrosandboxSubcommand {
         subcommand: ServerSubcommand,
     },
 
-    /// Version of microsandbox
+    /// Print version of microsandbox
     #[command(name = "version")]
     Version,
 }

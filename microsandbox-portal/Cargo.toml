@@ -1,0 +1,42 @@
+[package]
+name = "microsandbox-portal"
+authors.workspace = true
+repository.workspace = true
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib/lib.rs"
+
+[[bin]]
+name = "portal"
+path = "bin/portal.rs"
+
+[dependencies]
+axum = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["full", "rt-multi-thread", "macros"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["trace"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+microsandbox-utils = { workspace = true }
+clap = { workspace = true }
+uuid = { version = "1.4", features = ["v4"] }
+evcxr = { version = "0.19", optional = true }
+async-trait = "0.1"
+crossbeam-channel = "0.5"
+reqwest = { version = "0.11", features = ["json"], optional = true }
+
+[features]
+default = []
+python = []
+nodejs = []
+rust = ["evcxr"]
+
+[dev-dependencies]
+reqwest = { version = "0.11", features = ["json"] }

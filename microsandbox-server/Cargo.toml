@@ -32,9 +32,11 @@ console = { workspace = true, optional = true }
 microsandbox-utils.workspace = true
 libc.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 chrono.workspace = true
 jsonwebtoken.workspace = true
 microsandbox-core.workspace = true
+once_cell.workspace = true
 
 [features]
 default = []

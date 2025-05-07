@@ -19,14 +19,11 @@ use getset::Getters;
 use microsandbox_utils::{env, NAMESPACES_SUBDIR};
 use serde::Deserialize;
 
-use crate::{MicrosandboxServerError, MicrosandboxServerResult};
+use crate::{port::LOCALHOST_IP, MicrosandboxServerError, MicrosandboxServerResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
-
-/// Default port number for the server if not specified in environment variables
-pub const DEFAULT_PORT: u16 = 5555;
 
 /// Default JWT header for HS256 algorithm in base64
 pub const DEFAULT_JWT_HEADER: LazyLock<String> =
@@ -80,7 +77,7 @@ impl Config {
             }
         };
 
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let addr = SocketAddr::new(LOCALHOST_IP, port);
         let namespace_dir = namespace_dir
             .unwrap_or_else(|| env::get_microsandbox_home_path().join(NAMESPACES_SUBDIR));
 

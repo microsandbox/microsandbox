@@ -92,6 +92,11 @@ pub const SERVER_PID_FILE: &str = "server.pid";
 /// Example: <MICROSANDBOX_HOME_DIR>/<SERVER_KEY_FILE>
 pub const SERVER_KEY_FILE: &str = "server.key";
 
+/// The file where sandbox portal ports are stored
+///
+/// Example: <MICROSANDBOX_HOME_DIR>/<NAMESPACE_SUBDIR>/<PORTAL_PORTS_FILE>
+pub const PORTAL_PORTS_FILE: &str = "portal.ports";
+
 /// The XDG home directory
 ///
 /// Example: <HOME>/.local

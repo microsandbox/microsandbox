@@ -16,12 +16,72 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 //--------------------------------------------------------------------------------------------------
-// Types: REST API Requests
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// JSON-RPC version - always "2.0"
+pub const JSONRPC_VERSION: &str = "2.0";
+
+//--------------------------------------------------------------------------------------------------
+// Types: JSON-RPC Payloads
+//--------------------------------------------------------------------------------------------------
+
+/// JSON-RPC request structure
+#[derive(Debug, Deserialize, Serialize)]
+pub struct JsonRpcRequest {
+    /// JSON-RPC version, must be "2.0"
+    pub jsonrpc: String,
+
+    /// Method name
+    pub method: String,
+
+    /// Optional parameters for the method
+    #[serde(default)]
+    pub params: Value,
+
+    /// Request ID
+    pub id: Value,
+}
+
+/// JSON-RPC response structure
+#[derive(Debug, Deserialize, Serialize)]
+pub struct JsonRpcResponse {
+    /// JSON-RPC version, always "2.0"
+    pub jsonrpc: String,
+
+    /// Result of the method execution (if successful)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+
+    /// Error details (if failed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JsonRpcError>,
+
+    /// Response ID (same as request ID)
+    pub id: Value,
+}
+
+/// JSON-RPC error structure
+#[derive(Debug, Deserialize, Serialize)]
+pub struct JsonRpcError {
+    /// Error code
+    pub code: i32,
+
+    /// Error message
+    pub message: String,
+
+    /// Optional error data
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Types: Server Operations
 //--------------------------------------------------------------------------------------------------
 
 /// Request payload for starting a sandbox
 #[derive(Debug, Deserialize)]
-pub struct SandboxStartRequest {
+pub struct SandboxStartParams {
     /// Sandbox name
     pub sandbox: String,
 
@@ -34,7 +94,7 @@ pub struct SandboxStartRequest {
 
 /// Request payload for stopping a sandbox
 #[derive(Debug, Deserialize)]
-pub struct SandboxStopRequest {
+pub struct SandboxStopParams {
     /// Sandbox name
     pub sandbox: String,
 
@@ -44,7 +104,7 @@ pub struct SandboxStopRequest {
 
 /// Request payload for getting sandbox status
 #[derive(Debug, Deserialize)]
-pub struct SandboxStatusRequest {
+pub struct SandboxStatusParams {
     /// Optional sandbox name - if not provided, all sandboxes in the namespace will be included
     pub sandbox: Option<String>,
 
@@ -99,36 +159,80 @@ pub struct SandboxConfig {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Types: JSON-RPC Payloads
+// Types: Portal-mirrored RPC Payloads
 //--------------------------------------------------------------------------------------------------
 
-/// Generic JSON-RPC request
-#[derive(Debug, Deserialize)]
-pub struct JsonRpcRequest<T> {
-    /// JSON-RPC version
-    pub jsonrpc: String,
+/// Request parameters for executing code in a REPL environment
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SandboxReplRunParams {
+    /// Code to be executed
+    pub code: String,
 
-    /// Method to call
-    pub method: String,
-
-    /// Parameters for the method
-    pub params: T,
-
-    /// Request ID
-    pub id: Option<u64>,
+    /// Programming language to use for execution
+    pub language: String,
 }
 
-/// JSON-RPC response
-#[derive(Debug, Serialize)]
-pub struct JsonRpcResponse {
-    /// JSON-RPC version
-    pub jsonrpc: String,
+/// Request parameters for retrieving output from a previous REPL execution
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SandboxReplGetOutputParams {
+    /// Unique identifier for the execution
+    pub execution_id: String,
+}
 
-    /// Result of the operation
-    pub result: Value,
+/// Request parameters for executing a shell command
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SandboxCommandExecuteParams {
+    /// Command to execute
+    pub command: String,
 
-    /// Request ID
-    pub id: Option<u64>,
+    /// Optional arguments for the command
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Request parameters for retrieving output from a previous command execution
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SandboxCommandGetOutputParams {
+    /// Unique identifier for the command execution
+    pub execution_id: String,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl JsonRpcRequest {
+    /// Create a new JSON-RPC request
+    pub fn new(method: String, params: Value, id: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method,
+            params,
+            id,
+        }
+    }
+}
+
+impl JsonRpcResponse {
+    /// Create a new successful JSON-RPC response
+    pub fn success(result: Value, id: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            result: Some(result),
+            error: None,
+            id,
+        }
+    }
+
+    /// Create a new error JSON-RPC response
+    pub fn error(error: JsonRpcError, id: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            result: None,
+            error: Some(error),
+            id,
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
