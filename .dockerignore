@@ -1,0 +1,43 @@
+# Folders to ignore
+build/
+ignore/
+.git/
+.github/
+.menv/
+.vscode/
+assets/
+
+# Temporary and cache files
+**/*.o
+**/*.a
+**/*.so
+**/*.dylib
+**/*.tmp
+**/*.temp
+**/.DS_Store
+**/Thumbs.db
+**/*.swp
+**/*.swo
+target/
+
+# Specific files that aren't needed
+**/*.log
+**/*.md
+**/*.yaml
+**/*.yml
+**/*.sh
+**/*.entitlements
+**/*.env
+**/*.example
+**/*.test
+
+# Keep necessary files for cargo build
+!Cargo.toml
+!Cargo.lock
+!microsandbox-portal/
+!microsandbox-utils/
+!microsandbox-cli/
+!microsandbox-core/
+!microsandbox-server/
+!rust-toolchain.toml
+!deny.toml

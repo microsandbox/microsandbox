@@ -1,64 +1,91 @@
-# Python Docker Image
+# Python SDK Image
 
-This directory contains a Dockerfile for setting up a Python development environment.
+This directory contains the Dockerfile for the Python SDK image used with microsandbox.
 
 ## Features
 
-- Python 3.11
-- Common development tools (black, flake8, mypy, pytest)
-- IPython for interactive development
-- Non-root user for better security
+- Latest Python version
+- Common Python development packages pre-installed
+- microsandbox-portal service with Python REPL support
+- Non-root user for improved security
 
 ## Building the Image
 
-To build the Docker image, run the following command from this directory:
+To build the image, run the following command from the project root:
 
 ```bash
-docker build -t python-dev .
+docker build -t msb-python -f sdk-images/python/Dockerfile .
+```
+
+The Dockerfile uses a multi-stage build that automatically compiles the portal binary with Python features enabled, so no separate build step is required.
+
+Alternatively, you can use the provided build script:
+
+```bash
+./scripts/build_sdk_images.sh -s python
 ```
 
 ## Running the Container
 
-To start a container with the Python environment, run:
+To run the container with the portal service accessible on port 4444:
 
 ```bash
-docker run -it --rm -p 8000:8000 -v $(pwd):/home/python-user/work python-dev bash
+docker run -it -p 4444:4444 -e RUST_LOG=info --name msb-python msb-python
 ```
 
-This will:
+### Options
 
-- Start a container with the Python development image
-- Map port 8000 from the container to your host (for web applications)
-- Mount your current directory to the work directory in the container
-- Start an interactive bash session
-- Remove the container when you exit the bash session
+- `-p 4444:4444`: Maps container port 4444 to host port 4444
+- `-e RUST_LOG=info`: Sets logging level for better debugging
+- `--name msb-python`: Names the container for easier reference
 
-## Developing Python Applications
+## Accessing the Container
 
-Once inside the container, you can:
-
-- Run Python scripts with `python your_script.py`
-- Use IPython for interactive development with `ipython`
-- Run tests with `pytest`
-- Format code with `black`
-- Check syntax with `flake8`
-- Check types with `mypy`
-
-## Creating Virtual Environments
-
-If you need to create a virtual environment within the container:
+To access a shell inside the running container:
 
 ```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt  # if you have a requirements file
+docker exec -it msb-python bash
+```
+
+## Stopping and Cleaning Up
+
+```bash
+# Stop the container
+docker stop msb-python
+
+# Remove the container
+docker rm msb-python
+
+# Remove the image (optional)
+docker rmi msb-python
 ```
 
 ## Customization
 
-You can customize the Dockerfile to:
+### Adding Additional Python Packages
 
-- Change the Python version
-- Add additional Python packages by modifying the `pip install` command
-- Add additional system dependencies by modifying the `apt-get install` command
-- Change the user or security settings
+You can customize the Dockerfile to include additional Python packages:
+
+```dockerfile
+# Add this to the Dockerfile
+RUN pip install --no-cache-dir \
+    numpy \
+    pandas \
+    matplotlib
+```
+
+### Mounting Local Files
+
+To access your local files inside the container:
+
+```bash
+docker run -it -p 4444:4444 -v $(pwd)/your_code:/home/python-user/work --name msb-python msb-python
+```
+
+## Troubleshooting
+
+If you encounter connection issues to the portal:
+
+1. Check the logs: `docker logs msb-python`
+2. Verify the portal is running: `docker exec -it msb-python ps aux | grep portal`
+3. Ensure port 4444 is available on your host machine

@@ -176,10 +176,10 @@ pub struct Build {
     #[builder(default, setter(strip_option))]
     pub(crate) shell: Option<String>,
 
-    /// The scripts that can be run.
+    /// The steps that will be run.
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     #[builder(default)]
-    pub(crate) scripts: HashMap<String, String>,
+    pub(crate) steps: HashMap<String, String>,
 
     /// The exec command to run.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -762,7 +762,7 @@ mod tests {
                   - "PYTHON_VERSION=3.11"
                 workdir: "/build"
                 shell: "/bin/bash"
-                scripts:
+                steps:
                   build: "pip install -r requirements.txt"
                 imports:
                   requirements: "./requirements.txt"
@@ -834,7 +834,7 @@ mod tests {
         );
         assert_eq!(base_build.shell, Some("/bin/bash".to_string()));
         assert_eq!(
-            base_build.scripts.get("build").unwrap(),
+            base_build.steps.get("build").unwrap(),
             "pip install -r requirements.txt"
         );
         assert_eq!(
@@ -974,7 +974,7 @@ mod tests {
 
         let deps = builds.get("deps").unwrap();
         assert_eq!(
-            deps.scripts.get("install").unwrap(),
+            deps.steps.get("install").unwrap(),
             "pip install -r requirements.txt"
         );
     }
