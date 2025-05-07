@@ -136,10 +136,9 @@ sandboxes:
 
 **Microsandbox** is purpose-built for the emerging AI agent ecosystem:
 
-- **Secure execution** of untrusted, AI-generated code
-- **Native MCP (Model Context Protocol) integration**
-- **Fast iteration cycles** for AI-driven development
-- **Sandbox orchestration** for complex AI agent workflows
+- **Secure execution boundaries** — hardware-level isolation for untrusted AI-generated code
+- **Native MCP integration** — seamless communication with modern AI models
+- **Multi-language SDK ecosystem** — consistent APIs across 25+ programming languages
 
 <div align='center'>• • •</div>
 
