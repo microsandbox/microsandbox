@@ -49,7 +49,6 @@ Even with **full root access inside a Microsandbox**, attackers remain contained
 **Microsandbox** delivers perfect environment parity:
 
 - **Identical kernels everywhere** — same microVM technology on all platforms
-- **Same cgroup tree, same filesystems** across development and production
 - **Deterministic builds** with identical underlying systems
 - **"Works on my machine"** actually means something when your app behaves identically
 
