@@ -2398,6 +2398,7 @@ dependencies = [
  "libc",
  "microsandbox-core",
  "microsandbox-utils",
+ "once_cell",
  "pretty-error-debug",
  "rand 0.9.0",
  "reqwest 0.12.9",

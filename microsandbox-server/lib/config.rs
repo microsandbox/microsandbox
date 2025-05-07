@@ -19,7 +19,7 @@ use getset::Getters;
 use microsandbox_utils::{env, NAMESPACES_SUBDIR};
 use serde::Deserialize;
 
-use crate::{MicrosandboxServerError, MicrosandboxServerResult};
+use crate::{port::LOCALHOST_IP, MicrosandboxServerError, MicrosandboxServerResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -34,6 +34,9 @@ pub const DEFAULT_JWT_HEADER: LazyLock<String> =
 
 /// The header name for the proxy authorization
 pub const PROXY_AUTH_HEADER: &str = "Proxy-Authorization";
+
+/// The default portal guest port
+pub const DEFAULT_PORTAL_GUEST_PORT: u16 = 1111;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -55,9 +58,6 @@ pub struct Config {
 
     /// Address to listen on
     addr: SocketAddr,
-
-    /// URL for the portal service
-    portal_url: String,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -83,20 +83,15 @@ impl Config {
             }
         };
 
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let addr = SocketAddr::new(LOCALHOST_IP, port);
         let namespace_dir = namespace_dir
             .unwrap_or_else(|| env::get_microsandbox_home_path().join(NAMESPACES_SUBDIR));
-
-        // Get portal URL from environment or use default
-        let portal_url = std::env::var("MICROSANDBOX_PORTAL_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:5556".to_string());
 
         Ok(Self {
             key,
             namespace_dir,
             dev_mode,
             addr,
-            portal_url,
         })
     }
 }

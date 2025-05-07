@@ -36,6 +36,7 @@ reqwest.workspace = true
 chrono.workspace = true
 jsonwebtoken.workspace = true
 microsandbox-core.workspace = true
+once_cell.workspace = true
 
 [features]
 default = []
