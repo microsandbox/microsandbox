@@ -218,9 +218,9 @@ After starting the server and generating your key, [configure the two environmen
 
 ### Coding & Dev Environments
 
-Empower your AI agents to write and execute real code using professional development tools without compromising security. When your users ask their AI to create a web app, fix a bug, or spin up a prototype, it can handle everything from Git operations to dependency management to testing—all safely contained in a secure sandbox.
+Let your AI agents build real apps with professional dev tools. When users ask their AI to create a web app, fix a bug, or build a prototype, it can handle everything from Git operations to dependency management to testing in a protected environment.
 
-Your AI can spin up complete development environments in milliseconds, install dependencies, and execute programs with full system access. The security isolation ensures malicious code can't escape, while the lightning-fast startup means developers don't experience the lag of traditional sandboxes. Perfect for AI pair programming, educational coding platforms, and automated code generation workflows that need both safety and performance.
+Your AI can create complete development environments in milliseconds and run programs with full system access. The fast startup means developers get instant feedback and can iterate quickly. This makes it perfect for AI pair programming, coding education platforms, and automated code generation where quick results matter.
 
 <!-- TODO: <div align="center"><a href="https://microsandbox.dev/docs/examples/coding">✨ See coding examples ✨</a></div> -->
 
@@ -233,9 +233,9 @@ Your AI can spin up complete development environments in milliseconds, install d
 
 ### Data Analysis
 
-Turn raw numbers into meaningful insights with AI that works for you. Your AI agents can process spreadsheets, create beautiful charts, and generate reports without putting your system at risk. Whether analyzing customer feedback, sales trends, or research data, everything happens in a protected environment where code can't access your sensitive files.
+Transform raw numbers into meaningful insights with AI that works for you. Your AI can process spreadsheets, create charts, and generate reports safely. Whether it's analyzing customer feedback, sales trends, or research data, everything happens in a protected environment that respects data privacy.
 
-Microsandbox lets your AI securely process data with specialized libraries like NumPy, Pandas, and TensorFlow while generating visualizations that bring insights to life. The sandbox architecture ensures sensitive data remains protected during analysis, with only cleaned results being exported back to your application. Ideal for financial analysis tools, privacy-focused data processing, medical research applications, and any scenario where data security is paramount but computational power is essential.
+Microsandbox lets your AI work with powerful libraries like NumPy, Pandas, and TensorFlow while creating visualizations that bring insights to life. Perfect for financial analysis tools, privacy-focused data processing, medical research, and any situation where you need serious computing power with appropriate safeguards.
 
 <!-- TODO: <div align="center"><a href="https://microsandbox.dev/docs/examples/data-analysis">📊 Explore data examples 📊</a></div> -->
 
@@ -248,9 +248,9 @@ Microsandbox lets your AI securely process data with specialized libraries like 
 
 ### Web Browsing Agent
 
-Create AI assistants that can safely navigate the web on behalf of your users. Need to check prices across different stores, gather information from multiple news sites, or automate form submissions? Your AI can handle these tasks in a contained environment where website interactions can't affect your main system.
+Build AI assistants that can browse the web for your users. Need to compare prices across stores, gather info from multiple news sites, or automate form submissions? Your AI can handle it all while staying in a contained environment.
 
-With microsandbox, your AI can navigate websites, extract data, interact with web forms, and even handle authentication flows securely. Even if it visits potentially harmful websites, the sandbox keeps everything isolated, delivering only the useful information back to your application. This makes it perfect for price comparison tools, research assistants, and content aggregators that need to interact with the web without compromising security.
+With microsandbox, your AI can navigate websites, extract data, fill out forms, and handle logins. It can visit any site and deliver only the useful information back to your application. This makes it ideal for price comparison tools, research assistants, content aggregators, automated testing, and web automation workflows that would otherwise require complex setup.
 
 <!-- TODO: <div align="center"><a href="https://microsandbox.dev/docs/examples/web-browsing">🌐 View web examples 🌐</a></div> -->
 
@@ -263,9 +263,9 @@ With microsandbox, your AI can navigate websites, extract data, interact with we
 
 ### Instant App Hosting
 
-Share working applications and demos in seconds without deployment hassles. When your AI creates a useful tool, calculator, visualization, or prototype, users can immediately access it through a simple link. No waiting for server provisioning or DNS setup—just instant, secure access to the application.
+Share working apps and demos in seconds without deployment headaches. When your AI creates a useful tool, calculator, visualization, or prototype, users can immediately access it through a simple link. No waiting for server setup or DNS configuration—just instant access to the application.
 
-Zero-configuration deployment means your AI-generated code can be immediately useful without complex setup. Each app runs in its own protected space with clearly defined resource limits, and everything cleans up automatically when no longer needed. Educational platforms can host student projects, AI assistants can create live demonstrations, and end-users get immediate value without waiting for traditional deployment pipelines.
+Zero-setup deployment means your AI-generated code can be immediately useful without complex configuration. Each app runs in its own protected space with appropriate resource limits, and everything cleans up automatically when no longer needed. Perfect for educational platforms hosting student projects, AI assistants creating live demos, and users needing immediate value.
 
 <!-- TODO: <div align="center"><a href="https://microsandbox.dev/docs/examples/app-hosting">🚀 Try hosting examples 🚀</a></div> -->
 
