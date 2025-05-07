@@ -68,3 +68,9 @@ pub const DEFAULT_WORKDIR: &str = "/";
 
 /// The default namespace for the sandbox server.
 pub const DEFAULT_SERVER_NAMESPACE: &str = "default";
+
+/// The default microsandbox-server port.
+pub const DEFAULT_SERVER_PORT: u16 = 5555;
+
+/// The default microsandbox-portal port.
+pub const DEFAULT_PORTAL_GUEST_PORT: u16 = 4444;

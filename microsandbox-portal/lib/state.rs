@@ -1,11 +1,12 @@
 //! Shared state management for the microsandbox portal server.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 
-use crate::portal::command::CommandHandle;
-use crate::portal::repl::{EngineHandle, Line};
+use crate::portal::{
+    command::CommandHandle,
+    repl::{EngineHandle, Line},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types

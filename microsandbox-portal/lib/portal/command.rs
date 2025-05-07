@@ -21,8 +21,10 @@
 //! variables to maintain system security. Command execution is isolated to prevent
 //! damage to the host system.
 
-use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,

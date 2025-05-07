@@ -12,8 +12,10 @@ use crate::{
         SandboxCommandGetOutputParams, SandboxReplGetOutputParams, SandboxReplRunParams,
         JSONRPC_VERSION,
     },
-    portal::command::create_command_executor,
-    portal::repl::{start_engines, Language},
+    portal::{
+        command::create_command_executor,
+        repl::{start_engines, Language},
+    },
     state::SharedState,
 };
 
