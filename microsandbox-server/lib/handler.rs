@@ -12,6 +12,7 @@
 
 use axum::{
     body::Body,
+    debug_handler,
     extract::{Path, State},
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
@@ -56,6 +57,7 @@ pub async fn health() -> ServerResult<impl IntoResponse> {
 //--------------------------------------------------------------------------------------------------
 
 /// Main JSON-RPC handler that dispatches to the appropriate method
+#[debug_handler]
 pub async fn json_rpc_handler(
     State(state): State<AppState>,
     Json(request): Json<JsonRpcRequest>,
@@ -163,11 +165,51 @@ async fn forward_rpc_to_portal(
     state: AppState,
     request: JsonRpcRequest,
 ) -> ServerResult<(StatusCode, Json<JsonRpcResponse>)> {
-    // Get the portal URL from configuration
-    let portal_url = state.get_config().get_portal_url();
+    // Extract sandbox information from request context or method parameters
+    // The method will have the format "sandbox.repl.run" etc.
+    // The method params will have a sandbox_name and namespace parameter
+
+    // Extract the sandbox and namespace from the parameters
+    let (sandbox_name, namespace) = if let Some(params) = request.params.as_object() {
+        // Get sandbox name
+        let sandbox = params
+            .get("sandbox")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
+                    "Missing required 'sandbox' parameter for portal request".to_string(),
+                ))
+            })?;
+
+        // Get namespace
+        let namespace = params
+            .get("namespace")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
+                    "Missing required 'namespace' parameter for portal request".to_string(),
+                ))
+            })?;
+
+        (sandbox, namespace)
+    } else {
+        return Err(ServerError::ValidationError(
+            crate::error::ValidationError::InvalidInput(
+                "Request parameters must be an object containing 'sandbox' and 'namespace'"
+                    .to_string(),
+            ),
+        ));
+    };
+
+    // Get the portal URL specifically for this sandbox
+    let portal_url = state
+        .get_portal_url_for_sandbox(namespace, sandbox_name)
+        .await?;
 
     // Create a full URL to the portal's JSON-RPC endpoint
     let portal_rpc_url = format!("{}/api/v1/rpc", portal_url);
+
+    debug!("Forwarding RPC to portal: {}", portal_rpc_url);
 
     // Create an HTTP client
     let client = reqwest::Client::new();
@@ -255,79 +297,88 @@ async fn sandbox_start_impl(state: AppState, params: SandboxStartParams) -> Serv
         ));
     }
 
-    // If we're relying on existing config, verify that the sandbox exists in it
-    if !has_config_in_request && has_existing_config_file {
+    // Load or create the config
+    let mut config_yaml: serde_yaml::Value;
+
+    // Read or initialize the configuration
+    if has_existing_config_file {
         // Read the existing config
         let config_content = tokio_fs::read_to_string(&config_path).await.map_err(|e| {
             ServerError::InternalError(format!("Failed to read config file: {}", e))
         })?;
 
         // Parse the config as YAML
-        let config_yaml: serde_yaml::Value =
-            serde_yaml::from_str(&config_content).map_err(|e| {
-                ServerError::InternalError(format!("Failed to parse config file: {}", e))
-            })?;
+        config_yaml = serde_yaml::from_str(&config_content).map_err(|e| {
+            ServerError::InternalError(format!("Failed to parse config file: {}", e))
+        })?;
 
-        // Check if the sandboxes configuration exists and contains our sandbox
-        let has_sandbox_config = config_yaml
-            .get("sandboxes")
-            .and_then(|sandboxes| sandboxes.get(sandbox))
-            .is_some();
+        // If we're relying on existing config, verify that the sandbox exists in it
+        if !has_config_in_request {
+            let has_sandbox_config = config_yaml
+                .get("sandboxes")
+                .and_then(|sandboxes| sandboxes.get(sandbox))
+                .is_some();
 
-        if !has_sandbox_config {
+            if !has_sandbox_config {
+                return Err(ServerError::ValidationError(
+                    crate::error::ValidationError::InvalidInput(format!(
+                        "Sandbox '{}' not found in existing configuration",
+                        sandbox
+                    )),
+                ));
+            }
+        }
+    } else {
+        // Create a new config with default values
+        if !has_config_in_request {
             return Err(ServerError::ValidationError(
-                crate::error::ValidationError::InvalidInput(format!(
-                    "Sandbox '{}' not found in existing configuration",
-                    sandbox
-                )),
+                crate::error::ValidationError::InvalidInput(
+                    "No configuration provided and no existing configuration file".to_string(),
+                ),
             ));
         }
-    }
 
-    // If config is provided and we have an image, we need to update the config file
-    if let Some(config) = &params.config {
-        if config.image.is_some() {
-            // Ensure config file exists
-            if !config_path.exists() {
-                tokio_fs::write(&config_path, DEFAULT_CONFIG)
-                    .await
-                    .map_err(|e| {
-                        ServerError::InternalError(format!("Failed to create config file: {}", e))
-                    })?;
-            }
-
-            // Read the existing config
-            let config_content = tokio_fs::read_to_string(&config_path).await.map_err(|e| {
-                ServerError::InternalError(format!("Failed to read config file: {}", e))
+        // Create default config
+        tokio_fs::write(&config_path, DEFAULT_CONFIG)
+            .await
+            .map_err(|e| {
+                ServerError::InternalError(format!("Failed to create config file: {}", e))
             })?;
 
-            // Parse the config as YAML
-            let mut config_yaml: serde_yaml::Value = serde_yaml::from_str(&config_content)
-                .map_err(|e| {
-                    ServerError::InternalError(format!("Failed to parse config file: {}", e))
-                })?;
+        // Parse default config
+        config_yaml = serde_yaml::from_str(DEFAULT_CONFIG).map_err(|e| {
+            ServerError::InternalError(format!("Failed to parse default config: {}", e))
+        })?;
+    }
 
-            // Ensure sandboxes field exists
-            if !config_yaml.is_mapping() {
-                config_yaml = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-            }
+    // Ensure sandboxes field exists
+    if !config_yaml.is_mapping() {
+        config_yaml = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
 
-            let config_map = config_yaml.as_mapping_mut().unwrap();
-            if !config_map.contains_key(&serde_yaml::Value::String("sandboxes".to_string())) {
-                config_map.insert(
-                    serde_yaml::Value::String("sandboxes".to_string()),
-                    serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-                );
-            }
+    let config_map = config_yaml.as_mapping_mut().unwrap();
+    if !config_map.contains_key(&serde_yaml::Value::String("sandboxes".to_string())) {
+        config_map.insert(
+            serde_yaml::Value::String("sandboxes".to_string()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
 
-            // Get or create the sandboxes mapping
-            let sandboxes_map = config_map
-                .get_mut(&serde_yaml::Value::String("sandboxes".to_string()))
-                .unwrap()
-                .as_mapping_mut()
-                .unwrap();
+    // Get the sandboxes mapping
+    let sandboxes_key = serde_yaml::Value::String("sandboxes".to_string());
+    let sandboxes_value = config_map.get_mut(&sandboxes_key).unwrap();
 
-            // Create sandbox entry
+    // Check if sandboxes value is a mapping, if not, replace it with an empty mapping
+    if !sandboxes_value.is_mapping() {
+        *sandboxes_value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+
+    let sandboxes_map = sandboxes_value.as_mapping_mut().unwrap();
+
+    // If config is provided and we have an image, update the sandbox configuration
+    if let Some(config) = &params.config {
+        if config.image.is_some() {
+            // Create or update sandbox entry
             let mut sandbox_map = serde_yaml::Mapping::new();
 
             // Set required image field
@@ -448,19 +499,66 @@ async fn sandbox_start_impl(state: AppState, params: SandboxStartParams) -> Serv
                 serde_yaml::Value::String(sandbox.clone()),
                 serde_yaml::Value::Mapping(sandbox_map),
             );
-
-            // Write the updated config back to the file
-            let updated_config = serde_yaml::to_string(&config_yaml).map_err(|e| {
-                ServerError::InternalError(format!("Failed to serialize config: {}", e))
-            })?;
-
-            tokio_fs::write(&config_path, updated_config)
-                .await
-                .map_err(|e| {
-                    ServerError::InternalError(format!("Failed to write config file: {}", e))
-                })?;
         }
     }
+
+    // Assign a port for this sandbox
+    let sandbox_key = format!("{}/{}", params.namespace, params.sandbox);
+    let port = {
+        let mut port_manager = state.get_port_manager().write().await;
+        port_manager.assign_port(&sandbox_key).await.map_err(|e| {
+            ServerError::InternalError(format!("Failed to assign portal port: {}", e))
+        })?
+    };
+
+    debug!("Assigned portal port {} to sandbox {}", port, sandbox_key);
+
+    // Get the specific sandbox configuration
+    let sandbox_config = sandboxes_map
+        .get_mut(&serde_yaml::Value::String(sandbox.clone()))
+        .ok_or_else(|| {
+            ServerError::InternalError(format!("Sandbox '{}' not found in configuration", sandbox))
+        })?
+        .as_mapping_mut()
+        .ok_or_else(|| {
+            ServerError::InternalError(format!(
+                "Sandbox '{}' configuration is not a mapping",
+                sandbox
+            ))
+        })?;
+
+    // Add or update the portal port mapping
+    let guest_port = crate::config::DEFAULT_PORTAL_GUEST_PORT;
+    let portal_port_mapping = format!("{}:{}", port, guest_port);
+
+    let ports_key = serde_yaml::Value::String("ports".to_string());
+
+    if let Some(ports) = sandbox_config.get_mut(&ports_key) {
+        if let Some(ports_seq) = ports.as_sequence_mut() {
+            // Filter out any existing portal port mappings
+            ports_seq.retain(|p| {
+                p.as_str()
+                    .map(|s| !s.ends_with(&format!(":{}", guest_port)))
+                    .unwrap_or(true)
+            });
+
+            // Add the new port mapping
+            ports_seq.push(serde_yaml::Value::String(portal_port_mapping));
+        }
+    } else {
+        // Create a new ports list with the portal port mapping
+        let mut ports_seq = serde_yaml::Sequence::new();
+        ports_seq.push(serde_yaml::Value::String(portal_port_mapping));
+        sandbox_config.insert(ports_key, serde_yaml::Value::Sequence(ports_seq));
+    }
+
+    // Write the updated config back to the file
+    let updated_config = serde_yaml::to_string(&config_yaml)
+        .map_err(|e| ServerError::InternalError(format!("Failed to serialize config: {}", e)))?;
+
+    tokio_fs::write(&config_path, updated_config)
+        .await
+        .map_err(|e| ServerError::InternalError(format!("Failed to write config file: {}", e)))?;
 
     // If sandbox is already running, stop it first
     if let Err(e) = orchestra::down(
@@ -501,6 +599,7 @@ async fn sandbox_stop_impl(state: AppState, params: SandboxStopParams) -> Server
         .join(&params.namespace);
     let config_file = MICROSANDBOX_CONFIG_FILENAME;
     let sandbox = &params.sandbox;
+    let sandbox_key = format!("{}/{}", params.namespace, params.sandbox);
 
     // Verify that the namespace directory exists
     if !namespace_dir.exists() {
@@ -533,6 +632,16 @@ async fn sandbox_stop_impl(state: AppState, params: SandboxStopParams) -> Server
     .map_err(|e| {
         ServerError::InternalError(format!("Failed to stop sandbox {}: {}", params.sandbox, e))
     })?;
+
+    // Release the assigned port
+    {
+        let mut port_manager = state.get_port_manager().write().await;
+        port_manager.release_port(&sandbox_key).await.map_err(|e| {
+            ServerError::InternalError(format!("Failed to release portal port: {}", e))
+        })?;
+    }
+
+    debug!("Released portal port for sandbox {}", sandbox_key);
 
     // Return success message
     Ok(format!("Sandbox {} stopped successfully", params.sandbox))

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use axum::http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
@@ -6,7 +7,7 @@ use axum::http::{
 };
 use clap::Parser;
 use microsandbox_cli::{MicrosandboxCliResult, MsbserverArgs};
-use microsandbox_server::{route, state::AppState, Config};
+use microsandbox_server::{port::PortManager, route, state::AppState, Config};
 use microsandbox_utils::CHECKMARK;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -35,12 +36,23 @@ pub async fn main() -> MicrosandboxCliResult<()> {
     let config = Arc::new(Config::new(
         args.key,
         args.port,
-        args.namespace_dir,
+        args.namespace_dir.clone(),
         args.dev_mode,
     )?);
 
+    // Get namespace directory from config
+    let namespace_dir = config.get_namespace_dir().clone();
+
+    // Initialize the port manager
+    let port_manager = PortManager::new(namespace_dir).await.map_err(|e| {
+        eprintln!("Error initializing port manager: {}", e);
+        e
+    })?;
+
+    let port_manager = Arc::new(RwLock::new(port_manager));
+
     // Create application state
-    let state = AppState::new(config.clone());
+    let state = AppState::new(config.clone(), port_manager);
 
     // Configure CORS
     let cors = CorsLayer::new()
