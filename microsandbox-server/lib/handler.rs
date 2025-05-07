@@ -19,7 +19,7 @@ use axum::{
     Json,
 };
 use microsandbox_core::management::{menv, orchestra};
-use microsandbox_utils::{DEFAULT_CONFIG, MICROSANDBOX_CONFIG_FILENAME};
+use microsandbox_utils::{DEFAULT_CONFIG, DEFAULT_PORTAL_GUEST_PORT, MICROSANDBOX_CONFIG_FILENAME};
 use reqwest;
 use serde_json::{self, json};
 use serde_yaml;
@@ -528,7 +528,7 @@ async fn sandbox_start_impl(state: AppState, params: SandboxStartParams) -> Serv
         })?;
 
     // Add or update the portal port mapping
-    let guest_port = crate::config::DEFAULT_PORTAL_GUEST_PORT;
+    let guest_port = DEFAULT_PORTAL_GUEST_PORT;
     let portal_port_mapping = format!("{}:{}", port, guest_port);
 
     let ports_key = serde_yaml::Value::String("ports".to_string());

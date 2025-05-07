@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use microsandbox_server::DEFAULT_PORT;
+use microsandbox_utils::DEFAULT_SERVER_PORT;
 
 use crate::styles;
 
@@ -18,7 +18,7 @@ pub struct MsbserverArgs {
     pub key: Option<String>,
 
     /// Port number to listen on
-    #[arg(long, default_value_t = DEFAULT_PORT)]
+    #[arg(long, default_value_t = DEFAULT_SERVER_PORT)]
     pub port: u16,
 
     /// Directory for storing namespaces

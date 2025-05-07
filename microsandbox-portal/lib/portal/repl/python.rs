@@ -11,13 +11,15 @@
 
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
-use tokio::sync::{
-    mpsc::{self, Sender},
-    oneshot,
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::Command,
+    sync::{
+        mpsc::{self, Sender},
+        oneshot,
+    },
+    time::{sleep, Duration},
 };
-use tokio::time::{sleep, Duration};
 
 use super::types::{Engine, EngineError, Resp, Stream};
 

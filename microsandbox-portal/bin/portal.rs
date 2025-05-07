@@ -5,10 +5,9 @@
 
 use anyhow::Result;
 use clap::Parser;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::net::TcpListener;
-use tokio::signal;
+use microsandbox_utils::DEFAULT_PORTAL_GUEST_PORT;
+use std::{net::SocketAddr, sync::Arc};
+use tokio::{net::TcpListener, signal};
 use tracing;
 
 use microsandbox_portal::{
@@ -23,9 +22,6 @@ use microsandbox_portal::{
 
 /// Default host address
 const DEFAULT_HOST: &str = "127.0.0.1";
-
-/// Default port number
-const DEFAULT_PORT: u16 = 4444;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -91,7 +87,7 @@ async fn main() -> Result<()> {
     let args = PortalArgs::parse();
 
     // Resolve the server address
-    let port = args.port.unwrap_or(DEFAULT_PORT);
+    let port = args.port.unwrap_or(DEFAULT_PORTAL_GUEST_PORT);
     let addr = format!("{}:{}", DEFAULT_HOST, port)
         .parse::<SocketAddr>()
         .unwrap();

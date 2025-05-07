@@ -10,20 +10,8 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [[bin]]
-name = "python-portal"
-path = "bin/python-portal.rs"
-
-[[bin]]
 name = "portal"
 path = "bin/portal.rs"
-
-[[example]]
-name = "rpc_repl"
-path = "examples/rpc_repl.rs"
-
-[[example]]
-name = "repl"
-path = "examples/repl.rs"
 
 [dependencies]
 axum = { workspace = true, features = ["macros"] }

@@ -25,18 +25,12 @@ use crate::{port::LOCALHOST_IP, MicrosandboxServerError, MicrosandboxServerResul
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Default port number for the server if not specified in environment variables
-pub const DEFAULT_PORT: u16 = 5555;
-
 /// Default JWT header for HS256 algorithm in base64
 pub const DEFAULT_JWT_HEADER: LazyLock<String> =
     LazyLock::new(|| BASE64_STANDARD.encode("{\"typ\":\"JWT\",\"alg\":\"HS256\"}"));
 
 /// The header name for the proxy authorization
 pub const PROXY_AUTH_HEADER: &str = "Proxy-Authorization";
-
-/// The default portal guest port
-pub const DEFAULT_PORTAL_GUEST_PORT: u16 = 1111;
 
 //--------------------------------------------------------------------------------------------------
 // Types
