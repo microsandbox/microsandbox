@@ -158,11 +158,15 @@ asyncio.run(main())
 
 <div align='center'>• • •</div>
 
-# <sub><img height="18" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;SELF HOSTING</sub>
+# <sub><img height="18" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;SELF HOSTING<sup><sup>B E T A</sup></sup></sub>
 
 With self hosting, your data and code stay on your servers making security compliance easy. Also, having a local setup lets you test and move through ideas fast while debugging issues more reliably.
 
 Let's help you start your first self-hosted sandbox server. It's easy!
+
+> [!WARNING]
+>
+> `microsandbox` is beta software and not ready for production use.
 
 ##
 
@@ -281,7 +285,7 @@ The `msb` CLI brings the familiar feel of package managers to sandbox developmen
 
 > [!WARNING]
 >
-> `msb` CLI is beta software.
+> `microsandbox` is beta software and not ready for production use.
 
 ##
 
