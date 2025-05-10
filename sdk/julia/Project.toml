@@ -1,0 +1,19 @@
+name = "Microsandbox"
+uuid = "a2cd5187-66ca-460f-a65a-5ce4d5ca8eb7"
+license = "Apache-2.0"
+authors = ["Microsandbox Team <team@microsandbox.dev>"]
+repository = "https://github.com/microsandbox/microsandbox"
+version = "0.1.0"
+
+[deps]
+Registrator = "4418983a-e44d-11e8-3aec-9789530b3b3e"
+
+[compat]
+Registrator = "1.9.4"
+julia = "1.5"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

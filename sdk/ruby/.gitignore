@@ -1,0 +1,49 @@
+# Ruby specific
+*.gem
+*.rbc
+/.config
+/coverage/
+/InstalledFiles
+/pkg/
+/spec/reports/
+/spec/examples.txt
+/test/tmp/
+/test/version_tmp/
+/tmp/
+
+# Documentation
+/.yardoc/
+/_yardoc/
+/doc/
+/rdoc/
+
+# Environment
+/.bundle/
+/vendor/bundle
+/lib/bundler/man/
+
+# Dependencies
+/.ruby-version
+/.ruby-gemset
+
+# Build artifacts
+/build/
+
+# For those using RVM
+.rvmrc
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor specific
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
