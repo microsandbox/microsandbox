@@ -158,7 +158,7 @@ asyncio.run(main())
 
 <div align='center'>• • •</div>
 
-# <sub><img height="18" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;SELF HOSTING<sup><sup>B E T A</sup></sup></sub>
+# <sub><img height="18" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;SELF HOSTING&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
 
 With self hosting, your data and code stay on your servers making security compliance easy. Also, having a local setup lets you test and move through ideas fast while debugging issues more reliably.
 
