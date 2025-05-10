@@ -8,7 +8,7 @@ This directory contains SDKs for various programming languages that interact wit
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/people/A770EF">&nbsp;&nbsp;Join Our Community of Builders!</sub>
 
-**We Need YOU!** Microsandbox project is calling for heroes like you! While we've made great progress with JavaScript, Python, and Rust SDKs, there's a vast landscape of programming languages waiting to be supported.
+**We Need YOU!** Microsandbox project is calling for heroes like you! While we've made progress with JavaScript, Python, and Rust SDKs, there's a vast landscape of programming languages waiting to be supported.
 
 Each new SDK we add opens Microsandbox to entirely new communities of developers, enabling secure code execution across more ecosystems. Whether you're passionate about Go, Ruby, Java, or any of the languages marked with <img height="15" src="https://octicons-col.vercel.app/x-circle/F85149"> below, your expertise could make a tremendous difference.
 
