@@ -15,6 +15,7 @@ use crate::{
     MicrosandboxError, MicrosandboxResult,
 };
 
+#[cfg(feature = "cli")]
 use console::style;
 use microsandbox_utils::{MICROSANDBOX_ENV_DIR, SANDBOX_DB_FILENAME};
 use nix::{
@@ -1025,6 +1026,7 @@ fn print_namespace_header(namespace: &str) {
 }
 
 /// Formats the status columns for display
+#[cfg(feature = "cli")]
 fn format_status_columns(
     status: &SandboxStatus,
 ) -> (

@@ -1,21 +1,16 @@
 # First stage: Build the portal binary with Rust feature enabled
 FROM rust:slim AS builder
 
-# Install dependencies needed for building
+# Install dependencies and build the portal binary
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libssl-dev \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /usr/src/microsandbox
 
-# Set the working directory
 WORKDIR /usr/src/microsandbox
-
-# Copy the source code
-# Note: This assumes the Docker build command is run from the root of the repository
 COPY . .
-
-# Build the portal binary with Rust feature enabled
 RUN cargo build --release --bin portal --features rust
 
 # Second stage: Create the Rust image
@@ -27,7 +22,11 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH \
     RUST_VERSION=1.86.0
 
-# Install system dependencies
+ARG USER_NAME="rust-user"
+ARG USER_UID="1000"
+ARG USER_GID="100"
+
+# Install system dependencies, create user, set up directories, and install Rust tools in one layer
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
@@ -35,29 +34,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     ca-certificates \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Create a non-root user to run code
-ARG USER_NAME="rust-user"
-ARG USER_UID="1000"
-ARG USER_GID="100"
-
-# Create non-root user and necessary directories
-RUN useradd -m -s /bin/bash -N -u $USER_UID $USER_NAME \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+    # Create non-root user and necessary directories
+    && useradd -m -s /bin/bash -N -u $USER_UID $USER_NAME \
     && mkdir -p /home/$USER_NAME/work \
-    && chown -R $USER_NAME:$USER_GID /home/$USER_NAME
-
-# Install common Rust tools
-RUN rustup component add rustfmt clippy rls rust-analysis rust-src \
+    && chown -R $USER_NAME:$USER_GID /home/$USER_NAME \
+    && mkdir -p /etc/microsandbox/portal \
+    && chown -R $USER_NAME:$USER_GID /etc/microsandbox \
+    # Install common Rust tools
+    && rustup component add rustfmt clippy rls rust-analysis rust-src \
     && cargo install cargo-edit cargo-watch cargo-expand
 
-# Copy the portal binary from the builder stage
+# Copy the portal binary from the builder stage and set permissions
 COPY --from=builder /usr/src/microsandbox/target/release/portal /usr/local/bin/
 RUN chmod +x /usr/local/bin/portal
-
-# Create a directory for portal configuration
-RUN mkdir -p /etc/microsandbox/portal \
-    && chown -R $USER_NAME:$USER_GID /etc/microsandbox
 
 # Switch to the non-root user
 USER $USER_NAME
