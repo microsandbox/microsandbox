@@ -564,6 +564,7 @@ pub async fn status(
 ///     Ok(())
 /// }
 /// ```
+#[cfg(feature = "cli")]
 pub async fn show_status(
     names: &[String],
     path: Option<&Path>,
@@ -643,6 +644,7 @@ pub async fn show_status(
 ///     Ok(())
 /// }
 /// ```
+#[cfg(feature = "cli")]
 pub async fn show_status_namespaces(
     names: &[String],
     namespaces_parent_dir: &Path,
@@ -683,6 +685,7 @@ pub async fn show_status_namespaces(
 //--------------------------------------------------------------------------------------------------
 
 // Extracted the status display logic to a separate function
+#[cfg(feature = "cli")]
 async fn display_status(
     names: &[String],
     path: Option<&Path>,
@@ -769,6 +772,7 @@ async fn display_status(
 }
 
 // Update display_status_namespaces to discover namespaces dynamically
+#[cfg(feature = "cli")]
 async fn display_status_namespaces(
     names: &[String],
     namespaces_parent_dir: &Path,
@@ -1014,6 +1018,7 @@ async fn display_status_namespaces(
 }
 
 /// Prints a stylized header for namespace display
+#[cfg(feature = "cli")]
 fn print_namespace_header(namespace: &str) {
     // Create the simple title text without padding
     let title = format!("NAMESPACE: {}", namespace);

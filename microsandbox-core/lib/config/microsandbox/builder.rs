@@ -71,7 +71,7 @@ pub struct SandboxBuilder<I> {
     workdir: Option<Utf8UnixPathBuf>,
     shell: Option<String>,
     scripts: HashMap<String, String>,
-    exec: Option<String>,
+    command: Option<String>,
     imports: HashMap<String, Utf8UnixPathBuf>,
     exports: HashMap<String, Utf8UnixPathBuf>,
     scope: NetworkScope,
@@ -161,7 +161,7 @@ impl<I> SandboxBuilder<I> {
             workdir: self.workdir,
             shell: self.shell,
             scripts: self.scripts,
-            exec: self.exec,
+            command: self.command,
             imports: self.imports,
             exports: self.exports,
             scope: self.scope,
@@ -240,9 +240,9 @@ impl<I> SandboxBuilder<I> {
         self
     }
 
-    /// Sets the exec command for the sandbox
-    pub fn exec(mut self, exec: impl AsRef<str>) -> SandboxBuilder<I> {
-        self.exec = Some(exec.as_ref().to_string());
+    /// Sets the command for the sandbox
+    pub fn command(mut self, command: impl AsRef<str>) -> SandboxBuilder<I> {
+        self.command = Some(command.as_ref().to_string());
         self
     }
 
@@ -288,7 +288,7 @@ impl SandboxBuilder<ReferenceOrPath> {
             workdir: self.workdir,
             shell: self.shell,
             scripts: self.scripts,
-            exec: self.exec,
+            command: self.command,
             imports: self.imports,
             exports: self.exports,
             scope: self.scope,
@@ -317,7 +317,7 @@ impl Default for SandboxBuilder<()> {
             workdir: None,
             shell: Some(DEFAULT_SHELL.to_string()),
             scripts: HashMap::new(),
-            exec: None,
+            command: None,
             imports: HashMap::new(),
             exports: HashMap::new(),
             scope: NetworkScope::default(),

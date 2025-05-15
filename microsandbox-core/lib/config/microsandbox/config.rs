@@ -181,10 +181,11 @@ pub struct Build {
     #[builder(default)]
     pub(crate) steps: HashMap<String, String>,
 
-    /// The exec command to run.
+    /// The command to run. This is a string that can contain both the exec path and the args.
+    /// e.g. "ls -l /"
     #[serde(skip_serializing_if = "Option::is_none", default)]
     #[builder(default, setter(strip_option))]
-    pub(crate) exec: Option<String>,
+    pub(crate) command: Option<String>,
 
     /// The files to import.
     #[serde(
@@ -314,9 +315,10 @@ pub struct Sandbox {
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub(crate) scripts: HashMap<String, String>,
 
-    /// The exec command to run.
+    /// The command to run. This is a string that can contain both the exec path and the args.
+    /// e.g. "ls -l /"
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub(crate) exec: Option<String>,
+    pub(crate) command: Option<String>,
 
     /// The files to import.
     #[serde(
@@ -439,7 +441,7 @@ impl Sandbox {
     pub fn validate(&self) -> MicrosandboxResult<()> {
         // Error if start and exec are both not defined
         if self.scripts.get(START_SCRIPT_NAME).is_none()
-            && self.exec.is_none()
+            && self.command.is_none()
             && self.shell.is_none()
         {
             return Err(MicrosandboxError::MissingStartOrExecOrShell);

@@ -272,9 +272,9 @@ pub async fn install(
     if let Some(exec) = exec {
         let args = args.join(" ");
         if args.is_empty() {
-            sandbox.set_exec(Some(exec.to_string()));
+            sandbox.set_command(Some(exec.to_string()));
         } else {
-            sandbox.set_exec(Some(format!("{} {}", exec, args)));
+            sandbox.set_command(Some(format!("{} {}", exec, args)));
         };
     }
 

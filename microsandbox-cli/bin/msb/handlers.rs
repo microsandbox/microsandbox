@@ -813,6 +813,8 @@ fn parse_name_and_script(name_and_script: &str) -> (&str, Option<&str>) {
 /// If the file path is a directory, it is treated as the project path.
 /// If the file path is a file, its parent directory is treated as the project path
 /// and its name is treated as the config file.
+/// If the file has no parent directory (e.g., a simple filename like "config.yaml")
+/// or its parent is an empty string, the current directory is used as the project path.
 ///
 /// # Arguments
 ///
@@ -822,26 +824,51 @@ fn parse_name_and_script(name_and_script: &str) -> (&str, Option<&str>) {
 ///
 /// Tuple of (Option<PathBuf>, Option<String>) for project path and config file name
 pub fn parse_file_path(file: Option<PathBuf>) -> (Option<PathBuf>, Option<String>) {
-    match file {
+    let (project_path, config_name) = match file {
         Some(file_path) => {
             if file_path.is_dir() {
+                tracing::debug!("File path is a directory: {:?}", file_path);
                 // If it's a directory, it's the project path
                 (Some(file_path), None)
             } else {
-                // Otherwise, the parent directory is the project path
-                // and the file name is the config file name
+                // Get the config file name
                 let config_name = file_path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .map(String::from);
 
-                let project_path = file_path.parent().map(PathBuf::from);
+                // Get the parent directory
+                let parent = file_path.parent();
+
+                // Handle the cases:
+                // 1. No parent (None)
+                // 2. Empty parent (Some(""))
+                // 3. Valid parent directory
+                let project_path = match parent {
+                    Some(p) if p.as_os_str().is_empty() => {
+                        // Parent is empty string, use current directory
+                        Some(PathBuf::from("."))
+                    }
+                    Some(p) => {
+                        // Valid parent directory
+                        Some(PathBuf::from(p))
+                    }
+                    None => {
+                        // No parent, use current directory
+                        Some(PathBuf::from("."))
+                    }
+                };
+
+                tracing::debug!("Parent path: {:?}", parent);
+                tracing::debug!("Project path: {:?}", project_path);
 
                 (project_path, config_name)
             }
         }
         None => (None, None),
-    }
+    };
+
+    (project_path, config_name)
 }
 
 /// Parse a duration string like "1s", "1m", "3h", "2d" into a chrono::Duration
