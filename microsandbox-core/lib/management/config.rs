@@ -554,8 +554,8 @@ pub async fn apply_image_defaults(
         }
 
         // Apply entrypoint and cmd as command if no command is defined
-        if sandbox_config.get_command().is_none() {
-            let mut cmd_line = String::new();
+        if sandbox_config.get_command().is_empty() {
+            let mut command_vec: Vec<String> = Vec::new();
             let mut has_entrypoint_or_cmd = false;
 
             // Try to use entrypoint and cmd from image config
@@ -563,47 +563,38 @@ pub async fn apply_image_defaults(
                 if let Ok(entrypoint) = serde_json::from_str::<Vec<String>>(entrypoint_json) {
                     if !entrypoint.is_empty() {
                         has_entrypoint_or_cmd = true;
-
-                        // Just join the entrypoint components - shell will handle the parsing
-                        cmd_line = entrypoint.join(" ");
+                        command_vec = entrypoint;
 
                         // Add CMD args if they exist
                         if let Some(cmd_json) = &config.config_cmd_json {
                             if let Ok(cmd) = serde_json::from_str::<Vec<String>>(cmd_json) {
                                 if !cmd.is_empty() {
-                                    // Just add the cmd components to the command line
-                                    if !cmd_line.is_empty() {
-                                        cmd_line.push(' ');
-                                    }
-                                    cmd_line.push_str(&cmd.join(" "));
+                                    command_vec.extend(cmd);
                                 }
                             }
                         }
 
-                        tracing::debug!("entrypoint exec content: {}", cmd_line);
+                        tracing::debug!("entrypoint exec content: {:?}", command_vec);
                     }
                 }
             } else if let Some(cmd_json) = &config.config_cmd_json {
                 if let Ok(cmd) = serde_json::from_str::<Vec<String>>(cmd_json) {
                     if !cmd.is_empty() {
                         has_entrypoint_or_cmd = true;
-
-                        // Just join the cmd components - shell will handle the parsing
-                        cmd_line = cmd.join(" ");
-
-                        tracing::debug!("cmd exec content: {}", cmd_line);
+                        command_vec = cmd;
+                        tracing::debug!("cmd exec content: {:?}", command_vec);
                     }
                 }
             }
 
             // If we found an entrypoint or cmd, set it as the command
             if has_entrypoint_or_cmd {
-                tracing::debug!("setting command to: {}", cmd_line);
-                sandbox_config.command = Some(cmd_line);
+                tracing::debug!("setting command to: {:?}", command_vec);
+                sandbox_config.command = command_vec;
             } else if let Some(shell_value) = &sandbox_config.shell {
                 // If no entrypoint or cmd, use shell as fallback command
                 tracing::debug!("using shell as fallback command");
-                sandbox_config.command = Some(shell_value.clone());
+                sandbox_config.command = vec![shell_value.clone()];
             }
         }
 

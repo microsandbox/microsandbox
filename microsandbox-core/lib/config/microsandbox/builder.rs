@@ -71,7 +71,7 @@ pub struct SandboxBuilder<I> {
     workdir: Option<Utf8UnixPathBuf>,
     shell: Option<String>,
     scripts: HashMap<String, String>,
-    command: Option<String>,
+    command: Vec<String>,
     imports: HashMap<String, Utf8UnixPathBuf>,
     exports: HashMap<String, Utf8UnixPathBuf>,
     scope: NetworkScope,
@@ -241,8 +241,8 @@ impl<I> SandboxBuilder<I> {
     }
 
     /// Sets the command for the sandbox
-    pub fn command(mut self, command: impl AsRef<str>) -> SandboxBuilder<I> {
-        self.command = Some(command.as_ref().to_string());
+    pub fn command(mut self, command: impl IntoIterator<Item = String>) -> SandboxBuilder<I> {
+        self.command = command.into_iter().collect();
         self
     }
 
@@ -317,7 +317,7 @@ impl Default for SandboxBuilder<()> {
             workdir: None,
             shell: Some(DEFAULT_SHELL.to_string()),
             scripts: HashMap::new(),
-            command: None,
+            command: Vec::new(),
             imports: HashMap::new(),
             exports: HashMap::new(),
             scope: NetworkScope::default(),

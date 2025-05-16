@@ -859,9 +859,6 @@ pub fn parse_file_path(file: Option<PathBuf>) -> (Option<PathBuf>, Option<String
                     }
                 };
 
-                tracing::debug!("Parent path: {:?}", parent);
-                tracing::debug!("Project path: {:?}", project_path);
-
                 (project_path, config_name)
             }
         }

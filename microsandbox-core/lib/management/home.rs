@@ -270,12 +270,10 @@ pub async fn install(
 
     // Override the exec command if provided
     if let Some(exec) = exec {
-        let args = args.join(" ");
-        if args.is_empty() {
-            sandbox.set_command(Some(exec.to_string()));
-        } else {
-            sandbox.set_command(Some(format!("{} {}", exec, args)));
-        };
+        let mut command = Vec::with_capacity(args.len() + 1);
+        command.push(exec.to_string());
+        command.extend(args);
+        sandbox.set_command(command);
     }
 
     // Create the microsandbox config with the sandbox

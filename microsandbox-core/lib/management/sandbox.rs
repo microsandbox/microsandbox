@@ -736,20 +736,21 @@ pub fn determine_exec_path_and_args(
                         format!("{}/{}/{}", SANDBOX_DIR, SCRIPTS_DIR, START_SCRIPT_NAME);
                     Ok((script_path, Vec::new()))
                 }
-                None => match sandbox_config.get_command() {
-                    Some(command) => {
-                        // Split the command string into command and arguments
-                        let mut parts = command.split_whitespace();
-                        let cmd = parts.next().unwrap_or("").to_string();
-                        let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+                None => {
+                    let command = sandbox_config.get_command();
+                    if !command.is_empty() {
+                        // First element is the command, rest are arguments
+                        let cmd = command[0].clone();
+                        let args = command.iter().skip(1).cloned().collect();
                         Ok((cmd, args))
+                    } else {
+                        sandbox_config
+                            .get_shell()
+                            .as_ref()
+                            .map(|s| (s.to_string(), Vec::new()))
+                            .ok_or(MicrosandboxError::MissingStartOrExecOrShell)
                     }
-                    None => sandbox_config
-                        .get_shell()
-                        .as_ref()
-                        .map(|s| (s.to_string(), Vec::new()))
-                        .ok_or(MicrosandboxError::MissingStartOrExecOrShell),
-                },
+                }
             },
         },
     }
