@@ -340,7 +340,6 @@ async fn check_image_layers(
                         let dir_empty = read_dir.next_entry().await?.is_none();
                         if dir_empty {
                             tracing::warn!("layer {} exists but is empty", digest);
-                            return Ok(false);
                         }
 
                         tracing::info!("layer {} found in layers directory", digest);
