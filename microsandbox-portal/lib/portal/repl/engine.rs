@@ -56,7 +56,10 @@ use super::python;
 #[cfg(feature = "rust")]
 use super::rust;
 
-use super::types::{Cmd, Engine, EngineError, EngineHandle, Language, Line, Resp, Stream};
+use super::types::{Cmd, EngineError, EngineHandle, Language, Line, Resp, Stream};
+
+#[cfg(any(feature = "python", feature = "nodejs", feature = "rust"))]
+use super::types::Engine;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -202,11 +205,13 @@ pub async fn start_engines() -> Result<EngineHandle, EngineError> {
     // Spawn reactor task
     tokio::spawn(async move {
         // Initialize engines asynchronously
+        #[cfg(any(feature = "python", feature = "nodejs", feature = "rust"))]
         let mut engines = initialize_engines()
             .await
             .expect("Failed to initialize engines");
 
         // Process commands until shutdown
+        #[cfg(any(feature = "python", feature = "nodejs", feature = "rust"))]
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 Cmd::Eval {

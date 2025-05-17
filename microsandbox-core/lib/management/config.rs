@@ -3,7 +3,7 @@
 //! This module provides structures and utilities for modifying Microsandbox
 //! configuration.
 
-use microsandbox_utils::MICROSANDBOX_CONFIG_FILENAME;
+use microsandbox_utils::{DEFAULT_SHELL, MICROSANDBOX_CONFIG_FILENAME};
 use nondestructive::yaml;
 use sqlx::{Pool, Sqlite};
 use std::{
@@ -185,6 +185,8 @@ pub async fn add(
                 // Add shell (default if not provided)
                 if let Some(shell_value) = shell {
                     sandbox_mapping.insert_str("shell", shell_value);
+                } else if sandbox_mapping.get_mut("shell").is_none() {
+                    sandbox_mapping.insert_str("shell", DEFAULT_SHELL);
                 }
 
                 // Add volumes if any

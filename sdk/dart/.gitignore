@@ -1,0 +1,32 @@
+# Dart/Flutter specific
+.dart_tool/
+.packages
+.pub/
+build/
+pubspec.lock
+
+# IDE specific files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+
+# Generated files
+*.g.dart
+*.freezed.dart
+
+# Coverage reports
+coverage/
+.test_coverage.dart
+*.lcov
+
+# Documentation
+doc/api/
+
+# Temporary files
+.temp/
+.tmp/
+*.log
+*.bak

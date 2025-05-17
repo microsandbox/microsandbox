@@ -1,0 +1,46 @@
+# Zig build artifacts
+zig-cache/
+zig-out/
+build/
+build-*/
+
+# Release artifacts
+release/
+out/
+
+# Executables and binaries
+*.exe
+*.out
+*.dll
+*.so
+*.dylib
+
+# Generated files
+*.o
+*.obj
+*.a
+*.lib
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Dependency directories
+deps/
+
+# Project specific
+.zigmod
+.zigmod.lock
+
+# Test executables and data
+test_*
+*_test
