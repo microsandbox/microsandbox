@@ -61,4 +61,4 @@ USER $USER_NAME
 WORKDIR /home/$USER_NAME/work
 
 # Set a command that starts portal and keeps the container running
-CMD ["bash", "-c", "echo 'Python environment with microsandbox-portal ready' && portal & tail -f /dev/null"]
+CMD ["bash", "-c", "echo 'Python environment with microsandbox-portal ready' && RUST_LOG=debug portal & tail -f /dev/null"]

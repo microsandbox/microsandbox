@@ -52,7 +52,9 @@
 //! In a real application, you might want to handle errors more gracefully and
 //! implement more sophisticated code execution strategies in REPL environments.
 
-use microsandbox_portal::portal::repl::{start_engines, Language};
+use microsandbox_portal::portal::repl::start_engines;
+#[cfg(any(feature = "python", feature = "nodejs"))]
+use microsandbox_portal::portal::repl::Language;
 use std::error::Error;
 
 //--------------------------------------------------------------------------------------------------

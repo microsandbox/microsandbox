@@ -487,13 +487,6 @@ async fn sandbox_start_impl(state: AppState, params: SandboxStartParams) -> Serv
                 );
             }
 
-            if let Some(scope) = &config.scope {
-                sandbox_map.insert(
-                    serde_yaml::Value::String("scope".to_string()),
-                    serde_yaml::Value::String(scope.clone()),
-                );
-            }
-
             // Replace or add the sandbox in the config
             sandboxes_map.insert(
                 serde_yaml::Value::String(sandbox.clone()),

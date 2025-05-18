@@ -153,9 +153,9 @@ pub struct SandboxConfig {
 
     /// The exec command to run
     pub exec: Option<String>,
-
-    /// The network scope for the sandbox
-    pub scope: Option<String>,
+    // SECURITY: Needs networking namespacing to be implemented
+    // /// The network scope for the sandbox
+    // pub scope: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------

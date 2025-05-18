@@ -51,4 +51,4 @@ USER node
 WORKDIR /home/node/work
 
 # Set a command that starts portal and keeps the container running
-CMD ["bash", "-c", "echo 'Node.js environment with microsandbox-portal ready' && portal & tail -f /dev/null"]
+CMD ["bash", "-c", "echo 'Node.js environment with microsandbox-portal ready' && RUST_LOG=debug portal & tail -f /dev/null"]
