@@ -56,13 +56,13 @@ Get started with microsandbox in three straightforward steps.
 
 <h4><img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;&nbsp;<span>1</span>&nbsp;&nbsp;·&nbsp;&nbsp;Get API Key</h3>
 
-  — Get your API key <a href="./SELF_HOSTING.md">[→]</a>.
+— Get your API key <a href="./SELF_HOSTING.md">[→]</a>.
 
-  — Configure API key environment variable, for example by setting it in your `.env` file.
+— Configure API key environment variable, for example by setting it in your `.env` file.
 
-  ```env
-  MSB_API_KEY=msb_***
-  ```
+```env
+MSB_API_KEY=msb_***
+```
 
 ##
 
@@ -78,6 +78,12 @@ npm install microsandbox
 
 ```sh
 pip install microsandbox
+```
+
+_**or**_
+
+```sh
+uv add microsandbox
 ```
 
 ##### Rust
