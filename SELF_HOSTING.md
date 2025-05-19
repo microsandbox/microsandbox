@@ -1,6 +1,6 @@
 # <sub><img height="18" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;SELF HOSTING&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
 
-With self hosting, your data and code stay on your servers making security compliance easy. Also, having a local setup lets you test and move through ideas fast while debugging issues more reliably.
+With self hosting, your data and code stay on your servers making security compliance easy. Also, having a local setup allows you to test and move through ideas fast.
 
 Let's help you start your first self-hosted sandbox server. It's easy!
 
@@ -34,6 +34,10 @@ This will install the `msb` CLI tool, which helps you manage sandboxes locally.
 ```sh
 msb server start
 ```
+
+> [!TIP]
+>
+> Use `--detach` flag to run the server in the background.
 
 ##
 
