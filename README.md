@@ -56,9 +56,9 @@ Get started with microsandbox in three straightforward steps.
 
 <h4><img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;&nbsp;<span>1</span>&nbsp;&nbsp;·&nbsp;&nbsp;Get API Key</h3>
 
-— Get your API key <a href="./SELF_HOSTING.md">[→]</a>.
+· — Get your API key <a href="./SELF_HOSTING.md">[→]</a>
 
-— Configure API key environment variable, for example by setting it in your `.env` file.
+· — Configure API key environment variable, for example by setting it in your `.env` file
 
 ```env
 MSB_API_KEY=msb_***
@@ -198,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error> {
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;SELF HOSTING&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
 
-With self hosting, your data and code stay on your servers making security compliance easy. Also, having a local setup lets you test and move through ideas fast while debugging issues more reliably.
+With self hosting, your data and code stay on your servers making security compliance easy. Also, having a local setup allows you to test and move through ideas fast.
 
 Let's help you start your first self-hosted sandbox server. It's easy!
 
@@ -232,6 +232,10 @@ This will install the `msb` CLI tool, which helps you manage sandboxes locally.
 ```sh
 msb server start
 ```
+
+> [!TIP]
+>
+> Use `--detach` flag to run the server in the background.
 
 ##
 
