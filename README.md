@@ -32,10 +32,10 @@ Building AI agents that generate and execute code? — You'll need **secure sand
 
 To run your ai-generated code, you could try a few things:
 
-- **Run directly on machine?** — Risky for your user's machine
+- **Run directly on machine?** — Risky for the machine <a href="https://horizon3.ai/attack-research/disclosures/unsafe-at-any-speed-abusing-python-exec-for-unauth-rce-in-langflow-ai/">[→]</a>
 - **Run in docker containers?** — Limited isolation for untrusted code <a href="./Microsandbox-vs-Docker.md">[→]</a>
 - **Run in traditional VMs?** — Minutes to start up, heavy resource usage
-- **Run in cloud sandboxes?** — Can get expensive fast and less control over your infra
+- **Run in cloud sandboxes?** — Less control over your infra and lose rapid dev cycles
 
 **microsandbox** gives you the best of all the worlds, all on your own infrastructure:
 
@@ -57,10 +57,9 @@ Get started with microsandbox in three straightforward steps.
 <h4><img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;&nbsp;<span>1</span>&nbsp;&nbsp;·&nbsp;&nbsp;Get API Key</h3>
 
 1. Get your [API key](#self-hosting).
-2. Configure API key and URL environment variables or save them to a `.env` file within your project.
+2. Configure API key environment variable.
 
 ```env
-MSB_SERVER_URL=http://localhost:5555
 MSB_API_KEY=msb_***
 ```
 
@@ -173,6 +172,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error> {
 ```
 
 > [!NOTE]
+>
+> When you run the code for the first time, it will take a while to download the sandbox image unless you already have it downloaded. After that, it will run much faster.
 >
 > For more examples covering multiple languages and sandbox types, [check out the examples folder](./sdk-examples)
 
