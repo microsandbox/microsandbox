@@ -131,10 +131,12 @@ import { NodeSandbox } from "microsandbox";
 
 const sb = await NodeSandbox.create();
 
-await sb.run("var name = 'JavaScript'");
-await sb.run("console.log(`Hello ${name}!`)");
+var result = await sb.run("var name = 'JavaScript'");
+var result = await sb.run("console.log(`Hello ${name}!`)");
 
-console.log(await sb.output()); // prints Hello JavaScript!
+console.log(await result.output()); // prints Hello JavaScript!
+
+await sb.stop();
 ```
 
 ##### Python
@@ -145,10 +147,10 @@ from microsandbox import PythonSandbox
 
 async def main():
     async with PythonSandbox.create() as sb:
-        await sb.run("name = 'Python'")
-        await sb.run("print(f'Hello {name}!')")
+        result = await sb.run("name = 'Python'")
+        result = await sb.run("print(f'Hello {name}!')")
 
-    print(await sb.output()) # prints Hello Python!
+    print(await result.output()) # prints Hello Python!
 
 asyncio.run(main())
 ```
@@ -162,10 +164,10 @@ use microsandbox::RustSandbox;
 async fn main() -> Result<(), Box<dyn std::error::Error> {
     let sb = RustSandbox::create().await?;
 
-    sb.run(r#"let name = "Rust";"#).await?;
-    sb.run(r#"println!("Hello {name}");"#).await?;
+    var result = sb.run(r#"let name = "Rust";"#).await?;
+    var result = sb.run(r#"println!("Hello {name}");"#).await?;
 
-    println!("{}", sb.output().await?); // prints Hello Rust!
+    println!("{}", result.output().await?); // prints Hello Rust!
 
     Ok(())
 }
