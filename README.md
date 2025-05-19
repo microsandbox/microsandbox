@@ -169,16 +169,16 @@ asyncio.run(main())
 ##### Rust
 
 ```rs
-use microsandbox::RustSandbox;
+use microsandbox::PythonSandbox;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error> {
-    let sb = RustSandbox::create().await?;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let sb = PythonSandbox::create().await?;
 
-    let exec = sb.run(r#"let name = "Rust";"#).await?;
-    let exec = sb.run(r#"println!("Hello {name}");"#).await?;
+    let exec = sb.run(r#"name = "Python""#).await?;
+    let exec = sb.run(r#"print(f"Hello {name}")"#).await?;
 
-    println!("{}", exec.output().await?); // prints Hello Rust!
+    println!("{}", exec.output().await?); // prints Hello Python!
 
     Ok(())
 }
