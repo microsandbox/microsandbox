@@ -15,6 +15,7 @@
 #   -u, --username USERNAME   Docker registry username (required)
 #   -o, --org ORGANIZATION    Docker registry organization/account (defaults to username)
 #   -t, --tag TAG             Tag to use for the images (default: latest)
+#   -l, --latest              When used with -t/--tag, also publish as latest
 #   -m, --multi-arch          Create and push multi-arch manifests (requires prior builds on different architectures)
 #   -r, --registry REGISTRY   Docker registry to use (default: docker.io)
 #   --dry-run                 Don't actually push images, just show what would be done
@@ -22,6 +23,7 @@
 # Examples:
 #   ./scripts/publish_sdk_images.sh -u myuser -s python                # Push python image to docker.io/myuser/msb-python:latest
 #   ./scripts/publish_sdk_images.sh -u myuser -o myorg -s nodejs -t v1 # Push nodejs image to docker.io/myorg/msb-nodejs:v1
+#   ./scripts/publish_sdk_images.sh -u myuser -t v1 -l -s python       # Push python image as both v1 and latest tags
 #   ./scripts/publish_sdk_images.sh -u myuser --multi-arch -a          # Push all multi-arch images
 #
 # Note: For multi-arch manifests, you need to have built the images on different
@@ -50,6 +52,7 @@ TAG="latest"
 REGISTRY="docker.io"
 MULTI_ARCH=false
 DRY_RUN=false
+PUBLISH_LATEST=false
 
 # Display usage information
 function show_usage {
@@ -62,6 +65,7 @@ function show_usage {
     echo "  -u, --username USERNAME   Docker registry username (required)"
     echo "  -o, --org ORGANIZATION    Docker registry organization/account (defaults to username)"
     echo "  -t, --tag TAG             Tag to use for the images (default: latest)"
+    echo "  -l, --latest              When used with -t/--tag, also publish as latest"
     echo "  -m, --multi-arch          Create and push multi-arch manifests"
     echo "  -r, --registry REGISTRY   Docker registry to use (default: docker.io)"
     echo "  --dry-run                 Don't actually push images, just show what would be done"
@@ -69,6 +73,7 @@ function show_usage {
     echo "Examples:"
     echo "  $0 -u myuser -s python                # Push python image to docker.io/myuser/msb-python:latest"
     echo "  $0 -u myuser -o myorg -s nodejs -t v1 # Push nodejs image to docker.io/myorg/msb-nodejs:v1"
+    echo "  $0 -u myuser -t v1 -l -s python       # Push python image as both v1 and latest tags"
     echo "  $0 -u myuser --multi-arch -a          # Push all multi-arch images"
     echo
 }
@@ -161,15 +166,28 @@ publish_sdk_image() {
 
     # If multi-arch is enabled, we'll handle that in a separate function
     if [ "$MULTI_ARCH" = false ]; then
-        # Also tag as latest for convenience
-        local latest_tag="${remote_image}:${TAG}"
-        info "Tagging ${local_image} as ${latest_tag}"
+        # Tag with specified tag
+        local tag_version="${remote_image}:${TAG}"
+        info "Tagging ${local_image} as ${tag_version}"
         if [ "$DRY_RUN" = false ]; then
-            docker tag "${local_image}" "${latest_tag}"
-            docker push "${latest_tag}"
+            docker tag "${local_image}" "${tag_version}"
+            docker push "${tag_version}"
         else
-            info "[DRY RUN] Would tag: docker tag ${local_image} ${latest_tag}"
-            info "[DRY RUN] Would push: docker push ${latest_tag}"
+            info "[DRY RUN] Would tag: docker tag ${local_image} ${tag_version}"
+            info "[DRY RUN] Would push: docker push ${tag_version}"
+        fi
+
+        # If --latest flag is set and we're using a custom tag, also tag as latest
+        if [ "$PUBLISH_LATEST" = true ] && [ "$TAG" != "latest" ]; then
+            local latest_tag="${remote_image}:latest"
+            info "Also tagging ${local_image} as ${latest_tag}"
+            if [ "$DRY_RUN" = false ]; then
+                docker tag "${local_image}" "${latest_tag}"
+                docker push "${latest_tag}"
+            else
+                info "[DRY RUN] Would tag: docker tag ${local_image} ${latest_tag}"
+                info "[DRY RUN] Would push: docker push ${latest_tag}"
+            fi
         fi
     fi
 
@@ -210,7 +228,7 @@ create_multi_arch_manifest() {
         return 1
     fi
 
-    # Create and push the manifest
+    # Create and push the manifest for the specified tag
     info "Creating manifest: ${manifest_tag}"
     if [ "$DRY_RUN" = false ]; then
         # First remove any existing manifest with the same name
@@ -225,6 +243,39 @@ create_multi_arch_manifest() {
     else
         info "[DRY RUN] Would create manifest: ${manifest_cmd}"
         info "[DRY RUN] Would push manifest: docker manifest push ${manifest_tag}"
+    fi
+
+    # If --latest flag is set and we're using a custom tag, also create latest manifest
+    if [ "$PUBLISH_LATEST" = true ] && [ "$TAG" != "latest" ]; then
+        local latest_manifest_tag="${remote_image}:latest"
+        local latest_manifest_cmd="docker manifest create ${latest_manifest_tag}"
+
+        # Use the same architecture-specific images but tag them as latest
+        for arch in "${archs[@]}"; do
+            local arch_tag="${remote_image}:${TAG}-${arch}"
+            if [ "$DRY_RUN" = false ]; then
+                if ! docker manifest inspect "${arch_tag}" &> /dev/null; then
+                    continue
+                fi
+            fi
+            latest_manifest_cmd="${latest_manifest_cmd} ${arch_tag}"
+        done
+
+        info "Creating latest manifest: ${latest_manifest_tag}"
+        if [ "$DRY_RUN" = false ]; then
+            # First remove any existing manifest with the same name
+            docker manifest rm "${latest_manifest_tag}" 2>/dev/null || true
+
+            # Create the new manifest
+            eval ${latest_manifest_cmd}
+
+            # Push the manifest
+            info "Pushing latest manifest: ${latest_manifest_tag}"
+            docker manifest push "${latest_manifest_tag}"
+        else
+            info "[DRY RUN] Would create manifest: ${latest_manifest_cmd}"
+            info "[DRY RUN] Would push manifest: docker manifest push ${latest_manifest_tag}"
+        fi
     fi
 
     info "Successfully created and pushed multi-arch manifest for ${sdk}"
@@ -294,6 +345,9 @@ while [[ $# -gt 0 ]]; do
             fi
             TAG="$2"
             shift
+            ;;
+        -l|--latest)
+            PUBLISH_LATEST=true
             ;;
         -r|--registry)
             if [ -z "$2" ] || [[ "$2" == -* ]]; then
