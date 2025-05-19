@@ -12,6 +12,113 @@ import aiohttp
 from dotenv import load_dotenv
 
 
+class Execution:
+    """
+    Represents a code execution in a sandbox environment.
+
+    This class provides access to the results and output of code
+    that was executed in a sandbox.
+    """
+
+    def __init__(
+        self,
+        sandbox_name: str,
+        namespace: str,
+        execution_id: str,
+        server_url: str,
+        session: aiohttp.ClientSession,
+        api_key: Optional[str] = None,
+    ):
+        """
+        Initialize an execution instance.
+
+        Args:
+            sandbox_name: Name of the sandbox where execution occurred
+            namespace: Namespace of the sandbox
+            execution_id: Unique ID for this execution
+            server_url: URL of the Microsandbox server
+            session: HTTP session for API requests
+            api_key: Optional API key for authentication
+        """
+        self._sandbox_name = sandbox_name
+        self._namespace = namespace
+        self._execution_id = execution_id
+        self._server_url = server_url
+        self._session = session
+        self._api_key = api_key
+        self._output_lines = []
+        self._output_fetched = False
+
+    async def _fetch_output(self) -> None:
+        """
+        Fetch the output from the execution.
+
+        Raises:
+            RuntimeError: If fetching output fails
+        """
+        if not self._execution_id:
+            return
+
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        request_data = {
+            "jsonrpc": "2.0",
+            "method": "sandbox.repl.getOutput",
+            "params": {
+                "sandbox": self._sandbox_name,
+                "namespace": self._namespace,
+                "execution_id": self._execution_id,
+            },
+            "id": str(uuid.uuid4()),
+        }
+
+        try:
+            async with self._session.post(
+                f"{self._server_url}/api/v1/rpc",
+                json=request_data,
+                headers=headers,
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise RuntimeError(f"Failed to get output: {error_text}")
+
+                response_data = await response.json()
+                if "error" in response_data:
+                    raise RuntimeError(
+                        f"Failed to get output: {response_data['error']['message']}"
+                    )
+
+                result = response_data.get("result", {})
+                self._output_lines = result.get("lines", [])
+                self._output_fetched = True
+        except aiohttp.ClientError as e:
+            raise RuntimeError(f"Failed to fetch output: {e}")
+
+    async def output(self) -> str:
+        """
+        Get the output from the execution.
+
+        Returns:
+            String containing the output of the execution
+
+        Raises:
+            RuntimeError: If fetching output fails
+        """
+        # Ensure we have the latest output
+        if not self._output_fetched:
+            await self._fetch_output()
+
+        # Combine the output lines into a single string
+        output_text = ""
+        for line in self._output_lines:
+            if line.get("stream") == "stdout":
+                output_text += line.get("text", "") + "\n"
+
+        return output_text.rstrip()
+
+
 class BaseSandbox(ABC):
     """
     Base sandbox environment for executing code safely.
@@ -45,8 +152,6 @@ class BaseSandbox(ABC):
         self._sandbox_name = sandbox_name or f"sandbox-{uuid.uuid4().hex[:8]}"
         self._api_key = api_key or os.environ.get("MSB_API_KEY")
         self._session = None
-        self._execution_id = None
-        self._output_lines = []
         self._is_started = False
 
     @abstractmethod
@@ -199,7 +304,7 @@ class BaseSandbox(ABC):
             raise RuntimeError(f"Failed to communicate with Microsandbox server: {e}")
 
     @abstractmethod
-    async def run(self, code: str) -> str:
+    async def run(self, code: str):
         """
         Execute code in the sandbox.
 
@@ -207,80 +312,12 @@ class BaseSandbox(ABC):
             code: Code to execute
 
         Returns:
-            Execution ID that can be used to retrieve output
+            An Execution object representing the executed code
 
         Raises:
             RuntimeError: If execution fails
         """
         pass
-
-    async def _fetch_output(self) -> None:
-        """
-        Fetch the output from the last execution.
-
-        Raises:
-            RuntimeError: If fetching output fails
-        """
-        if not self._execution_id:
-            return
-
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-
-        request_data = {
-            "jsonrpc": "2.0",
-            "method": "sandbox.repl.getOutput",
-            "params": {
-                "sandbox": self._sandbox_name,
-                "namespace": self._namespace,
-                "execution_id": self._execution_id,
-            },
-            "id": str(uuid.uuid4()),
-        }
-
-        try:
-            async with self._session.post(
-                f"{self._server_url}/api/v1/rpc",
-                json=request_data,
-                headers=headers,
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise RuntimeError(f"Failed to get output: {error_text}")
-
-                response_data = await response.json()
-                if "error" in response_data:
-                    raise RuntimeError(
-                        f"Failed to get output: {response_data['error']['message']}"
-                    )
-
-                result = response_data.get("result", {})
-                self._output_lines = result.get("lines", [])
-        except aiohttp.ClientError as e:
-            raise RuntimeError(f"Failed to fetch output: {e}")
-
-    async def output(self) -> str:
-        """
-        Get the output from the last execution.
-
-        Returns:
-            String containing the output of the last execution
-
-        Raises:
-            RuntimeError: If fetching output fails
-        """
-        # Ensure we have the latest output
-        if self._execution_id:
-            await self._fetch_output()
-
-        # Combine the output lines into a single string
-        output_text = ""
-        for line in self._output_lines:
-            if line.get("stream") == "stdout":
-                output_text += line.get("text", "") + "\n"
-
-        return output_text.rstrip()
 
 
 class PythonSandbox(BaseSandbox):
@@ -297,7 +334,7 @@ class PythonSandbox(BaseSandbox):
         """
         return "appcypher/msb-python"
 
-    async def run(self, code: str) -> str:
+    async def run(self, code: str) -> Execution:
         """
         Execute Python code in the sandbox.
 
@@ -305,7 +342,7 @@ class PythonSandbox(BaseSandbox):
             code: Python code to execute
 
         Returns:
-            Execution ID that can be used to retrieve output
+            An Execution object that represents the executed code
 
         Raises:
             RuntimeError: If the sandbox is not started or execution fails
@@ -346,10 +383,16 @@ class PythonSandbox(BaseSandbox):
                     )
 
                 result = response_data.get("result", {})
-                self._execution_id = result.get("execution_id")
+                execution_id = result.get("execution_id")
 
-                await self._fetch_output()
-
-                return self._execution_id
+                # Create and return an Execution object
+                return Execution(
+                    sandbox_name=self._sandbox_name,
+                    namespace=self._namespace,
+                    execution_id=execution_id,
+                    server_url=self._server_url,
+                    session=self._session,
+                    api_key=self._api_key,
+                )
         except aiohttp.ClientError as e:
             raise RuntimeError(f"Failed to execute code: {e}")

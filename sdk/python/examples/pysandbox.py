@@ -39,8 +39,10 @@ arr = np.random.rand(1000, 1000)
 result = np.mean(arr)
 print(f'Mean of random 1000x1000 array: {result:.4f}')
 """
-        await sandbox.run(code)
-        print("Output:", await sandbox.output())
+        execution = await sandbox.run(code)
+        output = await execution.output()
+        print("Output:", output)
+
 
 async def example_explicit_lifecycle():
     """Example using explicit lifecycle management."""
@@ -63,16 +65,19 @@ async def example_explicit_lifecycle():
             cpus=2.0,  # 2 CPU cores
         )
 
-        # Run multiple code blocks
-        await sandbox.run("x = 42")
-        await sandbox.run("y = [i**2 for i in range(10)]")
-        await sandbox.run("print(f'x = {x}')\nprint(f'y = {y}')")
+        # Run multiple code blocks with variable assignments
+        execution1 = await sandbox.run("x = 42")
+        execution2 = await sandbox.run("y = [i**2 for i in range(10)]")
+        execution3 = await sandbox.run("print(f'x = {x}')\nprint(f'y = {y}')")
 
-        print("Output:", await sandbox.output())
+        print("Output:", await execution3.output())
 
         # Demonstrate error handling
         try:
-            await sandbox.run("1/0")  # This will raise a ZeroDivisionError
+            error_execution = await sandbox.run(
+                "1/0"
+            )  # This will raise a ZeroDivisionError
+            print("Error output:", await error_execution.output())
         except RuntimeError as e:
             print("Caught error:", e)
 
@@ -112,16 +117,31 @@ hist, bins = np.histogram(data, bins=30)
 print(f'\\nHistogram Bins: {bins[0]:.2f} to {bins[-1]:.2f}')
 print(f'Max Frequency: {max(hist)}')
 """
-        await sandbox.run(code)
-        print("Output:", await sandbox.output())
+        execution = await sandbox.run(code)
+        print("Output:", await execution.output())
+
+
+async def example_execution_chaining():
+    """Example demonstrating execution chaining with variables."""
+    print("\n=== Execution Chaining Example ===")
+
+    async with PythonSandbox.create(sandbox_name="sandbox-chain") as sandbox:
+        # Execute a sequence of related code blocks
+        await sandbox.run("name = 'Python'")
+        await sandbox.run("version = '3.9'")
+        exec = await sandbox.run("print(f'Hello from {name} {version}!')")
+
+        # Only get output from the final execution
+        print("Output:", await exec.output())
 
 
 async def main():
     """Run all examples."""
     try:
         await example_context_manager()
-        # await example_explicit_lifecycle()
-        # await example_scientific_computing()
+        await example_explicit_lifecycle()
+        await example_scientific_computing()
+        await example_execution_chaining()
     except Exception as e:
         print(f"Error running examples: {e}")
 
