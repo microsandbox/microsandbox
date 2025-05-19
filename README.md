@@ -33,7 +33,7 @@ Building AI agents that generate and execute code? — You'll need **secure sand
 To run your ai-generated code, you could try a few things:
 
 - **Run directly on machine?** — Risky for the machine <a href="https://horizon3.ai/attack-research/disclosures/unsafe-at-any-speed-abusing-python-exec-for-unauth-rce-in-langflow-ai/">[→]</a>
-- **Run in docker containers?** — Limited isolation for untrusted code <a href="./Microsandbox-vs-Docker.md">[→]</a>
+- **Run in docker containers?** — Limited isolation for untrusted code <a href="./MSB_V_DOCKER.md">[→]</a>
 - **Run in traditional VMs?** — Minutes to start up, heavy resource usage
 - **Run in cloud sandboxes?** — Less control over your infra and lose rapid dev cycles
 
@@ -56,12 +56,12 @@ Get started with microsandbox in three straightforward steps.
 
 <h4><img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;&nbsp;<span>1</span>&nbsp;&nbsp;·&nbsp;&nbsp;Get API Key</h3>
 
-1. Get your [API key](#self-hosting).
-2. Configure API key environment variable, for example by setting it in your `.env` file.
+- Get your API key <a href="./SELF_HOSTING.md">[→]</a>.
+- Configure API key environment variable, for example by setting it in your `.env` file.
 
-```env
-MSB_API_KEY=msb_***
-```
+  ```env
+  MSB_API_KEY=msb_***
+  ```
 
 ##
 
