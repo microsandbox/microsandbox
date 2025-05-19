@@ -161,9 +161,9 @@ async fn main() -> MicrosandboxCliResult<()> {
         Some(MicrosandboxSubcommand::Uninstall { script }) => {
             handlers::uninstall_subcommand(script).await?;
         }
-        Some(MicrosandboxSubcommand::Apply { file }) => {
+        Some(MicrosandboxSubcommand::Apply { file, detach }) => {
             let (path, config) = handlers::parse_file_path(file);
-            orchestra::apply(path.as_deref(), config.as_deref()).await?;
+            orchestra::apply(path.as_deref(), config.as_deref(), detach).await?;
         }
         Some(MicrosandboxSubcommand::Up {
             sandbox,
@@ -171,8 +171,9 @@ async fn main() -> MicrosandboxCliResult<()> {
             group,
             names,
             file,
+            detach,
         }) => {
-            handlers::up_subcommand(sandbox, build, group, names, file).await?;
+            handlers::up_subcommand(sandbox, build, group, names, file, detach).await?;
         }
         Some(MicrosandboxSubcommand::Down {
             sandbox,

@@ -298,12 +298,13 @@ pub async fn up_subcommand(
     group: bool,
     names: Vec<String>,
     file: Option<PathBuf>,
+    detach: bool,
 ) -> MicrosandboxCliResult<()> {
     trio_conflict_error(build, sandbox, group, "up", Some("[NAMES]"));
     unsupported_build_group_error(build, group, "up", Some("[NAMES]"));
 
     let (path, config) = parse_file_path(file);
-    orchestra::up(names, path.as_deref(), config.as_deref()).await?;
+    orchestra::up(names, path.as_deref(), config.as_deref(), detach).await?;
 
     Ok(())
 }

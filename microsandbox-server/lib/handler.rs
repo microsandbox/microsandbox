@@ -577,6 +577,7 @@ async fn sandbox_start_impl(state: AppState, params: SandboxStartParams) -> Serv
         vec![sandbox.clone()],
         Some(&namespace_dir),
         Some(config_file),
+        false,
     )
     .await
     .map_err(|e| {

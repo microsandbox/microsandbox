@@ -410,6 +410,10 @@ pub enum MicrosandboxSubcommand {
         /// Path to the sandbox file or the project directory
         #[arg(short, long)]
         file: Option<PathBuf>,
+
+        /// Run sandboxes in the background
+        #[arg(short, long)]
+        detach: bool,
     },
 
     /// Run a project's sandboxes
@@ -427,13 +431,16 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         group: bool,
 
-        /// Names of components to start
-        #[arg(required = true)]
+        /// Names of components to start. If omitted, starts all sandboxes defined in the configuration.
         names: Vec<String>,
 
         /// Path to the sandbox file or the project directory
         #[arg(short, long)]
         file: Option<PathBuf>,
+
+        /// Run sandboxes in the background
+        #[arg(short, long)]
+        detach: bool,
     },
 
     /// Stop a project's sandboxes
