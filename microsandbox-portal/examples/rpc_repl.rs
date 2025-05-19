@@ -18,7 +18,7 @@
 //!
 //! ```bash
 //! # From the monocore directory:
-//! cargo run --bin portal --features "python nodejs rust"
+//! cargo run --bin portal --features "python nodejs"
 //! ```
 //!
 //! Then, in another terminal, run this example:
@@ -33,7 +33,6 @@
 //! - Language features enabled on the server:
 //!   - Python: Python interpreter installed and available in PATH
 //!   - Node.js: Node.js installed and available in PATH
-//!   - Rust: No additional requirements (uses evcxr)
 //!
 //! # Example Output
 //!
@@ -253,57 +252,6 @@ for (let i = 0; i < 5; i++) {
     // Print the output lines directly from the run response
     println!("\nOutput:");
     if let Some(output) = js_result.get("output") {
-        print_output_lines(output);
-    } else {
-        println!("No output found in the response.");
-    }
-
-    // Execute Rust code in REPL
-    println!("\n🦀 Running Rust example in REPL:");
-    let rust_code = r#"
-// Define a function to calculate Fibonacci
-fn fibonacci(n: u32) -> u32 {
-    match n {
-        0 => 0,
-        1 => 1,
-        _ => fibonacci(n-1) + fibonacci(n-2),
-    }
-}
-
-// Use the function
-println!("Fibonacci sequence:");
-for i in 0..10 {
-    println!("fib({}) = {}", i, fibonacci(i));
-}
-    "#;
-
-    // Create typed parameters for Rust code execution
-    let rust_params = SandboxReplRunParams {
-        code: rust_code.to_string(),
-        language: "rust".to_string(),
-        timeout: Some(60), // Add a 60 second timeout for more complex computation
-    };
-
-    // Send sandbox.repl.run request
-    let rust_result = match send_rpc_request(&client, "sandbox.repl.run", rust_params).await {
-        Ok(result) => result,
-        Err(e) => {
-            println!("Error running Rust code in REPL: {}", e);
-            json!({})
-        }
-    };
-
-    // Print status
-    let status = rust_result
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-
-    println!("Status: {}", status);
-
-    // Print the output lines directly from the run response
-    println!("\nOutput:");
-    if let Some(output) = rust_result.get("output") {
         print_output_lines(output);
     } else {
         println!("No output found in the response.");

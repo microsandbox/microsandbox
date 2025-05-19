@@ -97,8 +97,6 @@ async fn sandbox_run_impl(state: SharedState, params: Value) -> Result<Value, Po
         "python" => Language::Python,
         #[cfg(feature = "nodejs")]
         "node" | "nodejs" | "javascript" => Language::Node,
-        #[cfg(feature = "rust")]
-        "rust" => Language::Rust,
         _ => {
             // Check if we're being asked for a language that is supported but not enabled via features
             let error_msg = match params.language.to_lowercase().as_str() {
@@ -110,8 +108,6 @@ async fn sandbox_run_impl(state: SharedState, params: Value) -> Result<Value, Po
                     "Node.js language support is not enabled. Recompile with --features nodejs"
                         .to_string()
                 }
-                "rust" => "Rust language support is not enabled. Recompile with --features rust"
-                    .to_string(),
                 _ => format!("Unsupported language: {}", params.language),
             };
             return Err(PortalError::JsonRpc(error_msg));

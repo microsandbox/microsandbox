@@ -10,7 +10,7 @@
 #
 # Options:
 #   -h, --help                Show help message
-#   -s, --sdk SDK_NAME        Publish specific SDK image (rust, python, nodejs)
+#   -s, --sdk SDK_NAME        Publish specific SDK image (python, nodejs)
 #   -a, --all                 Publish all SDK images (default if no SDK specified)
 #   -u, --username USERNAME   Docker registry username (required)
 #   -o, --org ORGANIZATION    Docker registry organization/account (defaults to username)
@@ -43,7 +43,7 @@ NC='\033[0m' # No Color
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # List of available SDKs
-AVAILABLE_SDKS=("rust" "python" "nodejs")
+AVAILABLE_SDKS=("python" "nodejs")
 
 # Default values
 USERNAME=""
@@ -60,7 +60,7 @@ function show_usage {
     echo
     echo "Options:"
     echo "  -h, --help                Show this help message"
-    printf "  -s, --sdk SDK_NAME        Publish specific SDK image (${YELLOW}rust${NC}, ${YELLOW}python${NC}, ${YELLOW}nodejs${NC})\n"
+    printf "  -s, --sdk SDK_NAME        Publish specific SDK image (${YELLOW}python${NC}, ${YELLOW}nodejs${NC})\n"
     echo "  -a, --all                 Publish all SDK images (default if no SDK specified)"
     echo "  -u, --username USERNAME   Docker registry username (required)"
     echo "  -o, --org ORGANIZATION    Docker registry organization/account (defaults to username)"

@@ -9,7 +9,7 @@
 #
 # Options:
 #   -h, --help              Show help message
-#   -s, --sdk SDK_NAME      Build specific SDK image (rust, python, nodejs)
+#   -s, --sdk SDK_NAME      Build specific SDK image (python, nodejs)
 #   -a, --all               Build all SDK images (default if no options provided)
 #
 # The script performs the following tasks:
@@ -20,7 +20,7 @@
 # Examples:
 #   ./scripts/build_sdk_images.sh                # Build all SDK images
 #   ./scripts/build_sdk_images.sh -s python      # Build only the Python SDK image
-#   ./scripts/build_sdk_images.sh -s rust -s nodejs  # Build Rust and Node.js SDK images
+#   ./scripts/build_sdk_images.sh -s nodejs      # Build only the Node.js SDK image
 #
 # All images are built from the project root, using multi-stage builds that
 # compile the portal binary with appropriate language features enabled.
@@ -39,7 +39,7 @@ NC='\033[0m' # No Color
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # List of available SDKs
-AVAILABLE_SDKS=("rust" "python" "nodejs")
+AVAILABLE_SDKS=("python" "nodejs")
 
 # Display usage information
 function show_usage {
@@ -47,13 +47,13 @@ function show_usage {
     echo
     echo "Options:"
     echo "  -h, --help              Show this help message"
-    printf "  -s, --sdk SDK_NAME      Build specific SDK image (${YELLOW}rust${NC}, ${YELLOW}python${NC}, ${YELLOW}nodejs${NC})\n"
+    printf "  -s, --sdk SDK_NAME      Build specific SDK image (${YELLOW}python${NC}, ${YELLOW}nodejs${NC})\n"
     echo "  -a, --all               Build all SDK images (default)"
     echo
     echo "Examples:"
     echo "  $0                      # Build all SDK images"
     echo "  $0 -s python            # Build only the Python SDK image"
-    echo "  $0 -s rust -s nodejs    # Build Rust and Node.js SDK images"
+    echo "  $0 -s nodejs            # Build only the Node.js SDK image"
     echo
 }
 

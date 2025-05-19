@@ -38,9 +38,6 @@
 //!     #[cfg(feature = "nodejs")]
 //!     let js_result = handle.eval("console.log('Hello from JavaScript')", Language::Node)?;
 //!
-//!     #[cfg(feature = "rust")]
-//!     let rust_result = handle.eval("println!(\"Hello from Rust\")", Language::Rust)?;
-//!
 //!     // Shutdown engines when done
 //!     handle.shutdown()?;
 //!     Ok(())
@@ -53,9 +50,6 @@
 //--------------------------------------------------------------------------------------------------
 // Exports
 //--------------------------------------------------------------------------------------------------
-
-#[cfg(feature = "rust")]
-pub mod rust;
 
 #[cfg(feature = "python")]
 pub mod python;

@@ -3,7 +3,7 @@
 //! This example showcases how to use the microsandbox-portal to execute code in REPL
 //! environments with a fixed timeout of 10 seconds. It demonstrates:
 //!
-//! - Executing code in different language REPLs (Python, Node.js, Rust)
+//! - Executing code in different language REPLs (Python, Node.js)
 //! - Setting a fixed timeout for REPL execution
 //! - Handling timeout scenarios with infinite loops or long computations
 //! - Processing execution output and checking for timeout errors
@@ -14,10 +14,10 @@
 //!
 //! ```bash
 //! # Run with all languages enabled
-//! cargo run --example repl_timer --features "python nodejs rust"
+//! cargo run --example repl_timer --features "python nodejs"
 //!
 //! # Run with specific languages
-//! cargo run --example repl_timer --features "python rust"
+//! cargo run --example repl_timer --features "python"
 //! cargo run --example repl_timer --features "nodejs"
 //! ```
 //!
@@ -27,7 +27,6 @@
 //!
 //! - Python: Python interpreter installed and available in PATH
 //! - Node.js: Node.js installed and available in PATH
-//! - Rust: No additional requirements (uses evcxr)
 //!
 //! # Example Output
 //!
@@ -197,67 +196,6 @@ while (true) {
 
         print_output("Node.js infinite loop", &result);
     }
-
-    //     // Example 5: Rust code that completes normally
-    //     #[cfg(feature = "rust")]
-    //     {
-    //         println!("🦀 Rust normal execution:");
-    //         let rust_normal = r#"
-    // use std::thread::sleep;
-    // use std::time::Duration;
-
-    // println!("Rust timer example:");
-    // for i in 1..=5 {
-    //     println!("Second {}", i);
-    //     sleep(Duration::from_secs(1));
-    // }
-    // println!("Rust timer complete!");
-    //         "#;
-
-    //         let result = engine_handle
-    //             .eval(
-    //                 rust_normal,
-    //                 Language::Rust,
-    //                 "rust_normal",
-    //                 Some(TIMEOUT_SECONDS),
-    //             )
-    //             .await?;
-
-    //         print_output("Rust normal", &result);
-    //     }
-
-    //     // Example 6: Rust code with a long computation (should timeout)
-    //     #[cfg(feature = "rust")]
-    //     {
-    //         println!("🦀 Rust long computation (should timeout):");
-    //         let rust_long = r#"
-    // println!("Computing Fibonacci numbers recursively (inefficient algorithm):");
-
-    // // Intentionally inefficient recursive Fibonacci that will time out
-    // fn fibonacci(n: u64) -> u64 {
-    //     if n <= 1 {
-    //         return n;
-    //     }
-    //     fibonacci(n - 1) + fibonacci(n - 2)
-    // }
-
-    // // This will take much longer than our timeout
-    // println!("Starting computation of fibonacci(50)...");
-    // let result = fibonacci(50);
-    // println!("Result: {}", result);  // This line should never be reached
-    //         "#;
-
-    //         let result = engine_handle
-    //             .eval(
-    //                 rust_long,
-    //                 Language::Rust,
-    //                 "rust_long",
-    //                 Some(TIMEOUT_SECONDS),
-    //             )
-    //             .await?;
-
-    //         print_output("Rust long computation", &result);
-    //     }
 
     println!("✅ All examples completed!");
     Ok(())

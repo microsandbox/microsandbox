@@ -37,7 +37,6 @@ rand.workspace = true
 default = []
 python = []
 nodejs = []
-rust = ["evcxr"]
 
 [dev-dependencies]
 reqwest = { version = "0.11", features = ["json"] }

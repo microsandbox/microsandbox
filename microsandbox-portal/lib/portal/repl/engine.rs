@@ -53,12 +53,10 @@ use tokio::sync::mpsc;
 use super::nodejs;
 #[cfg(feature = "python")]
 use super::python;
-#[cfg(feature = "rust")]
-use super::rust;
 
 use super::types::{Cmd, EngineError, EngineHandle, Language, Line, Resp, Stream};
 
-#[cfg(any(feature = "python", feature = "nodejs", feature = "rust"))]
+#[cfg(any(feature = "python", feature = "nodejs"))]
 use super::types::Engine;
 
 //--------------------------------------------------------------------------------------------------
@@ -74,8 +72,6 @@ struct Engines {
     python: Box<dyn Engine>,
     #[cfg(feature = "nodejs")]
     nodejs: Box<dyn Engine>,
-    #[cfg(feature = "rust")]
-    rust: Box<dyn Engine>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -208,13 +204,13 @@ pub async fn start_engines() -> Result<EngineHandle, EngineError> {
     // Spawn reactor task
     tokio::spawn(async move {
         // Initialize engines asynchronously
-        #[cfg(any(feature = "python", feature = "nodejs", feature = "rust"))]
+        #[cfg(any(feature = "python", feature = "nodejs"))]
         let mut engines = initialize_engines()
             .await
             .expect("Failed to initialize engines");
 
         // Process commands until shutdown
-        #[cfg(any(feature = "python", feature = "nodejs", feature = "rust"))]
+        #[cfg(any(feature = "python", feature = "nodejs"))]
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 Cmd::Eval {
@@ -254,18 +250,6 @@ pub async fn start_engines() -> Result<EngineHandle, EngineError> {
                                 .await;
                         }
                     }
-                    #[cfg(feature = "rust")]
-                    Language::Rust => {
-                        if let Err(e) = engines.rust.eval(id.clone(), code, &resp_tx, timeout).await
-                        {
-                            let _ = resp_tx
-                                .send(Resp::Error {
-                                    id,
-                                    message: e.to_string(),
-                                })
-                                .await;
-                        }
-                    }
                 },
                 Cmd::Shutdown => {
                     // Shutdown all engines
@@ -273,8 +257,6 @@ pub async fn start_engines() -> Result<EngineHandle, EngineError> {
                     engines.python.shutdown().await;
                     #[cfg(feature = "nodejs")]
                     engines.nodejs.shutdown().await;
-                    #[cfg(feature = "rust")]
-                    engines.rust.shutdown().await;
                     break;
                 }
             }
@@ -301,23 +283,17 @@ async fn initialize_engines() -> Result<Engines, EngineError> {
     let mut python_engine = python::create_engine()?;
     #[cfg(feature = "nodejs")]
     let mut nodejs_engine = nodejs::create_engine()?;
-    #[cfg(feature = "rust")]
-    let mut rust_engine = rust::create_engine()?;
 
     // Initialize each engine asynchronously
     #[cfg(feature = "python")]
     python_engine.initialize().await?;
     #[cfg(feature = "nodejs")]
     nodejs_engine.initialize().await?;
-    #[cfg(feature = "rust")]
-    rust_engine.initialize().await?;
 
     Ok(Engines {
         #[cfg(feature = "python")]
         python: python_engine,
         #[cfg(feature = "nodejs")]
         nodejs: nodejs_engine,
-        #[cfg(feature = "rust")]
-        rust: rust_engine,
     })
 }
