@@ -25,7 +25,8 @@ use serde_json::{self, json};
 use serde_yaml;
 use std::path::PathBuf;
 use tokio::fs as tokio_fs;
-use tracing::debug;
+use tokio::time::{sleep, timeout, Duration};
+use tracing::{debug, warn};
 
 use crate::{
     error::ServerError,
@@ -553,32 +554,106 @@ async fn sandbox_start_impl(state: AppState, params: SandboxStartParams) -> Serv
         .await
         .map_err(|e| ServerError::InternalError(format!("Failed to write config file: {}", e)))?;
 
-    // If sandbox is already running, stop it first
-    if let Err(e) = orchestra::down(
-        vec![sandbox.clone()],
-        Some(&namespace_dir),
-        Some(config_file),
-    )
-    .await
-    {
-        // Log the error but continue - this might just mean the sandbox wasn't running
-        tracing::warn!("Error stopping sandbox {}: {}", sandbox, e);
-    }
-
     // Start the sandbox
     orchestra::up(
         vec![sandbox.clone()],
         Some(&namespace_dir),
         Some(config_file),
-        false,
+        true,
     )
     .await
     .map_err(|e| {
         ServerError::InternalError(format!("Failed to start sandbox {}: {}", params.sandbox, e))
     })?;
 
-    // Return success message
-    Ok(format!("Sandbox {} started successfully", params.sandbox))
+    // Determine if this is a first-time image pull based on config
+    let potentially_first_time_pull = if let Some(config) = &params.config {
+        config.image.is_some()
+    } else {
+        false
+    };
+
+    // Set appropriate timeout based on whether this might be a first-time image pull
+    // Using longer timeout for first-time pulls to allow for image downloading
+    let poll_timeout = if potentially_first_time_pull {
+        Duration::from_secs(180) // 3 minutes for first-time image pulls
+    } else {
+        Duration::from_secs(60) // 1 minute for regular starts
+    };
+
+    // Wait for the sandbox to actually start running with a timeout
+    debug!("Waiting for sandbox {} to start...", sandbox);
+    match timeout(
+        poll_timeout,
+        poll_sandbox_until_running(&params.sandbox, &namespace_dir, config_file),
+    )
+    .await
+    {
+        Ok(result) => match result {
+            Ok(_) => {
+                debug!("Sandbox {} is now running", sandbox);
+                Ok(format!("Sandbox {} started successfully", params.sandbox))
+            }
+            Err(e) => {
+                // The sandbox was started but polling failed for some reason
+                warn!("Failed to verify sandbox {} is running: {}", sandbox, e);
+                Ok(format!(
+                    "Sandbox {} was started, but couldn't verify it's running: {}",
+                    params.sandbox, e
+                ))
+            }
+        },
+        Err(_) => {
+            // Timeout occurred, but we still return success since the sandbox might still be starting
+            warn!("Timeout waiting for sandbox {} to start", sandbox);
+            Ok(format!(
+                "Sandbox {} was started, but timed out waiting for it to be fully running. It may still be initializing.",
+                params.sandbox
+            ))
+        }
+    }
+}
+
+/// Polls the sandbox until it's verified to be running
+async fn poll_sandbox_until_running(
+    sandbox_name: &str,
+    namespace_dir: &PathBuf,
+    config_file: &str,
+) -> ServerResult<()> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(20);
+    const MAX_ATTEMPTS: usize = 2500; // Increased to maintain similar overall timeout period with faster polling
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        // Check if the sandbox is running
+        let statuses = orchestra::status(
+            vec![sandbox_name.to_string()],
+            Some(namespace_dir),
+            Some(config_file),
+        )
+        .await
+        .map_err(|e| ServerError::InternalError(format!("Failed to get sandbox status: {}", e)))?;
+
+        // Find our sandbox in the results
+        if let Some(status) = statuses.iter().find(|s| s.name == sandbox_name) {
+            if status.running {
+                // Sandbox is running, we're done
+                debug!(
+                    "Sandbox {} is running (verified on attempt {})",
+                    sandbox_name, attempt
+                );
+                return Ok(());
+            }
+        }
+
+        // Sleep before the next attempt
+        sleep(POLL_INTERVAL).await;
+    }
+
+    // If we reach here, we've exceeded our attempt limit
+    Err(ServerError::InternalError(format!(
+        "Exceeded maximum attempts to verify sandbox {} is running",
+        sandbox_name
+    )))
 }
 
 /// Implementation for stopping a sandbox

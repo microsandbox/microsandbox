@@ -9,8 +9,11 @@
 
 use async_trait::async_trait;
 use evcxr::EvalContext;
-use std::sync::mpsc as stdmpsc;
+use rand::{distr::Alphanumeric, Rng};
+use std::sync::{mpsc as stdmpsc, Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::timeout as tokio_timeout;
+use tokio::time::{sleep, Duration};
 
 use super::types::{Engine, EngineError, Resp, Stream};
 
@@ -31,6 +34,15 @@ struct EvalCmd {
 
     /// One-shot channel to signal completion
     done_tx: oneshot::Sender<Result<(), EngineError>>,
+
+    /// Optional timeout in seconds
+    timeout: Option<u64>,
+}
+
+/// Helper struct to track execution status
+struct ExecutionStatus {
+    eoe_marker: String,
+    completed: bool,
 }
 
 /// Rust engine implementation using an in-process `EvalContext`.
@@ -83,27 +95,67 @@ impl Engine for RustEngine {
 
             // Create a channel to bridge standard output from evcxr to async world
             let (out_tx, out_rx) = stdmpsc::channel::<(Stream, String)>();
+
+            // Create execution status tracking
+            let execution_status = Arc::new(Mutex::new(None::<ExecutionStatus>));
+            let exec_status = Arc::clone(&execution_status);
+
             let stdout_rx = outputs.stdout;
             let stderr_rx = outputs.stderr;
 
             // Spawn helper thread for capturing stdout
             {
                 let out_tx = out_tx.clone();
+                let stdout_exec_status = Arc::clone(&execution_status);
                 std::thread::spawn(move || {
                     for event in stdout_rx {
                         // Convert StdoutEvent to String using Debug formatting
-                        let _ = out_tx.send((Stream::Stdout, format!("{:?}", event)));
+                        let output = format!("{:?}", event);
+
+                        // Check if this is an end-of-execution marker
+                        let mut is_marker = false;
+                        {
+                            let mut status_guard = stdout_exec_status.lock().unwrap();
+                            if let Some(status) = status_guard.as_mut() {
+                                if output.trim() == status.eoe_marker {
+                                    status.completed = true;
+                                    is_marker = true;
+                                }
+                            }
+                        }
+
+                        // Only send if not a marker
+                        if !is_marker {
+                            let _ = out_tx.send((Stream::Stdout, output));
+                        }
                     }
                 });
             }
 
             // Spawn helper thread for capturing stderr
-            std::thread::spawn(move || {
-                for event in stderr_rx {
-                    // stderr events are already Strings
-                    let _ = out_tx.send((Stream::Stderr, event));
-                }
-            });
+            {
+                let stderr_exec_status = Arc::clone(&execution_status);
+                std::thread::spawn(move || {
+                    for event in stderr_rx {
+                        // stderr events are already Strings
+                        let mut is_marker = false;
+                        {
+                            let mut status_guard = stderr_exec_status.lock().unwrap();
+                            if let Some(status) = status_guard.as_mut() {
+                                if event.trim() == status.eoe_marker {
+                                    status.completed = true;
+                                    is_marker = true;
+                                }
+                            }
+                        }
+
+                        // Only send if not a marker
+                        if !is_marker {
+                            let _ = out_tx.send((Stream::Stderr, event));
+                        }
+                    }
+                });
+            }
 
             // Create a new Tokio runtime for this thread to handle async operations
             let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -115,16 +167,47 @@ impl Engine for RustEngine {
                     code,
                     resp_tx,
                     done_tx,
+                    timeout: timeout_opt,
                 } = cmd;
+
+                // Generate a unique end-of-execution marker
+                let eoe_marker = format!(
+                    "eoe_{}",
+                    rand::rng()
+                        .sample_iter(&Alphanumeric)
+                        .take(20)
+                        .map(char::from)
+                        .collect::<String>()
+                );
+
+                // Set the current execution status
+                {
+                    let mut status_guard = exec_status.lock().unwrap();
+                    *status_guard = Some(ExecutionStatus {
+                        eoe_marker: eoe_marker.clone(),
+                        completed: false,
+                    });
+                }
+
+                // Add the EOE marker to the end of the code
+                let mut code_with_marker = code;
+                // Add a println for the end-of-execution marker
+                code_with_marker.push_str(&format!("\nprintln!(\"{}\");", eoe_marker));
 
                 // Evaluate the code with evcxr
                 let eval_res = ctx
-                    .eval(&code)
+                    .eval(&code_with_marker)
                     .map(|_| ())
                     .map_err(|e| EngineError::Evaluation(e.to_string()));
 
                 // Drain all available output (non-blocking)
+                let mut output_lines = Vec::new();
                 while let Ok((stream, text)) = out_rx.try_recv() {
+                    output_lines.push((stream, text));
+                }
+
+                // Send all accumulated output
+                for (stream, text) in output_lines {
                     let _ = resp_tx.blocking_send(Resp::Line {
                         id: id.clone(),
                         stream,
@@ -132,9 +215,61 @@ impl Engine for RustEngine {
                     });
                 }
 
-                // Signal that evaluation is complete
-                let _ = resp_tx.blocking_send(Resp::Done { id: id.clone() });
-                let _ = done_tx.send(eval_res);
+                // Wait for the EOE marker or timeout
+                if eval_res.is_ok() {
+                    // Create wait future to monitor completion status
+                    let wait_future = async {
+                        let mut completed = false;
+                        while !completed {
+                            {
+                                let status_guard = exec_status.lock().unwrap();
+                                if let Some(status) = status_guard.as_ref() {
+                                    completed = status.completed;
+                                }
+                            }
+                            sleep(Duration::from_millis(50)).await;
+                        }
+                    };
+
+                    // Apply timeout only if specified
+                    let timeout_result = match timeout_opt {
+                        Some(timeout_secs) => {
+                            let timeout_duration = Duration::from_secs(timeout_secs);
+                            rt.block_on(async {
+                                tokio_timeout(timeout_duration, wait_future).await
+                            })
+                        }
+                        None => {
+                            // No timeout, just wait for completion
+                            rt.block_on(wait_future);
+                            Ok(())
+                        }
+                    };
+
+                    if let Err(_) = timeout_result {
+                        // Timeout occurred
+                        let timeout_secs = timeout_opt.unwrap(); // Safe to unwrap since we're in Some branch
+                        let _ = resp_tx.blocking_send(Resp::Error {
+                            id: id.clone(),
+                            message: format!("Execution timed out after {} seconds", timeout_secs),
+                        });
+                        let _ = done_tx.send(Err(EngineError::Timeout(timeout_secs)));
+                    } else {
+                        // Signal that evaluation is complete
+                        let _ = resp_tx.blocking_send(Resp::Done { id: id.clone() });
+                        let _ = done_tx.send(eval_res);
+                    }
+                } else {
+                    // Evaluation error - signal completion with error
+                    let _ = resp_tx.blocking_send(Resp::Done { id: id.clone() });
+                    let _ = done_tx.send(eval_res);
+                }
+
+                // Clear current execution status
+                {
+                    let mut status_guard = exec_status.lock().unwrap();
+                    *status_guard = None;
+                }
             }
         });
 
@@ -146,6 +281,7 @@ impl Engine for RustEngine {
         id: String,
         code: String,
         sender: &mpsc::Sender<Resp>,
+        timeout: Option<u64>,
     ) -> Result<(), EngineError> {
         // Get command channel or return error if engine not initialized
         let tx = self
@@ -162,6 +298,7 @@ impl Engine for RustEngine {
             code,
             resp_tx: sender.clone(),
             done_tx,
+            timeout,
         })
         .await
         .map_err(|_| EngineError::Unavailable("Rust worker thread gone".into()))?;

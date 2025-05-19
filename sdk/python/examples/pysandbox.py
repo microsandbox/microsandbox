@@ -8,6 +8,7 @@ This example shows:
 3. Error handling
 4. Multiple code execution patterns
 5. Output handling
+6. Timeouts and handling long-running starts
 
 Before running this example:
     1. Install the package: pip install -e .
@@ -20,6 +21,8 @@ Note: If authentication is enabled on the server, set MSB_API_KEY in your enviro
 import asyncio
 import sys
 from pathlib import Path
+
+import aiohttp
 
 # Add the parent directory to Python path to allow importing the package
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -40,8 +43,8 @@ result = np.mean(arr)
 print(f'Mean of random 1000x1000 array: {result:.4f}')
 """
         execution = await sandbox.run(code)
-        output = await execution.output()
-        print("Output:", output)
+        # output = await execution.output()
+        # print("Output:", output)
 
 
 async def example_explicit_lifecycle():
@@ -54,8 +57,6 @@ async def example_explicit_lifecycle():
     )
 
     # Create HTTP session
-    import aiohttp
-
     sandbox._session = aiohttp.ClientSession()
 
     try:
@@ -135,13 +136,57 @@ async def example_execution_chaining():
         print("Output:", await exec.output())
 
 
+async def example_timeout_handling():
+    """Example demonstrating timeout handling when starting sandboxes."""
+    print("\n=== Timeout Handling Example ===")
+
+    # Create a sandbox with a custom timeout
+    sandbox = PythonSandbox(sandbox_name="sandbox-timeout")
+    sandbox._session = aiohttp.ClientSession()
+
+    try:
+        # Demonstrate using a short timeout
+        # This might timeout if the image needs to be downloaded
+        try:
+            print("Starting sandbox with a very short timeout (5s)")
+            await sandbox.start(
+                # Using a less common image to demonstrate download time
+                image="appcypher/msb-python-ml:latest",
+                timeout=5.0,  # Very short timeout to demonstrate the feature
+            )
+            print("Sandbox started successfully")
+        except TimeoutError as e:
+            print(f"Expected timeout occurred: {e}")
+
+            # Now try with a reasonable timeout
+            print("Starting with a longer timeout (180s)")
+            await sandbox.start(
+                image="appcypher/msb-python-ml:latest",
+                timeout=180.0,  # More reasonable timeout
+            )
+            print("Sandbox started successfully with longer timeout")
+
+        # Run a simple code to verify it's working
+        execution = await sandbox.run("print('Sandbox is working!')")
+        print("Output:", await execution.output())
+
+    finally:
+        # Cleanup
+        try:
+            await sandbox.stop()
+        except Exception as e:
+            print(f"Error stopping sandbox: {e}")
+        await sandbox._session.close()
+
+
 async def main():
     """Run all examples."""
     try:
         await example_context_manager()
-        await example_explicit_lifecycle()
-        await example_scientific_computing()
-        await example_execution_chaining()
+        # await example_explicit_lifecycle()
+        # await example_scientific_computing()
+        # await example_execution_chaining()
+        # await example_timeout_handling()
     except Exception as e:
         print(f"Error running examples: {e}")
 

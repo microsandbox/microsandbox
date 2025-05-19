@@ -5,13 +5,12 @@
 //!
 //! - Connecting to the portal server
 //! - Sending code execution requests to REPL
-//! - Retrieving execution output
+//! - Processing execution output
 //! - Error handling with JSON-RPC responses
 //!
 //! # API Methods Demonstrated
 //!
 //! - `sandbox.repl.run`: Execute code in a specific language's REPL
-//! - `sandbox.repl.getOutput`: Retrieve the output of a REPL execution
 //!
 //! # Running the Example
 //!
@@ -42,7 +41,6 @@
 //!
 //! ```text
 //! 🐍 Running Python example in REPL:
-//! Execution ID: 3f7a0d55-0948-a30d-1824-2481144090548
 //! Status: success
 //!
 //! Output:
@@ -63,12 +61,9 @@
 use anyhow::Result;
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::time::Duration;
 
 // Import the parameter types from the microsandbox-portal crate
-use microsandbox_portal::payload::{
-    JsonRpcRequest, SandboxReplGetOutputParams, SandboxReplRunParams, JSONRPC_VERSION,
-};
+use microsandbox_portal::payload::{JsonRpcRequest, SandboxReplRunParams, JSONRPC_VERSION};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -133,6 +128,26 @@ async fn send_rpc_request<T: serde::Serialize>(
     Ok(result)
 }
 
+/// Print output lines from JSON
+fn print_output_lines(output: &Value) {
+    if let Some(output_array) = output.as_array() {
+        if output_array.is_empty() {
+            println!("No output lines found.");
+        } else {
+            for line in output_array {
+                let stream = line
+                    .get("stream")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let text = line.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                println!("[{}] {}", stream, text);
+            }
+        }
+    } else {
+        println!("No output found in response.");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Create HTTP client
@@ -158,6 +173,7 @@ for i in range(1, 6):
     let python_params = SandboxReplRunParams {
         code: python_code.to_string(),
         language: "python".to_string(),
+        timeout: Some(30), // Add a 30 second timeout
     };
 
     // Send sandbox.repl.run request with the typed parameters
@@ -171,54 +187,19 @@ for i in range(1, 6):
     };
 
     // Extract execution details
-    let execution_id = run_result
-        .get("execution_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
     let status = run_result
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    println!("Execution ID: {}", execution_id);
     println!("Status: {}", status);
 
-    // Give time for execution to complete
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Create typed parameters for getting output
-    let output_params = SandboxReplGetOutputParams {
-        execution_id: execution_id.to_string(),
-    };
-
-    // Get output using sandbox.repl.getOutput with the typed parameters
-    let output_result =
-        match send_rpc_request(&client, "sandbox.repl.getOutput", output_params).await {
-            Ok(result) => result,
-            Err(e) => {
-                println!("Error getting REPL output: {}", e);
-                println!("Continuing with empty output...");
-                json!({ "lines": [] })
-            }
-        };
-
-    // Print the output lines
+    // Print the output lines directly from the run response
     println!("\nOutput:");
-    if let Some(lines) = output_result.get("lines").and_then(|v| v.as_array()) {
-        if lines.is_empty() {
-            println!("No output lines found (language feature might not be enabled).");
-        } else {
-            for line in lines {
-                let stream = line
-                    .get("stream")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let text = line.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                println!("[{}] {}", stream, text);
-            }
-        }
+    if let Some(output) = run_result.get("output") {
+        print_output_lines(output);
     } else {
-        println!("No output lines found in response.");
+        println!("No output found in the response.");
     }
 
     // Execute JavaScript code in REPL
@@ -248,70 +229,85 @@ for (let i = 0; i < 5; i++) {
     // Create typed parameters for JavaScript code execution
     let js_params = SandboxReplRunParams {
         code: js_code.to_string(),
-        language: "node".to_string(),
+        language: "nodejs".to_string(),
+        timeout: Some(30), // Add a 30 second timeout
     };
 
-    // Send sandbox.repl.run request with the typed parameters
-    let run_result = match send_rpc_request(&client, "sandbox.repl.run", js_params).await {
+    // Send sandbox.repl.run request
+    let js_result = match send_rpc_request(&client, "sandbox.repl.run", js_params).await {
         Ok(result) => result,
         Err(e) => {
             println!("Error running JavaScript code in REPL: {}", e);
-            println!("Execution will continue but might fail...");
             json!({})
         }
     };
 
-    // Extract execution details
-    let execution_id = run_result
-        .get("execution_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let status = run_result
+    // Print status
+    let status = js_result
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    println!("Execution ID: {}", execution_id);
     println!("Status: {}", status);
 
-    // Give time for execution to complete
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Create typed parameters for getting JavaScript output
-    let output_params = SandboxReplGetOutputParams {
-        execution_id: execution_id.to_string(),
-    };
-
-    // Get output using sandbox.repl.getOutput with the typed parameters
-    let output_result =
-        match send_rpc_request(&client, "sandbox.repl.getOutput", output_params).await {
-            Ok(result) => result,
-            Err(e) => {
-                println!("Error getting REPL output: {}", e);
-                println!("Continuing with empty output...");
-                json!({ "lines": [] })
-            }
-        };
-
-    // Print the output lines
+    // Print the output lines directly from the run response
     println!("\nOutput:");
-    if let Some(lines) = output_result.get("lines").and_then(|v| v.as_array()) {
-        if lines.is_empty() {
-            println!("No output lines found (language feature might not be enabled).");
-        } else {
-            for line in lines {
-                let stream = line
-                    .get("stream")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let text = line.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                println!("[{}] {}", stream, text);
-            }
-        }
+    if let Some(output) = js_result.get("output") {
+        print_output_lines(output);
     } else {
-        println!("No output lines found in response.");
+        println!("No output found in the response.");
     }
 
-    println!("\nExample completed successfully!");
+    // Execute Rust code in REPL
+    println!("\n🦀 Running Rust example in REPL:");
+    let rust_code = r#"
+// Define a function to calculate Fibonacci
+fn fibonacci(n: u32) -> u32 {
+    match n {
+        0 => 0,
+        1 => 1,
+        _ => fibonacci(n-1) + fibonacci(n-2),
+    }
+}
+
+// Use the function
+println!("Fibonacci sequence:");
+for i in 0..10 {
+    println!("fib({}) = {}", i, fibonacci(i));
+}
+    "#;
+
+    // Create typed parameters for Rust code execution
+    let rust_params = SandboxReplRunParams {
+        code: rust_code.to_string(),
+        language: "rust".to_string(),
+        timeout: Some(60), // Add a 60 second timeout for more complex computation
+    };
+
+    // Send sandbox.repl.run request
+    let rust_result = match send_rpc_request(&client, "sandbox.repl.run", rust_params).await {
+        Ok(result) => result,
+        Err(e) => {
+            println!("Error running Rust code in REPL: {}", e);
+            json!({})
+        }
+    };
+
+    // Print status
+    let status = rust_result
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    println!("Status: {}", status);
+
+    // Print the output lines directly from the run response
+    println!("\nOutput:");
+    if let Some(output) = rust_result.get("output") {
+        print_output_lines(output);
+    } else {
+        println!("No output found in the response.");
+    }
+
     Ok(())
 }

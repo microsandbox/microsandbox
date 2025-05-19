@@ -1,12 +1,9 @@
 //! Shared state management for the microsandbox portal server.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::portal::{
-    command::CommandHandle,
-    repl::{EngineHandle, Line},
-};
+use crate::portal::{command::CommandHandle, repl::EngineHandle};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -23,9 +20,6 @@ pub struct SharedState {
 
     /// Command handle for command execution
     pub command_handle: Arc<Mutex<Option<CommandHandle>>>,
-
-    /// Store outputs from REPL executions
-    pub outputs: Arc<Mutex<HashMap<String, Vec<Line>>>>,
 }
 
 impl Default for SharedState {
@@ -34,7 +28,6 @@ impl Default for SharedState {
             ready: Arc::new(Mutex::new(false)),
             engine_handle: Arc::new(Mutex::new(None)),
             command_handle: Arc::new(Mutex::new(None)),
-            outputs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

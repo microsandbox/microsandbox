@@ -3,14 +3,12 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::{json, Value};
 use tracing::debug;
-use uuid::Uuid;
 
 use crate::{
     error::PortalError,
     payload::{
         JsonRpcError, JsonRpcRequest, JsonRpcResponse, SandboxCommandExecuteParams,
-        SandboxCommandGetOutputParams, SandboxReplGetOutputParams, SandboxReplRunParams,
-        JSONRPC_VERSION,
+        SandboxReplRunParams, JSONRPC_VERSION,
     },
     portal::{
         command::create_command_executor,
@@ -61,35 +59,9 @@ pub async fn json_rpc_handler(
                 }
             }
         }
-        "sandbox.repl.getOutput" => {
-            // Call the sandbox_get_output_impl function
-            match sandbox_get_output_impl(state, request.params).await {
-                Ok(result) => {
-                    // Create JSON-RPC response with success
-                    Ok((StatusCode::OK, Json(JsonRpcResponse::success(result, id))))
-                }
-                Err(e) => {
-                    // Use our helper function to create the error response
-                    Ok(create_error_response(e, id))
-                }
-            }
-        }
         "sandbox.command.execute" => {
             // Call the sandbox_command_run_impl function
             match sandbox_command_run_impl(state, request.params).await {
-                Ok(result) => {
-                    // Create JSON-RPC response with success
-                    Ok((StatusCode::OK, Json(JsonRpcResponse::success(result, id))))
-                }
-                Err(e) => {
-                    // Use our helper function to create the error response
-                    Ok(create_error_response(e, id))
-                }
-            }
-        }
-        "sandbox.command.getOutput" => {
-            // Call the sandbox_command_get_output_impl function
-            match sandbox_command_get_output_impl(state, request.params).await {
                 Ok(result) => {
                     // Create JSON-RPC response with success
                     Ok((StatusCode::OK, Json(JsonRpcResponse::success(result, id))))
@@ -167,54 +139,18 @@ async fn sandbox_run_impl(state: SharedState, params: Value) -> Result<Value, Po
         }
     };
 
-    // Generate a unique execution ID
-    let execution_id = Uuid::new_v4().to_string();
-
-    debug!("Generated execution_id: {}", execution_id);
     debug!("Language: {}", params.language);
 
-    // Execute the code in REPL using the provided execution_id
+    // Use a temporary identifier for evaluation
+    let temp_id = uuid::Uuid::new_v4().to_string();
+
+    // Execute the code in REPL
     let lines = engine_handle
-        .eval(&params.code, language, &execution_id)
+        .eval(&params.code, language, &temp_id, params.timeout)
         .await
         .map_err(|e| PortalError::Internal(format!("REPL execution failed: {}", e)))?;
 
     debug!("REPL execution produced {} output lines", lines.len());
-
-    // Store the output lines in shared state
-    {
-        let mut outputs = state.outputs.lock().await;
-        outputs.insert(execution_id.clone(), lines);
-    }
-
-    // Construct the result JSON object with explicit String conversions
-    let result = json!({
-        "execution_id": execution_id.to_string(),
-        "status": "success".to_string(),
-        "language": params.language.to_string(),
-    });
-
-    debug!("Returning result: {}", result);
-
-    Ok(result)
-}
-
-/// Implementation for sandbox get output method
-async fn sandbox_get_output_impl(state: SharedState, params: Value) -> Result<Value, PortalError> {
-    debug!(?params, "Sandbox get output method called");
-
-    // Deserialize parameters using the structured type
-    let params: SandboxReplGetOutputParams = serde_json::from_value(params)
-        .map_err(|e| PortalError::JsonRpc(format!("Invalid parameters: {}", e)))?;
-
-    // Get the outputs for this execution
-    let outputs_lock = state.outputs.lock().await;
-    let lines = outputs_lock.get(&params.execution_id).ok_or_else(|| {
-        PortalError::JsonRpc(format!(
-            "No output found for execution_id: {}",
-            params.execution_id
-        ))
-    })?;
 
     // Convert the lines to a format suitable for JSON
     let output_lines: Vec<Value> = lines
@@ -230,10 +166,14 @@ async fn sandbox_get_output_impl(state: SharedState, params: Value) -> Result<Va
         })
         .collect();
 
+    // Construct the result JSON object with explicit String conversions
     let result = json!({
-        "execution_id": params.execution_id,
-        "lines": output_lines,
+        "status": "success".to_string(),
+        "language": params.language.to_string(),
+        "output": output_lines,
     });
+
+    debug!("Returning result with output: {}", result);
 
     Ok(result)
 }
@@ -266,12 +206,9 @@ async fn sandbox_command_run_impl(state: SharedState, params: Value) -> Result<V
 
     // Execute the command
     let (exit_code, output_lines) = cmd_handle
-        .execute(&params.command, params.args.clone())
+        .execute(&params.command, params.args.clone(), params.timeout)
         .await
         .map_err(|e| PortalError::Internal(format!("Command execution failed: {}", e)))?;
-
-    // Generate a result ID for retrieving output later if needed
-    let execution_id = Uuid::new_v4().to_string();
 
     // Convert the output lines
     let formatted_lines = output_lines
@@ -287,24 +224,8 @@ async fn sandbox_command_run_impl(state: SharedState, params: Value) -> Result<V
         })
         .collect::<Vec<Value>>();
 
-    // Store the output lines in shared state if needed
-    {
-        let mut outputs = state.outputs.lock().await;
-        outputs.insert(
-            execution_id.clone(),
-            output_lines
-                .into_iter()
-                .map(|line| crate::portal::repl::Line {
-                    stream: line.stream,
-                    text: line.text,
-                })
-                .collect(),
-        );
-    }
-
     // Construct the result JSON object
     let result = json!({
-        "execution_id": execution_id,
         "command": params.command,
         "args": params.args,
         "exit_code": exit_code,
@@ -312,49 +233,7 @@ async fn sandbox_command_run_impl(state: SharedState, params: Value) -> Result<V
         "output": formatted_lines,
     });
 
-    debug!("Returning command result: {}", result);
-
-    Ok(result)
-}
-
-/// Implementation for sandbox command get output method
-async fn sandbox_command_get_output_impl(
-    state: SharedState,
-    params: Value,
-) -> Result<Value, PortalError> {
-    debug!(?params, "Sandbox command get output method called");
-
-    // Deserialize parameters using the structured type
-    let params: SandboxCommandGetOutputParams = serde_json::from_value(params)
-        .map_err(|e| PortalError::JsonRpc(format!("Invalid parameters: {}", e)))?;
-
-    // Get the outputs for this execution
-    let outputs_lock = state.outputs.lock().await;
-    let lines = outputs_lock.get(&params.execution_id).ok_or_else(|| {
-        PortalError::JsonRpc(format!(
-            "No command output found for execution_id: {}",
-            params.execution_id
-        ))
-    })?;
-
-    // Convert the lines to a format suitable for JSON
-    let output_lines: Vec<Value> = lines
-        .iter()
-        .map(|line| {
-            json!({
-                "stream": match line.stream {
-                    crate::portal::repl::Stream::Stdout => "stdout",
-                    crate::portal::repl::Stream::Stderr => "stderr",
-                },
-                "text": line.text,
-            })
-        })
-        .collect();
-
-    let result = json!({
-        "execution_id": params.execution_id,
-        "lines": output_lines,
-    });
+    debug!("Returning command result with output: {}", result);
 
     Ok(result)
 }

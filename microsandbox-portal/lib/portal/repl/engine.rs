@@ -94,6 +94,7 @@ impl EngineHandle {
     /// * `code` - The code to evaluate
     /// * `language` - The language to use for evaluation
     /// * `execution_id` - A unique identifier for this evaluation
+    /// * `timeout` - Optional timeout in seconds after which evaluation will be cancelled
     ///
     /// # Returns
     ///
@@ -108,6 +109,7 @@ impl EngineHandle {
         code: S,
         language: Language,
         execution_id: S,
+        timeout: Option<u64>,
     ) -> Result<Vec<Line>, EngineError> {
         let code = code.into();
         let execution_id = execution_id.into();
@@ -122,6 +124,7 @@ impl EngineHandle {
                 code,
                 language,
                 resp_tx,
+                timeout,
             })
             .await
             .map_err(|_| EngineError::Unavailable("Reactor thread not available".to_string()))?;
@@ -219,10 +222,15 @@ pub async fn start_engines() -> Result<EngineHandle, EngineError> {
                     code,
                     language,
                     resp_tx,
+                    timeout,
                 } => match language {
                     #[cfg(feature = "python")]
                     Language::Python => {
-                        if let Err(e) = engines.python.eval(id.clone(), code, &resp_tx).await {
+                        if let Err(e) = engines
+                            .python
+                            .eval(id.clone(), code, &resp_tx, timeout)
+                            .await
+                        {
                             let _ = resp_tx
                                 .send(Resp::Error {
                                     id,
@@ -233,7 +241,11 @@ pub async fn start_engines() -> Result<EngineHandle, EngineError> {
                     }
                     #[cfg(feature = "nodejs")]
                     Language::Node => {
-                        if let Err(e) = engines.nodejs.eval(id.clone(), code, &resp_tx).await {
+                        if let Err(e) = engines
+                            .nodejs
+                            .eval(id.clone(), code, &resp_tx, timeout)
+                            .await
+                        {
                             let _ = resp_tx
                                 .send(Resp::Error {
                                     id,
@@ -244,7 +256,8 @@ pub async fn start_engines() -> Result<EngineHandle, EngineError> {
                     }
                     #[cfg(feature = "rust")]
                     Language::Rust => {
-                        if let Err(e) = engines.rust.eval(id.clone(), code, &resp_tx).await {
+                        if let Err(e) = engines.rust.eval(id.clone(), code, &resp_tx, timeout).await
+                        {
                             let _ = resp_tx
                                 .send(Resp::Error {
                                     id,

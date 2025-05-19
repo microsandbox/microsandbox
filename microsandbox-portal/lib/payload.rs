@@ -75,13 +75,9 @@ pub struct SandboxReplRunParams {
 
     /// Programming language to use for execution
     pub language: String,
-}
 
-/// Request parameters for retrieving output from a previous REPL execution
-#[derive(Debug, Deserialize, Serialize)]
-pub struct SandboxReplGetOutputParams {
-    /// Unique identifier for the execution
-    pub execution_id: String,
+    /// Optional timeout in seconds after which execution will be cancelled
+    pub timeout: Option<u64>,
 }
 
 /// Request parameters for executing a shell command
@@ -93,13 +89,9 @@ pub struct SandboxCommandExecuteParams {
     /// Optional arguments for the command
     #[serde(default)]
     pub args: Vec<String>,
-}
 
-/// Request parameters for retrieving output from a previous command execution
-#[derive(Debug, Deserialize, Serialize)]
-pub struct SandboxCommandGetOutputParams {
-    /// Unique identifier for the command execution
-    pub execution_id: String,
+    /// Optional timeout in seconds after which execution will be cancelled
+    pub timeout: Option<u64>,
 }
 
 //--------------------------------------------------------------------------------------------------

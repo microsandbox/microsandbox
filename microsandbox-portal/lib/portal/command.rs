@@ -131,6 +131,7 @@ struct CommandRequest {
     args: Vec<String>,
     resp_tx: Sender<CommandResp>,
     done_tx: oneshot::Sender<Result<i32, CommandError>>,
+    timeout: Option<u64>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -151,11 +152,12 @@ impl CommandHandle {
                     args,
                     resp_tx,
                     done_tx,
+                    timeout,
                 } = req;
 
                 // Execute the command in a separate task
                 tokio::spawn(async move {
-                    let result = execute_command(id, command, args, resp_tx.clone()).await;
+                    let result = execute_command(id, command, args, resp_tx.clone(), timeout).await;
                     let _ = done_tx.send(result);
                 });
             }
@@ -170,6 +172,7 @@ impl CommandHandle {
     ///
     /// * `command` - The command to execute
     /// * `args` - Arguments to pass to the command
+    /// * `timeout` - Optional timeout in seconds after which execution will be cancelled
     ///
     /// # Returns
     ///
@@ -178,6 +181,7 @@ impl CommandHandle {
         &self,
         command: S,
         args: Vec<String>,
+        timeout: Option<u64>,
     ) -> Result<(i32, Vec<CommandLine>), CommandError> {
         let command = command.into();
 
@@ -197,6 +201,7 @@ impl CommandHandle {
                 args,
                 resp_tx,
                 done_tx,
+                timeout,
             })
             .await
             .map_err(|_| CommandError::Unavailable("Command executor not available".to_string()))?;
@@ -269,6 +274,7 @@ async fn execute_command(
     command: String,
     args: Vec<String>,
     resp_tx: Sender<CommandResp>,
+    timeout: Option<u64>,
 ) -> Result<i32, CommandError> {
     // Spawn the command process
     let mut process = Command::new(&command)
@@ -341,7 +347,7 @@ async fn execute_command(
         }
     });
 
-    // Set a timeout for the command execution
+    // Set a timeout for the command execution if specified
     let process_wait = async {
         match process.wait().await {
             Ok(status) => {
@@ -369,20 +375,28 @@ async fn execute_command(
         }
     };
 
-    // Execute with timeout
-    let timeout_duration = Duration::from_secs(300); // 5 minute timeout
-    let result = tokio::select! {
-        result = process_wait => result,
-        _ = sleep(timeout_duration) => {
-            // Kill the process on timeout
-            let _ = process.kill().await;
-            let _ = resp_tx
-                .send(CommandResp::Error {
-                    id: id.clone(),
-                    message: format!("Command timed out after {} seconds", timeout_duration.as_secs()),
-                })
-                .await;
-            Err(CommandError::Timeout(timeout_duration.as_secs()))
+    // Execute with timeout only if specified
+    let result = match timeout {
+        Some(timeout_secs) => {
+            let timeout_duration = Duration::from_secs(timeout_secs);
+            tokio::select! {
+                result = process_wait => result,
+                _ = sleep(timeout_duration) => {
+                    // Kill the process on timeout
+                    let _ = process.kill().await;
+                    let _ = resp_tx
+                        .send(CommandResp::Error {
+                            id: id.clone(),
+                            message: format!("Command timed out after {} seconds", timeout_secs),
+                        })
+                        .await;
+                    Err(CommandError::Timeout(timeout_secs))
+                }
+            }
+        }
+        None => {
+            // No timeout, just wait for the process to complete
+            process_wait.await
         }
     };
 

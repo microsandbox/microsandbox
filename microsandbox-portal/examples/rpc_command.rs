@@ -5,14 +5,12 @@
 //!
 //! - Connecting to the portal server
 //! - Sending command execution requests
-//! - Streaming command output
-//! - Handling command exit codes
-//! - Retrieving command output by execution ID
+//! - Processing command output and exit codes
+//! - Handling different command types
 //!
 //! # API Methods Demonstrated
 //!
 //! - `sandbox.command.execute`: Execute a command in a sandboxed environment
-//! - `sandbox.command.getOutput`: Retrieve the output of a command execution by ID
 //!
 //! # Running the Example
 //!
@@ -66,9 +64,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 // Import the parameter types from the microsandbox-portal crate
-use microsandbox_portal::payload::{
-    JsonRpcRequest, SandboxCommandExecuteParams, SandboxCommandGetOutputParams, JSONRPC_VERSION,
-};
+use microsandbox_portal::payload::{JsonRpcRequest, SandboxCommandExecuteParams, JSONRPC_VERSION};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -145,6 +141,7 @@ async fn main() -> Result<()> {
     let ls_params = SandboxCommandExecuteParams {
         command: "ls".to_string(),
         args: vec!["-la".to_string()],
+        timeout: Some(30), // Add a 30 second timeout
     };
 
     let result = send_rpc_request(&client, "sandbox.command.execute", ls_params).await?;
@@ -171,18 +168,10 @@ async fn main() -> Result<()> {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Save the execution ID for later
-    let execution_id = result
-        .get("execution_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
     println!("Command: {}", command);
     println!("Args: {}", args);
     println!("Exit code: {}", exit_code);
     println!("Success: {}", success);
-    println!("Execution ID: {}", execution_id);
 
     // Print the output lines
     println!("\nOutput from execute response:");
@@ -197,6 +186,7 @@ async fn main() -> Result<()> {
     let echo_params = SandboxCommandExecuteParams {
         command: "echo".to_string(),
         args: vec!["Hello from the sandbox!".to_string()],
+        timeout: None, // No timeout needed for simple echo command
     };
 
     let result = send_rpc_request(&client, "sandbox.command.execute", echo_params).await?;
@@ -236,34 +226,38 @@ async fn main() -> Result<()> {
         println!("No output found in response.");
     }
 
-    // Now demonstrate retrieving output by execution ID using the typed params
-    if !execution_id.is_empty() {
-        println!("\n🔍 Retrieving command output by execution ID:");
-        let output_params = SandboxCommandGetOutputParams {
-            execution_id: execution_id.clone(),
-        };
+    // Execute a command that will fail to demonstrate error handling
+    println!("\n❌ Running a command that will fail:");
+    let fail_params = SandboxCommandExecuteParams {
+        command: "nonexistent_command".to_string(),
+        args: vec![],
+        timeout: Some(5), // Short timeout
+    };
 
-        let output_result =
-            send_rpc_request(&client, "sandbox.command.getOutput", output_params).await?;
+    // This will likely fail, so handle the error case
+    match send_rpc_request(&client, "sandbox.command.execute", fail_params).await {
+        Ok(result) => {
+            // Still might get a result with error details
+            let exit_code = result
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1);
 
-        // Print the retrieved execution ID
-        println!(
-            "Retrieved output for execution ID: {}",
-            output_result
-                .get("execution_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-        );
+            println!("Command executed but failed with exit code: {}", exit_code);
 
-        // Print the output lines
-        println!("\nOutput from getOutput response:");
-        if let Some(lines) = output_result.get("lines") {
-            print_output_lines(lines);
-        } else {
-            println!("No output lines found in response.");
+            // Print any output/error messages
+            println!("\nError output:");
+            if let Some(output) = result.get("output") {
+                print_output_lines(output);
+            } else {
+                println!("No error output found in response.");
+            }
+        }
+        Err(e) => {
+            println!("Failed to execute nonexistent command: {}", e);
         }
     }
 
-    println!("\nExample completed successfully!");
+    println!("\nCommand execution examples completed!");
     Ok(())
 }

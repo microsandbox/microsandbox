@@ -2369,6 +2369,7 @@ dependencies = [
  "crossbeam-channel",
  "evcxr",
  "microsandbox-utils",
+ "rand 0.9.0",
  "reqwest 0.11.27",
  "serde",
  "serde_json",

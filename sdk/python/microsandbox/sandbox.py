@@ -2,6 +2,7 @@
 Sandbox implementation for the Microsandbox Python SDK.
 """
 
+import asyncio
 import os
 import uuid
 from abc import ABC, abstractmethod
@@ -206,7 +207,11 @@ class BaseSandbox(ABC):
                 sandbox._session = None
 
     async def start(
-        self, image: Optional[str] = None, memory: int = 512, cpus: float = 1.0
+        self,
+        image: Optional[str] = None,
+        memory: int = 512,
+        cpus: float = 1.0,
+        timeout: float = 180.0,
     ) -> None:
         """
         Start the sandbox container.
@@ -215,9 +220,11 @@ class BaseSandbox(ABC):
             image: Docker image to use for the sandbox (defaults to language-specific image)
             memory: Memory limit in MB
             cpus: CPU limit (will be rounded to nearest integer)
+            timeout: Maximum time in seconds to wait for the sandbox to start (default: 180 seconds)
 
         Raises:
             RuntimeError: If the sandbox fails to start
+            TimeoutError: If the sandbox doesn't start within the specified timeout
         """
         if self._is_started:
             return
@@ -243,10 +250,15 @@ class BaseSandbox(ABC):
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         try:
+            # Set a client-side timeout that's a bit longer than the server-side timeout
+            # to account for network latency and processing time
+            client_timeout = aiohttp.ClientTimeout(total=timeout + 30)
+
             async with self._session.post(
                 f"{self._server_url}/api/v1/rpc",
                 json=request_data,
                 headers=headers,
+                timeout=client_timeout,
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
@@ -258,8 +270,21 @@ class BaseSandbox(ABC):
                         f"Failed to start sandbox: {response_data['error']['message']}"
                     )
 
+                # Check the result message - it might indicate the sandbox is still initializing
+                result = response_data.get("result", "")
+                if isinstance(result, str) and "timed out waiting" in result:
+                    # Server timed out but still started the sandbox
+                    # We'll raise a warning but still consider it started
+                    import warnings
+
+                    warnings.warn(f"Sandbox start warning: {result}")
+
                 self._is_started = True
         except aiohttp.ClientError as e:
+            if isinstance(e, asyncio.TimeoutError):
+                raise TimeoutError(
+                    f"Timed out waiting for sandbox to start after {timeout} seconds"
+                ) from e
             raise RuntimeError(f"Failed to communicate with Microsandbox server: {e}")
 
     async def stop(self) -> None:

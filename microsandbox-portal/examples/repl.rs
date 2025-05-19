@@ -53,7 +53,7 @@
 //! implement more sophisticated code execution strategies in REPL environments.
 
 use microsandbox_portal::portal::repl::start_engines;
-#[cfg(any(feature = "python", feature = "nodejs"))]
+#[cfg(any(feature = "python", feature = "nodejs", feature = "rust"))]
 use microsandbox_portal::portal::repl::Language;
 use std::error::Error;
 
@@ -92,7 +92,7 @@ for i, fruit in enumerate(fruits):
         "#;
 
         let result = engine_handle
-            .eval(python_code, Language::Python, "123")
+            .eval(python_code, Language::Python, "123", Some(60))
             .await?;
 
         // Print the output
@@ -150,7 +150,7 @@ console.log("Waiting for data...");
         "#;
 
         let result = engine_handle
-            .eval(javascript_code, Language::Node, "123")
+            .eval(javascript_code, Language::Node, "123", Some(60))
             .await?;
 
         // Print the output
@@ -159,34 +159,37 @@ console.log("Waiting for data...");
         }
     }
 
-    // Example 3: Execute Rust code in REPL
-    #[cfg(feature = "rust")]
-    {
-        println!("\n🦀 Running Rust example in REPL:");
-        let rust_code = r#"
-    // Define a function
-    fn fibonacci(n: u32) -> u32 {
-        match n {
-            0 => 0,
-            1 => 1,
-            _ => fibonacci(n-1) + fibonacci(n-2),
-        }
-    }
+    // // Example 3: Execute Rust code in REPL
+    // #[cfg(feature = "rust")]
+    // {
+    //     println!("\n🦀 Running Rust example in REPL:");
+    //     let rust_code = r#"
+    // // Define a function
+    // fn fibonacci(n: u32) -> u32 {
+    //     match n {
+    //         0 => 0,
+    //         1 => 1,
+    //         _ => fibonacci(n-1) + fibonacci(n-2),
+    //     }
+    // }
 
-    // Use the function
-    println!("Fibonacci sequence:");
-    for i in 0..10 {
-        println!("fib({}) = {}", i, fibonacci(i));
-    }
-            "#;
+    // // Use the function
+    // println!("Fibonacci sequence:");
+    // for i in 0..10 {
+    //     println!("fib({}) = {}", i, fibonacci(i));
+    // }
+    //         "#;
 
-        let result = engine_handle.eval(rust_code, Language::Rust, "123").await?;
+    //     // Fibonacci recursion can be slow, so give it more time
+    //     let result = engine_handle
+    //         .eval(rust_code, Language::Rust, "123", Some(120))
+    //         .await?;
 
-        // Print the output
-        for line in result {
-            println!("[{:?}] {}", line.stream, line.text);
-        }
-    }
+    //     // Print the output
+    //     for line in result {
+    //         println!("[{:?}] {}", line.stream, line.text);
+    //     }
+    // }
 
     // Example 4: Stateful REPL session with Python
     #[cfg(feature = "python")]
@@ -196,7 +199,7 @@ console.log("Waiting for data...");
         // First execution - define a variable
         let python_step1 = "x = 10";
         let result1 = engine_handle
-            .eval(python_step1, Language::Python, "123")
+            .eval(python_step1, Language::Python, "123", None)
             .await?;
         for line in result1 {
             println!("[{:?}] {}", line.stream, line.text);
@@ -205,7 +208,7 @@ console.log("Waiting for data...");
         // Second execution - use the variable defined in the first step
         let python_step2 = "print(f'The value of x is {x}')";
         let result2 = engine_handle
-            .eval(python_step2, Language::Python, "123")
+            .eval(python_step2, Language::Python, "123", None)
             .await?;
         for line in result2 {
             println!("[{:?}] {}", line.stream, line.text);
@@ -220,7 +223,7 @@ console.log("Waiting for data...");
         // First execution - define a variable
         let nodejs_step1 = "const greeting = 'Hello from JavaScript!';";
         let result1 = engine_handle
-            .eval(nodejs_step1, Language::Node, "123")
+            .eval(nodejs_step1, Language::Node, "123", None)
             .await?;
         for line in result1 {
             println!("[{:?}] {}", line.stream, line.text);
@@ -229,36 +232,36 @@ console.log("Waiting for data...");
         // Second execution - use the variable defined in the first step
         let nodejs_step2 = "console.log(greeting);";
         let result2 = engine_handle
-            .eval(nodejs_step2, Language::Node, "123")
+            .eval(nodejs_step2, Language::Node, "123", None)
             .await?;
         for line in result2 {
             println!("[{:?}] {}", line.stream, line.text);
         }
     }
 
-    // Example 6: Stateful REPL session with Rust
-    #[cfg(feature = "rust")]
-    {
-        println!("\n🔄 Rust stateful REPL session example:");
+    // // Example 6: Stateful REPL session with Rust
+    // #[cfg(feature = "rust")]
+    // {
+    //     println!("\n🔄 Rust stateful REPL session example:");
 
-        // First execution - define a variable
-        let rust_step1 = "let message = \"Hello from Rust!\";";
-        let result1 = engine_handle
-            .eval(rust_step1, Language::Rust, "123")
-            .await?;
-        for line in result1 {
-            println!("[{:?}] {}", line.stream, line.text);
-        }
+    //     // First execution - define a variable
+    //     let rust_step1 = "let message = \"Hello from Rust!\";";
+    //     let result1 = engine_handle
+    //         .eval(rust_step1, Language::Rust, "123", None)
+    //         .await?;
+    //     for line in result1 {
+    //         println!("[{:?}] {}", line.stream, line.text);
+    //     }
 
-        // Second execution - use the variable defined in the first step
-        let rust_step2 = "println!(\"{}\", message);";
-        let result2 = engine_handle
-            .eval(rust_step2, Language::Rust, "123")
-            .await?;
-        for line in result2 {
-            println!("[{:?}] {}", line.stream, line.text);
-        }
-    }
+    //     // Second execution - use the variable defined in the first step
+    //     let rust_step2 = "println!(\"{}\", message);";
+    //     let result2 = engine_handle
+    //         .eval(rust_step2, Language::Rust, "123", None)
+    //         .await?;
+    //     for line in result2 {
+    //         println!("[{:?}] {}", line.stream, line.text);
+    //     }
+    // }
 
     println!("\nExample completed successfully!");
     Ok(())

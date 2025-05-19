@@ -10,7 +10,9 @@
 //! and prompts for cleaner output handling.
 
 use async_trait::async_trait;
+use rand::{distr::Alphanumeric, Rng};
 use std::sync::{Arc, Mutex};
+use tokio::time::timeout as tokio_timeout;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -44,6 +46,15 @@ struct EvalRequest {
     code: String,
     resp_tx: Sender<Resp>,
     done_tx: oneshot::Sender<Result<(), EngineError>>,
+    timeout: Option<u64>,
+}
+
+/// Helper struct to track execution status
+struct ExecutionStatus {
+    id: String,
+    sender: Sender<Resp>,
+    eoe_marker: String,
+    completed: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -120,11 +131,13 @@ impl Engine for NodeEngine {
                 }
             };
 
+            // Current execution status
+            let execution_status = Arc::new(Mutex::new(None::<ExecutionStatus>));
+
             // Start stdout handler in a separate task
             let stdout_reader = BufReader::new(stdout);
             let (stdout_done_tx, mut stdout_done_rx) = mpsc::channel::<()>(1);
-            let stdout_current_eval = Arc::new(Mutex::new(None::<(String, Sender<Resp>)>));
-            let stdout_eval_clone = Arc::clone(&stdout_current_eval);
+            let stdout_exec_status = Arc::clone(&execution_status);
 
             tokio::task::spawn_blocking(move || {
                 let mut lines_future = stdout_reader.lines();
@@ -141,16 +154,39 @@ impl Engine for NodeEngine {
                                 && !line.starts_with('>')
                                 && !line.starts_with("..")
                             {
-                                // Send to active evaluation if one exists
-                                if let Some((id, sender)) =
-                                    stdout_eval_clone.lock().unwrap().as_ref()
+                                // Check if this is an end-of-execution marker line
+                                let mut should_send = true;
+
                                 {
-                                    // Use block_on to send the message
-                                    let _ = runtime.block_on(sender.send(Resp::Line {
-                                        id: id.clone(),
-                                        stream: Stream::Stdout,
-                                        text: line,
-                                    }));
+                                    let mut status_guard = stdout_exec_status.lock().unwrap();
+                                    if let Some(status) = status_guard.as_mut() {
+                                        // Check if this line is our end-of-execution marker
+                                        if line.trim() == status.eoe_marker {
+                                            should_send = false;
+                                            status.completed = true;
+
+                                            // Signal completion
+                                            let id = status.id.clone();
+                                            let sender = status.sender.clone();
+                                            runtime.block_on(async {
+                                                let _ = sender.send(Resp::Done { id }).await;
+                                            });
+                                        }
+                                    }
+                                }
+
+                                // Send line if it's not an EOE marker
+                                if should_send {
+                                    if let Some(status) =
+                                        stdout_exec_status.lock().unwrap().as_ref()
+                                    {
+                                        // Use block_on to send the message
+                                        let _ = runtime.block_on(status.sender.send(Resp::Line {
+                                            id: status.id.clone(),
+                                            stream: Stream::Stdout,
+                                            text: line,
+                                        }));
+                                    }
                                 }
                             }
                         }
@@ -166,7 +202,7 @@ impl Engine for NodeEngine {
             // Start stderr handler in a separate task
             let stderr_reader = BufReader::new(stderr);
             let (stderr_done_tx, mut stderr_done_rx) = mpsc::channel::<()>(1);
-            let stderr_current_eval = Arc::clone(&stdout_current_eval);
+            let stderr_exec_status = Arc::clone(&execution_status);
 
             tokio::task::spawn_blocking(move || {
                 let mut lines_future = stderr_reader.lines();
@@ -178,12 +214,10 @@ impl Engine for NodeEngine {
 
                     match line_result {
                         Ok(Some(line)) => {
-                            // Send to active evaluation if one exists
-                            if let Some((id, sender)) = stderr_current_eval.lock().unwrap().as_ref()
-                            {
+                            if let Some(status) = stderr_exec_status.lock().unwrap().as_ref() {
                                 // Use block_on to send the message
-                                let _ = runtime.block_on(sender.send(Resp::Line {
-                                    id: id.clone(),
+                                let _ = runtime.block_on(status.sender.send(Resp::Line {
+                                    id: status.id.clone(),
                                     stream: Stream::Stderr,
                                     text: line,
                                 }));
@@ -209,18 +243,43 @@ impl Engine for NodeEngine {
                         }
                     }
                     Some(eval_req) = eval_rx.recv() => {
-                        let EvalRequest { id, code, resp_tx, done_tx } = eval_req;
+                        let EvalRequest { id, code, resp_tx, done_tx, timeout } = eval_req;
 
-                        // Set as current evaluation
+                        // Generate a unique end-of-execution marker
+                        // This should be unique enough to not appear in normal output
+                        let eoe_marker = format!("eoe_{}", rand::rng()
+                            .sample_iter(&Alphanumeric)
+                            .take(20)
+                            .map(char::from)
+                            .collect::<String>());
+
+                        // Set as current execution
                         {
-                            let mut eval_guard = stdout_current_eval.lock().unwrap();
-                            *eval_guard = Some((id.clone(), resp_tx.clone()));
+                            let mut status_guard = execution_status.lock().unwrap();
+                            *status_guard = Some(ExecutionStatus {
+                                id: id.clone(),
+                                sender: resp_tx.clone(),
+                                eoe_marker: eoe_marker.clone(),
+                                completed: false,
+                            });
                         }
 
-                        // Execute the code
+                        // Execute the code with timeout
+                        let exec_status = Arc::clone(&execution_status);
+
                         let result = async {
+                            // Prepare code with EOE marker
+                            // Ensure code ends with a newline for proper execution
+                            let mut code_with_marker = match code.chars().last() {
+                                Some('\n') => code,
+                                _ => format!("{}\n", code),
+                            };
+
+                            // Add console.log statement for EOE marker
+                            code_with_marker.push_str(&format!("console.log('{}');\n", eoe_marker));
+
                             // Write code to Node.js process
-                            stdin.write_all(code.as_bytes()).await.map_err(|e| {
+                            stdin.write_all(code_with_marker.as_bytes()).await.map_err(|e| {
                                 EngineError::Evaluation(format!("Failed to send code to Node.js: {}", e))
                             })?;
 
@@ -234,18 +293,43 @@ impl Engine for NodeEngine {
                                 EngineError::Evaluation(format!("Failed to flush code to Node.js: {}", e))
                             })?;
 
-                            // Give time for execution
-                            sleep(Duration::from_millis(500)).await;
+                            // Create wait future that will complete when the EOE marker is detected
+                            let wait_future = async {
+                                let mut completed = false;
+                                while !completed {
+                                    if let Some(status) = exec_status.lock().unwrap().as_ref() {
+                                        completed = status.completed;
+                                    }
+                                    sleep(Duration::from_millis(50)).await;
+                                }
+                            };
 
-                            // Signal completion
-                            let _ = resp_tx.send(Resp::Done { id }).await;
+                            // Apply timeout only if specified
+                            match timeout {
+                                Some(timeout_secs) => {
+                                    let timeout_duration = Duration::from_secs(timeout_secs);
+                                    if let Err(_) = tokio_timeout(timeout_duration, wait_future).await {
+                                        // Timeout occurred
+                                        let _ = resp_tx.send(Resp::Error {
+                                            id: id.clone(),
+                                            message: format!("Execution timed out after {} seconds", timeout_secs),
+                                        }).await;
+                                        return Err(EngineError::Timeout(timeout_secs));
+                                    }
+                                },
+                                None => {
+                                    // No timeout, just wait for completion
+                                    wait_future.await;
+                                }
+                            }
+
                             Ok(())
                         }.await;
 
-                        // Clear current evaluation
+                        // Clear current execution
                         {
-                            let mut eval_guard = stdout_current_eval.lock().unwrap();
-                            *eval_guard = None;
+                            let mut status_guard = execution_status.lock().unwrap();
+                            *status_guard = None;
                         }
 
                         // Signal completion to caller
@@ -278,6 +362,7 @@ impl Engine for NodeEngine {
         id: String,
         code: String,
         sender: &Sender<Resp>,
+        timeout: Option<u64>,
     ) -> Result<(), EngineError> {
         let eval_tx = self.eval_tx.as_ref().ok_or_else(|| {
             EngineError::Unavailable("Node.js engine not initialized".to_string())
@@ -293,6 +378,7 @@ impl Engine for NodeEngine {
                 code,
                 resp_tx: sender.clone(),
                 done_tx,
+                timeout,
             })
             .await
             .map_err(|_| EngineError::Unavailable("Node.js process channel closed".to_string()))?;
