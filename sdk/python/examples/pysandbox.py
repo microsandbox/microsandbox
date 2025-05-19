@@ -42,7 +42,6 @@ print(f'Mean of random 1000x1000 array: {result:.4f}')
         await sandbox.run(code)
         print("Output:", await sandbox.output())
 
-
 async def example_explicit_lifecycle():
     """Example using explicit lifecycle management."""
     print("\n=== Explicit Lifecycle Example ===")
@@ -121,8 +120,8 @@ async def main():
     """Run all examples."""
     try:
         await example_context_manager()
-        await example_explicit_lifecycle()
-        await example_scientific_computing()
+        # await example_explicit_lifecycle()
+        # await example_scientific_computing()
     except Exception as e:
         print(f"Error running examples: {e}")
 
