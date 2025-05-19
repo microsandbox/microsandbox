@@ -17,6 +17,8 @@ use crate::{
 
 #[cfg(feature = "cli")]
 use console::style;
+#[cfg(feature = "cli")]
+use microsandbox_utils::term;
 use microsandbox_utils::{MICROSANDBOX_ENV_DIR, SANDBOX_DB_FILENAME};
 use nix::{
     sys::signal::{self, Signal},
@@ -38,6 +40,15 @@ use super::{config, db, menv, sandbox};
 
 /// TTL for cached directory sizes.
 const DISK_SIZE_TTL: Duration = Duration::from_secs(30);
+
+#[cfg(feature = "cli")]
+const APPLY_CONFIG_MSG: &str = "Applying sandbox configuration";
+
+#[cfg(feature = "cli")]
+const START_SANDBOXES_MSG: &str = "Starting sandboxes";
+
+#[cfg(feature = "cli")]
+const STOP_SANDBOXES_MSG: &str = "Stopping sandboxes";
 
 /// Global cache path -> (size, last_updated)
 static DISK_SIZE_CACHE: Lazy<RwLock<HashMap<String, (u64, Instant)>>> =
@@ -128,23 +139,52 @@ pub async fn apply(
     config_file: Option<&str>,
     detach: bool,
 ) -> MicrosandboxResult<()> {
+    // Create spinner for CLI feedback
+    #[cfg(feature = "cli")]
+    let apply_config_sp = term::create_spinner(APPLY_CONFIG_MSG.to_string(), None, None);
+
     // Load the configuration first to validate it exists before acquiring lock
     let (config, canonical_project_dir, config_file) =
-        config::load_config(project_dir, config_file).await?;
+        match config::load_config(project_dir, config_file).await {
+            Ok(result) => result,
+            Err(e) => {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&apply_config_sp);
+                return Err(e);
+            }
+        };
 
     // Ensure menv files exist
     let menv_path = canonical_project_dir.join(MICROSANDBOX_ENV_DIR);
-    menv::ensure_menv_files(&menv_path).await?;
+    if let Err(e) = menv::ensure_menv_files(&menv_path).await {
+        #[cfg(feature = "cli")]
+        term::finish_with_error(&apply_config_sp);
+        return Err(e);
+    }
 
     // Get database connection pool
     let db_path = menv_path.join(SANDBOX_DB_FILENAME);
-    let pool = db::get_or_create_pool(&db_path, &db::SANDBOX_DB_MIGRATOR).await?;
+    let pool = match db::get_or_create_pool(&db_path, &db::SANDBOX_DB_MIGRATOR).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            #[cfg(feature = "cli")]
+            term::finish_with_error(&apply_config_sp);
+            return Err(e);
+        }
+    };
 
     // Get all sandboxes defined in config
     let config_sandboxes = config.get_sandboxes();
 
     // Get all running sandboxes from database
-    let running_sandboxes = db::get_running_config_sandboxes(&pool, &config_file).await?;
+    let running_sandboxes = match db::get_running_config_sandboxes(&pool, &config_file).await {
+        Ok(sandboxes) => sandboxes,
+        Err(e) => {
+            #[cfg(feature = "cli")]
+            term::finish_with_error(&apply_config_sp);
+            return Err(e);
+        }
+    };
     let running_sandbox_names: Vec<String> =
         running_sandboxes.iter().map(|s| s.name.clone()).collect();
 
@@ -160,7 +200,7 @@ pub async fn apply(
         // Start sandboxes in detached mode
         for name in sandboxes_to_start {
             tracing::info!("starting sandbox: {}", name);
-            sandbox::run(
+            if let Err(e) = sandbox::run(
                 name,
                 Some(START_SCRIPT_NAME),
                 Some(&canonical_project_dir),
@@ -170,20 +210,42 @@ pub async fn apply(
                 None,
                 true,
             )
-            .await?;
+            .await
+            {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&apply_config_sp);
+                return Err(e);
+            }
         }
     } else {
         // Start sandboxes in non-detached mode with multiplexed output
-        let sandbox_commands = prepare_sandbox_commands(
+        let sandbox_commands = match prepare_sandbox_commands(
             &sandboxes_to_start,
             Some(START_SCRIPT_NAME),
             &canonical_project_dir,
             &config_file,
         )
-        .await?;
+        .await
+        {
+            Ok(commands) => commands,
+            Err(e) => {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&apply_config_sp);
+                return Err(e);
+            }
+        };
 
         if !sandbox_commands.is_empty() {
-            run_commands_with_prefixed_output(sandbox_commands).await?;
+            // Finish the spinner before running commands with output
+            #[cfg(feature = "cli")]
+            apply_config_sp.finish();
+
+            if let Err(e) = run_commands_with_prefixed_output(sandbox_commands).await {
+                return Err(e);
+            }
+
+            // Return early as we've already finished the spinner
+            return Ok(());
         }
     }
 
@@ -191,12 +253,19 @@ pub async fn apply(
     for sandbox in running_sandboxes {
         if !config_sandboxes.contains_key(&sandbox.name) {
             tracing::info!("stopping sandbox: {}", sandbox.name);
-            signal::kill(
+            if let Err(e) = signal::kill(
                 Pid::from_raw(sandbox.supervisor_pid as i32),
                 Signal::SIGTERM,
-            )?;
+            ) {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&apply_config_sp);
+                return Err(e.into());
+            }
         }
     }
+
+    #[cfg(feature = "cli")]
+    apply_config_sp.finish();
 
     Ok(())
 }
@@ -248,9 +317,20 @@ pub async fn up(
     config_file: Option<&str>,
     detach: bool,
 ) -> MicrosandboxResult<()> {
+    // Create spinner for CLI feedback
+    #[cfg(feature = "cli")]
+    let start_sandboxes_sp = term::create_spinner(START_SANDBOXES_MSG.to_string(), None, None);
+
     // Load the configuration first to validate it exists
     let (config, canonical_project_dir, config_file) =
-        config::load_config(project_dir, config_file).await?;
+        match config::load_config(project_dir, config_file).await {
+            Ok(result) => result,
+            Err(e) => {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&start_sandboxes_sp);
+                return Err(e);
+            }
+        };
 
     // Get all sandboxes defined in config
     let config_sandboxes = config.get_sandboxes();
@@ -261,26 +341,48 @@ pub async fn up(
         config_sandboxes.keys().cloned().collect()
     } else {
         // Validate all sandbox names exist in config before proceeding
-        validate_sandbox_names(
+        if let Err(e) = validate_sandbox_names(
             &sandbox_names,
             &config,
             &canonical_project_dir,
             &config_file,
-        )?;
+        ) {
+            #[cfg(feature = "cli")]
+            term::finish_with_error(&start_sandboxes_sp);
+            return Err(e);
+        }
 
         sandbox_names
     };
 
     // Ensure menv files exist
     let menv_path = canonical_project_dir.join(MICROSANDBOX_ENV_DIR);
-    menv::ensure_menv_files(&menv_path).await?;
+    if let Err(e) = menv::ensure_menv_files(&menv_path).await {
+        #[cfg(feature = "cli")]
+        term::finish_with_error(&start_sandboxes_sp);
+        return Err(e);
+    }
 
     // Get database connection pool
     let db_path = menv_path.join(SANDBOX_DB_FILENAME);
-    let pool = db::get_or_create_pool(&db_path, &db::SANDBOX_DB_MIGRATOR).await?;
+    let pool = match db::get_or_create_pool(&db_path, &db::SANDBOX_DB_MIGRATOR).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            #[cfg(feature = "cli")]
+            term::finish_with_error(&start_sandboxes_sp);
+            return Err(e);
+        }
+    };
 
     // Get all running sandboxes from database
-    let running_sandboxes = db::get_running_config_sandboxes(&pool, &config_file).await?;
+    let running_sandboxes = match db::get_running_config_sandboxes(&pool, &config_file).await {
+        Ok(sandboxes) => sandboxes,
+        Err(e) => {
+            #[cfg(feature = "cli")]
+            term::finish_with_error(&start_sandboxes_sp);
+            return Err(e);
+        }
+    };
     let running_sandbox_names: Vec<String> =
         running_sandboxes.iter().map(|s| s.name.clone()).collect();
 
@@ -294,6 +396,8 @@ pub async fn up(
 
     if sandboxes_to_start.is_empty() {
         tracing::info!("No new sandboxes to start");
+        #[cfg(feature = "cli")]
+        start_sandboxes_sp.finish();
         return Ok(());
     }
 
@@ -301,7 +405,7 @@ pub async fn up(
         // Start specified sandboxes in detached mode
         for name in sandboxes_to_start {
             tracing::info!("starting sandbox: {}", name);
-            sandbox::run(
+            if let Err(e) = sandbox::run(
                 name,
                 None,
                 Some(&canonical_project_dir),
@@ -311,22 +415,47 @@ pub async fn up(
                 None,
                 true,
             )
-            .await?;
+            .await
+            {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&start_sandboxes_sp);
+                return Err(e);
+            }
         }
     } else {
         // Start sandboxes in non-detached mode with multiplexed output
-        let sandbox_commands = prepare_sandbox_commands(
+        let sandbox_commands = match prepare_sandbox_commands(
             &sandboxes_to_start,
             None, // Start script is None for normal up
             &canonical_project_dir,
             &config_file,
         )
-        .await?;
+        .await
+        {
+            Ok(commands) => commands,
+            Err(e) => {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&start_sandboxes_sp);
+                return Err(e);
+            }
+        };
 
         if !sandbox_commands.is_empty() {
-            run_commands_with_prefixed_output(sandbox_commands).await?;
+            // Finish the spinner before running commands with output
+            #[cfg(feature = "cli")]
+            start_sandboxes_sp.finish();
+
+            if let Err(e) = run_commands_with_prefixed_output(sandbox_commands).await {
+                return Err(e);
+            }
+
+            // Return early as we've already finished the spinner
+            return Ok(());
         }
     }
+
+    #[cfg(feature = "cli")]
+    start_sandboxes_sp.finish();
 
     Ok(())
 }
@@ -375,42 +504,92 @@ pub async fn down(
     project_dir: Option<&Path>,
     config_file: Option<&str>,
 ) -> MicrosandboxResult<()> {
+    // Create spinner for CLI feedback
+    #[cfg(feature = "cli")]
+    let stop_sandboxes_sp = term::create_spinner(STOP_SANDBOXES_MSG.to_string(), None, None);
+
     // Load the configuration first to validate it exists
     let (config, canonical_project_dir, config_file) =
-        config::load_config(project_dir, config_file).await?;
-
-    // Validate all sandbox names exist in config before proceeding
-    validate_sandbox_names(
-        &sandbox_names,
-        &config,
-        &canonical_project_dir,
-        &config_file,
-    )?;
-
-    // Ensure menv files exist
-    let menv_path = canonical_project_dir.join(MICROSANDBOX_ENV_DIR);
-    menv::ensure_menv_files(&menv_path).await?;
-
-    // Get database connection pool
-    let db_path = menv_path.join(SANDBOX_DB_FILENAME);
-    let pool = db::get_or_create_pool(&db_path, &db::SANDBOX_DB_MIGRATOR).await?;
+        match config::load_config(project_dir, config_file).await {
+            Ok(result) => result,
+            Err(e) => {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&stop_sandboxes_sp);
+                return Err(e);
+            }
+        };
 
     // Get all sandboxes defined in config
     let config_sandboxes = config.get_sandboxes();
 
+    // Use all sandbox names from config if no names were specified
+    let sandbox_names_to_stop = if sandbox_names.is_empty() {
+        // Use all sandbox names from config
+        config_sandboxes.keys().cloned().collect()
+    } else {
+        // Validate all sandbox names exist in config before proceeding
+        if let Err(e) = validate_sandbox_names(
+            &sandbox_names,
+            &config,
+            &canonical_project_dir,
+            &config_file,
+        ) {
+            #[cfg(feature = "cli")]
+            term::finish_with_error(&stop_sandboxes_sp);
+            return Err(e);
+        }
+
+        sandbox_names
+    };
+
+    // Ensure menv files exist
+    let menv_path = canonical_project_dir.join(MICROSANDBOX_ENV_DIR);
+    if let Err(e) = menv::ensure_menv_files(&menv_path).await {
+        #[cfg(feature = "cli")]
+        term::finish_with_error(&stop_sandboxes_sp);
+        return Err(e);
+    }
+
+    // Get database connection pool
+    let db_path = menv_path.join(SANDBOX_DB_FILENAME);
+    let pool = match db::get_or_create_pool(&db_path, &db::SANDBOX_DB_MIGRATOR).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            #[cfg(feature = "cli")]
+            term::finish_with_error(&stop_sandboxes_sp);
+            return Err(e);
+        }
+    };
+
     // Get all running sandboxes from database
-    let running_sandboxes = db::get_running_config_sandboxes(&pool, &config_file).await?;
+    let running_sandboxes = match db::get_running_config_sandboxes(&pool, &config_file).await {
+        Ok(sandboxes) => sandboxes,
+        Err(e) => {
+            #[cfg(feature = "cli")]
+            term::finish_with_error(&stop_sandboxes_sp);
+            return Err(e);
+        }
+    };
 
     // Stop specified sandboxes that are both in config and running
     for sandbox in running_sandboxes {
-        if sandbox_names.contains(&sandbox.name) && config_sandboxes.contains_key(&sandbox.name) {
+        if sandbox_names_to_stop.contains(&sandbox.name)
+            && config_sandboxes.contains_key(&sandbox.name)
+        {
             tracing::info!("stopping sandbox: {}", sandbox.name);
-            signal::kill(
+            if let Err(e) = signal::kill(
                 Pid::from_raw(sandbox.supervisor_pid as i32),
                 Signal::SIGTERM,
-            )?;
+            ) {
+                #[cfg(feature = "cli")]
+                term::finish_with_error(&stop_sandboxes_sp);
+                return Err(e.into());
+            }
         }
     }
+
+    #[cfg(feature = "cli")]
+    stop_sandboxes_sp.finish();
 
     Ok(())
 }

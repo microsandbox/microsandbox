@@ -458,8 +458,7 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         group: bool,
 
-        /// Names of components to stop
-        #[arg(required = true)]
+        /// Names of components to stop. If omitted, stops all sandboxes defined in the configuration.
         names: Vec<String>,
 
         /// Path to the sandbox file or the project directory
