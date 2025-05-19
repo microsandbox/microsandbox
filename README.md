@@ -142,10 +142,10 @@ import { NodeSandbox } from "microsandbox";
 
 const sb = await NodeSandbox.create();
 
-var result = await sb.run("var name = 'JavaScript'");
-var result = await sb.run("console.log(`Hello ${name}!`)");
+var exec = await sb.run("var name = 'JavaScript'");
+var exec = await sb.run("console.log(`Hello ${name}!`)");
 
-console.log(await result.output()); // prints Hello JavaScript!
+console.log(await exec.output()); // prints Hello JavaScript!
 
 await sb.stop();
 ```
@@ -158,10 +158,10 @@ from microsandbox import PythonSandbox
 
 async def main():
     async with PythonSandbox.create() as sb:
-        result = await sb.run("name = 'Python'")
-        result = await sb.run("print(f'Hello {name}!')")
+        exec = await sb.run("name = 'Python'")
+        exec = await sb.run("print(f'Hello {name}!')")
 
-    print(await result.output()) # prints Hello Python!
+    print(await exec.output()) # prints Hello Python!
 
 asyncio.run(main())
 ```
@@ -175,10 +175,10 @@ use microsandbox::RustSandbox;
 async fn main() -> Result<(), Box<dyn std::error::Error> {
     let sb = RustSandbox::create().await?;
 
-    var result = sb.run(r#"let name = "Rust";"#).await?;
-    var result = sb.run(r#"println!("Hello {name}");"#).await?;
+    let exec = sb.run(r#"let name = "Rust";"#).await?;
+    let exec = sb.run(r#"println!("Hello {name}");"#).await?;
 
-    println!("{}", result.output().await?); // prints Hello Rust!
+    println!("{}", exec.output().await?); // prints Hello Rust!
 
     Ok(())
 }
@@ -188,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error> {
 >
 > When you run the code for the first time, it will take a while to download the sandbox image unless you already have it downloaded. After that, it will run much faster.
 >
-> For more examples covering multiple languages and sandbox types, [check out the examples folder](./sdk-examples)
+> For more information on how to use the SDK, [check out the SDK README](./sdk/README.md).
 
 <br />
 
