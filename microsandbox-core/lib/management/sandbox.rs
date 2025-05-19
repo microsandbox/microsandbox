@@ -96,6 +96,72 @@ pub async fn run(
     exec: Option<&str>,
     use_image_defaults: bool,
 ) -> MicrosandboxResult<()> {
+    // Prepare the command
+    let (mut command, is_detached) = prepare_run(
+        sandbox_name,
+        script_name,
+        project_dir,
+        config_file,
+        args,
+        detach,
+        exec,
+        use_image_defaults,
+    )
+    .await?;
+
+    // Spawn the command
+    let mut child = command.spawn()?;
+
+    tracing::info!(
+        "started supervisor process with PID: {}",
+        child.id().unwrap_or(0)
+    );
+
+    // If in detached mode, don't wait for the child process to complete
+    if is_detached {
+        return Ok(());
+    }
+
+    // Wait for the child process to complete
+    let status = child.wait().await?;
+    if !status.success() {
+        tracing::error!(
+            "child process — supervisor — exited with status: {}",
+            status
+        );
+        return Err(MicrosandboxError::SupervisorError(format!(
+            "child process — supervisor — failed with exit status: {}",
+            status
+        )));
+    }
+
+    Ok(())
+}
+
+/// Prepares a sandbox command for execution without running it.
+///
+/// This function performs all the setup required to run a sandbox, including configuration loading,
+/// rootfs setup, and command preparation, but does not execute the command. Instead, it returns
+/// the prepared command that can be executed later.
+///
+/// The arguments and behavior are identical to `run()`, except this function returns the prepared
+/// command instead of executing it.
+///
+/// ## Returns
+///
+/// Returns a tuple containing:
+/// - The prepared command ready for execution
+/// - Whether the command should be run in detached mode
+pub async fn prepare_run(
+    sandbox_name: &str,
+    script_name: Option<&str>,
+    project_dir: Option<&Path>,
+    config_file: Option<&str>,
+    args: Vec<String>,
+    detach: bool,
+    exec: Option<&str>,
+    use_image_defaults: bool,
+) -> MicrosandboxResult<(Command, bool)> {
     // Load the configuration
     let (config, canonical_project_dir, config_file) =
         config::load_config(project_dir, config_file).await?;
@@ -160,7 +226,7 @@ pub async fn run(
     let log_dir = menv_path.join(LOG_SUBDIR);
     fs::create_dir_all(&log_dir).await?;
 
-    tracing::info!("starting sandbox supervisor...");
+    tracing::info!("preparing sandbox supervisor...");
     tracing::debug!("rootfs: {:?}", rootfs);
     tracing::debug!("exec_path: {}", exec_path);
     tracing::debug!("exec_args: {:?}", exec_args);
@@ -307,32 +373,7 @@ pub async fn run(
         }
     }
 
-    let mut child = command.spawn()?;
-
-    tracing::info!(
-        "started supervisor process with PID: {}",
-        child.id().unwrap_or(0)
-    );
-
-    // If in detached mode, don't wait for the child process to complete
-    if detach {
-        return Ok(());
-    }
-
-    // Wait for the child process to complete
-    let status = child.wait().await?;
-    if !status.success() {
-        tracing::error!(
-            "child process — supervisor — exited with status: {}",
-            status
-        );
-        return Err(MicrosandboxError::SupervisorError(format!(
-            "child process — supervisor — failed with exit status: {}",
-            status
-        )));
-    }
-
-    Ok(())
+    Ok((command, detach))
 }
 
 /// Creates and runs a temporary sandbox from an OCI image.
