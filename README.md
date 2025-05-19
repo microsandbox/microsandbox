@@ -80,7 +80,11 @@ npm install microsandbox
 pip install microsandbox
 ```
 
+<div align="center">
+
 _**or**_
+
+</div>
 
 ```sh
 uv add microsandbox
@@ -378,13 +382,21 @@ sandboxes:
 msb run --sandbox app
 ```
 
+<div align="center">
+
 _**or**_
+
+</div>
 
 ```sh
 msb r app
 ```
 
+<div align="center">
+
 _**or**_
+
+</div>
 
 ```sh
 msr app
@@ -402,13 +414,21 @@ For experimentation or one-off tasks, temporary sandboxes provide a clean enviro
 msb exe --image python
 ```
 
+<div align="center">
+
 _**or**_
+
+</div>
 
 ```sh
 msb x python
 ```
 
+<div align="center">
+
 _**or**_
+
+</div>
 
 ```sh
 msx python
@@ -426,13 +446,21 @@ The `msb install` command sets up a sandbox as a system-wide executable. It inst
 msb install --image alpine
 ```
 
+<div align="center">
+
 _**or**_
+
+</div>
 
 ```sh
 msb i alpine
 ```
 
+<div align="center">
+
 _**or**_
+
+</div>
 
 ```sh
 msi alpine
