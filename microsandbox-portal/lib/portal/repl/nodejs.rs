@@ -91,7 +91,7 @@ impl Engine for NodeEngine {
             let mut process = match Command::new("node")
                 .args(&[
                     "-e",
-                    "require('repl').start({prompt:'', terminal:false, ignoreUndefined:true})",
+                    "const r=require('repl').start({prompt:'',terminal:false,ignoreUndefined:true,useGlobal:true});r._prompt='';r.displayPrompt=()=>{}",
                 ])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
