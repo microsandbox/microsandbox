@@ -186,9 +186,6 @@ install_files() {
         info "Codesigning done"
     fi
 
-    # Create microsandbox symlink
-    ln -sf "$BIN_DIR/microsandbox" "$BIN_DIR/msb" || { warn "Failed to create microsandbox symlink"; }
-
     # Install libraries
     info "Installing libraries..."
     if [ "$OS" = "darwin" ]; then

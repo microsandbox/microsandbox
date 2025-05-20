@@ -425,14 +425,14 @@ fn extract_name_from_reference(reference: &Reference) -> String {
 fn generate_alias_script(alias: &str, script: Option<&str>) -> String {
     let run_command = if let Some(script_name) = script {
         format!(
-            "exec \"$MSB_PATH\" run \"{}~{}\" -p \"$HOME/{}\" \"$@\"",
+            "exec \"$MSB_PATH\" run \"{}~{}\" -f \"$HOME/{}\" \"$@\"",
             alias,
             script_name,
             MICROSANDBOX_HOME_DIR.to_string() + "/" + INSTALLS_SUBDIR
         )
     } else {
         format!(
-            "exec \"$MSB_PATH\" run \"{}\" -p \"$HOME/{}\" \"$@\"",
+            "exec \"$MSB_PATH\" run \"{}\" -f \"$HOME/{}\" \"$@\"",
             alias,
             MICROSANDBOX_HOME_DIR.to_string() + "/" + INSTALLS_SUBDIR
         )

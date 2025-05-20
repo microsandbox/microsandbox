@@ -494,6 +494,7 @@ This makes frequently used sandboxes incredibly convenient to access — no need
 
 <br />
 
+<<<<<<< Updated upstream
 <a href="https://asciinema.org/a/7eOFf2Ovigi473FsKgr3Lpve1" target="_blank"><img src="https://github.com/user-attachments/assets/3a9d1de4-2370-4d5a-a40d-9aa7315aa934" /></a>
 
 <div align='center'>• • •</div>
@@ -503,6 +504,11 @@ This makes frequently used sandboxes incredibly convenient to access — no need
 Interested in contributing to microsandbox? Check out our [Development Guide](./DEVELOPMENT.md) for instructions on setting up your development environment, building the project, running tests, and creating releases.
 
 For contribution guidelines, please refer to [CONTRIBUTING.md](./CONTRIBUTING.md).
+=======
+<a href="https://asciinema.org/a/SLGZaeY0VwWrrdS7LmqjaA4rq" target="_blank"><img img="700" src="https://asciinema.org/a/SLGZaeY0VwWrrdS7LmqjaA4rq.svg" /></a>
+
+<!-- TODO: <a href="https://asciinema.org/a/646222" target="_blank"><img width="2000" src="https://asciinema.org/a/646222.svg" /></a> -->
+>>>>>>> Stashed changes
 
 <div align='center'>• • •</div>
 
