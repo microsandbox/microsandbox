@@ -1,5 +1,6 @@
 [package]
 name = "microsandbox-portal"
+description = "`microsandbox-portal` implements the side car program for executing code and commands in a microsandbox."
 authors.workspace = true
 repository.workspace = true
 version.workspace = true
