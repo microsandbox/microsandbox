@@ -82,7 +82,7 @@ nondestructive = { version = "0.0.26", features = ["serde"] }
 jsonwebtoken = "9.3.1"
 rand.workspace = true
 indicatif = { workspace = true, optional = true }
-console = { workspace = true, optional = true }
+console.workspace = true
 which = "7.0"
 crossterm.workspace = true
 atty.workspace = true
@@ -95,4 +95,4 @@ serial_test = "3.2.0"
 
 [features]
 default = []
-cli = ["indicatif", "console"]
+cli = ["indicatif"]
