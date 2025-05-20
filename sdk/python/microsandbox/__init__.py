@@ -11,10 +11,12 @@ from .command import Command
 from .command_execution import CommandExecution
 from .execution import Execution
 from .metrics import Metrics, SandboxMetrics
+from .node_sandbox import NodeSandbox
 from .python_sandbox import PythonSandbox
 
 __all__ = [
     "PythonSandbox",
+    "NodeSandbox",
     "BaseSandbox",
     "Execution",
     "CommandExecution",
