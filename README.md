@@ -68,11 +68,11 @@ MSB_API_KEY=msb_***
 
 <h4><img height="13" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;&nbsp;<span>2</span>&nbsp;&nbsp;·&nbsp;&nbsp;Install SDK</h3>
 
-##### JavaScript
+<!-- ##### JavaScript
 
 ```sh
 npm install microsandbox
-```
+``` -->
 
 ##### Python
 
@@ -89,12 +89,12 @@ _**or**_
 ```sh
 uv add microsandbox
 ```
-
+<!--
 ##### Rust
 
 ```sh
 cargo add microsandbox
-```
+``` -->
 
 > [!NOTE]
 > There are [SDKs](./sdk) for other languages as well! Join us in expanding support for your favorite language.
@@ -135,7 +135,7 @@ cargo add microsandbox
 
 `microsandbox` offers a growing list of sandbox environment types optimized for different execution requirements. Choose the appropriate sandbox (e.g., PythonSandbox or NodeSandbox) to run your code in a secure tailored environment.
 
-##### JavaScript
+<!-- ##### JavaScript
 
 ```js
 import { NodeSandbox } from "microsandbox";
@@ -148,7 +148,7 @@ var exec = await sb.run("console.log(`Hello ${name}!`)");
 console.log(await exec.output()); // prints Hello JavaScript!
 
 await sb.stop();
-```
+``` -->
 
 ##### Python
 
@@ -166,7 +166,7 @@ async def main():
 asyncio.run(main())
 ```
 
-##### Rust
+<!-- ##### Rust
 
 ```rs
 use microsandbox::PythonSandbox;
@@ -182,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-```
+``` -->
 
 > [!NOTE]
 >
