@@ -7,7 +7,7 @@ import os
 import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 from dotenv import load_dotenv
@@ -23,101 +23,109 @@ class Execution:
 
     def __init__(
         self,
-        sandbox_name: str,
-        namespace: str,
-        execution_id: str,
-        server_url: str,
-        session: aiohttp.ClientSession,
-        api_key: Optional[str] = None,
+        output_data: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize an execution instance.
 
         Args:
-            sandbox_name: Name of the sandbox where execution occurred
-            namespace: Namespace of the sandbox
-            execution_id: Unique ID for this execution
-            server_url: URL of the Microsandbox server
-            session: HTTP session for API requests
-            api_key: Optional API key for authentication
+            output_data: Output data from the sandbox.repl.run response
         """
-        self._sandbox_name = sandbox_name
-        self._namespace = namespace
-        self._execution_id = execution_id
-        self._server_url = server_url
-        self._session = session
-        self._api_key = api_key
-        self._output_lines = []
-        self._output_fetched = False
+        self._output_lines: List[Dict[str, str]] = []
+        self._status = "unknown"
+        self._language = "unknown"
+        self._has_error = False
 
-    async def _fetch_output(self) -> None:
+        # Process output data if provided
+        if output_data and isinstance(output_data, dict):
+            self._process_output_data(output_data)
+
+    def _process_output_data(self, output_data: Dict[str, Any]) -> None:
         """
-        Fetch the output from the execution.
+        Process output data from the sandbox.repl.run response.
 
-        Raises:
-            RuntimeError: If fetching output fails
+        Args:
+            output_data: Dictionary containing the output data
         """
-        if not self._execution_id:
-            return
+        # Extract output lines from the response
+        self._output_lines = output_data.get("output", [])
 
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
+        # Store additional metadata that might be useful
+        self._status = output_data.get("status", "unknown")
+        self._language = output_data.get("language", "unknown")
 
-        request_data = {
-            "jsonrpc": "2.0",
-            "method": "sandbox.repl.getOutput",
-            "params": {
-                "sandbox": self._sandbox_name,
-                "namespace": self._namespace,
-                "execution_id": self._execution_id,
-            },
-            "id": str(uuid.uuid4()),
-        }
-
-        try:
-            async with self._session.post(
-                f"{self._server_url}/api/v1/rpc",
-                json=request_data,
-                headers=headers,
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise RuntimeError(f"Failed to get output: {error_text}")
-
-                response_data = await response.json()
-                if "error" in response_data:
-                    raise RuntimeError(
-                        f"Failed to get output: {response_data['error']['message']}"
-                    )
-
-                result = response_data.get("result", {})
-                self._output_lines = result.get("lines", [])
-                self._output_fetched = True
-        except aiohttp.ClientError as e:
-            raise RuntimeError(f"Failed to fetch output: {e}")
+        # Check for errors in the output or status
+        if self._status == "error" or self._status == "exception":
+            self._has_error = True
+        else:
+            # Check if there's any stderr output
+            for line in self._output_lines:
+                if (
+                    isinstance(line, dict)
+                    and line.get("stream") == "stderr"
+                    and line.get("text")
+                ):
+                    self._has_error = True
+                    break
 
     async def output(self) -> str:
         """
-        Get the output from the execution.
+        Get the standard output from the execution.
 
         Returns:
-            String containing the output of the execution
-
-        Raises:
-            RuntimeError: If fetching output fails
+            String containing the stdout output of the execution
         """
-        # Ensure we have the latest output
-        if not self._output_fetched:
-            await self._fetch_output()
-
-        # Combine the output lines into a single string
+        # Combine the stdout output lines into a single string
         output_text = ""
         for line in self._output_lines:
-            if line.get("stream") == "stdout":
+            if isinstance(line, dict) and line.get("stream") == "stdout":
                 output_text += line.get("text", "") + "\n"
 
         return output_text.rstrip()
+
+    async def error(self) -> str:
+        """
+        Get the error output from the execution.
+
+        Returns:
+            String containing the stderr output of the execution
+        """
+        # Combine the stderr output lines into a single string
+        error_text = ""
+        for line in self._output_lines:
+            if isinstance(line, dict) and line.get("stream") == "stderr":
+                error_text += line.get("text", "") + "\n"
+
+        return error_text.rstrip()
+
+    def has_error(self) -> bool:
+        """
+        Check if the execution contains an error.
+
+        Returns:
+            Boolean indicating whether the execution encountered an error
+        """
+        return self._has_error
+
+    @property
+    def status(self) -> str:
+        """
+        Get the status of the execution.
+
+        Returns:
+            String containing the execution status (e.g., "success")
+        """
+        return self._status
+
+    @property
+    def language(self) -> str:
+        """
+        Get the language used for the execution.
+
+        Returns:
+            String containing the execution language (e.g., "python")
+        """
+        return self._language
 
 
 class BaseSandbox(ABC):
@@ -408,16 +416,8 @@ class PythonSandbox(BaseSandbox):
                     )
 
                 result = response_data.get("result", {})
-                execution_id = result.get("execution_id")
 
-                # Create and return an Execution object
-                return Execution(
-                    sandbox_name=self._sandbox_name,
-                    namespace=self._namespace,
-                    execution_id=execution_id,
-                    server_url=self._server_url,
-                    session=self._session,
-                    api_key=self._api_key,
-                )
+                # Create and return an Execution object with the output data
+                return Execution(output_data=result)
         except aiohttp.ClientError as e:
             raise RuntimeError(f"Failed to execute code: {e}")

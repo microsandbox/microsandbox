@@ -19,14 +19,8 @@ Note: If authentication is enabled on the server, set MSB_API_KEY in your enviro
 """
 
 import asyncio
-import sys
-from pathlib import Path
 
 import aiohttp
-
-# Add the parent directory to Python path to allow importing the package
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from microsandbox import PythonSandbox
 
 
@@ -37,14 +31,11 @@ async def example_context_manager():
     async with PythonSandbox.create(sandbox_name="sandbox-cm") as sandbox:
         # Run some computation
         code = """
-import numpy as np
-arr = np.random.rand(1000, 1000)
-result = np.mean(arr)
-print(f'Mean of random 1000x1000 array: {result:.4f}')
+print("Hello, world!")
 """
         execution = await sandbox.run(code)
-        # output = await execution.output()
-        # print("Output:", output)
+        output = await execution.output()
+        print("Output:", output)
 
 
 async def example_explicit_lifecycle():
@@ -67,8 +58,8 @@ async def example_explicit_lifecycle():
         )
 
         # Run multiple code blocks with variable assignments
-        execution1 = await sandbox.run("x = 42")
-        execution2 = await sandbox.run("y = [i**2 for i in range(10)]")
+        await sandbox.run("x = 42")
+        await sandbox.run("y = [i**2 for i in range(10)]")
         execution3 = await sandbox.run("print(f'x = {x}')\nprint(f'y = {y}')")
 
         print("Output:", await execution3.output())
@@ -78,7 +69,7 @@ async def example_explicit_lifecycle():
             error_execution = await sandbox.run(
                 "1/0"
             )  # This will raise a ZeroDivisionError
-            print("Error output:", await error_execution.output())
+            print("Error:", await error_execution.error())
         except RuntimeError as e:
             print("Caught error:", e)
 
@@ -88,40 +79,6 @@ async def example_explicit_lifecycle():
         await sandbox._session.close()
 
 
-async def example_scientific_computing():
-    """Example demonstrating scientific computing capabilities."""
-    print("\n=== Scientific Computing Example ===")
-
-    async with PythonSandbox.create(sandbox_name="sandbox-sci") as sandbox:
-        # Run a more complex scientific computation
-        code = """
-import numpy as np
-from scipy import stats
-
-# Generate sample data
-data = np.random.normal(loc=0, scale=1, size=1000)
-
-# Compute statistics
-mean = np.mean(data)
-std = np.std(data)
-skew = stats.skew(data)
-kurtosis = stats.kurtosis(data)
-
-print(f'Sample Statistics:')
-print(f'Mean: {mean:.4f}')
-print(f'Std Dev: {std:.4f}')
-print(f'Skewness: {skew:.4f}')
-print(f'Kurtosis: {kurtosis:.4f}')
-
-# Create a histogram
-hist, bins = np.histogram(data, bins=30)
-print(f'\\nHistogram Bins: {bins[0]:.2f} to {bins[-1]:.2f}')
-print(f'Max Frequency: {max(hist)}')
-"""
-        execution = await sandbox.run(code)
-        print("Output:", await execution.output())
-
-
 async def example_execution_chaining():
     """Example demonstrating execution chaining with variables."""
     print("\n=== Execution Chaining Example ===")
@@ -129,64 +86,20 @@ async def example_execution_chaining():
     async with PythonSandbox.create(sandbox_name="sandbox-chain") as sandbox:
         # Execute a sequence of related code blocks
         await sandbox.run("name = 'Python'")
-        await sandbox.run("version = '3.9'")
+        await sandbox.run("import sys")
+        await sandbox.run("version = sys.version")
         exec = await sandbox.run("print(f'Hello from {name} {version}!')")
 
         # Only get output from the final execution
         print("Output:", await exec.output())
 
 
-async def example_timeout_handling():
-    """Example demonstrating timeout handling when starting sandboxes."""
-    print("\n=== Timeout Handling Example ===")
-
-    # Create a sandbox with a custom timeout
-    sandbox = PythonSandbox(sandbox_name="sandbox-timeout")
-    sandbox._session = aiohttp.ClientSession()
-
-    try:
-        # Demonstrate using a short timeout
-        # This might timeout if the image needs to be downloaded
-        try:
-            print("Starting sandbox with a very short timeout (5s)")
-            await sandbox.start(
-                # Using a less common image to demonstrate download time
-                image="appcypher/msb-python-ml:latest",
-                timeout=5.0,  # Very short timeout to demonstrate the feature
-            )
-            print("Sandbox started successfully")
-        except TimeoutError as e:
-            print(f"Expected timeout occurred: {e}")
-
-            # Now try with a reasonable timeout
-            print("Starting with a longer timeout (180s)")
-            await sandbox.start(
-                image="appcypher/msb-python-ml:latest",
-                timeout=180.0,  # More reasonable timeout
-            )
-            print("Sandbox started successfully with longer timeout")
-
-        # Run a simple code to verify it's working
-        execution = await sandbox.run("print('Sandbox is working!')")
-        print("Output:", await execution.output())
-
-    finally:
-        # Cleanup
-        try:
-            await sandbox.stop()
-        except Exception as e:
-            print(f"Error stopping sandbox: {e}")
-        await sandbox._session.close()
-
-
 async def main():
     """Run all examples."""
     try:
         await example_context_manager()
-        # await example_explicit_lifecycle()
-        # await example_scientific_computing()
-        # await example_execution_chaining()
-        # await example_timeout_handling()
+        await example_explicit_lifecycle()
+        await example_execution_chaining()
     except Exception as e:
         print(f"Error running examples: {e}")
 

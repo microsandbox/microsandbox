@@ -26,7 +26,7 @@ use serde_yaml;
 use std::path::PathBuf;
 use tokio::fs as tokio_fs;
 use tokio::time::{sleep, timeout, Duration};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::{
     error::ServerError,
@@ -139,10 +139,7 @@ pub async fn json_rpc_handler(
         }
 
         // Portal-forwarded methods
-        "sandbox.repl.run"
-        | "sandbox.repl.getOutput"
-        | "sandbox.command.execute"
-        | "sandbox.command.getOutput" => {
+        "sandbox.repl.run" | "sandbox.command.execute" => {
             // Forward these RPC methods to the portal
             forward_rpc_to_portal(state, request).await
         }
@@ -215,7 +212,57 @@ async fn forward_rpc_to_portal(
     // Create an HTTP client
     let client = reqwest::Client::new();
 
-    // Forward the request to the portal
+    // Configure connection retry parameters
+    const MAX_RETRIES: u32 = 10_000;
+    const TIMEOUT_MS: u64 = 50;
+
+    // Try to establish a connection to the portal before sending the actual request
+    let mut retry_count = 0;
+    let mut last_error = None;
+
+    // Keep trying to connect until we succeed or hit max retries
+    while retry_count < MAX_RETRIES {
+        // Check if portal is available with a HEAD request
+        match client
+            .head(&portal_url)
+            .timeout(Duration::from_millis(TIMEOUT_MS))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                // Any HTTP response (success or error) means we successfully connected
+                debug!(
+                    "Successfully connected to portal after {} retries (status: {})",
+                    retry_count,
+                    response.status()
+                );
+                break;
+            }
+            Err(e) => {
+                // Track the error for potential reporting but keep retrying
+                last_error = Some(e);
+                trace!("Connection attempt {} failed, retrying...", retry_count + 1);
+            }
+        }
+
+        // Increment retry counter
+        retry_count += 1;
+    }
+
+    // If we've hit the max retries and still can't connect, report the error
+    if retry_count >= MAX_RETRIES {
+        let error_msg = if let Some(e) = last_error {
+            format!(
+                "Failed to connect to portal after {} retries: {}",
+                MAX_RETRIES, e
+            )
+        } else {
+            format!("Failed to connect to portal after {} retries", MAX_RETRIES)
+        };
+        return Err(ServerError::InternalError(error_msg));
+    }
+
+    // Forward the request to the portal now that we've verified connectivity
     let response = client
         .post(&portal_rpc_url)
         .json(&request)
