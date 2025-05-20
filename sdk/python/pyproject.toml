@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "microsandbox"
-version = "0.1.4"
+version = "0.1.5"
 description = "Microsandbox Python SDK"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -24,8 +24,8 @@ classifiers = [
 dependencies = ["aiohttp>=3.10.0,<3.11.0", "frozenlist>=1.4.0", "python-dotenv"]
 
 [project.urls]
-Homepage = "https://microsandbox.dev"
-Repository = "https://github.com/yourusername/monocore"
+Homepage = "https://github.com/microsandbox/microsandbox/"
+Repository = "https://github.com/microsandbox/microsandbox/"
 
 [project.optional-dependencies]
 dev = [
