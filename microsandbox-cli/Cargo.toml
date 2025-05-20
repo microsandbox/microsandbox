@@ -26,13 +26,9 @@ path = "lib/lib.rs"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
-microsandbox-core = { version = "0.1.0", path = "../microsandbox-core", features = [
-    "cli",
-] }
-microsandbox-server = { version = "0.1.0", path = "../microsandbox-server", features = [
-    "cli",
-] }
-microsandbox-utils = { version = "0.1.0", path = "../microsandbox-utils" }
+microsandbox-core = { workspace = true, features = ["cli"] }
+microsandbox-server = { workspace = true, features = ["cli"] }
+microsandbox-utils = { workspace = true }
 clap.workspace = true
 typed-path.workspace = true
 chrono.workspace = true
