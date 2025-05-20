@@ -16,9 +16,11 @@ use std::{path::PathBuf, process::Stdio};
 
 use chrono::{Duration, Utc};
 use jsonwebtoken::{EncodingKey, Header};
+#[cfg(feature = "cli")]
+use microsandbox_utils::term;
 use microsandbox_utils::{
-    env, term, DEFAULT_MSBSERVER_EXE_PATH, MSBSERVER_EXE_ENV_VAR, NAMESPACES_SUBDIR,
-    SERVER_KEY_FILE, SERVER_PID_FILE,
+    env, DEFAULT_MSBSERVER_EXE_PATH, MSBSERVER_EXE_ENV_VAR, NAMESPACES_SUBDIR, SERVER_KEY_FILE,
+    SERVER_PID_FILE,
 };
 use rand::{distr::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -460,9 +462,11 @@ pub async fn keygen(expire: Option<Duration>, namespace: String) -> Microsandbox
     })?;
 
     // Convert the JWT token to our custom API key format
+    #[cfg(feature = "cli")]
     let custom_token = convert_jwt_to_api_key(&jwt_token)?;
 
     // Store the token information for output
+    #[cfg(feature = "cli")]
     let token_str = custom_token.clone();
     let expiry_str = expiry.to_rfc3339();
 
