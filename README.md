@@ -1,8 +1,8 @@
-<a href="./#gh-dark-mode-only" target="_blank">
-    <img width="100%" src="./assets/microsandbox-banner-xl-dark.png" alt="microsandbox-banner-xl-dark">
+\*\*\*\*<a href="./#gh-dark-mode-only" target="_blank">
+<img width="100%" src="./assets/microsandbox-banner-xl-dark.png" alt="microsandbox-banner-xl-dark">
 </a>
 <a href="./#gh-light-mode-only" target="_blank">
-    <img width="100%" src="./assets/microsandbox-banner-xl.png" alt="microsandbox-banner-xl">
+<img width="100%" src="./assets/microsandbox-banner-xl.png" alt="microsandbox-banner-xl">
 </a>
 
 <div align="center"><b>———&nbsp;&nbsp;&nbsp;secure self-hosted sandboxes for your ai agents&nbsp;&nbsp;&nbsp;———</b></div>
@@ -52,7 +52,7 @@ To run your ai-generated code, you could try a few things:
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;QUICK START</sub>
 
-Get started with microsandbox in three straightforward steps.
+Get started with microsandbox in three easy steps:
 
 <h4><img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;&nbsp;<span>1</span>&nbsp;&nbsp;·&nbsp;&nbsp;Get API Key</h3>
 
@@ -260,14 +260,19 @@ Zero-setup deployment means your AI-generated code can be immediately useful wit
 
 <div align='center'>• • •</div>
 
-
-# <sub><img height="18" src="https://octicons-col.vercel.app/device-desktop/A770EF">&nbsp;&nbsp;SANDBOX PROJECTS&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
+# <sub><img height="18" src="https://octicons-col.vercel.app/device-desktop/A770EF">&nbsp;&nbsp;PROJECTS&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
 
 `msb` CLI brings the familiar feel of package managers to sandbox development. Think of it like npm or cargo, but for sandboxes! Create a simple Sandboxfile, define your environments, and run them with easy commands.
 
+> [!WARNING]
+>
+> `microsandbox` is beta software and not ready for production use.
+
+<br />
+
 <a href="https://asciinema.org/a/7eOFf2Ovigi473FsKgr3Lpve1" target="_blank"><img src="https://github.com/user-attachments/assets/3a9d1de4-2370-4d5a-a40d-9aa7315aa934" /></a>
 
-See [SANDBOX_PROJECTS.md](./SANDBOX_PROJECTS.md) for more information.
+See [projects](./PROJECTS.md) for more information.
 
 <div align='center'>• • •</div>
 
