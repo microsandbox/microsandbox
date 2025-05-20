@@ -1,5 +1,5 @@
 """
-Sandbox implementation for the Microsandbox Python SDK.
+Base sandbox implementation for the Microsandbox Python SDK.
 """
 
 import asyncio
@@ -7,125 +7,13 @@ import os
 import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 import aiohttp
 from dotenv import load_dotenv
 
-
-class Execution:
-    """
-    Represents a code execution in a sandbox environment.
-
-    This class provides access to the results and output of code
-    that was executed in a sandbox.
-    """
-
-    def __init__(
-        self,
-        output_data: Optional[Dict[str, Any]] = None,
-    ):
-        """
-        Initialize an execution instance.
-
-        Args:
-            output_data: Output data from the sandbox.repl.run response
-        """
-        self._output_lines: List[Dict[str, str]] = []
-        self._status = "unknown"
-        self._language = "unknown"
-        self._has_error = False
-
-        # Process output data if provided
-        if output_data and isinstance(output_data, dict):
-            self._process_output_data(output_data)
-
-    def _process_output_data(self, output_data: Dict[str, Any]) -> None:
-        """
-        Process output data from the sandbox.repl.run response.
-
-        Args:
-            output_data: Dictionary containing the output data
-        """
-        # Extract output lines from the response
-        self._output_lines = output_data.get("output", [])
-
-        # Store additional metadata that might be useful
-        self._status = output_data.get("status", "unknown")
-        self._language = output_data.get("language", "unknown")
-
-        # Check for errors in the output or status
-        if self._status == "error" or self._status == "exception":
-            self._has_error = True
-        else:
-            # Check if there's any stderr output
-            for line in self._output_lines:
-                if (
-                    isinstance(line, dict)
-                    and line.get("stream") == "stderr"
-                    and line.get("text")
-                ):
-                    self._has_error = True
-                    break
-
-    async def output(self) -> str:
-        """
-        Get the standard output from the execution.
-
-        Returns:
-            String containing the stdout output of the execution
-        """
-        # Combine the stdout output lines into a single string
-        output_text = ""
-        for line in self._output_lines:
-            if isinstance(line, dict) and line.get("stream") == "stdout":
-                output_text += line.get("text", "") + "\n"
-
-        return output_text.rstrip()
-
-    async def error(self) -> str:
-        """
-        Get the error output from the execution.
-
-        Returns:
-            String containing the stderr output of the execution
-        """
-        # Combine the stderr output lines into a single string
-        error_text = ""
-        for line in self._output_lines:
-            if isinstance(line, dict) and line.get("stream") == "stderr":
-                error_text += line.get("text", "") + "\n"
-
-        return error_text.rstrip()
-
-    def has_error(self) -> bool:
-        """
-        Check if the execution contains an error.
-
-        Returns:
-            Boolean indicating whether the execution encountered an error
-        """
-        return self._has_error
-
-    @property
-    def status(self) -> str:
-        """
-        Get the status of the execution.
-
-        Returns:
-            String containing the execution status (e.g., "success")
-        """
-        return self._status
-
-    @property
-    def language(self) -> str:
-        """
-        Get the language used for the execution.
-
-        Returns:
-            String containing the execution language (e.g., "python")
-        """
-        return self._language
+from .command import Command
+from .metrics import Metrics
 
 
 class BaseSandbox(ABC):
@@ -352,72 +240,22 @@ class BaseSandbox(ABC):
         """
         pass
 
-
-class PythonSandbox(BaseSandbox):
-    """
-    Python-specific sandbox for executing Python code.
-    """
-
-    async def get_default_image(self) -> str:
+    @property
+    def command(self):
         """
-        Get the default Docker image for Python sandbox.
+        Access the command namespace for executing shell commands in the sandbox.
 
         Returns:
-            A string containing the Docker image name and tag
+            A Command instance bound to this sandbox
         """
-        return "appcypher/msb-python"
+        return Command(self)
 
-    async def run(self, code: str) -> Execution:
+    @property
+    def metrics(self):
         """
-        Execute Python code in the sandbox.
-
-        Args:
-            code: Python code to execute
+        Access the metrics namespace for retrieving sandbox metrics.
 
         Returns:
-            An Execution object that represents the executed code
-
-        Raises:
-            RuntimeError: If the sandbox is not started or execution fails
+            A Metrics instance bound to this sandbox
         """
-        if not self._is_started:
-            raise RuntimeError("Sandbox is not started. Call start() first.")
-
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-
-        request_data = {
-            "jsonrpc": "2.0",
-            "method": "sandbox.repl.run",
-            "params": {
-                "sandbox": self._sandbox_name,
-                "namespace": self._namespace,
-                "language": "python",
-                "code": code,
-            },
-            "id": str(uuid.uuid4()),
-        }
-
-        try:
-            async with self._session.post(
-                f"{self._server_url}/api/v1/rpc",
-                json=request_data,
-                headers=headers,
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise RuntimeError(f"Failed to execute code: {error_text}")
-
-                response_data = await response.json()
-                if "error" in response_data:
-                    raise RuntimeError(
-                        f"Failed to execute code: {response_data['error']['message']}"
-                    )
-
-                result = response_data.get("result", {})
-
-                # Create and return an Execution object with the output data
-                return Execution(output_data=result)
-        except aiohttp.ClientError as e:
-            raise RuntimeError(f"Failed to execute code: {e}")
+        return Metrics(self)
