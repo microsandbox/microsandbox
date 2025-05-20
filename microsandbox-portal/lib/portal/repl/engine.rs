@@ -67,6 +67,7 @@ use super::types::Engine;
 ///
 /// This struct holds instances of each language engine that has been
 /// enabled through feature flags. Each engine implements the `Engine` trait.
+#[cfg(any(feature = "python", feature = "nodejs"))]
 struct Engines {
     #[cfg(feature = "python")]
     python: Box<dyn Engine>,
@@ -116,11 +117,11 @@ impl EngineHandle {
         // Send evaluation command to reactor using the provided execution_id
         self.cmd_sender
             .send(Cmd::Eval {
-                id: execution_id,
-                code,
-                language,
-                resp_tx,
-                timeout,
+                _id: execution_id,
+                _code: code,
+                _language: language,
+                _resp_tx: resp_tx,
+                _timeout: timeout,
             })
             .await
             .map_err(|_| EngineError::Unavailable("Reactor thread not available".to_string()))?;
@@ -199,37 +200,36 @@ impl EngineHandle {
 ///
 /// Returns an `EngineError` if any of the engines fail to initialize.
 pub async fn start_engines() -> Result<EngineHandle, EngineError> {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Cmd>(100);
+    let (cmd_tx, mut _cmd_rx) = mpsc::channel::<Cmd>(100);
 
     // Spawn reactor task
+    #[cfg(any(feature = "python", feature = "nodejs"))]
     tokio::spawn(async move {
         // Initialize engines asynchronously
-        #[cfg(any(feature = "python", feature = "nodejs"))]
         let mut engines = initialize_engines()
             .await
             .expect("Failed to initialize engines");
 
         // Process commands until shutdown
-        #[cfg(any(feature = "python", feature = "nodejs"))]
-        while let Some(cmd) = cmd_rx.recv().await {
+        while let Some(cmd) = _cmd_rx.recv().await {
             match cmd {
                 Cmd::Eval {
-                    id,
-                    code,
-                    language,
-                    resp_tx,
-                    timeout,
-                } => match language {
+                    _id,
+                    _code,
+                    _language,
+                    _resp_tx,
+                    _timeout,
+                } => match _language {
                     #[cfg(feature = "python")]
                     Language::Python => {
                         if let Err(e) = engines
                             .python
-                            .eval(id.clone(), code, &resp_tx, timeout)
+                            .eval(_id.clone(), _code, &_resp_tx, _timeout)
                             .await
                         {
-                            let _ = resp_tx
+                            let _ = _resp_tx
                                 .send(Resp::Error {
-                                    id,
+                                    id: _id,
                                     message: e.to_string(),
                                 })
                                 .await;
@@ -278,6 +278,7 @@ pub async fn start_engines() -> Result<EngineHandle, EngineError> {
 /// # Errors
 ///
 /// Returns an `EngineError` if any of the engines fail to initialize.
+#[cfg(any(feature = "python", feature = "nodejs"))]
 async fn initialize_engines() -> Result<Engines, EngineError> {
     #[cfg(feature = "python")]
     let mut python_engine = python::create_engine()?;

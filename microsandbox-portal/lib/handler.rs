@@ -10,12 +10,12 @@ use crate::{
         JsonRpcError, JsonRpcRequest, JsonRpcResponse, SandboxCommandExecuteParams,
         SandboxReplRunParams, JSONRPC_VERSION,
     },
-    portal::{
-        command::create_command_executor,
-        repl::{start_engines, Language},
-    },
+    portal::command::create_command_executor,
     state::SharedState,
 };
+
+#[cfg(any(feature = "python", feature = "nodejs"))]
+use crate::portal::repl::{start_engines, Language};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -84,7 +84,7 @@ pub async fn json_rpc_handler(
 //--------------------------------------------------------------------------------------------------
 
 /// Implementation for sandbox run method
-async fn sandbox_run_impl(state: SharedState, params: Value) -> Result<Value, PortalError> {
+async fn sandbox_run_impl(_state: SharedState, params: Value) -> Result<Value, PortalError> {
     debug!(?params, "Sandbox run method called");
 
     // Deserialize parameters using the structured type
@@ -92,11 +92,14 @@ async fn sandbox_run_impl(state: SharedState, params: Value) -> Result<Value, Po
         .map_err(|e| PortalError::JsonRpc(format!("Invalid parameters: {}", e)))?;
 
     // Convert language string to Language enum
-    let language = match params.language.to_lowercase().as_str() {
+    #[cfg(any(feature = "python", feature = "nodejs"))]
+    let language;
+
+    match params.language.to_lowercase().as_str() {
         #[cfg(feature = "python")]
-        "python" => Language::Python,
+        "python" => language = Language::Python,
         #[cfg(feature = "nodejs")]
-        "node" | "nodejs" | "javascript" => Language::Node,
+        "node" | "nodejs" | "javascript" => language = Language::Node,
         _ => {
             // Check if we're being asked for a language that is supported but not enabled via features
             let error_msg = match params.language.to_lowercase().as_str() {
@@ -116,9 +119,10 @@ async fn sandbox_run_impl(state: SharedState, params: Value) -> Result<Value, Po
 
     // Get or initialize engine handle
     // With tokio::sync::Mutex, we can safely .await while holding the lock
+    #[cfg(any(feature = "python", feature = "nodejs"))]
     let engine_handle = {
         // Get the current engine handle if it exists
-        let mut lock = state.engine_handle.lock().await;
+        let mut lock = _state.engine_handle.lock().await;
 
         if let Some(ref handle) = *lock {
             handle.clone()
@@ -135,20 +139,25 @@ async fn sandbox_run_impl(state: SharedState, params: Value) -> Result<Value, Po
         }
     };
 
+    #[cfg(any(feature = "python", feature = "nodejs"))]
     debug!("Language: {}", params.language);
 
     // Use a temporary identifier for evaluation
+    #[cfg(any(feature = "python", feature = "nodejs"))]
     let temp_id = uuid::Uuid::new_v4().to_string();
 
     // Execute the code in REPL
+    #[cfg(any(feature = "python", feature = "nodejs"))]
     let lines = engine_handle
         .eval(&params.code, language, &temp_id, params.timeout)
         .await
         .map_err(|e| PortalError::Internal(format!("REPL execution failed: {}", e)))?;
 
+    #[cfg(any(feature = "python", feature = "nodejs"))]
     debug!("REPL execution produced {} output lines", lines.len());
 
     // Convert the lines to a format suitable for JSON
+    #[cfg(any(feature = "python", feature = "nodejs"))]
     let output_lines: Vec<Value> = lines
         .iter()
         .map(|line| {
@@ -163,14 +172,17 @@ async fn sandbox_run_impl(state: SharedState, params: Value) -> Result<Value, Po
         .collect();
 
     // Construct the result JSON object with explicit String conversions
+    #[cfg(any(feature = "python", feature = "nodejs"))]
     let result = json!({
         "status": "success".to_string(),
         "language": params.language.to_string(),
         "output": output_lines,
     });
 
+    #[cfg(any(feature = "python", feature = "nodejs"))]
     debug!("Returning result with output: {}", result);
 
+    #[cfg(any(feature = "python", feature = "nodejs"))]
     Ok(result)
 }
 

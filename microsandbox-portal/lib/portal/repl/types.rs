@@ -107,11 +107,11 @@ pub enum EngineError {
 pub(crate) enum Cmd {
     /// Evaluate code with ID and code string
     Eval {
-        id: String,
-        code: String,
-        language: Language,
-        resp_tx: Sender<Resp>,
-        timeout: Option<u64>,
+        _id: String,
+        _code: String,
+        _language: Language,
+        _resp_tx: Sender<Resp>,
+        _timeout: Option<u64>,
     },
 
     /// Shutdown the reactor and all engines
