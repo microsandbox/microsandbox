@@ -1,5 +1,6 @@
 [package]
 name = "microsandbox-server"
+description = "`microsandbox-server` implements the sandbox server responsible for orchestrating sandboxes."
 authors.workspace = true
 repository.workspace = true
 version.workspace = true

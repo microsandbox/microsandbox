@@ -405,7 +405,10 @@ pub async fn stop() -> MicrosandboxServerResult<()> {
 }
 
 /// Generate a new API key (JWT token)
-pub async fn keygen(expire: Option<Duration>, namespace: String) -> MicrosandboxServerResult<()> {
+pub async fn keygen(
+    expire: Option<Duration>,
+    namespace: String,
+) -> MicrosandboxServerResult<String> {
     let microsandbox_home_path = env::get_microsandbox_home_path();
     let key_file_path = microsandbox_home_path.join(SERVER_KEY_FILE);
 
@@ -462,11 +465,9 @@ pub async fn keygen(expire: Option<Duration>, namespace: String) -> Microsandbox
     })?;
 
     // Convert the JWT token to our custom API key format
-    #[cfg(feature = "cli")]
     let custom_token = convert_jwt_to_api_key(&jwt_token)?;
 
     // Store the token information for output
-    #[cfg(feature = "cli")]
     let token_str = custom_token.clone();
     let expiry_str = expiry.to_rfc3339();
 
@@ -486,7 +487,7 @@ pub async fn keygen(expire: Option<Duration>, namespace: String) -> Microsandbox
         println!("Namespace: {}", console::style(&claims.namespace).cyan());
     }
 
-    Ok(())
+    Ok(token_str)
 }
 
 /// Clean up the PID file
