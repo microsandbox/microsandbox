@@ -1003,9 +1003,8 @@ async fn run_commands_with_prefixed_output(
         };
 
         tracing::info!(
-            "{} {} started supervisor process with PID: {}",
-            styled_name,
-            styled_separator,
+            "{} | started supervisor process with PID: {}",
+            sandbox_name,
             child.id().unwrap_or(0)
         );
 
