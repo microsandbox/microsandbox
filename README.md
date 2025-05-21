@@ -52,7 +52,7 @@ To run your ai-generated code, you could try a few things:
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;QUICK START</sub>
 
-Get started with microsandbox in a few easy steps:
+Get started with the SDK in a few easy steps:
 
 <br />
 
@@ -164,11 +164,11 @@ asyncio.run(main())
 ##### Rust
 
 ```rs
-use microsandbox::PythonSandbox;
+use microsandbox::{SandboxOptions, PythonSandbox};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sb = PythonSandbox::create().await?;
+    let sb = PythonSandbox::create(SandboxOptions::default()).await?;
 
     let exec = sb.run(r#"name = "Python""#).await?;
     let exec = sb.run(r#"print(f"Hello {name}")"#).await?;
