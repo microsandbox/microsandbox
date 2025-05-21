@@ -184,11 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ``` -->
 
-
-
-https://github.com/user-attachments/assets/4ff86eeb-8812-4b6c-a917-464377eef134
-
-
+<a href="https://asciinema.org/a/7eOFf2Ovigi473FsKgr3Lpve1" target="_blank"><img src="https://github.com/user-attachments/assets/3a9d1de4-2370-4d5a-a40d-9aa7315aa934" /></a>
 
 > [!NOTE]
 >
