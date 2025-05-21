@@ -258,9 +258,6 @@ fn validate_token(api_key: &str, state: &AppState) -> Result<Claims, ServerError
     // Get server key for validation
     let server_key = get_server_key(state)?;
 
-    println!("server_key: {}", server_key);
-    println!("jwt: {}", jwt);
-
     // Decode and validate the JWT
     let token_data = decode::<Claims>(
         &jwt,
