@@ -56,7 +56,7 @@ Get started with the SDK in a few easy steps:
 
 <br />
 
-<a href="https://asciinema.org/a/7eOFf2Ovigi473FsKgr3Lpve1" target="_blank"><img src="https://github.com/user-attachments/assets/3a9d1de4-2370-4d5a-a40d-9aa7315aa934" /></a>
+<a href="https://asciinema.org/a/7eOFf2Ovigi473FsKgr3Lpve1" target="_blank"><img src="https://asciinema.org/a/zyxUsKm2drfeiIZzyfrhroerp.svg" /></a>
 
 ##
 
