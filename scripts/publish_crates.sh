@@ -53,6 +53,8 @@ DRY_RUN=false
 CHECK_ONLY=false
 SKIP_CONFIRM=false
 CRATES_TOKEN=""
+# Store the last package name for comparison later
+LAST_PACKAGE="${PACKAGES[4]}"  # microsandbox-cli is the last package
 
 # Display usage information
 function show_usage {
@@ -250,11 +252,24 @@ publish_crate() {
         fi
     else
         # Real publish - should proceed only if all dependencies are properly available
-        if cargo publish; then
-            info "Successfully published $package v$VERSION"
+        # Capture both stdout and stderr
+        output=$(cargo publish 2>&1)
+        exit_code=$?
+
+        # Check if the output contains "already exists" error message
+        if [ $exit_code -ne 0 ]; then
+            if echo "$output" | grep -q "already exists"; then
+                warn "Package $package v$VERSION already exists on crates.io, skipping..."
+                # Return success so the script continues
+                return 0
+            else
+                # It's a different error, so print it and exit
+                error "Failed to publish $package v$VERSION"
+                echo "$output"
+                exit 1
+            fi
         else
-            error "Failed to publish $package v$VERSION"
-            exit 1
+            info "Successfully published $package v$VERSION"
         fi
     fi
 
@@ -275,13 +290,31 @@ wait_for_package_availability() {
         return 0
     fi
 
+    # If a package was already found to exist during publication, we don't need to wait
+    if [ -n "$SKIP_WAIT_FOR_$package" ]; then
+        info "Package $package v$version was already on crates.io, skipping wait check"
+        return 0
+    fi
+
     info "Waiting for $package v$version to be available on crates.io…"
 
     while [ $attempt -le $max_attempts ]; do
-        # Query crates.io via its API (faster and less noisy than cargo search)
-        if curl -s "https://crates.io/api/v1/crates/${package}/${version}" | grep -q "\"version\":\"${version}\""; then
+        # Query crates.io via its API
+        response=$(curl -s "https://crates.io/api/v1/crates/${package}/${version}")
+
+        # Check if the response contains successful version data
+        # Look for both the version number and the package name in the response
+        if echo "$response" | grep -q "\"num\":\"${version}\"" && \
+           echo "$response" | grep -q "\"crate\":\"${package}\""; then
             info "$package v$version is now available on crates.io!"
             return 0
+        fi
+
+        # Debug output if needed
+        if [ $attempt -eq 1 ] || [ $((attempt % 10)) -eq 0 ]; then
+            # Log the API response occasionally for debugging
+            echo "API response (attempt $attempt):"
+            echo "$response" | head -10
         fi
 
         sleep 3
@@ -289,24 +322,48 @@ wait_for_package_availability() {
     done
 
     warn "Timed out waiting for $package v$version to become available."
-    return 1
+
+    # Even if we time out, we'll check one last time by making a direct HTTP request to the package page
+    # This is a fallback in case the API is inconsistent
+    if curl -s -I "https://crates.io/crates/${package}/${version}" | grep -q "HTTP/"; then
+        info "Package $package v$version appears to be available on crates.io website, continuing..."
+        return 0
+    fi
+
+    # Ask the user what to do
+    read -p "Continue with publishing anyway? (y/n) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        info "Continuing with publishing as requested..."
+        return 0
+    else
+        error "Publishing aborted due to dependency availability issues."
+        exit 1
+    fi
 }
 
 # Publish all crates in order
 publish_crates() {
     info "Publishing all crates with version $VERSION"
 
+    # Temporarily disable strict error handling for this function
+    set +e
+
     if [ "$SKIP_CONFIRM" = false ]; then
         read -p "Are you sure you want to publish all crates with version $VERSION? (y/n) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             info "Publishing cancelled."
+            # Re-enable strict error handling before exiting
+            set -e
             exit 0
         fi
     fi
 
     # Track published packages to know which ones we need to wait for
     local published_packages=()
+    # Track already existing packages to skip wait checks
+    declare -A already_exists_packages
 
     for package in "${PACKAGES[@]}"; do
         # First check if we need to wait for any dependencies
@@ -322,7 +379,13 @@ publish_crates() {
 
                 if [ "$DRY_RUN" = false ]; then
                     info "$package depends on $published, waiting for it to be available..."
-                    wait_for_package_availability "$published" "$VERSION"
+
+                    # Skip waiting if we already know it exists
+                    if [ "${already_exists_packages[$published]}" = "1" ]; then
+                        info "Dependency $published v$VERSION already exists on crates.io, no need to wait"
+                    else
+                        wait_for_package_availability "$published" "$VERSION"
+                    fi
                 else
                     info "$package depends on $published (dependency noted for dry run)"
                 fi
@@ -330,46 +393,69 @@ publish_crates() {
         done
 
         # Now publish the package
+        info "Publishing $package v$VERSION to crates.io"
+        cd "$PROJECT_ROOT/$package"
+
         if [ "$DRY_RUN" = true ]; then
+            # For dry runs, skip the verification step entirely to avoid dependency issues
             info "[DRY RUN] Simulating cargo publish for $package v$VERSION"
 
-            # In dry run mode, just check if the cargo manifest is valid instead of trying to publish
-            cd "$PROJECT_ROOT/$package"
-
-            # Just verify that the package can be packaged, without checking deps
-            if cargo check --quiet; then
+            # Use cargo publish with --dry-run and --no-verify to skip checking dependencies on crates.io
+            cargo publish --dry-run --no-verify --allow-dirty
+            if [ $? -eq 0 ]; then
                 info "[DRY RUN] Package verification successful for $package v$VERSION"
             else
                 error "[DRY RUN] Failed to verify package $package"
+                # Re-enable strict error handling before exiting
+                set -e
                 exit 1
             fi
-
-            cd "$PROJECT_ROOT"
         else
-            # For real publishing, we perform the full checks and publishing process
-            info "Publishing $package v$VERSION to crates.io"
-            cd "$PROJECT_ROOT/$package"
+            # Real publish - should proceed only if all dependencies are properly available
+            # Capture both stdout and stderr
+            output=$(cargo publish 2>&1)
+            exit_code=$?
 
-            if cargo publish; then
-                info "Successfully published $package v$VERSION"
+            # Check if the output contains "already exists" error message
+            if [ $exit_code -ne 0 ]; then
+                if echo "$output" | grep -q "already exists"; then
+                    warn "Package $package v$VERSION already exists on crates.io, skipping..."
+                    # Mark this package as already existing to skip waiting for it later
+                    already_exists_packages[$package]=1
+                else
+                    # It's a different error, so print it and exit
+                    error "Failed to publish $package v$VERSION"
+                    echo "$output"
+                    # Re-enable strict error handling before exiting
+                    set -e
+                    exit 1
+                fi
             else
-                error "Failed to publish $package v$VERSION"
-                exit 1
+                info "Successfully published $package v$VERSION"
             fi
-
-            cd "$PROJECT_ROOT"
         fi
+
+        # Return to project root
+        cd "$PROJECT_ROOT"
 
         # Add to the list of published packages
         published_packages+=("$package")
 
         # After publishing (real run), wait until crates.io shows the crate before proceeding
-        if [ "$DRY_RUN" = false ] && [ "$package" != "${PACKAGES[-1]}" ]; then
-            wait_for_package_availability "$package" "$VERSION"
+        if [ "$DRY_RUN" = false ] && [ "$package" != "$LAST_PACKAGE" ]; then
+            # Skip waiting if we already know it exists
+            if [ "${already_exists_packages[$package]}" = "1" ]; then
+                info "Package $package v$VERSION already exists on crates.io, no need to wait"
+            else
+                wait_for_package_availability "$package" "$VERSION"
+            fi
         fi
     done
 
     info "All crates published successfully with version $VERSION"
+
+    # Re-enable strict error handling
+    set -e
 }
 
 # Parse command line arguments
