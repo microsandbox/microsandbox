@@ -1,4 +1,4 @@
-\*\*\*\*<a href="./#gh-dark-mode-only" target="_blank">
+<a href="./#gh-dark-mode-only" target="_blank">
 <img width="100%" src="./assets/microsandbox-banner-xl-dark.png" alt="microsandbox-banner-xl-dark">
 </a>
 <a href="./#gh-light-mode-only" target="_blank">
@@ -52,9 +52,15 @@ To run your ai-generated code, you could try a few things:
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;QUICK START</sub>
 
-Get started with microsandbox in three easy steps:
+Get started with microsandbox in a few easy steps:
 
-<h4><img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;&nbsp;<span>1</span>&nbsp;&nbsp;·&nbsp;&nbsp;Get API Key</h3>
+<br />
+
+<a href="https://asciinema.org/a/7eOFf2Ovigi473FsKgr3Lpve1" target="_blank"><img src="https://github.com/user-attachments/assets/3a9d1de4-2370-4d5a-a40d-9aa7315aa934" /></a>
+
+##
+
+<h3><span>1</span>&nbsp;&nbsp;<img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;Get API Key</h3>
 
 - Get your API key <a href="./SELF_HOSTING.md">[→]</a>
 - Configure API key environment variable, for example by setting it in your `.env` file
@@ -65,13 +71,13 @@ Get started with microsandbox in three easy steps:
 
 ##
 
-<h4><img height="13" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;&nbsp;<span>2</span>&nbsp;&nbsp;·&nbsp;&nbsp;Install SDK</h3>
+<h3><span>2</span>&nbsp;&nbsp;<img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install SDK</h3>
 
-<!-- ##### JavaScript
+##### JavaScript
 
 ```sh
 npm install microsandbox
-``` -->
+```
 
 ##### Python
 
@@ -79,22 +85,11 @@ npm install microsandbox
 pip install microsandbox
 ```
 
-<div align="center">
-
-_**or**_
-
-</div>
-
-```sh
-uv add microsandbox
-```
-
-<!--
 ##### Rust
 
 ```sh
 cargo add microsandbox
-``` -->
+```
 
 > [!NOTE]
 > There are [SDKs](./sdk) for other languages as well! Join us in expanding support for your favorite language.
@@ -131,11 +126,11 @@ cargo add microsandbox
 
 ##
 
-<h4><img height="13" src="https://octicons-col.vercel.app/file-binary/A770EF">&nbsp;&nbsp;&nbsp;<span>3</span>&nbsp;&nbsp;·&nbsp;&nbsp;Execute Code in Sandbox</h3>
+<h3><span>3</span>&nbsp;&nbsp;<img height="14" src="https://octicons-col.vercel.app/file-binary/A770EF">&nbsp;&nbsp;Execute Code in Sandbox</h3>
 
 `microsandbox` offers a growing list of sandbox environment types optimized for different execution requirements. Choose the appropriate sandbox (e.g., PythonSandbox or NodeSandbox) to run your code in a secure tailored environment.
 
-<!-- ##### JavaScript
+##### JavaScript
 
 ```js
 import { NodeSandbox } from "microsandbox";
@@ -148,7 +143,7 @@ var exec = await sb.run("console.log(`Hello ${name}!`)");
 console.log(await exec.output()); // prints Hello JavaScript!
 
 await sb.stop();
-``` -->
+```
 
 ##### Python
 
@@ -166,7 +161,7 @@ async def main():
 asyncio.run(main())
 ```
 
-<!-- ##### Rust
+##### Rust
 
 ```rs
 use microsandbox::PythonSandbox;
@@ -182,9 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-``` -->
-
-<a href="https://asciinema.org/a/7eOFf2Ovigi473FsKgr3Lpve1" target="_blank"><img src="https://github.com/user-attachments/assets/3a9d1de4-2370-4d5a-a40d-9aa7315aa934" /></a>
+```
 
 > [!NOTE]
 >
@@ -264,11 +257,9 @@ Zero-setup deployment means your AI-generated code can be immediately useful wit
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/device-desktop/A770EF">&nbsp;&nbsp;PROJECTS&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
 
-`msb` CLI brings the familiar feel of package managers to sandbox development. Think of it like npm or cargo, but for sandboxes! Create a simple Sandboxfile, define your environments, and run them with easy commands.
+Beyond its SDK for secure execution of untrusted code, microsandbox supports project-based development with familiar package-manager workflows.
 
-> [!WARNING]
->
-> `microsandbox` is beta software and not ready for production use.
+Think of it like npm or cargo, but for sandboxes! Create a Sandboxfile, define your environments, and manage your sandboxes with simple commands.
 
 <br />
 
