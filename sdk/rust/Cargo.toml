@@ -3,12 +3,20 @@ name = "microsandbox"
 version = "0.1.0"
 edition = "2021"
 authors = ["Microsandbox Team <team@microsandbox.dev>"]
-description = "A minimal Rust SDK for the Microsandbox project"
+description = "Rust SDK for microsandbox - secure self-hosted sandboxes for your AI agents"
 repository = "https://github.com/microsandbox/microsandbox"
 license = "Apache-2.0"
 readme = "README.md"
-keywords = ["microsandbox", "sdk"]
-categories = ["api-bindings"]
-homepage = "https://github.com/microsandbox/microsandbox"
+keywords = ["microsandbox", "sandbox", "security", "ai", "execution"]
+categories = ["api-bindings", "virtualization"]
+homepage = "https://microsandbox.dev"
 
 [dependencies]
+async-trait = "0.1"
+dotenv = "0.15"
+futures = "0.3"
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1.4", features = ["v4", "serde"] }

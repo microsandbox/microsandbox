@@ -175,12 +175,14 @@ use microsandbox::{SandboxOptions, PythonSandbox};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sb = PythonSandbox::create(SandboxOptions::builder().name("test").build()).await?;
+    let mut sb = PythonSandbox::create(SandboxOptions::builder().name("test").build()).await?;
 
     let exec = sb.run(r#"name = "Python""#).await?;
-    let exec = sb.run(r#"print(f"Hello {name}")"#).await?;
+    let exec = sb.run(r#"print(f"Hello {name}!")"#).await?;
 
     println!("{}", exec.output().await?); // prints Hello Python!
+
+    sb.stop().await?;
 
     Ok(())
 }
