@@ -135,7 +135,7 @@ cargo add microsandbox
 ```js
 import { NodeSandbox } from "microsandbox";
 
-const sb = await NodeSandbox.create();
+const sb = await NodeSandbox.create({ name: "test" });
 
 var exec = await sb.run("var name = 'JavaScript'");
 var exec = await sb.run("console.log(`Hello ${name}!`)");
@@ -152,7 +152,7 @@ import asyncio
 from microsandbox import PythonSandbox
 
 async def main():
-    async with PythonSandbox.create() as sb:
+    async with PythonSandbox.create(name="test") as sb:
         exec = await sb.run("name = 'Python'")
         exec = await sb.run("print(f'Hello {name}!')")
 
@@ -168,7 +168,7 @@ use microsandbox::{SandboxOptions, PythonSandbox};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sb = PythonSandbox::create(SandboxOptions::default()).await?;
+    let sb = PythonSandbox::create(SandboxOptions::builder().name("test").build()).await?;
 
     let exec = sb.run(r#"name = "Python""#).await?;
     let exec = sb.run(r#"print(f"Hello {name}")"#).await?;
