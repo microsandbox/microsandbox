@@ -134,7 +134,7 @@ class Metrics:
             "method": "sandbox.getStatus",
             "params": {
                 "namespace": self._sandbox._namespace,
-                "sandbox": self._sandbox._sandbox_name,
+                "sandbox": self._sandbox._name,
             },
             "id": str(uuid.uuid4()),
         }
@@ -163,7 +163,7 @@ class Metrics:
                 our_sandbox = None
                 for sandbox in sandboxes:
                     if (
-                        sandbox.get("name") == self._sandbox._sandbox_name
+                        sandbox.get("name") == self._sandbox._name
                         and sandbox.get("namespace") == self._sandbox._namespace
                     ):
                         our_sandbox = sandbox

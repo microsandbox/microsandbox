@@ -232,25 +232,8 @@ fn convert_api_key_to_jwt(api_key: &str) -> Result<String, ServerError> {
         ));
     }
 
-    // Remove the prefix
-    let key_without_prefix = &api_key[API_KEY_PREFIX.len()..];
-
-    // Split into parts and validate
-    let parts: Vec<&str> = key_without_prefix.split('.').collect();
-    if parts.len() != 2 {
-        return Err(ServerError::Authentication(
-            AuthenticationError::InvalidCredentials("Invalid API key format".to_string()),
-        ));
-    }
-
-    // Reconstruct as standard JWT with header, payload, signature
-    // Fix the temporary value issue by storing the header in a variable
-    let header_value = crate::config::DEFAULT_JWT_HEADER.clone();
-    let jwt_header = header_value.as_str();
-    let payload = parts[0];
-    let signature = parts[1];
-
-    Ok(format!("{}.{}.{}", jwt_header, payload, signature))
+    // Remove the prefix and return the original JWT
+    Ok(api_key[API_KEY_PREFIX.len()..].to_string())
 }
 
 /// Get the server key from the AppState config
@@ -274,6 +257,9 @@ fn validate_token(api_key: &str, state: &AppState) -> Result<Claims, ServerError
 
     // Get server key for validation
     let server_key = get_server_key(state)?;
+
+    println!("server_key: {}", server_key);
+    println!("jwt: {}", jwt);
 
     // Decode and validate the JWT
     let token_data = decode::<Claims>(

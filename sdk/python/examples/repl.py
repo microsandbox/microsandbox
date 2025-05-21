@@ -28,7 +28,7 @@ async def example_context_manager():
     """Example using the async context manager pattern."""
     print("\n=== Context Manager Example ===")
 
-    async with PythonSandbox.create(sandbox_name="sandbox-cm") as sandbox:
+    async with PythonSandbox.create(name="sandbox-cm") as sandbox:
         # Run some computation
         code = """
 print("Hello, world!")
@@ -44,7 +44,7 @@ async def example_explicit_lifecycle():
 
     # Create sandbox with custom configuration
     sandbox = PythonSandbox(
-        server_url="http://127.0.0.1:5555", sandbox_name="sandbox-explicit"
+        server_url="http://127.0.0.1:5555", name="sandbox-explicit"
     )
 
     # Create HTTP session
@@ -83,7 +83,7 @@ async def example_execution_chaining():
     """Example demonstrating execution chaining with variables."""
     print("\n=== Execution Chaining Example ===")
 
-    async with PythonSandbox.create(sandbox_name="sandbox-chain") as sandbox:
+    async with PythonSandbox.create(name="sandbox-chain") as sandbox:
         # Execute a sequence of related code blocks
         await sandbox.run("name = 'Python'")
         await sandbox.run("import sys")

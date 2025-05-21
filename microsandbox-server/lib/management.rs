@@ -516,15 +516,8 @@ fn generate_random_key() -> String {
 
 /// Convert a standard JWT token to our custom API key format
 /// Takes a standard JWT token (<header>.<payload>.<signature>) and returns
-/// our custom API key format (<API_KEY_PREFIX_<payload>.<signature>)
+/// our custom API key format (<API_KEY_PREFIX><full_jwt_token>)
 pub fn convert_jwt_to_api_key(jwt_token: &str) -> MicrosandboxServerResult<String> {
-    let parts: Vec<&str> = jwt_token.split('.').collect();
-    if parts.len() != 3 {
-        return Err(MicrosandboxServerError::KeyGenError(
-            "Invalid JWT token format".to_string(),
-        ));
-    }
-
-    // Create custom API key format: API_KEY_PREFIX.payload.signature
-    Ok(format!("{}{}.{}", API_KEY_PREFIX, parts[1], parts[2]))
+    // Create custom API key format: API_KEY_PREFIX + full JWT token
+    Ok(format!("{}{}", API_KEY_PREFIX, jwt_token))
 }

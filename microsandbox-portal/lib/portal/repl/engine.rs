@@ -239,12 +239,12 @@ pub async fn start_engines() -> Result<EngineHandle, EngineError> {
                     Language::Node => {
                         if let Err(e) = engines
                             .nodejs
-                            .eval(id.clone(), code, &resp_tx, timeout)
+                            .eval(_id.clone(), _code, &_resp_tx, _timeout)
                             .await
                         {
-                            let _ = resp_tx
+                            let _ = _resp_tx
                                 .send(Resp::Error {
-                                    id,
+                                    id: _id,
                                     message: e.to_string(),
                                 })
                                 .await;

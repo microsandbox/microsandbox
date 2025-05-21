@@ -14,7 +14,7 @@ async def basic_example():
     print("\n=== Basic Command Example ===")
 
     # Create a sandbox using a context manager (automatically handles start/stop)
-    async with PythonSandbox.create(sandbox_name="command-example") as sandbox:
+    async with PythonSandbox.create(name="command-example") as sandbox:
         # Run a simple command
         ls_execution = await sandbox.command.run("ls", ["-la", "/"])
         print("$ ls -la /")
@@ -39,7 +39,7 @@ async def error_handling_example():
     """Example showing how to handle command errors."""
     print("\n=== Error Handling Example ===")
 
-    async with PythonSandbox.create(sandbox_name="error-example") as sandbox:
+    async with PythonSandbox.create(name="error-example") as sandbox:
         # Run a command that generates an error
         error_execution = await sandbox.command.run("ls", ["/nonexistent"])
 
@@ -62,7 +62,7 @@ async def timeout_example():
     """Example showing how to use command timeouts."""
     print("\n=== Timeout Example ===")
 
-    async with PythonSandbox.create(sandbox_name="timeout-example") as sandbox:
+    async with PythonSandbox.create(name="timeout-example") as sandbox:
         print("Running command with timeout...")
         try:
             # Run a command that takes longer than the specified timeout
@@ -80,7 +80,7 @@ async def advanced_example():
     """Example showing more advanced command usage."""
     print("\n=== Advanced Example ===")
 
-    async with PythonSandbox.create(sandbox_name="advanced-example") as sandbox:
+    async with PythonSandbox.create(name="advanced-example") as sandbox:
         # Write a file
         write_cmd = await sandbox.command.run(
             "bash", ["-c", "echo 'Hello, file content!' > /tmp/test.txt"]
@@ -131,7 +131,7 @@ async def explicit_lifecycle_example():
     print("\n=== Explicit Lifecycle Example ===")
 
     # Create sandbox without context manager
-    sandbox = PythonSandbox(sandbox_name="explicit-lifecycle")
+    sandbox = PythonSandbox(name="explicit-lifecycle")
     sandbox._session = aiohttp.ClientSession()
 
     try:

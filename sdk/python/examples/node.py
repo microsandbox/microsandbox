@@ -24,7 +24,7 @@ async def basic_example():
     print("\n=== Basic Node.js Example ===")
 
     # Create a sandbox using a context manager (automatically handles start/stop)
-    async with NodeSandbox.create(sandbox_name="node-basic") as sandbox:
+    async with NodeSandbox.create(name="node-basic") as sandbox:
         # Run a simple JavaScript code snippet
         execution = await sandbox.run("console.log('Hello from Node.js!');")
         output = await execution.output()
@@ -44,7 +44,7 @@ async def error_handling_example():
     """Example showing how to handle JavaScript errors."""
     print("\n=== Error Handling Example ===")
 
-    async with NodeSandbox.create(sandbox_name="node-error") as sandbox:
+    async with NodeSandbox.create(name="node-error") as sandbox:
         # Run code with a caught error
         caught_error_code = """
 try {
@@ -64,7 +64,7 @@ async def module_example():
     """Example showing Node.js module usage."""
     print("\n=== Module Usage Example ===")
 
-    async with NodeSandbox.create(sandbox_name="node-module") as sandbox:
+    async with NodeSandbox.create(name="node-module") as sandbox:
         # Using built-in Node.js modules
         fs_code = """
 const fs = require('fs');
@@ -91,7 +91,7 @@ async def execution_chaining_example():
     """Example demonstrating execution chaining with variables."""
     print("\n=== Execution Chaining Example ===")
 
-    async with NodeSandbox.create(sandbox_name="node-chain") as sandbox:
+    async with NodeSandbox.create(name="node-chain") as sandbox:
         # Execute a sequence of related code blocks that maintain state
         await sandbox.run("const name = 'Node.js';")
         await sandbox.run("const version = process.version;")

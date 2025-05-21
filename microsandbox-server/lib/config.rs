@@ -12,9 +12,8 @@
 //! - Environment-based configuration loading
 //! - Namespace directory management
 
-use std::{net::SocketAddr, path::PathBuf, sync::LazyLock};
+use std::{net::SocketAddr, path::PathBuf};
 
-use base64::{prelude::BASE64_STANDARD, Engine};
 use getset::Getters;
 use microsandbox_utils::{env, NAMESPACES_SUBDIR};
 use serde::Deserialize;
@@ -24,10 +23,6 @@ use crate::{port::LOCALHOST_IP, MicrosandboxServerError, MicrosandboxServerResul
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
-
-/// Default JWT header for HS256 algorithm in base64
-pub const DEFAULT_JWT_HEADER: LazyLock<String> =
-    LazyLock::new(|| BASE64_STANDARD.encode("{\"typ\":\"JWT\",\"alg\":\"HS256\"}"));
 
 /// The header name for the proxy authorization
 pub const PROXY_AUTH_HEADER: &str = "Proxy-Authorization";

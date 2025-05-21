@@ -14,7 +14,7 @@ async def basic_metrics_example():
     print("\n=== Basic Metrics Example ===")
 
     # Create a sandbox using a context manager (automatically handles start/stop)
-    async with PythonSandbox.create(sandbox_name="metrics-example") as sandbox:
+    async with PythonSandbox.create(name="metrics-example") as sandbox:
         # Get initial sandbox metrics
         print("Getting initial sandbox metrics...")
         metrics = await sandbox.metrics.get()
@@ -55,7 +55,7 @@ async def monitoring_example():
     """Example showing how to monitor sandbox metrics over time."""
     print("\n=== Monitoring Metrics Example ===")
 
-    async with PythonSandbox.create(sandbox_name="monitoring-example") as sandbox:
+    async with PythonSandbox.create(name="monitoring-example") as sandbox:
         # Monitor metrics while running various operations
         print("Starting monitoring...")
 
@@ -102,7 +102,7 @@ async def advanced_metrics_example():
     """Example showing more advanced metrics usage."""
     print("\n=== Advanced Metrics Example ===")
 
-    async with PythonSandbox.create(sandbox_name="advanced-example") as sandbox:
+    async with PythonSandbox.create(name="advanced-example") as sandbox:
         # Get all raw metrics data
         metrics = await sandbox.metrics.get()
 

@@ -59,7 +59,7 @@ class Command:
             "jsonrpc": "2.0",
             "method": "sandbox.command.execute",
             "params": {
-                "sandbox": self._sandbox._sandbox_name,
+                "sandbox": self._sandbox._name,
                 "namespace": self._sandbox._namespace,
                 "command": command,
                 "args": args,

@@ -48,7 +48,7 @@ class NodeSandbox(BaseSandbox):
             "jsonrpc": "2.0",
             "method": "sandbox.repl.run",
             "params": {
-                "sandbox": self._sandbox_name,
+                "sandbox": self._name,
                 "namespace": self._namespace,
                 "language": "nodejs",
                 "code": code,

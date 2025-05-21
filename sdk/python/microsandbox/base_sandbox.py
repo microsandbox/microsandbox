@@ -28,7 +28,7 @@ class BaseSandbox(ABC):
         self,
         server_url: str = None,
         namespace: str = "default",
-        sandbox_name: Optional[str] = None,
+        name: Optional[str] = None,
         api_key: Optional[str] = None,
     ):
         """
@@ -37,7 +37,7 @@ class BaseSandbox(ABC):
         Args:
             server_url: URL of the Microsandbox server. If not provided, will check MSB_SERVER_URL environment variable, then fall back to default.
             namespace: Namespace for the sandbox
-            sandbox_name: Optional name for the sandbox. If not provided, a random name will be generated.
+            name: Optional name for the sandbox. If not provided, a random name will be generated.
             api_key: API key for Microsandbox server authentication. If not provided, it will be read from MSB_API_KEY environment variable.
         """
         load_dotenv()
@@ -46,7 +46,7 @@ class BaseSandbox(ABC):
             "MSB_SERVER_URL", "http://127.0.0.1:5555"
         )
         self._namespace = namespace
-        self._sandbox_name = sandbox_name or f"sandbox-{uuid.uuid4().hex[:8]}"
+        self._name = name or f"sandbox-{uuid.uuid4().hex[:8]}"
         self._api_key = api_key or os.environ.get("MSB_API_KEY")
         self._session = None
         self._is_started = False
@@ -67,7 +67,7 @@ class BaseSandbox(ABC):
         cls,
         server_url: str = None,
         namespace: str = "default",
-        sandbox_name: Optional[str] = None,
+        name: Optional[str] = None,
         api_key: Optional[str] = None,
     ):
         """
@@ -76,7 +76,7 @@ class BaseSandbox(ABC):
         Args:
             server_url: URL of the Microsandbox server. If not provided, will check MSB_SERVER_URL environment variable, then fall back to default.
             namespace: Namespace for the sandbox
-            sandbox_name: Optional name for the sandbox. If not provided, a random name will be generated.
+            name: Optional name for the sandbox. If not provided, a random name will be generated.
             api_key: API key for Microsandbox server authentication. If not provided, it will be read from MSB_API_KEY environment variable.
 
         Returns:
@@ -85,7 +85,7 @@ class BaseSandbox(ABC):
         sandbox = cls(
             server_url=server_url,
             namespace=namespace,
-            sandbox_name=sandbox_name,
+            name=name,
             api_key=api_key,
         )
         try:
@@ -131,7 +131,7 @@ class BaseSandbox(ABC):
             "method": "sandbox.start",
             "params": {
                 "namespace": self._namespace,
-                "sandbox": self._sandbox_name,
+                "sandbox": self._name,
                 "config": {
                     "image": sandbox_image,
                     "memory": memory,
@@ -196,7 +196,7 @@ class BaseSandbox(ABC):
         request_data = {
             "jsonrpc": "2.0",
             "method": "sandbox.stop",
-            "params": {"namespace": self._namespace, "sandbox": self._sandbox_name},
+            "params": {"namespace": self._namespace, "sandbox": self._name},
             "id": str(uuid.uuid4()),
         }
 
