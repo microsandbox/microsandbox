@@ -1,6 +1,8 @@
 # <sub><img height="18" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;SELF HOSTING&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
 
-With self hosting, your data and code stay on your servers making security compliance easy. Also, having a local setup allows you to test and move through ideas fast.
+To get started, you need to host your own sandbox server. Whether that's on a local machine or in the cloud, it's up to you.
+
+Self hosting lets you manage your own data and code making it easier to comply with security policies. Also, having a sandbox server set up locally allows you to test and move through ideas quickly.
 
 Let's help you start your first self-hosted sandbox server. It's easy!
 
@@ -24,8 +26,8 @@ This will install the `msb` CLI tool, which helps you manage sandboxes locally.
 >
 > **Platform-specific requirements:**
 >
-> - <a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/linux/black" height="14"/></a><a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/linux/white" height="14"/></a> **Linux** — KVM virtualization must be enabled
 > - <a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/apple" height="14"/></a><a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/apple/white" height="14"/></a> **macOS** — Requires Apple Silicon (M1/M2/M3/M4)
+> - <a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/linux/black" height="14"/></a><a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/linux/white" height="14"/></a> **Linux**<sup><sup><small><a href="https://github.com/microsandbox/microsandbox/issues/224" target="_blank">[WIP]</a></small></sup></sup> — KVM virtualization must be enabled
 
 ##
 
@@ -44,12 +46,17 @@ msb server start
 #### 3. Generate API Key
 
 ```sh
-msb server keygen
+msb server keygen --expire 3mo
 ```
 
 ##
 
-After starting the server and generating your key, [configure the two environment variables](#1get-api-key) to connect your SDK to your self-hosted sandbox server automatically.
+After starting the server and generating your key, configure the environment variables to connect your SDK to your self-hosted sandbox server automatically.
+
+There are just two environment variables to set:
+
+- `MSB_API_KEY` — The API key for your sandbox server
+- `MSB_API_URL` — The URL of your sandbox server. You don't need to set this if you are running the server locally at the default port.
 
 > [!TIP]
 >
