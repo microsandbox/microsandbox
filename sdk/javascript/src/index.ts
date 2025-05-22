@@ -1,17 +1,14 @@
 /**
- * Microsandbox JavaScript SDK
+ * Microsandbox TypeScript SDK
  *
- * A minimal SDK for the Microsandbox project.
+ * A TypeScript SDK for creating and managing secure sandboxes for code execution.
  */
 
-/**
- * Returns a greeting message for the given name.
- *
- * @param name - The name to greet
- * @returns A greeting message
- */
-export function greet(name: string): string {
-  const message = `Hello, ${name}! Welcome to Microsandbox!`;
-  console.log(message);
-  return message;
-}
+export { BaseSandbox } from "./base-sandbox";
+export { Command } from "./command";
+export { CommandExecution } from "./command-execution";
+export { Execution } from "./execution";
+export { Metrics } from "./metrics";
+export { NodeSandbox } from "./node-sandbox";
+export { PythonSandbox } from "./python-sandbox";
+export { SandboxOptions } from "./types";

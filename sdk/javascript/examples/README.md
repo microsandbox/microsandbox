@@ -1,38 +1,77 @@
-# Microsandbox JavaScript SDK Examples
+# Microsandbox TypeScript SDK Examples
 
-This directory contains example scripts to demonstrate how to use the Microsandbox JavaScript SDK.
+This directory contains examples demonstrating how to use the Microsandbox TypeScript SDK.
 
-## Available Examples
+## Prerequisites
 
-### 1. Simple Hello World Example
+1. Install dependencies:
 
-The most basic example showing how to use the microsandbox package after installation.
+   ```
+   npm install
+   ```
 
-#### JavaScript Version (`hello_example.js`)
+2. Start the Microsandbox server:
+
+   ```
+   microsandbox-server
+   ```
+
+3. Run the examples as described below
+
+## Running Examples
+
+The examples can be run using the following npm scripts:
 
 ```bash
-# First install the package
-npm install microsandbox
+# Run Node.js sandbox example
+npm run example:node
 
-# Then run the example
-node hello_example.js
+# Run Python sandbox example
+npm run example:python
+
+# Run shell command execution example
+npm run example:command
+
+# Run metrics monitoring example
+npm run example:metrics
 ```
 
-#### TypeScript Version (`hello_example.ts`)
+## Examples
 
-```bash
-# First install the package
-npm install microsandbox
+### Node.js Example (`node.ts`)
 
-# Compile the TypeScript file
-tsc hello_example.ts
+Demonstrates how to use `NodeSandbox` to execute JavaScript code, including:
 
-# Then run the compiled JavaScript
-node hello_example.js
-```
+- Basic JavaScript execution
+- Error handling
+- Node.js module usage
+- Execution chaining with variable state
 
-## Notes
+### Python Example (`python.ts`)
 
-- The examples assume you have Node.js and npm installed
-- For TypeScript examples, you'll need the TypeScript compiler (`npm install -g typescript`)
-- You can also run TypeScript examples directly with ts-node (`npm install -g ts-node`)
+Demonstrates the Python sandbox features, including:
+
+- Different sandbox creation and management patterns
+- Resource configuration (memory, CPU)
+- Error handling with Python exceptions
+- Execution chaining with variable state
+
+### Command Execution Example (`command.ts`)
+
+Shows how to execute shell commands within a sandbox, including:
+
+- Basic command execution
+- Error handling
+- Command timeouts
+- Advanced usage (file I/O, complex pipelines)
+- Explicit lifecycle management
+
+### Metrics Example (`metrics.ts`)
+
+Demonstrates how to retrieve and monitor sandbox metrics, including:
+
+- Individual metrics retrieval (CPU, memory, disk)
+- All metrics at once
+- Continuous monitoring
+- CPU load generation and measurement
+- Error handling with metrics

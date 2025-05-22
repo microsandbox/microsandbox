@@ -77,18 +77,16 @@ Get started with the SDK in a few easy steps:
 
 <h3><span>2</span>&nbsp;&nbsp;<img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install SDK</h3>
 
-<!--
-##### JavaScript
-
-```sh
-npm install microsandbox
-```
--->
-
 ##### Python
 
 ```sh
 pip install microsandbox
+```
+
+##### JavaScript
+
+```sh
+npm install microsandbox
 ```
 
 ##### Rust
@@ -139,23 +137,6 @@ cargo add microsandbox
 
 `microsandbox` offers a growing list of sandbox environment types optimized for different execution requirements. Choose the appropriate sandbox (e.g., PythonSandbox or NodeSandbox) to run your code in a secure tailored environment.
 
-<!--
-##### JavaScript
-
-```js
-import { NodeSandbox } from "microsandbox";
-
-const sb = await NodeSandbox.create({ name: "test" });
-
-var exec = await sb.run("var name = 'JavaScript'");
-var exec = await sb.run("console.log(`Hello ${name}!`)");
-
-console.log(await exec.output()); // prints Hello JavaScript!
-
-await sb.stop();
-```
--->
-
 ##### Python
 
 ```py
@@ -170,6 +151,27 @@ async def main():
     print(await exec.output()) # prints Hello Python!
 
 asyncio.run(main())
+```
+
+##### JavaScript
+
+```js
+import { NodeSandbox } from "microsandbox";
+
+async function main() {
+  const sb = await NodeSandbox.create({ name: "test" });
+
+  try {
+    let exec = await sb.run("var name = 'JavaScript'");
+    exec = await sb.run("console.log(`Hello ${name}!`)");
+
+    console.log(await exec.output()); // prints Hello JavaScript!
+  } finally {
+    await sb.stop();
+  }
+}
+
+main().catch(console.error);
 ```
 
 ##### Rust
