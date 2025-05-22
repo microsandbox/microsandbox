@@ -32,8 +32,8 @@ use crate::{
     error::ServerError,
     middleware,
     payload::{
-        JsonRpcError, JsonRpcRequest, JsonRpcResponse, RegularMessageResponse, SandboxStartParams,
-        SandboxStatusParams, SandboxStopParams, JSONRPC_VERSION,
+        JsonRpcError, JsonRpcRequest, JsonRpcResponse, RegularMessageResponse,
+        SandboxMetricsGetParams, SandboxStartParams, SandboxStopParams, JSONRPC_VERSION,
     },
     state::AppState,
     SandboxStatus, SandboxStatusResponse, ServerResult,
@@ -119,17 +119,17 @@ pub async fn json_rpc_handler(
                 Json(JsonRpcResponse::success(json!(result), id)),
             ))
         }
-        "sandbox.getStatus" => {
-            // Parse the params into a SandboxStatusRequest
-            let status_params: SandboxStatusParams = serde_json::from_value(request.params.clone())
-                .map_err(|e| {
+        "sandbox.metrics.get" => {
+            // Parse the params into a SandboxMetricsGetRequest
+            let metrics_params: SandboxMetricsGetParams =
+                serde_json::from_value(request.params.clone()).map_err(|e| {
                     ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
-                        format!("Invalid params for sandbox.getStatus: {}", e),
+                        format!("Invalid params for sandbox.metrics.get: {}", e),
                     ))
                 })?;
 
-            // Call the sandbox_status_impl function with state and request
-            let result = sandbox_get_status_impl(state.clone(), status_params).await?;
+            // Call the sandbox_get_metrics_impl function with state and request
+            let result = sandbox_get_metrics_impl(state.clone(), metrics_params).await?;
 
             // Create JSON-RPC response with success
             Ok((
@@ -139,7 +139,7 @@ pub async fn json_rpc_handler(
         }
 
         // Portal-forwarded methods
-        "sandbox.repl.run" | "sandbox.command.execute" => {
+        "sandbox.repl.run" | "sandbox.command.run" => {
             // Forward these RPC methods to the portal
             forward_rpc_to_portal(state, request).await
         }
@@ -763,10 +763,10 @@ async fn sandbox_stop_impl(state: AppState, params: SandboxStopParams) -> Server
     Ok(format!("Sandbox {} stopped successfully", params.sandbox))
 }
 
-/// Implementation for sandbox status
-async fn sandbox_get_status_impl(
+/// Implementation for sandbox metrics
+async fn sandbox_get_metrics_impl(
     state: AppState,
-    params: SandboxStatusParams,
+    params: SandboxMetricsGetParams,
 ) -> ServerResult<SandboxStatusResponse> {
     // Validate namespace - special handling for '*' wildcard
     if params.namespace != "*" {
@@ -788,10 +788,10 @@ async fn sandbox_get_status_impl(
         )));
     }
 
-    // Get all sandboxes statuses based on the request
+    // Get all sandboxes metrics based on the request
     let mut all_statuses = Vec::new();
 
-    // If namespace is "*", get statuses from all namespaces
+    // If namespace is "*", get metrics from all namespaces
     if params.namespace == "*" {
         // Read namespaces directory
         let mut entries = tokio::fs::read_dir(&namespaces_dir).await.map_err(|e| {
@@ -813,7 +813,7 @@ async fn sandbox_get_status_impl(
                 .unwrap_or("unknown")
                 .to_string();
 
-            // Get statuses for this namespace, filtered by sandbox name if provided
+            // Get metrics for this namespace, filtered by sandbox name if provided
             let sandbox_names = if let Some(sandbox) = &params.sandbox {
                 vec![sandbox.clone()]
             } else {
@@ -836,12 +836,12 @@ async fn sandbox_get_status_impl(
                 }
                 Err(e) => {
                     // Log the error but continue with other namespaces
-                    tracing::warn!("Error getting status for namespace {}: {}", namespace, e);
+                    tracing::warn!("Error getting metrics for namespace {}: {}", namespace, e);
                 }
             }
         }
     } else {
-        // Get status for a specific namespace
+        // Get metrics for a specific namespace
         let namespace_dir = namespaces_dir.join(&params.namespace);
 
         // Check if the namespace directory exists
@@ -854,7 +854,7 @@ async fn sandbox_get_status_impl(
             ));
         }
 
-        // Get statuses for this namespace, filtered by sandbox name if provided
+        // Get metrics for this namespace, filtered by sandbox name if provided
         let sandbox_names = if let Some(sandbox) = &params.sandbox {
             vec![sandbox.clone()]
         } else {
@@ -877,7 +877,7 @@ async fn sandbox_get_status_impl(
             }
             Err(e) => {
                 return Err(ServerError::InternalError(format!(
-                    "Error getting status for namespace {}: {}",
+                    "Error getting metrics for namespace {}: {}",
                     params.namespace, e
                 )));
             }

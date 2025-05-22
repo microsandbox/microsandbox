@@ -7,7 +7,7 @@ use tracing::debug;
 use crate::{
     error::PortalError,
     payload::{
-        JsonRpcError, JsonRpcRequest, JsonRpcResponse, SandboxCommandExecuteParams,
+        JsonRpcError, JsonRpcRequest, JsonRpcResponse, SandboxCommandRunParams,
         SandboxReplRunParams, JSONRPC_VERSION,
     },
     portal::command::create_command_executor,
@@ -59,7 +59,7 @@ pub async fn json_rpc_handler(
                 }
             }
         }
-        "sandbox.command.execute" => {
+        "sandbox.command.run" => {
             // Call the sandbox_command_run_impl function
             match sandbox_command_run_impl(state, request.params).await {
                 Ok(result) => {
@@ -186,12 +186,12 @@ async fn sandbox_run_impl(_state: SharedState, params: Value) -> Result<Value, P
     Ok(result)
 }
 
-/// Implementation for sandbox command execute method
+/// Implementation for sandbox command run method
 async fn sandbox_command_run_impl(state: SharedState, params: Value) -> Result<Value, PortalError> {
-    debug!(?params, "Sandbox command execute method called");
+    debug!(?params, "Sandbox command run method called");
 
     // Deserialize parameters using the structured type
-    let params: SandboxCommandExecuteParams = serde_json::from_value(params)
+    let params: SandboxCommandRunParams = serde_json::from_value(params)
         .map_err(|e| PortalError::JsonRpc(format!("Invalid parameters: {}", e)))?;
 
     // Get or initialize command executor handle

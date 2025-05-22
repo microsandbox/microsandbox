@@ -57,7 +57,7 @@ class Command:
         # Prepare the request data
         request_data = {
             "jsonrpc": "2.0",
-            "method": "sandbox.command.execute",
+            "method": "sandbox.command.run",
             "params": {
                 "sandbox": self._sandbox._name,
                 "namespace": self._sandbox._namespace,

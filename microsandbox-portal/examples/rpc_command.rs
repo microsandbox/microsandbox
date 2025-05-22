@@ -10,7 +10,7 @@
 //!
 //! # API Methods Demonstrated
 //!
-//! - `sandbox.command.execute`: Execute a command in a sandboxed environment
+//! - `sandbox.command.run`: Execute a command in a sandboxed environment
 //!
 //! # Running the Example
 //!
@@ -64,7 +64,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 // Import the parameter types from the microsandbox-portal crate
-use microsandbox_portal::payload::{JsonRpcRequest, SandboxCommandExecuteParams, JSONRPC_VERSION};
+use microsandbox_portal::payload::{JsonRpcRequest, SandboxCommandRunParams, JSONRPC_VERSION};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -138,13 +138,13 @@ async fn main() -> Result<()> {
 
     // Execute a simple 'ls' command using the typed params
     println!("\n📁 Running 'ls' command:");
-    let ls_params = SandboxCommandExecuteParams {
+    let ls_params = SandboxCommandRunParams {
         command: "ls".to_string(),
         args: vec!["-la".to_string()],
         timeout: Some(30), // Add a 30 second timeout
     };
 
-    let result = send_rpc_request(&client, "sandbox.command.execute", ls_params).await?;
+    let result = send_rpc_request(&client, "sandbox.command.run", ls_params).await?;
 
     // Extract command execution details
     let command = result
@@ -183,13 +183,13 @@ async fn main() -> Result<()> {
 
     // Execute another command with environment variables using the typed params
     println!("\n🔄 Running 'echo' command:");
-    let echo_params = SandboxCommandExecuteParams {
+    let echo_params = SandboxCommandRunParams {
         command: "echo".to_string(),
         args: vec!["Hello from the sandbox!".to_string()],
         timeout: None, // No timeout needed for simple echo command
     };
 
-    let result = send_rpc_request(&client, "sandbox.command.execute", echo_params).await?;
+    let result = send_rpc_request(&client, "sandbox.command.run", echo_params).await?;
 
     // Extract command execution details
     let command = result
@@ -228,14 +228,14 @@ async fn main() -> Result<()> {
 
     // Execute a command that will fail to demonstrate error handling
     println!("\n❌ Running a command that will fail:");
-    let fail_params = SandboxCommandExecuteParams {
+    let fail_params = SandboxCommandRunParams {
         command: "nonexistent_command".to_string(),
         args: vec![],
         timeout: Some(5), // Short timeout
     };
 
     // This will likely fail, so handle the error case
-    match send_rpc_request(&client, "sandbox.command.execute", fail_params).await {
+    match send_rpc_request(&client, "sandbox.command.run", fail_params).await {
         Ok(result) => {
             // Still might get a result with error details
             let exit_code = result

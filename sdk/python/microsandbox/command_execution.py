@@ -21,7 +21,7 @@ class CommandExecution:
         Initialize a command execution instance.
 
         Args:
-            output_data: Output data from the sandbox.command.execute response
+            output_data: Output data from the sandbox.command.run response
         """
         self._output_lines: List[Dict[str, str]] = []
         self._command = ""
@@ -35,7 +35,7 @@ class CommandExecution:
 
     def _process_output_data(self, output_data: Dict[str, Any]) -> None:
         """
-        Process output data from the sandbox.command.execute response.
+        Process output data from the sandbox.command.run response.
 
         Args:
             output_data: Dictionary containing the output data

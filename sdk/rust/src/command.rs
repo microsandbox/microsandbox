@@ -217,7 +217,7 @@ impl Command {
         // Execute command
         let base = self.sandbox.lock().await;
         let result: HashMap<String, Value> =
-            base.make_request("sandbox.command.execute", params).await?;
+            base.make_request("sandbox.command.run", params).await?;
 
         Ok(CommandExecution::new(result))
     }

@@ -82,7 +82,7 @@ pub struct SandboxReplRunParams {
 
 /// Request parameters for executing a shell command
 #[derive(Debug, Deserialize, Serialize)]
-pub struct SandboxCommandExecuteParams {
+pub struct SandboxCommandRunParams {
     /// Command to execute
     pub command: String,
 

@@ -102,13 +102,13 @@ pub struct SandboxStopParams {
     pub namespace: String,
 }
 
-/// Request payload for getting sandbox status
+/// Request payload for getting sandbox metrics
 #[derive(Debug, Deserialize)]
-pub struct SandboxStatusParams {
+pub struct SandboxMetricsGetParams {
     /// Optional sandbox name - if not provided, all sandboxes in the namespace will be included
     pub sandbox: Option<String>,
 
-    /// Namespace - use "*" to get status from all namespaces
+    /// Namespace - use "*" to get metrics from all namespaces
     pub namespace: String,
 }
 
@@ -181,7 +181,7 @@ pub struct SandboxReplGetOutputParams {
 
 /// Request parameters for executing a shell command
 #[derive(Debug, Deserialize, Serialize)]
-pub struct SandboxCommandExecuteParams {
+pub struct SandboxCommandRunParams {
     /// Command to execute
     pub command: String,
 
