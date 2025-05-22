@@ -9,18 +9,18 @@
 #
 # Options:
 #   -h, --help              Show help message
-#   -s, --sdk SDK_NAME      Build specific SDK image (python, nodejs)
+#   -s, --sdk SDK_NAME      Build specific SDK image (python, node)
 #   -a, --all               Build all SDK images (default if no options provided)
 #
 # The script performs the following tasks:
 #   1. Detects which SDK images to build based on arguments
 #   2. Builds each selected image using Docker
-#   3. Tags images with a consistent naming scheme (msb-[sdk])
+#   3. Tags images with the language name
 #
 # Examples:
 #   ./scripts/build_sdk_images.sh                # Build all SDK images
 #   ./scripts/build_sdk_images.sh -s python      # Build only the Python SDK image
-#   ./scripts/build_sdk_images.sh -s nodejs      # Build only the Node.js SDK image
+#   ./scripts/build_sdk_images.sh -s node        # Build only the Node.js SDK image
 #
 # All images are built from the project root, using multi-stage builds that
 # compile the portal binary with appropriate language features enabled.
@@ -39,7 +39,7 @@ NC='\033[0m' # No Color
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # List of available SDKs
-AVAILABLE_SDKS=("python" "nodejs")
+AVAILABLE_SDKS=("python" "node")
 
 # Display usage information
 function show_usage {
@@ -47,13 +47,13 @@ function show_usage {
     echo
     echo "Options:"
     echo "  -h, --help              Show this help message"
-    printf "  -s, --sdk SDK_NAME      Build specific SDK image (${YELLOW}python${NC}, ${YELLOW}nodejs${NC})\n"
+    printf "  -s, --sdk SDK_NAME      Build specific SDK image (${YELLOW}python${NC}, ${YELLOW}node${NC})\n"
     echo "  -a, --all               Build all SDK images (default)"
     echo
     echo "Examples:"
     echo "  $0                      # Build all SDK images"
     echo "  $0 -s python            # Build only the Python SDK image"
-    echo "  $0 -s nodejs            # Build only the Node.js SDK image"
+    echo "  $0 -s node              # Build only the Node.js SDK image"
     echo
 }
 
@@ -73,7 +73,7 @@ error() {
 # Function to build a specific SDK image
 function build_sdk_image {
     local sdk=$1
-    local image_name="msb-${sdk}"
+    local image_name="${sdk}"
     local dockerfile="$PROJECT_ROOT/sdk-images/${sdk}/Dockerfile"
 
     # Check if Dockerfile exists
@@ -172,7 +172,7 @@ info "All specified SDK images have been processed"
 printf "\n${BLUE}======================= BUILD SUMMARY ========================${NC}\n"
 echo "Images built:"
 for sdk in "${SDKS_TO_BUILD[@]}"; do
-    printf "  - ${YELLOW}msb-%s${NC}\n" "${sdk}"
+    printf "  - ${YELLOW}%s${NC}\n" "${sdk}"
 done
 printf "\n${GREEN}You can run these images with:${NC}\n"
 echo "  docker run -it -p 4444:4444 -e RUST_LOG=info --name IMAGE_NAME IMAGE_NAME"

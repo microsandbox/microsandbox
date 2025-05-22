@@ -10,7 +10,7 @@
 #
 # Options:
 #   -h, --help                Show help message
-#   -s, --sdk SDK_NAME        Publish specific SDK image (python, nodejs)
+#   -s, --sdk SDK_NAME        Publish specific SDK image (python, node)
 #   -a, --all                 Publish all SDK images (default if no SDK specified)
 #   -u, --username USERNAME   Docker registry username (required)
 #   -o, --org ORGANIZATION    Docker registry organization/account (defaults to username)
@@ -21,10 +21,10 @@
 #   --dry-run                 Don't actually push images, just show what would be done
 #
 # Examples:
-#   ./scripts/publish_sdk_images.sh -u myuser -s python                # Push python image to docker.io/myuser/msb-python:latest
-#   ./scripts/publish_sdk_images.sh -u myuser -o myorg -s nodejs -t v1 # Push nodejs image to docker.io/myorg/msb-nodejs:v1
-#   ./scripts/publish_sdk_images.sh -u myuser -t v1 -l -s python       # Push python image as both v1 and latest tags
-#   ./scripts/publish_sdk_images.sh -u myuser --multi-arch -a          # Push all multi-arch images
+#   ./scripts/publish_sdk_images.sh -u myuser -s python             # Push python image to docker.io/myuser/python:latest
+#   ./scripts/publish_sdk_images.sh -u myuser -o myorg -s node -t v1 # Push node image to docker.io/myorg/node:v1
+#   ./scripts/publish_sdk_images.sh -u myuser -t v1 -l -s python    # Push python image as both v1 and latest tags
+#   ./scripts/publish_sdk_images.sh -u myuser --multi-arch -a       # Push all multi-arch images
 #
 # Note: For multi-arch manifests, you need to have built the images on different
 # architectures and pushed them with architecture-specific tags first.
@@ -43,7 +43,7 @@ NC='\033[0m' # No Color
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # List of available SDKs
-AVAILABLE_SDKS=("python" "nodejs")
+AVAILABLE_SDKS=("python" "node")
 
 # Default values
 USERNAME=""
@@ -60,7 +60,7 @@ function show_usage {
     echo
     echo "Options:"
     echo "  -h, --help                Show this help message"
-    printf "  -s, --sdk SDK_NAME        Publish specific SDK image (${YELLOW}python${NC}, ${YELLOW}nodejs${NC})\n"
+    printf "  -s, --sdk SDK_NAME        Publish specific SDK image (${YELLOW}python${NC}, ${YELLOW}node${NC})\n"
     echo "  -a, --all                 Publish all SDK images (default if no SDK specified)"
     echo "  -u, --username USERNAME   Docker registry username (required)"
     echo "  -o, --org ORGANIZATION    Docker registry organization/account (defaults to username)"
@@ -71,10 +71,10 @@ function show_usage {
     echo "  --dry-run                 Don't actually push images, just show what would be done"
     echo
     echo "Examples:"
-    echo "  $0 -u myuser -s python                # Push python image to docker.io/myuser/msb-python:latest"
-    echo "  $0 -u myuser -o myorg -s nodejs -t v1 # Push nodejs image to docker.io/myorg/msb-nodejs:v1"
-    echo "  $0 -u myuser -t v1 -l -s python       # Push python image as both v1 and latest tags"
-    echo "  $0 -u myuser --multi-arch -a          # Push all multi-arch images"
+    echo "  $0 -u myuser -s python             # Push python image to docker.io/myuser/python:latest"
+    echo "  $0 -u myuser -o myorg -s node -t v1 # Push node image to docker.io/myorg/node:v1"
+    echo "  $0 -u myuser -t v1 -l -s python    # Push python image as both v1 and latest tags"
+    echo "  $0 -u myuser --multi-arch -a       # Push all multi-arch images"
     echo
 }
 
@@ -135,8 +135,8 @@ check_buildx() {
 publish_sdk_image() {
     local sdk=$1
     local arch=$(detect_architecture)
-    local local_image="msb-${sdk}"
-    local remote_image="${REGISTRY}/${ORGANIZATION}/msb-${sdk}"
+    local local_image="${sdk}"
+    local remote_image="${REGISTRY}/${ORGANIZATION}/${sdk}"
 
     info "Publishing ${sdk} SDK image for architecture ${arch}..."
 
@@ -197,7 +197,7 @@ publish_sdk_image() {
 # Function to create and push multi-architecture manifests
 create_multi_arch_manifest() {
     local sdk=$1
-    local remote_image="${REGISTRY}/${ORGANIZATION}/msb-${sdk}"
+    local remote_image="${REGISTRY}/${ORGANIZATION}/${sdk}"
     local manifest_tag="${remote_image}:${TAG}"
 
     info "Creating multi-architecture manifest for ${sdk}..."
@@ -445,13 +445,13 @@ info "All specified SDK images have been processed"
 printf "\n${BLUE}======================= PUBLISH SUMMARY ========================${NC}\n"
 echo "Images published to ${REGISTRY}/${ORGANIZATION}:"
 for sdk in "${SDKS_TO_PUBLISH[@]}"; do
-    printf "  - ${YELLOW}msb-%s${NC}\n" "${sdk}"
+    printf "  - ${YELLOW}%s${NC}\n" "${sdk}"
 done
 
 if [ "$MULTI_ARCH" = true ]; then
     echo -e "\n${GREEN}Multi-architecture manifests created for:${NC}"
     for sdk in "${SDKS_TO_PUBLISH[@]}"; do
-        printf "  - ${YELLOW}msb-%s:${TAG}${NC}\n" "${sdk}"
+        printf "  - ${YELLOW}%s:${TAG}${NC}\n" "${sdk}"
     done
 fi
 
