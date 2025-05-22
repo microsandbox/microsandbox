@@ -66,8 +66,8 @@ Get started with the SDK in a few easy steps:
 
 <h3><span>1</span>&nbsp;&nbsp;<img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;Get API Key</h3>
 
-- Get your API key by <a href="./SELF_HOSTING.md">[self-hosting →]</a>
-- Set API key environment variable. For example, you could set it in your `.env` file
+- Get your API key by <a href="./SELF_HOSTING.md">[SELF HOSTING →]</a>
+- Set key as an environment variable. For example, you could set it in your `.env` file
 
   ```env
   MSB_API_KEY=msb_***
@@ -191,6 +191,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+##
 
 > [!NOTE]
 >
