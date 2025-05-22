@@ -47,7 +47,21 @@ msb server start
 
 ##
 
-#### 3. Generate API Key
+#### 3. Pull SDK Images
+
+```sh
+msb pull microsandbox/python
+```
+
+```sh
+msb pull microsandbox/node
+```
+
+This pulls and caches the images for the SDKs to use. It is what allows you to run a `PythonSandbox` or `NodeSandbox`.
+
+##
+
+#### 4. Generate API Key
 
 ```sh
 msb server keygen --expire 3mo
@@ -64,4 +78,4 @@ There are just two environment variables to set:
 
 > [!TIP]
 >
-> For self-hosting on a cloud provider, refer to our [cloud hosting guide](CLOUD_HOSTING.md) for a list of cloud providers that would support running a sandbox server.
+> For self-hosting on a cloud provider, refer to our [cloud hosting guide](CLOUD_HOSTING.md) for a list of cloud providers that would support running microsandbox.
