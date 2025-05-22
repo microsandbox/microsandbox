@@ -52,10 +52,14 @@ To run your ai-generated code, you could try a few things:
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;QUICK START</sub>
 
-Get started with the SDK in a few easy steps:
+Get started with few easy steps:
 
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/15299b93-b87d-4635-986b-cbbb2c9916ac" width="800" controls></video>
+  <video src="https://github.com/user-attachments/assets/15299b93-b87d-4635-986b-cbbb2c9916ac" width="800" controls>
+  </video>
+
+<sup><small><a href="https://asciinema.org/a/itQE92vIJiyq1PAPnaGURzDpv" target="_blank">[ASCIINEMA →]</a></small></sup>
+
 </div>
 
 <div align='center'>
@@ -68,11 +72,11 @@ Get started with the SDK in a few easy steps:
 
 <h3><span>1</span>&nbsp;&nbsp;<img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;Get API Key</h3>
 
-- Get your API key by <a href="./SELF_HOSTING.md">[SELF HOSTING →]</a>
-- Set key as an environment variable. For example, you could set it in your `.env` file
+- Get your API key by <a href="./SELF_HOSTING.md">[<small>SELF HOSTING →</small>]</a>
+- Set the `MSB_API_KEY` environment variable to the key.
 
-  ```env
-  MSB_API_KEY=msb_***
+  ```sh
+  export MSB_API_KEY=msb_***
   ```
 
 ##
