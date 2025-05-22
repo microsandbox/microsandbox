@@ -54,7 +54,9 @@ To run your ai-generated code, you could try a few things:
 
 Get started with the SDK in a few easy steps:
 
-<a href="https://asciinema.org/a/zyxUsKm2drfeiIZzyfrhroerp" target="_blank"><img src="https://github.com/user-attachments/assets/1d089394-2a02-4fd2-85f8-82f70f79dc26"  width="2000" /></a>
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/15299b93-b87d-4635-986b-cbbb2c9916ac" width="800" controls></video>
+</div>
 
 <div align='center'>
   <img src="https://img.shields.io/badge/macos-working-green?style=for-the-badge" alt=macos style="margin-bottom: 5px;"/>
@@ -258,7 +260,7 @@ With microsandbox, your AI can navigate websites, extract data, fill out forms, 
 
 ### Instant App Hosting
 
-Share working apps and demos in seconds without deployment headaches. When your AI creates a useful tool, calculator, visualization, or prototype, users can immediately access it through a simple link. No waiting for server setup or DNS configuration—just instant access to the application.
+Share working apps and demos in seconds without deployment headaches. When your AI creates a useful tool, calculator, visualization, or prototype, users can immediately access it through a simple link.
 
 Zero-setup deployment means your AI-generated code can be immediately useful without complex configuration. Each app runs in its own protected space with appropriate resource limits, and everything cleans up automatically when no longer needed. Perfect for educational platforms hosting student projects, AI assistants creating live demos, and users needing immediate value.
 
@@ -272,9 +274,9 @@ Zero-setup deployment means your AI-generated code can be immediately useful wit
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/device-desktop/A770EF">&nbsp;&nbsp;PROJECTS&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
 
-Beyond its SDK for secure execution of untrusted code, microsandbox supports project-based development with familiar package-manager workflows.
+Beyond the SDK, microsandbox supports project-based development with familiar package-manager workflows. Think of it like npm or cargo, but for sandboxes!
 
-Think of it like npm or cargo, but for sandboxes! Create a Sandboxfile, define your environments, and manage your sandboxes with simple commands.
+Create a `Sandboxfile`, define your environments, and manage your sandboxes with simple commands.
 
 <br />
 
