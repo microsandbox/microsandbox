@@ -40,7 +40,13 @@ class BaseSandbox(ABC):
             name: Optional name for the sandbox. If not provided, a random name will be generated.
             api_key: API key for Microsandbox server authentication. If not provided, it will be read from MSB_API_KEY environment variable.
         """
-        load_dotenv()
+        # Only try to load .env if MSB_API_KEY is not already set
+        if "MSB_API_KEY" not in os.environ:
+            # Ignore errors if .env file doesn't exist
+            try:
+                load_dotenv()
+            except Exception:
+                pass
 
         self._server_url = server_url or os.environ.get(
             "MSB_SERVER_URL", "http://127.0.0.1:5555"
@@ -82,6 +88,14 @@ class BaseSandbox(ABC):
         Returns:
             An instance of the sandbox ready for use
         """
+        # Only try to load .env if MSB_API_KEY is not already set
+        if "MSB_API_KEY" not in os.environ:
+            # Ignore errors if .env file doesn't exist
+            try:
+                load_dotenv()
+            except Exception:
+                pass
+
         sandbox = cls(
             server_url=server_url,
             namespace=namespace,

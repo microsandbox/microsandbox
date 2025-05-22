@@ -61,7 +61,6 @@ let sb = PythonSandbox::create(
 
 - **Python Sandbox** - Run Python code in a secure sandbox
 - **Shell Commands** - Execute shell commands in the sandbox
-- **Resource Metrics** - Monitor resource usage of your sandboxes
 - **Fully Async** - Built with modern async/await support
 
 ## Examples

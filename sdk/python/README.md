@@ -68,35 +68,6 @@ async def main():
 asyncio.run(main())
 ```
 
-### Retrieving Sandbox Metrics
-
-```python
-import asyncio
-from microsandbox import PythonSandbox
-
-async def main():
-    async with PythonSandbox.create() as sandbox:
-        # Get current sandbox metrics
-        metrics = await sandbox.metrics.get()
-
-        # Access specific metrics
-        print(f"Sandbox running: {metrics.running}")
-        print(f"CPU usage: {metrics.cpu_usage:.2f}%")
-        print(f"Memory usage: {metrics.memory_usage_mb:.2f} MB")
-        print(f"Disk usage: {metrics.disk_usage_mb:.2f} MB")
-
-        # Access all raw metrics data
-        print(f"Raw metrics: {metrics.raw_data}")
-
-        # Monitor sandbox performance over time
-        for _ in range(5):
-            metrics = await sandbox.metrics.get()
-            print(f"CPU: {metrics.cpu_usage:.2f}%, Memory: {metrics.memory_usage_mb:.2f} MB")
-            await asyncio.sleep(1)
-
-asyncio.run(main())
-```
-
 ## Requirements
 
 - Python 3.8+
@@ -115,7 +86,6 @@ Check out the [examples directory](./examples) for sample scripts that demonstra
 - Create and use sandboxes
 - Run code in sandbox environments
 - Execute shell commands in the sandbox
-- Monitor sandbox metrics and resource usage
 - Handle execution output and error handling
 
 ## License

@@ -5,10 +5,13 @@
 pub struct SandboxOptions {
     /// URL of the Microsandbox server
     pub(crate) server_url: Option<String>,
+
     /// Namespace for the sandbox
     pub(crate) namespace: Option<String>,
+
     /// Name of the sandbox
     pub(crate) name: Option<String>,
+
     /// API key for Microsandbox server authentication
     pub(crate) api_key: Option<String>,
 }

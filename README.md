@@ -85,16 +85,15 @@ npm install microsandbox
 pip install microsandbox
 ```
 
-<!--
 ##### Rust
 
 ```sh
 cargo add microsandbox
 ```
--->
 
 > [!NOTE]
 > There are [SDKs](./sdk) for other languages as well! Join us in expanding support for your favorite language.
+
 <!--
 >
 > <div align="left">
@@ -167,7 +166,6 @@ async def main():
 asyncio.run(main())
 ```
 
-<!--
 ##### Rust
 
 ```rs
@@ -187,7 +185,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
--->
 
 > [!NOTE]
 >
