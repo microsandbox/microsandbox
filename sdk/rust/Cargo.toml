@@ -1,6 +1,6 @@
 [package]
 name = "microsandbox"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Microsandbox Team <team@microsandbox.dev>"]
 description = "Rust SDK for microsandbox - secure self-hosted sandboxes for your AI agents"
