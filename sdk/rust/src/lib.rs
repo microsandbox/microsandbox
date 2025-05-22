@@ -12,6 +12,7 @@ pub use builder::SandboxOptions;
 pub use command::Command;
 pub use error::SandboxError;
 pub use execution::Execution;
+pub use metrics::Metrics;
 pub use node::NodeSandbox;
 pub use python::PythonSandbox;
 pub use start_options::StartOptions;
@@ -21,6 +22,7 @@ mod builder;
 mod command;
 mod error;
 mod execution;
+mod metrics;
 mod node;
 mod python;
 mod start_options;
@@ -64,4 +66,7 @@ pub trait BaseSandbox: Send + Sync {
 
     /// Stop the sandbox container
     async fn stop(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Get the metrics interface for the sandbox
+    async fn metrics(&self) -> Result<Metrics, Box<dyn std::error::Error + Send + Sync>>;
 }

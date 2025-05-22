@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::command::Command;
-use crate::{BaseSandbox, Execution, SandboxBase, SandboxOptions, StartOptions};
+use crate::{BaseSandbox, Execution, Metrics, SandboxBase, SandboxOptions, StartOptions};
 
 /// Node.js-specific sandbox for executing JavaScript code
 pub struct NodeSandbox {
@@ -40,6 +40,11 @@ impl NodeSandbox {
     pub async fn command(&self) -> Result<Command, Box<dyn Error + Send + Sync>> {
         Ok(Command::new(self.base.clone()))
     }
+
+    /// Get the metrics interface for retrieving sandbox metrics
+    pub async fn metrics(&self) -> Result<Metrics, Box<dyn Error + Send + Sync>> {
+        Ok(Metrics::new(self.base.clone()))
+    }
 }
 
 #[async_trait]
@@ -66,7 +71,7 @@ impl BaseSandbox for NodeSandbox {
 
         // Execute code
         let base = self.base.lock().await;
-        base.run_code("node", code).await
+        base.run_code("javascript", code).await
     }
 
     async fn start(
@@ -98,5 +103,9 @@ impl BaseSandbox for NodeSandbox {
         // Stop sandbox
         let mut base = self.base.lock().await;
         base.stop_sandbox().await
+    }
+
+    async fn metrics(&self) -> Result<Metrics, Box<dyn Error + Send + Sync>> {
+        Ok(Metrics::new(self.base.clone()))
     }
 }
