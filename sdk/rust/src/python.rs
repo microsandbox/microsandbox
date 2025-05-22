@@ -45,7 +45,7 @@ impl PythonSandbox {
 #[async_trait]
 impl BaseSandbox for PythonSandbox {
     async fn get_default_image(&self) -> String {
-        "appcypher/msb-python".to_string()
+        "microsandbox/python".to_string()
     }
 
     async fn is_started(&self) -> bool {

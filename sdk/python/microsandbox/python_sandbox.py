@@ -22,7 +22,7 @@ class PythonSandbox(BaseSandbox):
         Returns:
             A string containing the Docker image name and tag
         """
-        return "appcypher/msb-python"
+        return "microsandbox/python"
 
     async def run(self, code: str) -> Execution:
         """

@@ -22,7 +22,7 @@ class NodeSandbox(BaseSandbox):
         Returns:
             A string containing the Docker image name and tag
         """
-        return "appcypher/msb-nodejs"
+        return "microsandbox/node"
 
     async def run(self, code: str) -> Execution:
         """

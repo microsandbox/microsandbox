@@ -45,7 +45,7 @@ impl NodeSandbox {
 #[async_trait]
 impl BaseSandbox for NodeSandbox {
     async fn get_default_image(&self) -> String {
-        "appcypher/msb-nodejs".to_string()
+        "microsandbox/node".to_string()
     }
 
     async fn is_started(&self) -> bool {
