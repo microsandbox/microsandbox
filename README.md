@@ -58,8 +58,8 @@ Get started with the SDK in a few easy steps:
 
 <div align='center'>
   <img src="https://img.shields.io/badge/macos-working-green?style=for-the-badge" alt=macos style="margin-bottom: 5px;"/>
-  <img src="https://img.shields.io/badge/linux-mostly_working-yellow?style=for-the-badge" alt=linux style="margin-bottom: 5px;"/>
-  <img src="https://img.shields.io/badge/windows-not_working-red?style=for-the-badge" alt=windows style="margin-bottom: 5px;"/>
+  <img src="https://img.shields.io/badge/linux-working-green?style=for-the-badge" alt=linux style="margin-bottom: 5px;"/>
+  <img src="https://img.shields.io/badge/windows-wip-yellow?style=for-the-badge" alt=windows style="margin-bottom: 5px;"/>
 </div>
 
 ##

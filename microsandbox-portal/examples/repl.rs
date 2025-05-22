@@ -62,7 +62,7 @@ use std::error::Error;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Start the engines - this initializes all enabled engines
-    let engine_handle = start_engines().await?;
+    let _engine_handle = start_engines().await?;
     println!("✅ Engines started successfully");
 
     // Example 1: Execute Python code in REPL
@@ -89,7 +89,7 @@ for i, fruit in enumerate(fruits):
     print(f"{i+1}. {fruit}")
         "#;
 
-        let result = engine_handle
+        let result = _engine_handle
             .eval(python_code, Language::Python, "123", Some(60))
             .await?;
 
@@ -147,7 +147,7 @@ fetchData().then(result => {
 console.log("Waiting for data...");
         "#;
 
-        let result = engine_handle
+        let result = _engine_handle
             .eval(javascript_code, Language::Node, "123", Some(60))
             .await?;
 
@@ -164,7 +164,7 @@ console.log("Waiting for data...");
 
         // First execution - define a variable
         let python_step1 = "x = 10";
-        let result1 = engine_handle
+        let result1 = _engine_handle
             .eval(python_step1, Language::Python, "123", None)
             .await?;
         for line in result1 {
@@ -173,7 +173,7 @@ console.log("Waiting for data...");
 
         // Second execution - use the variable defined in the first step
         let python_step2 = "print(f'The value of x is {x}')";
-        let result2 = engine_handle
+        let result2 = _engine_handle
             .eval(python_step2, Language::Python, "123", None)
             .await?;
         for line in result2 {
@@ -188,7 +188,7 @@ console.log("Waiting for data...");
 
         // First execution - define a variable
         let nodejs_step1 = "const greeting = 'Hello from JavaScript!';";
-        let result1 = engine_handle
+        let result1 = _engine_handle
             .eval(nodejs_step1, Language::Node, "123", None)
             .await?;
         for line in result1 {
@@ -197,7 +197,7 @@ console.log("Waiting for data...");
 
         // Second execution - use the variable defined in the first step
         let nodejs_step2 = "console.log(greeting);";
-        let result2 = engine_handle
+        let result2 = _engine_handle
             .eval(nodejs_step2, Language::Node, "123", None)
             .await?;
         for line in result2 {

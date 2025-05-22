@@ -48,13 +48,16 @@
 //! [Stderr] Execution timed out after 10 seconds
 //! ```
 
-use microsandbox_portal::portal::repl::{start_engines, Language};
+use microsandbox_portal::portal::repl::start_engines;
+#[cfg(any(feature = "python", feature = "nodejs"))]
+use microsandbox_portal::portal::repl::Language;
 use std::error::Error;
 
 /// Fixed timeout duration for all executions in this example
 const TIMEOUT_SECONDS: u64 = 10;
 
 /// Print output lines from a REPL execution with a prefix
+#[cfg(any(feature = "python", feature = "nodejs"))]
 fn print_output(prefix: &str, lines: &[microsandbox_portal::portal::repl::Line]) {
     println!("{} execution result:", prefix);
     if lines.is_empty() {
@@ -70,7 +73,7 @@ fn print_output(prefix: &str, lines: &[microsandbox_portal::portal::repl::Line])
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Start the engines - this initializes all enabled engines
-    let engine_handle = start_engines().await?;
+    let _engine_handle = start_engines().await?;
     println!("✅ Engines started successfully\n");
     println!(
         "🕒 Running examples with {}-second timeout\n",
@@ -92,7 +95,7 @@ for i in range(1, 6):
 print("Python counting complete!")
         "#;
 
-        let result = engine_handle
+        let result = _engine_handle
             .eval(
                 python_normal,
                 Language::Python,
@@ -119,7 +122,7 @@ while True:
     time.sleep(0.5)  # Sleep for half a second
         "#;
 
-        let result = engine_handle
+        let result = _engine_handle
             .eval(
                 python_infinite,
                 Language::Python,
@@ -152,7 +155,7 @@ for (let i = 1; i <= 5; i++) {
 console.log("Node.js counting complete!");
         "#;
 
-        let result = engine_handle
+        let result = _engine_handle
             .eval(
                 js_normal,
                 Language::Node,
@@ -185,7 +188,7 @@ while (true) {
 }
         "#;
 
-        let result = engine_handle
+        let result = _engine_handle
             .eval(
                 js_infinite,
                 Language::Node,
