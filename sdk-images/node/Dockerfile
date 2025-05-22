@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /usr/src/microsandbox
 COPY . .
-RUN cargo build --release --bin portal --features node
+RUN cargo build --release --bin portal --features nodejs
 
 # Second stage: Create the Node.js image
 # Using latest LTS version (currently 20) from Chainguard's minimalist images
