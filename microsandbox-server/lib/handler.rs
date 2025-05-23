@@ -30,7 +30,7 @@ use tracing::{debug, trace, warn};
 
 use crate::{
     error::ServerError,
-    middleware,
+    mcp, middleware,
     payload::{
         JsonRpcError, JsonRpcRequest, JsonRpcResponse, RegularMessageResponse,
         SandboxMetricsGetParams, SandboxStartParams, SandboxStopParams, JSONRPC_VERSION,
@@ -80,6 +80,24 @@ pub async fn json_rpc_handler(
 
     let method = request.method.as_str();
     let id = request.id.clone();
+
+    // Check if this is an MCP method first
+    if mcp::is_mcp_method(method) {
+        match mcp::handle_mcp_method(state, request).await {
+            Ok(response) => return Ok((StatusCode::OK, Json(response))),
+            Err(e) => {
+                let error = JsonRpcError {
+                    code: -32603,
+                    message: format!("MCP method error: {}", e),
+                    data: None,
+                };
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(JsonRpcResponse::error(error, id)),
+                ));
+            }
+        }
+    }
 
     match method {
         // Server specific methods
@@ -159,7 +177,7 @@ pub async fn json_rpc_handler(
 }
 
 /// Forwards the JSON-RPC request to the portal service
-async fn forward_rpc_to_portal(
+pub async fn forward_rpc_to_portal(
     state: AppState,
     request: JsonRpcRequest,
 ) -> ServerResult<(StatusCode, Json<JsonRpcResponse>)> {
@@ -296,7 +314,10 @@ async fn forward_rpc_to_portal(
 }
 
 /// Implementation for starting a sandbox
-async fn sandbox_start_impl(state: AppState, params: SandboxStartParams) -> ServerResult<String> {
+pub async fn sandbox_start_impl(
+    state: AppState,
+    params: SandboxStartParams,
+) -> ServerResult<String> {
     // Validate sandbox name and namespace
     validate_sandbox_name(&params.sandbox)?;
     validate_namespace(&params.namespace)?;
@@ -704,7 +725,7 @@ async fn poll_sandbox_until_running(
 }
 
 /// Implementation for stopping a sandbox
-async fn sandbox_stop_impl(state: AppState, params: SandboxStopParams) -> ServerResult<String> {
+pub async fn sandbox_stop_impl(state: AppState, params: SandboxStopParams) -> ServerResult<String> {
     // Validate sandbox name and namespace
     validate_sandbox_name(&params.sandbox)?;
     validate_namespace(&params.namespace)?;
@@ -764,7 +785,7 @@ async fn sandbox_stop_impl(state: AppState, params: SandboxStopParams) -> Server
 }
 
 /// Implementation for sandbox metrics
-async fn sandbox_get_metrics_impl(
+pub async fn sandbox_get_metrics_impl(
     state: AppState,
     params: SandboxMetricsGetParams,
 ) -> ServerResult<SandboxStatusResponse> {
