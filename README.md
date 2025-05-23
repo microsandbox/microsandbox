@@ -5,7 +5,7 @@
 <img width="100%" src="./assets/microsandbox-banner-xl.png" alt="microsandbox-banner-xl">
 </a>
 
-<div align="center"><b>———&nbsp;&nbsp;&nbsp;secure self-hosted sandboxes for your ai agents&nbsp;&nbsp;&nbsp;———</b></div>
+<div align="center"><b>———&nbsp;&nbsp;&nbsp;easy and secure execution of untrusted code&nbsp;&nbsp;&nbsp;———</b></div>
 
 <br />
 <br />
@@ -30,7 +30,7 @@
 
 Building AI agents that generate and execute code? Need to run untrusted user code? You'll need **secure sandboxes**<sup>✨</sup>!
 
-- **Run code directly on machine?** — Risky for the machine <a href="https://horizon3.ai/attack-research/disclosures/unsafe-at-any-speed-abusing-python-exec-for-unauth-rce-in-langflow-ai/">[→]</a>
+- **Run code directly on machine?** — Security risk for the machine <a href="https://horizon3.ai/attack-research/disclosures/unsafe-at-any-speed-abusing-python-exec-for-unauth-rce-in-langflow-ai/">[→]</a>
 - **Run code in docker containers?** — Limited isolation for untrusted code <a href="./MSB_V_DOCKER.md">[→]</a>
 - **Run code in traditional VMs?** — Minutes to start up, heavy resource usage
 - **Run code in cloud sandboxes?** — Less control over your infra and lose rapid dev cycles
