@@ -28,7 +28,9 @@
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/question/A770EF">&nbsp;&nbsp;WHY MICROSANDBOX?</sub>
 
-Building AI agents that generate and execute code? Need to run untrusted user code? You'll need **secure sandboxes**<sup>✨</sup>!
+Building AI agents that generate and execute code? Need to run untrusted user code?
+
+You'll need **secure sandboxes**<sup>✨</sup>!
 
 - **Run code directly on machine?** — Security risk for the machine <a href="https://horizon3.ai/attack-research/disclosures/unsafe-at-any-speed-abusing-python-exec-for-unauth-rce-in-langflow-ai/">[→]</a>
 - **Run code in docker containers?** — Limited isolation for untrusted code <a href="./MSB_V_DOCKER.md">[→]</a>
@@ -38,9 +40,8 @@ Building AI agents that generate and execute code? Need to run untrusted user co
 **microsandbox** gives you the best of all the worlds:
 
 - <div><img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF">&nbsp;&nbsp;True VM-Level Security Isolation with Fast Startup Times</div>
-- <div><img height="15" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;Self-Hosted with Full Control and Fast Dev Cycles</div>
+- <div><img height="15" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;Self-Hosted with Full Control and Local Setup</div>
 - <div><img height="15" src="https://octicons-col.vercel.app/sync/A770EF">&nbsp;&nbsp;Seamless Transition from Local to Production</div>
-- <div><img height="15" src="https://octicons-col.vercel.app/lock/A770EF">&nbsp;&nbsp;Data Sovereignty and Privacy</div>
 - <div><img height="15" src="https://octicons-col.vercel.app/stack/A770EF">&nbsp;&nbsp;Compatible with Standard Container Images</div>
 - <div><img height="15" src="https://octicons-col.vercel.app/plug/A770EF">&nbsp;&nbsp;Integration with Any MCP Enabled AI</div>
 
