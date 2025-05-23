@@ -5,7 +5,7 @@
 <img width="100%" src="./assets/microsandbox-banner-xl.png" alt="microsandbox-banner-xl">
 </a>
 
-<div align="center"><b>———&nbsp;&nbsp;&nbsp;easy and secure execution of untrusted code&nbsp;&nbsp;&nbsp;———</b></div>
+<div align="center"><b>———&nbsp;&nbsp;&nbsp;easy secure execution of untrusted user/ai code&nbsp;&nbsp;&nbsp;———</b></div>
 
 <br />
 <br />
