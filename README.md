@@ -28,14 +28,12 @@
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/question/A770EF">&nbsp;&nbsp;WHY MICROSANDBOX?</sub>
 
-Building AI agents that generate and execute code? — You'll need **secure sandboxes**<sup>✨</sup>!
+Building AI agents that generate and execute code? Need to run untrusted user code? You'll need **secure sandboxes**<sup>✨</sup>!
 
-To run your ai-generated code, you could try a few things:
-
-- **Run directly on machine?** — Risky for the machine <a href="https://horizon3.ai/attack-research/disclosures/unsafe-at-any-speed-abusing-python-exec-for-unauth-rce-in-langflow-ai/">[→]</a>
-- **Run in docker containers?** — Limited isolation for untrusted code <a href="./MSB_V_DOCKER.md">[→]</a>
-- **Run in traditional VMs?** — Minutes to start up, heavy resource usage
-- **Run in cloud sandboxes?** — Less control over your infra and lose rapid dev cycles
+- **Run code directly on machine?** — Risky for the machine <a href="https://horizon3.ai/attack-research/disclosures/unsafe-at-any-speed-abusing-python-exec-for-unauth-rce-in-langflow-ai/">[→]</a>
+- **Run code in docker containers?** — Limited isolation for untrusted code <a href="./MSB_V_DOCKER.md">[→]</a>
+- **Run code in traditional VMs?** — Minutes to start up, heavy resource usage
+- **Run code in cloud sandboxes?** — Less control over your infra and lose rapid dev cycles
 
 **microsandbox** gives you the best of all the worlds, all on your own infrastructure:
 
@@ -70,7 +68,7 @@ Get started with few easy steps:
 
 ##
 
-<h3><span>1</span>&nbsp;&nbsp;<img height="13" src="https://octicons-col.vercel.app/north-star/A770EF">&nbsp;&nbsp;Start the <code>msb</code> Server</h3>
+<h3><span>1</span>&nbsp;&nbsp;<img height="13" src="https://octicons-col.vercel.app/north-star/A770EF">&nbsp;&nbsp;Start the Server</h3>
 
 ##### Install microsandbox
 
@@ -81,12 +79,14 @@ curl -sSL https://get.microsandbox.dev | sh
 ##### And start the server
 
 ```sh
-msb server start --dev
+msb server start --dev --detach
 ```
 
 > [!TIP]
 >
-> The microsandbox server is also an MCP (Model Context Protocol) server, enabling seamless integration with MCP-compatible AI tools and agents.
+> microsandbox server is also an [MCP server](https://modelcontextprotocol.io), so it works directly with Cursor, Agno, and other MCP-enabled AI tools and agents.
+>
+> For more information on setting up the server, see the [self-hosting guide](./SELF_HOSTING.md).
 
 ##
 
@@ -240,15 +240,15 @@ flowchart TB
 
     %% ── Individual MicroVMs ────────────────
     subgraph VM1["microVM"]
-        VM1S["python sandbox"]
+        VM1S["python environment"]
     end
 
     subgraph VM2["microVM"]
-        VM2S["python sandbox"]
+        VM2S["python environment"]
     end
 
     subgraph VM3["microVM"]
-        VM3S["node sandbox"]
+        VM3S["node environment"]
     end
 
     D --> VM1S
