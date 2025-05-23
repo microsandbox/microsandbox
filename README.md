@@ -70,14 +70,23 @@ Get started with few easy steps:
 
 ##
 
-<h3><span>1</span>&nbsp;&nbsp;<img height="13" src="https://octicons-col.vercel.app/key/A770EF">&nbsp;&nbsp;Get API Key</h3>
+<h3><span>1</span>&nbsp;&nbsp;<img height="13" src="https://octicons-col.vercel.app/north-star/A770EF">&nbsp;&nbsp;Start the <code>msb</code> Server</h3>
 
-- Get your API key by <a href="./SELF_HOSTING.md">[<small>SELF HOSTING →</small>]</a>
-- Set the `MSB_API_KEY` environment variable to the key.
+##### Install microsandbox
 
-  ```sh
-  export MSB_API_KEY=msb_***
-  ```
+```sh
+curl -sSL https://get.microsandbox.dev | sh
+```
+
+##### And start the server
+
+```sh
+msb server start --dev
+```
+
+> [!TIP]
+>
+> The microsandbox server is also an MCP (Model Context Protocol) server, enabling seamless integration with MCP-compatible AI tools and agents.
 
 ##
 
@@ -139,7 +148,7 @@ cargo add microsandbox
 
 ##
 
-<h3><span>3</span>&nbsp;&nbsp;<img height="14" src="https://octicons-col.vercel.app/file-binary/A770EF">&nbsp;&nbsp;Execute Code in Sandbox</h3>
+<h3><span>3</span>&nbsp;&nbsp;<img height="14" src="https://octicons-col.vercel.app/file-binary/A770EF">&nbsp;&nbsp;Execute the Code</h3>
 
 `microsandbox` offers a growing list of sandbox environment types optimized for different execution requirements. Choose the appropriate sandbox (e.g., PythonSandbox or NodeSandbox) to run your code in a secure tailored environment.
 
@@ -255,7 +264,6 @@ flowchart TB
     style VM2S fill:#FCF3CF,stroke:#F1C40F,stroke-width:2px,color:#000000
     style VM3S fill:#FCF3CF,stroke:#F1C40F,stroke-width:2px,color:#000000
 ```
-
 
 <br />
 
