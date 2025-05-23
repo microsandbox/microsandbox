@@ -35,7 +35,7 @@ Building AI agents that generate and execute code? Need to run untrusted user co
 - **Run code in traditional VMs?** — Minutes to start up, heavy resource usage
 - **Run code in cloud sandboxes?** — Less control over your infra and lose rapid dev cycles
 
-**microsandbox** gives you the best of all the worlds, all on your own infrastructure:
+**microsandbox** gives you the best of all the worlds:
 
 - <div><img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF">&nbsp;&nbsp;True VM-Level Security Isolation with Fast Startup Times</div>
 - <div><img height="15" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;Self-Hosted with Full Control</div>
@@ -50,7 +50,7 @@ Building AI agents that generate and execute code? Need to run untrusted user co
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;QUICK START</sub>
 
-Get started with few easy steps:
+Get started with in easy steps:
 
 <div align="center">
   <video src="https://github.com/user-attachments/assets/14e71fe5-1ac8-4663-8370-08002119e909" width="800" controls>
@@ -90,7 +90,7 @@ msb server start --dev --detach
 
 ##
 
-<h3><span>2</span>&nbsp;&nbsp;<img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install SDK</h3>
+<h3><span>2</span>&nbsp;&nbsp;<img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK</h3>
 
 ##### Python
 
