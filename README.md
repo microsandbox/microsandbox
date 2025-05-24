@@ -336,7 +336,7 @@ Zero-setup deployment means your AI-generated code can be immediately useful wit
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/device-desktop/A770EF">&nbsp;&nbsp;PROJECTS&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
 
-Beyond the SDK, microsandbox supports project-based development with familiar package-manager workflows. Think of it like npm or cargo, but for sandboxes!
+Beyond the SDK, microsandbox supports project-based development with the familiar package-manager workflow devs are used to. Think of it like npm or cargo, but for sandboxes!
 
 Create a `Sandboxfile`, define your environments, and manage your sandboxes with simple commands.
 
