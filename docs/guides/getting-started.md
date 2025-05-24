@@ -151,47 +151,189 @@ You've successfully created and executed code in your first microsandbox! The co
 
 Here are some quick examples to get you started with common use cases:
 
-#### Execute a Simple Script
+#### Execute Commands in Sandbox
+
++++ Python
 
 ```python
-async with PythonSandbox.create(name="script-test") as sb:
-    script = """
-    import math
-    result = math.sqrt(16)
-    print(f"Square root of 16 is: {result}")
-    """
-    exec = await sb.run(script)
-    print(await exec.output())
+import asyncio
+from microsandbox import PythonSandbox
+
+async def main():
+    async with PythonSandbox.create(name="command-test") as sb:
+        # Run shell commands
+        result = await sb.command.run("ls", ["-la", "/"])
+        print("Directory listing:")
+        print(await result.output())
+
+        # Create and execute a script
+        await sb.run("""
+with open("test.py", "w") as f:
+    f.write("print('Hello from sandbox!')")
+        """)
+
+        result = await sb.command.run("python", ["test.py"])
+        print("Script output:")
+        print(await result.output())
+
+asyncio.run(main())
 ```
 
-#### Install and Use Packages
++++ JavaScript
+
+```javascript
+import { PythonSandbox } from "microsandbox";
+
+async function main() {
+  const sb = await PythonSandbox.create({ name: "command-test" });
+
+  try {
+    // Run shell commands
+    const result = await sb.command.run("ls", ["-la", "/"]);
+    console.log("Directory listing:");
+    console.log(await result.output());
+
+    // Create and execute a script
+    await sb.run(`
+with open("test.py", "w") as f:
+    f.write("print('Hello from sandbox!')")
+    `);
+
+    const scriptResult = await sb.command.run("python", ["test.py"]);
+    console.log("Script output:");
+    console.log(await scriptResult.output());
+  } finally {
+    await sb.stop();
+  }
+}
+
+main().catch(console.error);
+```
+
++++ Rust
+
+```rust
+use microsandbox::{BaseSandbox, PythonSandbox};
+use std::error::Error;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut sb = PythonSandbox::create("command-test").await?;
+    sb.start(None).await?;
+
+    let cmd = sb.command().await?;
+
+    // Run shell commands
+    let result = cmd.run("ls", Some(vec!["-la", "/"]), None).await?;
+    println!("Directory listing:");
+    println!("{}", result.output().await?);
+
+    // Create and execute a script
+    sb.run(r#"
+with open("test.py", "w") as f:
+    f.write("print('Hello from sandbox!')")
+"#, None).await?;
+
+    let script_result = cmd.run("python", Some(vec!["test.py"]), None).await?;
+    println!("Script output:");
+    println!("{}", script_result.output().await?);
+
+    sb.stop().await?;
+    Ok(())
+}
+```
+
++++
+
+#### Create and Run Bash Scripts
+
++++ Python
 
 ```python
-async with PythonSandbox.create(name="package-test") as sb:
-    # Install a package
-    await sb.run("pip install requests")
+import asyncio
+from textwrap import dedent
+from microsandbox import PythonSandbox
 
-    # Use the package
-    code = """
-    import requests
-    response = requests.get('https://httpbin.org/json')
-    print(response.json())
-    """
-    exec = await sb.run(code)
-    print(await exec.output())
+async def main():
+    async with PythonSandbox.create(name="bash-test") as sb:
+        # Create and run a bash script
+        await sb.run(
+            dedent("""
+            with open("hello.sh", "w") as f:
+                f.write("#!/bin/bash\\n")
+                f.write("echo Hello World\\n")
+                f.write("date\\n")
+        """)
+        )
+
+        # Execute the script
+        result = await sb.command.run("bash", ["hello.sh"])
+        print("Script output:")
+        print(await result.output())
+
+asyncio.run(main())
 ```
 
-#### File Operations
++++ JavaScript
 
-```python
-async with PythonSandbox.create(name="file-test") as sb:
-    # Create a file
-    await sb.run("with open('test.txt', 'w') as f: f.write('Hello from sandbox!')")
+```javascript
+import { PythonSandbox } from "microsandbox";
 
-    # Read the file
-    exec = await sb.run("with open('test.txt', 'r') as f: print(f.read())")
-    print(await exec.output())
+async function main() {
+  const sb = await PythonSandbox.create({ name: "bash-test" });
+
+  try {
+    // Create and run a bash script
+    await sb.run(`
+with open("hello.sh", "w") as f:
+    f.write("#!/bin/bash\\n")
+    f.write("echo Hello World\\n")
+    f.write("date\\n")
+    `);
+
+    // Execute the script
+    const result = await sb.command.run("bash", ["hello.sh"]);
+    console.log("Script output:");
+    console.log(await result.output());
+  } finally {
+    await sb.stop();
+  }
+}
+
+main().catch(console.error);
 ```
+
++++ Rust
+
+```rust
+use microsandbox::{BaseSandbox, PythonSandbox};
+use std::error::Error;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut sb = PythonSandbox::create("bash-test").await?;
+    sb.start(None).await?;
+
+    // Create and run a bash script
+    sb.run(r#"
+with open("hello.sh", "w") as f:
+    f.write("#!/bin/bash\n")
+    f.write("echo Hello World\n")
+    f.write("date\n")
+"#, None).await?;
+
+    // Execute the script
+    let cmd = sb.command().await?;
+    let result = cmd.run("bash", Some(vec!["hello.sh"]), None).await?;
+    println!("Script output:");
+    println!("{}", result.output().await?);
+
+    sb.stop().await?;
+    Ok(())
+}
+```
+
++++
 
 ---
 
