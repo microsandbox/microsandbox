@@ -27,6 +27,12 @@ microsandbox exposes the following MCP capabilities:
 - **`sandbox_run_command`** - Run shell commands in sandboxes
 - **`sandbox_get_metrics`** - Monitor sandbox resource usage
 
+#### Connection Details
+
+- **Endpoint:** `http://127.0.0.1:5555/mcp`
+- **Protocol:** Streamable HTTP
+- **Authentication:** Bearer token (if not in dev mode)
+
 !!!info Transport Support
 microsandbox server only supports the **Streamable HTTP** transport protocol. The deprecated HTTP+SSE transport is not supported. Prefer **Streamable HTTP** when connecting with MCP clients.
 !!!
@@ -58,7 +64,7 @@ from agno.tools.mcp import MCPTools
 
 async def main():
     # Connect to microsandbox MCP server
-    server_url = "http://127.0.0.1:5555/api/v1/rpc"
+    server_url = "http://127.0.0.1:5555/mcp"
 
     async with MCPTools(url=server_url, transport="streamable-http") as mcp_tools:
         # Create agent with microsandbox tools
@@ -85,133 +91,6 @@ microsandbox works with any MCP-compatible application:
 
 - **Cursor** - AI-powered code editor
 - **Custom MCP clients** - Build your own integrations
-
----
-
-### MCP API Reference
-
-#### Connection Details
-
-- **Endpoint:** `http://127.0.0.1:5555/api/v1/rpc`
-- **Protocol:** JSON-RPC 2.0 over HTTP
-- **Authentication:** Bearer token (if not in dev mode)
-
-#### Available MCP Methods
-
-==- `initialize`
-Initialize the MCP connection and get server capabilities.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "initialize",
-  "params": {
-    "protocolVersion": "2024-11-05",
-    "capabilities": {},
-    "clientInfo": {
-      "name": "claude-desktop",
-      "version": "0.7.1"
-    }
-  },
-  "id": 1
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "protocolVersion": "2024-11-05",
-    "capabilities": {
-      "tools": {},
-      "prompts": {}
-    },
-    "serverInfo": {
-      "name": "microsandbox",
-      "version": "1.0.0"
-    }
-  },
-  "id": 1
-}
-```
-===
-
-==- `tools/list`
-List all available tools.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/list",
-  "id": 2
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "tools": [
-      {
-        "name": "sandbox_start",
-        "description": "Start a new sandbox",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "name": {"type": "string"},
-            "image": {"type": "string"},
-            "namespace": {"type": "string"}
-          }
-        }
-      }
-    ]
-  },
-  "id": 2
-}
-```
-===
-
-==- `tools/call`
-Execute a specific tool.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/call",
-  "params": {
-    "name": "sandbox_run_code",
-    "arguments": {
-      "sandbox": "my-python-env",
-      "namespace": "default",
-      "language": "python",
-      "code": "print('Hello from MCP!')"
-    }
-  },
-  "id": 3
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "content": [
-      {
-        "type": "text",
-        "text": "Hello from MCP!\n"
-      }
-    ]
-  },
-  "id": 3
-}
-```
-===
 
 ---
 

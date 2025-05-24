@@ -52,11 +52,3 @@ flowchart TB
     style VM2S fill:#FCF3CF,stroke:#F1C40F,stroke-width:2px,color:#000000
     style VM3S fill:#FCF3CF,stroke:#F1C40F,stroke-width:2px,color:#000000
 ```
-
-### Next Steps
-
-Now that you understand the architecture, explore:
-
-[!ref Security Best Practices](/guides/architecture)
-[!ref Performance Tuning](/guides/architecture)
-[!ref Deployment Guide](/guides/architecture)

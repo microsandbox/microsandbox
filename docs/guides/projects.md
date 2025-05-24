@@ -79,13 +79,3 @@ This executes the default _start_ script of your sandbox. For more control, you 
 ```bash
 msr myapp~start
 ```
-
----
-
-### Next Steps
-
-Now that you understand how to use microsandbox projects, explore:
-
-[!ref Managing Sandboxes](/projects/managing-sandboxes)
-[!ref Running Commands](/projects/running-commands)
-[!ref Monitoring Sandboxes](/projects/monitoring)

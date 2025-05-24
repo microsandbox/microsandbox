@@ -36,10 +36,20 @@ pub fn create_router(state: AppState) -> Router {
             app_middleware::auth_middleware,
         ));
 
+    // Create MCP routes - separate endpoint for Model Context Protocol
+    let mcp_api =
+        Router::new()
+            .route("/", post(handler::mcp_handler))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                app_middleware::auth_middleware,
+            ));
+
     // Combine all routes with logging middleware
     Router::new()
         .nest("/api/v1", rest_api)
         .nest("/api/v1/rpc", rpc_api)
+        .nest("/mcp", mcp_api)
         .layer(middleware::from_fn(app_middleware::logging_middleware))
         .with_state(state)
 }

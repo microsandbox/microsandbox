@@ -278,11 +278,3 @@ if exec.has_error():
 else:
     print("Success:", await exec.output())
 ```
-
----
-
-## Next Steps
-
-[!ref Sandbox Lifecycle](/sdk/sandbox-lifecycle)
-[!ref Command Execution](/sdk/command-execution)
-[!ref Code Execution](/sdk/code-execution)

@@ -77,7 +77,7 @@ msb server start --dev
 
 > [!TIP]
 >
-> microsandbox server is also an [MCP server](https://modelcontextprotocol.io), so it works directly with Cursor, Agno, and other MCP-enabled AI tools and agents.
+> microsandbox server is also an [MCP server](./MCP.md), so it works directly with Cursor, Agno, and other MCP-enabled AI tools and agents.
 >
 > For more information on setting up the server, see the [self-hosting guide](./SELF_HOSTING.md).
 

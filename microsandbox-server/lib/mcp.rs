@@ -1,6 +1,6 @@
 //! Model Context Protocol (MCP) implementation for microsandbox server.
 //!
-//! This module implements MCP endpoints using our existing JSON-RPC infrastructure.
+//! This module implements MCP endpoints served at the `/mcp` endpoint.
 //! MCP is essentially JSON-RPC with specific method names and schemas.
 //!
 //! The module provides:
@@ -37,7 +37,7 @@ const SERVER_NAME: &str = "microsandbox-mcp-server";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 //--------------------------------------------------------------------------------------------------
-// MCP Method Handlers
+// Functions: Handlers
 //--------------------------------------------------------------------------------------------------
 
 /// Handle MCP initialize request
@@ -199,7 +199,7 @@ pub async fn handle_mcp_list_tools(
             },
             {
                 "name": "sandbox_get_metrics",
-                "description": "Get metrics and status for sandboxes including CPU usage, memory consumption, and running state. PREREQUISITES: If querying a specific sandbox, it should be started first. Use this to monitor resource usage and verify sandbox status before running code or commands.",
+                "description": "Get metrics and status for sandboxes including CPU usage, memory consumption, and running state. This tool can check the status of any sandbox regardless of whether it's running or not",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -553,18 +553,6 @@ pub async fn handle_mcp_call_tool(
     };
 
     Ok(JsonRpcResponse::success(mcp_result, request.id))
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-/// Check if a method is an MCP method
-pub fn is_mcp_method(method: &str) -> bool {
-    matches!(
-        method,
-        "initialize" | "tools/list" | "tools/call" | "prompts/list" | "prompts/get"
-    )
 }
 
 /// Handle MCP methods

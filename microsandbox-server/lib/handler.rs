@@ -57,6 +57,47 @@ pub async fn health() -> ServerResult<impl IntoResponse> {
 // Functions: JSON-RPC Handlers
 //--------------------------------------------------------------------------------------------------
 
+/// Dedicated MCP handler for Model Context Protocol requests
+#[debug_handler]
+pub async fn mcp_handler(
+    State(state): State<AppState>,
+    Json(request): Json<JsonRpcRequest>,
+) -> ServerResult<impl IntoResponse> {
+    debug!(?request, "Received MCP request");
+
+    // Check for required JSON-RPC fields
+    if request.jsonrpc != JSONRPC_VERSION {
+        let error = JsonRpcError {
+            code: -32600,
+            message: "Invalid or missing jsonrpc version field".to_string(),
+            data: None,
+        };
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(JsonRpcResponse::error(error, request.id.clone())),
+        ));
+    }
+
+    // Extract the ID before moving the request
+    let request_id = request.id.clone();
+
+    // Handle MCP methods directly since all requests to /mcp are MCP requests
+    match mcp::handle_mcp_method(state, request).await {
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(e) => {
+            let error = JsonRpcError {
+                code: -32603,
+                message: format!("MCP method error: {}", e),
+                data: None,
+            };
+            Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(JsonRpcResponse::error(error, request_id)),
+            ))
+        }
+    }
+}
+
 /// Main JSON-RPC handler that dispatches to the appropriate method
 #[debug_handler]
 pub async fn json_rpc_handler(
@@ -80,24 +121,6 @@ pub async fn json_rpc_handler(
 
     let method = request.method.as_str();
     let id = request.id.clone();
-
-    // Check if this is an MCP method first
-    if mcp::is_mcp_method(method) {
-        match mcp::handle_mcp_method(state, request).await {
-            Ok(response) => return Ok((StatusCode::OK, Json(response))),
-            Err(e) => {
-                let error = JsonRpcError {
-                    code: -32603,
-                    message: format!("MCP method error: {}", e),
-                    data: None,
-                };
-                return Ok((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(JsonRpcResponse::error(error, id)),
-                ));
-            }
-        }
-    }
 
     match method {
         // Server specific methods
