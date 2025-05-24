@@ -77,7 +77,7 @@ pub async fn handle_mcp_list_tools(
         "tools": [
             {
                 "name": "sandbox_start",
-                "description": "Start a new sandbox with specified configuration",
+                "description": "Start a new sandbox with specified configuration. This creates an isolated environment for code execution. IMPORTANT: Always stop the sandbox when done to prevent it from running indefinitely and consuming resources.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -128,7 +128,7 @@ pub async fn handle_mcp_list_tools(
             },
             {
                 "name": "sandbox_stop",
-                "description": "Stop a running sandbox",
+                "description": "Stop a running sandbox and clean up its resources. CRITICAL: Always call this when you're finished with a sandbox to prevent resource leaks and indefinite running. Failing to stop sandboxes will cause them to consume system resources unnecessarily.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -146,13 +146,13 @@ pub async fn handle_mcp_list_tools(
             },
             {
                 "name": "sandbox_run_code",
-                "description": "Execute code in a running sandbox",
+                "description": "Execute code in a running sandbox. PREREQUISITES: The target sandbox must be started first using sandbox_start - this will fail if the sandbox is not running. TIMING: Code execution is synchronous and may take time depending on complexity. Long-running code will block until completion or timeout.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "sandbox": {
                             "type": "string",
-                            "description": "Name of the sandbox"
+                            "description": "Name of the sandbox (must be already started)"
                         },
                         "namespace": {
                             "type": "string",
@@ -164,7 +164,7 @@ pub async fn handle_mcp_list_tools(
                         },
                         "language": {
                             "type": "string",
-                            "description": "Programming language"
+                            "description": "Programming language (e.g., 'python', 'nodejs')"
                         }
                     },
                     "required": ["sandbox", "namespace", "code", "language"]
@@ -172,13 +172,13 @@ pub async fn handle_mcp_list_tools(
             },
             {
                 "name": "sandbox_run_command",
-                "description": "Execute a shell command in a running sandbox",
+                "description": "Execute a command in a running sandbox. PREREQUISITES: The target sandbox must be started first using sandbox_start - this will fail if the sandbox is not running. TIMING: Command execution is synchronous and may take time depending on the command complexity. Long-running commands will block until completion or timeout.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "sandbox": {
                             "type": "string",
-                            "description": "Name of the sandbox"
+                            "description": "Name of the sandbox (must be already started)"
                         },
                         "namespace": {
                             "type": "string",
@@ -199,17 +199,17 @@ pub async fn handle_mcp_list_tools(
             },
             {
                 "name": "sandbox_get_metrics",
-                "description": "Get metrics and status for sandboxes",
+                "description": "Get metrics and status for sandboxes including CPU usage, memory consumption, and running state. PREREQUISITES: If querying a specific sandbox, it should be started first. Use this to monitor resource usage and verify sandbox status before running code or commands.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "sandbox": {
                             "type": "string",
-                            "description": "Optional specific sandbox name"
+                            "description": "Optional specific sandbox name to get metrics for"
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace (use '*' for all namespaces)"
+                            "description": "Namespace to query (use '*' for all namespaces)"
                         }
                     },
                     "required": ["namespace"]
