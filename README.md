@@ -490,3 +490,17 @@ For contribution guidelines, please refer to [CONTRIBUTING.md](./CONTRIBUTING.md
 # <sub><img height="18" src="https://octicons-col.vercel.app/law/A770EF">&nbsp;&nbsp;LICENSE</sub>
 
 This project is licensed under the [Apache License 2.0](./LICENSE).
+
+<div align='center'>• • •</div>
+
+# <sub><img height="18" src="https://octicons-col.vercel.app/star/A770EF">&nbsp;&nbsp;STAR HISTORY</sub>
+
+We appreciate all the support!
+
+<div align='center'>
+  <img src="https://api.star-history.com/svg?repos=microsandbox/microsandbox&type=Date">
+</div>
+
+<br />
+
+<div align='center'>• • •</div>
