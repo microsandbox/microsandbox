@@ -17,6 +17,8 @@ Essential guides to get you started with Microsandbox.
 
 :icon-gear: [Configuration](configuration.md) - Configure your Microsandbox setup
 
+:icon-key: [API Keys](api-keys.md) - Managing API keys and authentication
+
 :icon-plug: [MCP](mcp.md) - Model Context Protocol integration
 
 :icon-project: [Projects](projects.md) - Working with projects

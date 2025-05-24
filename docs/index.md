@@ -10,7 +10,7 @@ Run untrusted code with **VM-level isolation** and **lightning-fast startup**. B
 
 ---
 
-## Why microsandbox?
+### Why microsandbox?
 
 Ever needed to run code you don't fully trust? Whether it's AI-generated code, user submissions, or experimental code, the traditional options all have serious drawbacks:
 
@@ -33,7 +33,7 @@ Ever needed to run code you don't fully trust? Whether it's AI-generated code, u
 
 ---
 
-## Get Running in Minutes
+### Get Running in Minutes
 
 +++ :icon-download: Install
 
@@ -71,27 +71,27 @@ microsandbox server speaks [MCP](https://modelcontextprotocol.io) natively - con
 
 ---
 
-## What You Can Build
+### What You Can Build
 
-#### :icon-code: AI Code Execution Platforms
+#### AI Code Execution Platforms
 
 Build AI assistants that can safely execute the code they generate. Whether it's a simple Python script or a complex web application, your AI can run, test, and debug code in real-time without compromising your infrastructure. Perfect for coding assistants, educational platforms, and automated development workflows where AI needs to validate its own output.
 
-#### :icon-graph: Secure Data Analysis Services
+#### Secure Data Analysis Services
 
 Create platforms where users can upload datasets and run custom analysis scripts without security concerns. Support any data science stack - Python with pandas, R for statistics, Julia for high-performance computing - while maintaining complete isolation. Ideal for research institutions, business intelligence platforms, and collaborative data science environments.
 
-#### :icon-globe: Interactive Learning Environments
+#### Interactive Learning Environments
 
 Deploy instant coding environments for education and training. Students can write, compile, and execute code in any programming language directly through their browser while you maintain complete security isolation. Perfect for coding bootcamps, online computer science courses, competitive programming platforms, and technical interview systems.
 
-#### :icon-server: Continuous Integration & Testing
+#### Continuous Integration & Testing
 
 Rapidly prototype and test microservices in isolated environments. Spin up complete application stacks, test API integrations, and validate deployment configurations without affecting your main infrastructure. Great for CI/CD pipelines, integration testing, and proof-of-concept development.
 
 ---
 
-## Support
+### Support
 
 Do you have a technical support question, find a defect, or would like to make a feature request? Please create an [issue](https://github.com/microsandbox/microsandbox/issues) to get the conversation started.
 

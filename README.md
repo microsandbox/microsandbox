@@ -10,19 +10,15 @@
 <br />
 <br />
 
-<div align='center'><a href="./"><img align="centre" width="400" alt="floating-sandbox-bot" src="https://github.com/user-attachments/assets/52ea427f-f2d0-4b7b-bc23-8e729d28453b"></a></div>
-
-<br />
-
 <div align='center'>
   <a href="https://discord.gg/T95Y3XnEAK" target="_blank">
     <img src="https://img.shields.io/badge/discord -%2300acee.svg?color=mediumslateblue&style=for-the-badge&logo=discord&logoColor=white" alt=discord style="margin-bottom: 5px;"/>
   </a>
-  <a href="https://x.com/microsandbox" target="_blank">
-    <img src="https://img.shields.io/badge/x (twitter)-%2300acee.svg?color=000000&style=for-the-badge&logo=x&logoColor=white" alt=x style="margin-bottom: 5px;"/>
+  <a href="https://docs.microsandbox.dev" target="_blank">
+    <img src="https://img.shields.io/badge/documentation-%2300acee.svg?color=ff4500&style=for-the-badge&logo=gitbook&logoColor=white" alt=documentation style="margin-bottom: 5px;"/>
   </a>
-  <a href="https://www.reddit.com/r/microsandbox" target="_blank">
-    <img src="https://img.shields.io/badge/reddit-%2300acee.svg?color=fe4609&style=for-the-badge&logo=reddit&logoColor=white" alt=reddit style="margin-bottom: 5px;"/>
+  <a href="https://x.com/microsandbox" target="_blank">
+    <img src="https://img.shields.io/badge/twitter-%2300acee.svg?color=000000&style=for-the-badge&logo=x&logoColor=white" alt=twitter style="margin-bottom: 5px;"/>
   </a>
 </div>
 
@@ -60,7 +56,7 @@ Get started with in easy steps:
 <div align='center'>
   <img src="https://img.shields.io/badge/macos-working-green?style=for-the-badge" alt=macos style="margin-bottom: 5px;"/>
   <img src="https://img.shields.io/badge/linux-working-green?style=for-the-badge" alt=linux style="margin-bottom: 5px;"/>
-  <img src="https://img.shields.io/badge/windows-wip-yellow?style=for-the-badge" alt=windows style="margin-bottom: 5px;"/>
+  <img src="https://img.shields.io/badge/windows-wip-red?style=for-the-badge" alt=windows style="margin-bottom: 5px;"/>
 </div>
 
 ##

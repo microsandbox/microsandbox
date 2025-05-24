@@ -1,9 +1,9 @@
 ---
-order: 50
-icon: organization
+order: 75
+icon: key
 tags: [guide]
 ---
 
-# Architecture
+# API Keys
 
 Content coming soon...
