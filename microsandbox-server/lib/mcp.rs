@@ -33,7 +33,7 @@ use crate::{
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Server information
-const SERVER_NAME: &str = "microsandbox-mcp-server";
+const SERVER_NAME: &str = "microsandbox-server";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 //--------------------------------------------------------------------------------------------------
