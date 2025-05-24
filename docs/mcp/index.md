@@ -1,7 +1,7 @@
 ---
 order: 80
 # icon: plug
-expanded: true
+expanded: false
 tags: [mcp]
 ---
 

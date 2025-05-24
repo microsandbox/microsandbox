@@ -1,7 +1,7 @@
 ---
 order: 90
 # icon: code
-expanded: true
+expanded: false
 tags: [sdk]
 ---
 

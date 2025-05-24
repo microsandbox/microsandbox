@@ -1,7 +1,7 @@
 ---
 order: 70
 # icon: project
-expanded: true
+expanded: false
 tags: [projects]
 ---
 
