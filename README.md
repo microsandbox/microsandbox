@@ -78,7 +78,7 @@ curl -sSL https://get.microsandbox.dev | sh
 ##### And start the server
 
 ```sh
-msb server start --dev --detach
+msb server start --dev
 ```
 
 > [!TIP]
