@@ -7,11 +7,14 @@ start:
   # Uncomment the next line to try Retype Pro features
   # pro: true
 
+breadcrumb:
+  home: ":icon-home:"
+
 branding:
-  title: Microsandbox
+  title: microsandbox
   label: Docs
-  logo: ../assets/microsandbox-banner-xl.png
-  logoDark: ../assets/microsandbox-banner-xl-dark.png
+  logo: static/logo-black.svg
+  logoDark: static/logo-white.svg
 
 links:
   - text: GitHub
