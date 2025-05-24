@@ -30,19 +30,19 @@
 
 Building AI agents that generate and execute code? Need to run untrusted user code?
 
-You'll need **secure sandboxes**<sup>✨</sup>!
+Maybe you've tried running the code:
 
-- **Run code directly on machine?** — Security risk for the machine <a href="https://horizon3.ai/attack-research/disclosures/unsafe-at-any-speed-abusing-python-exec-for-unauth-rce-in-langflow-ai/">[→]</a>
-- **Run code in docker containers?** — Limited isolation for untrusted code <a href="./MSB_V_DOCKER.md">[→]</a>
-- **Run code in traditional VMs?** — Minutes to start up, heavy resource usage
-- **Run code in cloud sandboxes?** — Less control over your infra and lose rapid dev cycles
+- **Directly on your machine** — Security risk for your machine <a href="https://horizon3.ai/attack-research/disclosures/unsafe-at-any-speed-abusing-python-exec-for-unauth-rce-in-langflow-ai/">[→]</a>
+- **In docker containers** — Limited isolation for untrusted code <a href="./MSB_V_DOCKER.md">[→]</a>
+- **In traditional VMs** — Minutes to start up, heavy resource usage
+- **In cloud sandboxes** — Less control over your infra and lose rapid dev cycles
 
-**microsandbox** gives you the best of all the worlds:
+**microsandbox** solves all these issues for you with:
 
 - <div><img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF">&nbsp;&nbsp;True VM-Level Security Isolation with Fast Startup Times</div>
 - <div><img height="15" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;Self-Hosted with Full Control and Local Setup</div>
 - <div><img height="15" src="https://octicons-col.vercel.app/sync/A770EF">&nbsp;&nbsp;Seamless Transition from Local to Production</div>
-- <div><img height="15" src="https://octicons-col.vercel.app/stack/A770EF">&nbsp;&nbsp;Compatible with Standard Container Images</div>
+- <div><img height="15" src="https://octicons-col.vercel.app/stack/A770EF">&nbsp;&nbsp;Compatibility with Standard Container Images</div>
 - <div><img height="15" src="https://octicons-col.vercel.app/plug/A770EF">&nbsp;&nbsp;Integration with Any MCP Enabled AI</div>
 
 <div align='center'>• • •</div>
