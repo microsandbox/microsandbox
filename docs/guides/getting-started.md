@@ -6,7 +6,7 @@ tags: [guide]
 
 # Getting Started
 
-Welcome to microsandbox! This guide will help you get up and running with secure code execution in minutes.
+This guide will help you get up and running with secure code execution in minutes.
 
 !!!info Prerequisites
 Before starting, make sure you have:
@@ -16,7 +16,7 @@ Before starting, make sure you have:
 - Basic familiarity with command line
   !!!
 
-### Installation
+## Installation
 
 #### Step 1: Install microsandbox
 

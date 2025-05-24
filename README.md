@@ -28,22 +28,20 @@
 
 # <sub><img height="18" src="https://octicons-col.vercel.app/question/A770EF">&nbsp;&nbsp;WHY MICROSANDBOX?</sub>
 
-Building AI agents that generate and execute code? Need to run untrusted user code?
+Ever needed to run code you don't fully trust? Whether it's AI-generated code, user submissions, or experimental code, the traditional options all have serious drawbacks:
 
-Maybe you've tried running the code:
+- **Running locally** - One malicious script and your entire system is compromised
+- **Using containers** - Shared kernels mean sophisticated attacks can still break out
+- **Traditional VMs** - Waiting 10+ seconds for a VM to boot kills productivity and performance
+- **Cloud solutions** - Can get expensive fast and at the whim of the cloud provider
 
-- **Directly on your machine** — Security risk for your machine <a href="https://horizon3.ai/attack-research/disclosures/unsafe-at-any-speed-abusing-python-exec-for-unauth-rce-in-langflow-ai/">[→]</a>
-- **In docker containers** — Limited isolation for untrusted code <a href="./MSB_V_DOCKER.md">[→]</a>
-- **In traditional VMs** — Minutes to start up, heavy resource usage
-- **In cloud sandboxes** — Less control over your infra and lose rapid dev cycles
+**microsandbox** combines the best of all worlds:
 
-**microsandbox** solves all these issues for you with:
-
-- <div><img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF">&nbsp;&nbsp;True VM-Level Security Isolation with Fast Startup Times</div>
-- <div><img height="15" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;Self-Hosted with Full Control and Local Setup</div>
-- <div><img height="15" src="https://octicons-col.vercel.app/sync/A770EF">&nbsp;&nbsp;Seamless Transition from Local to Production</div>
-- <div><img height="15" src="https://octicons-col.vercel.app/stack/A770EF">&nbsp;&nbsp;Compatibility with Standard Container Images</div>
-- <div><img height="15" src="https://octicons-col.vercel.app/plug/A770EF">&nbsp;&nbsp;Integration with Any MCP Enabled AI</div>
+- [x] <span><img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF">&nbsp;&nbsp;<strong>Bulletproof Security</strong> - True VM isolation with separate kernels</span>
+- [x] <span><img height="15" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;<strong>Instant Startup</strong> - Boot times under 200ms, not 10+ seconds</span>
+- [x] <span><img height="15" src="https://octicons-col.vercel.app/home/A770EF">&nbsp;&nbsp;<strong>Your Infrastructure</strong> - Self-hosted with complete control</span>
+- [x] <span><img height="15" src="https://octicons-col.vercel.app/package/A770EF">&nbsp;&nbsp;<strong>OCI Compatible</strong> - Works with standard container images</span>
+- [x] <span><img height="15" src="https://octicons-col.vercel.app/dependabot/A770EF">&nbsp;&nbsp;<strong>AI-Ready</strong> - Built-in MCP server for seamless AI integration</span>
 
 <div align='center'>• • •</div>
 
