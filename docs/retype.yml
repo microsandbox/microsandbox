@@ -36,9 +36,6 @@ meta:
   title: " | Microsandbox Docs"
   description: "Secure self-hosted sandboxes for your AI agents"
 
-theme:
-  default: light
-
 exclude:
   - "*.tmp"
   - "node_modules/"
