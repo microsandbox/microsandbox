@@ -66,7 +66,7 @@ asyncio.run(main())
 !!!info AI Integration Ready
 microsandbox server speaks [MCP](https://modelcontextprotocol.io) natively - connect it to **Cursor**, **Claude**, or any MCP-compatible AI tool in seconds!
 
-[!ref See how to use microsandbox as a MCP server](/mcp)
+[!ref See how to use microsandbox as a MCP server](/guides/mcp)
 !!!
 
 ---

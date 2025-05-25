@@ -79,3 +79,9 @@ This executes the default _start_ script of your sandbox. For more control, you 
 ```bash
 msr myapp~start
 ```
+
+---
+
+### Next Steps
+
+[!ref CLI Reference](/references/cli#project-management)

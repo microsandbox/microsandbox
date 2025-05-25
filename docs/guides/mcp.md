@@ -16,26 +16,254 @@ The [Model Context Protocol (MCP)](https://modelcontextprotocol.io) is an open s
 
 ---
 
-### MCP Capabilities
-
-microsandbox exposes the following MCP capabilities:
-
-#### Tools Available
-- **`sandbox_start`** - Create and start new sandboxes
-- **`sandbox_stop`** - Stop running sandboxes
-- **`sandbox_run_code`** - Execute code in sandboxes (Python, Node.js)
-- **`sandbox_run_command`** - Run shell commands in sandboxes
-- **`sandbox_get_metrics`** - Monitor sandbox resource usage
-
-#### Connection Details
+### Connection Details
 
 - **Endpoint:** `http://127.0.0.1:5555/mcp`
 - **Protocol:** Streamable HTTP
 - **Authentication:** Bearer token (if not in dev mode)
 
 !!!info Transport Support
-microsandbox server only supports the **Streamable HTTP** transport protocol. The deprecated HTTP+SSE transport is not supported. Prefer **Streamable HTTP** when connecting with MCP clients.
+microsandbox server only supports the **Streamable HTTP** transport protocol.
 !!!
+
+---
+
+### Tools
+
+microsandbox exposes tools through the MCP interface for complete sandbox lifecycle management.
+
+---
+
+### Sandbox Management Tools
+
+==- `sandbox_start`
+Start a new sandbox with specified configuration. This creates an isolated environment for code execution.
+
+| Parameter   | Type     | Required | Description                   |
+| ----------- | -------- | -------- | ----------------------------- |
+| `sandbox`   | `string` | ✓        | Name of the sandbox to start  |
+| `namespace` | `string` | ✓        | Namespace for the sandbox     |
+| `config`    | `object` |          | Sandbox configuration options |
+
+#### Configuration Options
+
+| Property  | Type            | Description                                                            |
+| --------- | --------------- | ---------------------------------------------------------------------- |
+| `image`   | `string`        | Docker image to use (e.g., `microsandbox/python`, `microsandbox/node`) |
+| `memory`  | `integer`       | Memory limit in MiB                                                    |
+| `cpus`    | `integer`       | Number of CPUs                                                         |
+| `volumes` | `array[string]` | Volume mounts                                                          |
+| `ports`   | `array[string]` | Port mappings                                                          |
+| `envs`    | `array[string]` | Environment variables                                                  |
+
++++ Basic Python Sandbox
+
+```json
+{
+  "sandbox": "my-python-env",
+  "namespace": "default"
+}
+```
+
++++ Custom Configuration
+
+```json
+{
+  "sandbox": "data-analysis",
+  "namespace": "research",
+  "config": {
+    "image": "microsandbox/python",
+    "memory": 1024,
+    "cpus": 2,
+    "envs": ["PYTHONPATH=/workspace"]
+  }
+}
+```
+
++++ Node.js Environment
+
+```json
+{
+  "sandbox": "node-env",
+  "namespace": "development",
+  "config": {
+    "image": "microsandbox/node",
+    "memory": 512
+  }
+}
+```
+
++++
+
+!!!warning Important
+Always stop the sandbox when done to prevent it from running indefinitely and consuming resources.
+!!!
+===
+
+==- `sandbox_stop`
+Stop a running sandbox and clean up its resources.
+
+| Parameter   | Type     | Required | Description                 |
+| ----------- | -------- | -------- | --------------------------- |
+| `sandbox`   | `string` | ✓        | Name of the sandbox to stop |
+| `namespace` | `string` | ✓        | Namespace of the sandbox    |
+
+```json
+{
+  "sandbox": "my-python-env",
+  "namespace": "default"
+}
+```
+
+!!!warning Critical
+Always call this when you're finished with a sandbox to prevent resource leaks and indefinite running. Failing to stop sandboxes will cause them to consume system resources unnecessarily.
+!!!
+===
+
+---
+
+### Code Execution Tools
+
+==- `sandbox_run_code`
+Execute code in a running sandbox environment.
+
+| Parameter   | Type     | Required | Description                                   |
+| ----------- | -------- | -------- | --------------------------------------------- |
+| `sandbox`   | `string` | ✓        | Name of the sandbox (must be already started) |
+| `namespace` | `string` | ✓        | Namespace of the sandbox                      |
+| `code`      | `string` | ✓        | Code to execute                               |
+| `language`  | `string` | ✓        | Programming language (`python`, `nodejs`)     |
+
++++ Python Execution
+
+```json
+{
+  "sandbox": "my-python-env",
+  "namespace": "default",
+  "code": "import math\nresult = math.sqrt(16)\nprint(f'Square root: {result}')",
+  "language": "python"
+}
+```
+
++++ JavaScript Execution
+
+```json
+{
+  "sandbox": "node-env",
+  "namespace": "development",
+  "code": "const fs = require('fs');\nconst data = { message: 'Hello from Node.js!' };\nconsole.log(JSON.stringify(data, null, 2));",
+  "language": "nodejs"
+}
+```
+
++++
+
+!!! Prerequisites
+The target sandbox must be started first using `sandbox_start` - this will fail if the sandbox is not running. Code execution is synchronous and may take time depending on complexity.
+!!!
+===
+
+==- `sandbox_run_command`
+Execute shell commands in a running sandbox.
+
+| Parameter   | Type            | Required | Description                                   |
+| ----------- | --------------- | -------- | --------------------------------------------- |
+| `sandbox`   | `string`        | ✓        | Name of the sandbox (must be already started) |
+| `namespace` | `string`        | ✓        | Namespace of the sandbox                      |
+| `command`   | `string`        | ✓        | Command to execute                            |
+| `args`      | `array[string]` |          | Command arguments                             |
+
++++ Simple Command
+
+```json
+{
+  "sandbox": "my-python-env",
+  "namespace": "default",
+  "command": "ls"
+}
+```
+
++++ Command with Arguments
+
+```json
+{
+  "sandbox": "my-python-env",
+  "namespace": "default",
+  "command": "ls",
+  "args": ["-la", "/workspace"]
+}
+```
+
++++ Package Installation
+
+```json
+{
+  "sandbox": "data-analysis",
+  "namespace": "research",
+  "command": "pip",
+  "args": ["install", "pandas", "numpy", "matplotlib"]
+}
+```
+
++++
+
+!!!info Prerequisites
+The target sandbox must be started first using `sandbox_start` - this will fail if the sandbox is not running. Command execution is synchronous and may take time depending on complexity.
+!!!
+===
+
+---
+
+### Monitoring Tools
+
+==- `sandbox_get_metrics`
+Get metrics and status for sandboxes including CPU usage, memory consumption, and running state.
+
+| Parameter   | Type     | Required | Description                                       |
+| ----------- | -------- | -------- | ------------------------------------------------- |
+| `namespace` | `string` | ✓        | Namespace to query (use `*` for all namespaces)   |
+| `sandbox`   | `string` |          | Optional specific sandbox name to get metrics for |
+
++++ Single Sandbox
+
+```json
+{
+  "sandbox": "my-python-env",
+  "namespace": "default"
+}
+```
+
++++ All Sandboxes in Namespace
+
+```json
+{
+  "namespace": "development"
+}
+```
+
++++ All Sandboxes
+
+```json
+{
+  "namespace": "*"
+}
+```
+
++++
+
+**Returns:** JSON object with metrics including:
+
+- `name` - Sandbox name
+- `namespace` - Sandbox namespace
+- `running` - Boolean running status
+- `cpu_usage` - CPU usage percentage
+- `memory_usage` - Memory usage in MiB
+- `disk_usage` - Disk usage in bytes
+
+!!! Usage
+This tool can check the status of any sandbox regardless of whether it's running or not, making it useful for monitoring and cleanup operations.
+!!!
+===
 
 ---
 
@@ -46,11 +274,13 @@ Let's use [Agno](https://docs.agno.com) to build an AI agent that can execute co
 #### Prerequisites
 
 1. **Install Agno and dependencies**:
+
 ```bash
 pip install agno openai
 ```
 
 2. **Start microsandbox server**:
+
 ```bash
 msb server start --dev
 ```
@@ -99,6 +329,7 @@ microsandbox works with any MCP-compatible application:
 #### Complete Workflow
 
 1. **Start the server:**
+
 ```bash
 msb server start --dev
 ```
@@ -106,6 +337,7 @@ msb server start --dev
 2. **Configure Claude Desktop** with the MCP server
 
 3. **Test the integration:**
+
 ```
 Ask Claude: "Can you start a Python sandbox and run a simple calculation?"
 ```
@@ -118,16 +350,19 @@ Ask Claude: "Can you start a Python sandbox and run a simple calculation?"
 #### Advanced Usage
 
 **Data Analysis Workflow:**
+
 ```
 "Create a Python sandbox, install pandas, and analyze this CSV data: [paste data]"
 ```
 
 **Web Development:**
+
 ```
-"Start a Node.js sandbox, create a simple Express server, and show me the code"
+"Start a Node.js sandbox and create a simple HTML generator script"
 ```
 
 **Multi-step Processing:**
+
 ```
 "Create a sandbox, download some data, process it, and create a visualization"
 ```
@@ -135,7 +370,5 @@ Ask Claude: "Can you start a Python sandbox and run a simple calculation?"
 ---
 
 ### Next Steps
-
-Now that you understand MCP integration:
 
 [!ref API Reference](/references/api)

@@ -19,4 +19,4 @@ API references and SDK documentation.
 
 :icon-terminal: [CLI](cli.md) - Command Line Interface reference
 
-:icon-server: [RPC API](rpc-api.md) - RPC API reference
+:icon-server: [API](api.md) - API reference
