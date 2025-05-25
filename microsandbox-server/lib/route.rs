@@ -37,12 +37,13 @@ pub fn create_router(state: AppState) -> Router {
         ));
 
     // Create MCP routes - separate endpoint for Model Context Protocol
+    // Uses smart auth middleware that handles protocol vs tool methods differently
     let mcp_api =
         Router::new()
             .route("/", post(handler::mcp_handler))
             .layer(middleware::from_fn_with_state(
                 state.clone(),
-                app_middleware::auth_middleware,
+                app_middleware::mcp_smart_auth_middleware,
             ));
 
     // Combine all routes with logging middleware

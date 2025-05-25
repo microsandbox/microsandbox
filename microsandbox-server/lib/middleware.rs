@@ -140,6 +140,78 @@ pub async fn auth_middleware(
     Ok(next.run(req).await)
 }
 
+/// Smart authentication middleware for MCP requests that handles protocol vs tool methods differently
+/// Protocol methods (initialize, tools/list, prompts/list, prompts/get) don't require namespace validation
+/// Tool methods (tools/call) require namespace validation
+pub async fn mcp_smart_auth_middleware(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<impl IntoResponse, ServerError> {
+    // Skip auth in dev mode if configured
+    if *state.get_config().get_dev_mode() {
+        return Ok(next.run(req).await);
+    }
+
+    // Extract API key from authorization header
+    let api_key = extract_api_key_from_headers(req.headers())?;
+
+    // Validate the token and get its claims
+    let claims = validate_token(&api_key, &state)?;
+
+    // If token has wildcard namespace access, we can skip further namespace validation
+    if claims.namespace == "*" {
+        return Ok(next.run(req).await);
+    }
+
+    // For namespace-specific tokens, we need to check if this is a tool execution method
+    // that requires namespace validation
+    let (parts, body) = req.into_parts();
+
+    // Use axum's to_bytes to buffer the body
+    let bytes = to_bytes(body, usize::MAX)
+        .await
+        .map_err(|e| ServerError::InternalError(format!("Failed to read request body: {}", e)))?;
+
+    // Parse the JSON to check the method
+    let json_value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        ServerError::ValidationError(crate::error::ValidationError::InvalidInput(format!(
+            "Invalid JSON-RPC request: {}",
+            e
+        )))
+    })?;
+
+    let method = json_value
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+
+    // Check if this is a tool execution method that requires namespace validation
+    let requires_namespace_validation = matches!(method, "tools/call");
+
+    if requires_namespace_validation {
+        // Extract namespace from params for tool execution methods
+        let namespace_from_request = extract_namespace_from_json_rpc(&bytes)?;
+
+        // Validate that the token has access to the requested namespace
+        if claims.namespace != namespace_from_request {
+            return Err(ServerError::AuthorizationError(
+                crate::error::AuthorizationError::AccessDenied(format!(
+                    "Token does not have access to namespace '{}'",
+                    namespace_from_request
+                )),
+            ));
+        }
+    }
+
+    // Reconstruct the request with the original body
+    let body = Body::from(bytes);
+    let req = Request::from_parts(parts, body);
+
+    // If everything is valid, continue with the request
+    Ok(next.run(req).await)
+}
+
 //--------------------------------------------------------------------------------------------------
 // Helper Functions
 //--------------------------------------------------------------------------------------------------
