@@ -347,26 +347,6 @@ Ask Claude: "Can you start a Python sandbox and run a simple calculation?"
    - Call `sandbox_run_code` to execute your calculation
    - Return the results in a natural language response
 
-#### Advanced Usage
-
-**Data Analysis Workflow:**
-
-```
-"Create a Python sandbox, install pandas, and analyze this CSV data: [paste data]"
-```
-
-**Web Development:**
-
-```
-"Start a Node.js sandbox and create a simple HTML generator script"
-```
-
-**Multi-step Processing:**
-
-```
-"Create a sandbox, download some data, process it, and create a visualization"
-```
-
 ---
 
 ### Next Steps

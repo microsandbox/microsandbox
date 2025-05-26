@@ -8,7 +8,7 @@
 #   ./install_microsandbox.sh [options]
 #
 # Options:
-#   --version       Specify version to install (default: 0.2.3)
+#   --version       Specify version to install (default: 0.2.4)
 #   --no-cleanup   Skip cleanup of temporary files after installation
 #
 # The script performs the following tasks:
@@ -43,7 +43,7 @@ error() {
 }
 
 # Default values
-VERSION="0.2.3"
+VERSION="0.2.4"
 NO_CLEANUP=false
 TEMP_DIR="/tmp/microsandbox-install"
 GITHUB_REPO="microsandbox/microsandbox"

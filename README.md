@@ -26,7 +26,7 @@ Ever needed to run code you don't fully trust? Whether it's AI-generated code, u
 - **Running locally** - One malicious script and your entire system is compromised
 - **Using containers** - Shared kernels mean sophisticated attacks can still break out
 - **Traditional VMs** - Waiting 10+ seconds for a VM to boot kills productivity and performance
-- **Cloud solutions** - Can get expensive fast and at the whim of the cloud provider
+- **Cloud solutions** - Not as flexible, at the whim of the cloud provider
 
 **microsandbox** combines the best of all worlds:
 

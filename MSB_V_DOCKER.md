@@ -14,10 +14,10 @@ Microsandbox fundamentally reimagines isolation security through hardware-virtua
 │  Your application    │                       │  Your application    │
 ├──────────────────────┤                       ├──────────────────────┤
 │  Host **kernel**     │◀── escapes here       │  **Guest kernel**    │
-└──────────────────────┘    - CVE‑2024‑21626   ├──────────────────────┤
-                            - CVE‑2024‑23653   │  VMM (KVM / Apple HV)│
+└──────────────────────┘    - CVE‑2024‑23653   ├──────────────────────┤
+                            - CVE‑2024‑21626   │  VMM (KVM / Apple HV)│
                             - CVE‑2023‑27561   ├──────────────────────┤
-                                               │  Host kernel         │ ✔ host is *never*
+                            - CVE-2024-26584   │  Host kernel         │ ✔ host is *never*
                                                └──────────────────────┘   directly reachable
 ```
 
@@ -46,7 +46,7 @@ Even with **full root access inside a Microsandbox**, attackers remain contained
 - macOS/Windows: Hidden Linux VM running in the background
 - Production: Often Linux-based with different kernel settings
 
-**Microsandbox** delivers perfect environment parity:
+**Microsandbox** delivers consistent environments across platforms:
 
 - **Identical kernels everywhere** — same microVM technology on all platforms
 - **Deterministic builds** with identical underlying systems
@@ -56,7 +56,7 @@ Even with **full root access inside a Microsandbox**, attackers remain contained
 
 ## 3. Unified Configuration Model: The Sandboxfile
 
-**Docker** requires managing separate Dockerfile, docker-compose.yml, and often .env files—creating a disjointed configuration experience and synchronization challenges.
+**Docker** requires managing separate Dockerfile and docker-compose.yml files, creating a disjointed configuration experience and synchronization challenges.
 
 **Microsandbox** consolidates everything into a single, declarative `Sandboxfile`:
 

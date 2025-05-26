@@ -78,7 +78,7 @@ pub async fn handle_mcp_list_tools(
         "tools": [
             {
                 "name": "sandbox_start",
-                "description": "Start a new sandbox with specified configuration. This creates an isolated environment for code execution. IMPORTANT: Always stop the sandbox when done to prevent it from running indefinitely and consuming resources.",
+                "description": "Start a new sandbox with specified configuration. This creates an isolated environment for code execution. IMPORTANT: Always stop the sandbox when done to prevent it from running indefinitely and consuming resources. SUPPORTED IMAGES: Only 'microsandbox/python' (for Python code) and 'microsandbox/node' (for Node.js code) are currently supported.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -96,7 +96,8 @@ pub async fn handle_mcp_list_tools(
                             "properties": {
                                 "image": {
                                     "type": "string",
-                                    "description": "Docker image to use"
+                                    "description": "Docker image to use. Only 'microsandbox/python' and 'microsandbox/node' are supported.",
+                                    "enum": ["microsandbox/python", "microsandbox/node"]
                                 },
                                 "memory": {
                                     "type": "integer",

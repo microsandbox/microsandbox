@@ -2265,7 +2265,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-cli"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "atty",
@@ -2289,7 +2289,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -2360,7 +2360,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-portal"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2384,7 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-server"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2417,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
