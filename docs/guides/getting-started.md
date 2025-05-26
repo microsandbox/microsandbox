@@ -38,7 +38,7 @@ msb server start --dev
 ```
 
 !!!info MCP Server
-The microsandbox server is also an [MCP server](https://modelcontextprotocol.io), which means it works directly with Cursor, Claude, and other MCP-enabled AI tools out of the box!
+The microsandbox server is also an [MCP server](https://modelcontextprotocol.io), which means it works directly with Claude and other MCP-enabled AI tools out of the box!
 
 [!ref See how to use microsandbox as an MCP server](/guides/mcp)
 !!!

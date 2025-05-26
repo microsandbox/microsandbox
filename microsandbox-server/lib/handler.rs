@@ -32,8 +32,9 @@ use crate::{
     error::ServerError,
     mcp, middleware,
     payload::{
-        JsonRpcError, JsonRpcRequest, JsonRpcResponse, RegularMessageResponse,
-        SandboxMetricsGetParams, SandboxStartParams, SandboxStopParams, JSONRPC_VERSION,
+        JsonRpcError, JsonRpcRequest, JsonRpcResponse, JsonRpcResponseOrNotification,
+        RegularMessageResponse, SandboxMetricsGetParams, SandboxStartParams, SandboxStopParams,
+        JSONRPC_VERSION,
     },
     state::AppState,
     SandboxStatus, SandboxStatusResponse, ServerResult,
@@ -64,7 +65,6 @@ pub async fn mcp_handler(
     Json(request): Json<JsonRpcRequest>,
 ) -> ServerResult<impl IntoResponse> {
     debug!(?request, "Received MCP request");
-
     // Check for required JSON-RPC fields
     if request.jsonrpc != JSONRPC_VERSION {
         let error = JsonRpcError {
@@ -72,9 +72,9 @@ pub async fn mcp_handler(
             message: "Invalid or missing jsonrpc version field".to_string(),
             data: None,
         };
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(JsonRpcResponse::error(error, request.id.clone())),
+        return Ok(JsonRpcResponseOrNotification::error(
+            error,
+            request.id.clone(),
         ));
     }
 
@@ -83,17 +83,17 @@ pub async fn mcp_handler(
 
     // Handle MCP methods directly since all requests to /mcp are MCP requests
     match mcp::handle_mcp_method(state, request).await {
-        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Ok(response) => {
+            // The enum handles both regular responses and notifications
+            Ok(response)
+        }
         Err(e) => {
             let error = JsonRpcError {
                 code: -32603,
                 message: format!("MCP method error: {}", e),
                 data: None,
             };
-            Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(JsonRpcResponse::error(error, request_id)),
-            ))
+            Ok(JsonRpcResponseOrNotification::error(error, request_id))
         }
     }
 }
@@ -182,7 +182,10 @@ pub async fn json_rpc_handler(
         // Portal-forwarded methods
         "sandbox.repl.run" | "sandbox.command.run" => {
             // Forward these RPC methods to the portal
-            forward_rpc_to_portal(state, request).await
+            match forward_rpc_to_portal(state, request).await {
+                Ok((status, json_response)) => Ok((status, json_response)),
+                Err(e) => Err(e),
+            }
         }
 
         _ => {

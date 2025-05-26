@@ -39,8 +39,23 @@ pub struct JsonRpcRequest {
     #[serde(default)]
     pub params: Value,
 
-    /// Request ID
-    pub id: Value,
+    /// Request ID (optional for notifications)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Value>,
+}
+
+/// JSON-RPC notification structure (no id field, no response expected)
+#[derive(Debug, Deserialize, Serialize)]
+pub struct JsonRpcNotification {
+    /// JSON-RPC version, must be "2.0"
+    pub jsonrpc: String,
+
+    /// Method name
+    pub method: String,
+
+    /// Optional parameters for the method
+    #[serde(default)]
+    pub params: Value,
 }
 
 /// JSON-RPC response structure
@@ -57,8 +72,9 @@ pub struct JsonRpcResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
 
-    /// Response ID (same as request ID)
-    pub id: Value,
+    /// Response ID (same as request ID, optional for notifications)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Value>,
 }
 
 /// JSON-RPC error structure
@@ -73,6 +89,27 @@ pub struct JsonRpcError {
     /// Optional error data
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+}
+
+/// JSON-RPC response or notification result
+/// This enum allows handlers to return either a response (for regular requests)
+/// or no response (for notifications) while maintaining type safety
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum JsonRpcResponseOrNotification {
+    /// A regular JSON-RPC response
+    Response(JsonRpcResponse),
+
+    /// A processed notification (no response should be sent)
+    Notification(ProcessedNotification),
+}
+
+/// Represents a processed JSON-RPC notification (no response expected)
+#[derive(Debug, Serialize)]
+pub struct ProcessedNotification {
+    /// Indicates this was a notification that was processed
+    #[serde(skip)]
+    pub processed: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -208,14 +245,63 @@ impl JsonRpcRequest {
             jsonrpc: JSONRPC_VERSION.to_string(),
             method,
             params,
-            id,
+            id: Some(id),
         }
+    }
+
+    /// Create a new JSON-RPC notification (no response expected)
+    pub fn new_notification(method: String, params: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method,
+            params,
+            id: None,
+        }
+    }
+
+    /// Check if this is a notification (no id field)
+    pub fn is_notification(&self) -> bool {
+        self.id.is_none()
+    }
+}
+
+impl ProcessedNotification {
+    /// Create a new processed notification marker
+    pub fn processed() -> Self {
+        Self { processed: true }
+    }
+}
+
+impl JsonRpcResponseOrNotification {
+    /// Create a successful response
+    pub fn success(result: Value, id: Option<Value>) -> Self {
+        Self::Response(JsonRpcResponse::success(result, id))
+    }
+
+    /// Create an error response
+    pub fn error(error: JsonRpcError, id: Option<Value>) -> Self {
+        Self::Response(JsonRpcResponse::error(error, id))
+    }
+
+    /// Create a response from a JsonRpcResponse
+    pub fn response(response: JsonRpcResponse) -> Self {
+        Self::Response(response)
+    }
+
+    /// Create a notification result (no response)
+    pub fn notification(notification: ProcessedNotification) -> Self {
+        Self::Notification(notification)
+    }
+
+    /// Create a no-response result for notifications (deprecated - use notification() instead)
+    pub fn no_response() -> Self {
+        Self::Notification(ProcessedNotification::processed())
     }
 }
 
 impl JsonRpcResponse {
     /// Create a new successful JSON-RPC response
-    pub fn success(result: Value, id: Value) -> Self {
+    pub fn success(result: Value, id: Option<Value>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             result: Some(result),
@@ -225,7 +311,7 @@ impl JsonRpcResponse {
     }
 
     /// Create a new error JSON-RPC response
-    pub fn error(error: JsonRpcError, id: Value) -> Self {
+    pub fn error(error: JsonRpcError, id: Option<Value>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             result: None,
@@ -281,4 +367,23 @@ pub struct SandboxStatus {
 
     /// Disk usage of the RW layer in bytes
     pub disk_usage: Option<u64>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl axum::response::IntoResponse for JsonRpcResponseOrNotification {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            JsonRpcResponseOrNotification::Response(response) => {
+                (axum::http::StatusCode::OK, axum::Json(response)).into_response()
+            }
+            JsonRpcResponseOrNotification::Notification(_notification) => {
+                // For JSON-RPC notifications, send HTTP 200 with empty body
+                // This satisfies the HTTP protocol requirement while sending no JSON-RPC response
+                axum::http::StatusCode::OK.into_response()
+            }
+        }
+    }
 }

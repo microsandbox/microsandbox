@@ -251,7 +251,10 @@ async fn sandbox_command_run_impl(state: SharedState, params: Value) -> Result<V
 //--------------------------------------------------------------------------------------------------
 
 /// Helper function to create a JSON-RPC error response from a PortalError
-fn create_error_response(error: PortalError, id: Value) -> (StatusCode, Json<JsonRpcResponse>) {
+fn create_error_response(
+    error: PortalError,
+    id: Option<Value>,
+) -> (StatusCode, Json<JsonRpcResponse>) {
     // Determine appropriate JSON-RPC error code
     let code = match &error {
         PortalError::JsonRpc(_) => -32600,        // Invalid Request

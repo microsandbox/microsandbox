@@ -384,7 +384,7 @@ Execute a shell command in a running sandbox. This method is forwarded to the sa
 
 ### MCP (Model Context Protocol) Support
 
-The microsandbox server also implements the Model Context Protocol, making it compatible with AI tools like Cursor and Claude.
+The microsandbox server also implements the Model Context Protocol, making it compatible with AI tools like Claude.
 
 ==- MCP Methods
 The server supports the following MCP methods:

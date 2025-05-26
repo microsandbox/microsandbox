@@ -27,8 +27,9 @@ pub struct JsonRpcRequest {
     #[serde(default)]
     pub params: Value,
 
-    /// Request ID
-    pub id: Value,
+    /// Request ID (optional for notifications)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Value>,
 }
 
 /// JSON-RPC response structure
@@ -45,8 +46,9 @@ pub struct JsonRpcResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
 
-    /// Response ID (same as request ID)
-    pub id: Value,
+    /// Response ID (same as request ID, optional for notifications)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Value>,
 }
 
 /// JSON-RPC error structure
@@ -105,14 +107,29 @@ impl JsonRpcRequest {
             jsonrpc: JSONRPC_VERSION.to_string(),
             method,
             params,
-            id,
+            id: Some(id),
         }
+    }
+
+    /// Create a new JSON-RPC notification (no response expected)
+    pub fn new_notification(method: String, params: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method,
+            params,
+            id: None,
+        }
+    }
+
+    /// Check if this is a notification (no id field)
+    pub fn is_notification(&self) -> bool {
+        self.id.is_none()
     }
 }
 
 impl JsonRpcResponse {
     /// Create a new successful JSON-RPC response
-    pub fn success(result: Value, id: Value) -> Self {
+    pub fn success(result: Value, id: Option<Value>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             result: Some(result),
@@ -122,7 +139,7 @@ impl JsonRpcResponse {
     }
 
     /// Create a new error JSON-RPC response
-    pub fn error(error: JsonRpcError, id: Value) -> Self {
+    pub fn error(error: JsonRpcError, id: Option<Value>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             result: None,
