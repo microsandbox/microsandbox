@@ -28,9 +28,7 @@ anyhow = { workspace = true }
 microsandbox-utils = { workspace = true }
 clap = { workspace = true }
 uuid = { version = "1.4", features = ["v4"] }
-evcxr = { version = "0.19", optional = true }
 async-trait = "0.1"
-crossbeam-channel = "0.5"
 reqwest = { version = "0.11", features = ["json"], optional = true }
 rand.workspace = true
 

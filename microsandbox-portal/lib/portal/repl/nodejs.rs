@@ -12,7 +12,6 @@
 use async_trait::async_trait;
 use rand::{distr::Alphanumeric, Rng};
 use std::sync::{Arc, Mutex};
-use tokio::time::timeout as tokio_timeout;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -20,7 +19,7 @@ use tokio::{
         mpsc::{self, Sender},
         oneshot,
     },
-    time::{sleep, Duration},
+    time::{sleep, timeout as tokio_timeout, Duration},
 };
 
 use super::types::{Engine, EngineError, Resp, Stream};

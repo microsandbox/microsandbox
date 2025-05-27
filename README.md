@@ -207,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 > [!NOTE]
 >
-> If you haven't pulled the environment image, the first run will take a while as it tries to download it. 
+> If you haven't pulled the environment image, the first run will take a while as it tries to download it.
 > Executions will be much faster afterwards.
 >
 > For more information on how to use the SDK, [check out the SDK README](./sdk/README.md).

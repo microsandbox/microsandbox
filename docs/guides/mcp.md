@@ -6,6 +6,8 @@ tags: [guide]
 
 # Model Context Protocol (MCP)
 
+[!embed](https://github.com/user-attachments/assets/d8f8d854-aebe-4385-b447-3e22a065296b)
+
 Learn how to integrate microsandbox with AI tools using the Model Context Protocol for seamless code execution and sandbox management.
 
 ---

@@ -606,7 +606,7 @@ pub enum MicrosandboxSubcommand {
 /// Subcommands for the server subcommand
 #[derive(Debug, Parser)]
 pub enum ServerSubcommand {
-    /// Start the sandbox server
+    /// Start the sandbox server which is also an MCP server
     Start {
         /// Port to listen on
         #[arg(long)]

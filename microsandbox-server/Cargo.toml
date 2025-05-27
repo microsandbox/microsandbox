@@ -12,13 +12,10 @@ path = "lib/lib.rs"
 
 [dependencies]
 tower.workspace = true
-tower-http.workspace = true
 axum = { workspace = true, features = ["macros"] }
 anyhow.workspace = true
 base64.workspace = true
-dotenvy.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
@@ -27,7 +24,6 @@ tokio-util.workspace = true
 getset.workspace = true
 thiserror.workspace = true
 pretty-error-debug.workspace = true
-clap.workspace = true
 indicatif = { workspace = true, optional = true }
 console = { workspace = true, optional = true }
 microsandbox-utils.workspace = true
