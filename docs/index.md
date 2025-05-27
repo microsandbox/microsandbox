@@ -6,6 +6,8 @@ tags: [introduction]
 
 # INTRODUCTION
 
+[!embed](https://github.com/user-attachments/assets/23618f92-5897-44d1-bfa6-1058f30c09ef)
+
 Run untrusted code with **VM-level isolation** and **lightning-fast startup**. Built for AI agents, developers, and anyone who needs to execute code safely without compromising on speed or security.
 
 ---

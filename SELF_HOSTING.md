@@ -9,7 +9,7 @@ Let's help you start your first self-hosted sandbox server. It's easy!
 > **Platform-specific requirements:**
 >
 > - <a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/apple" height="14"/></a><a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/apple/white" height="14"/></a> **macOS** — Requires Apple Silicon (M1/M2/M3/M4)
-> - <a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/linux/black" height="14"/></a><a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/linux/white" height="14"/></a>  **Linux** <a href="https://github.com/microsandbox/microsandbox/issues/224" target="_blank"><sup><sup>#224</sup></sup></a> — KVM virtualization must be enabled
+> - <a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/linux/black" height="14"/></a><a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img src="https://cdn.simpleicons.org/linux/white" height="14"/></a> **Linux** <a href="https://github.com/microsandbox/microsandbox/issues/224" target="_blank"><sup><sup>#224</sup></sup></a> — KVM virtualization must be enabled
 > - <a href="https://microsandbox.dev#gh-light-mode-only" target="_blank"><img src="https://github.com/user-attachments/assets/1677b695-e359-4b51-9931-f8f5f9488e71" height="14"/></a><a href="https://microsandbox.dev#gh-dark-mode-only" target="_blank"><img src="https://github.com/user-attachments/assets/e3e5b341-b097-45d9-bea1-eb70e0769340" height="14"/></a> **Windows** <a href="https://github.com/microsandbox/microsandbox/issues/224" target="_blank"> — [Coming soon!](https://github.com/microsandbox/microsandbox/issues/47)
 
 ##
@@ -36,7 +36,11 @@ msb server start
 >
 > Use the `--dev` flag to skip requiring an API key.
 >
-> See `msb server --help` for more options.
+> `msb server start --help` for more options.
+>
+> ##
+>
+> **microsandbox server** is also an **MCP server**. See [MCP.md](./MCP.md) for more information.
 
 ##
 

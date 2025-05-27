@@ -2,6 +2,11 @@
 
 microsandbox server is also a **Model Context Protocol (MCP) server**, enabling seamless integration with AI tools and agents that support MCP.
 
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/d8f8d854-aebe-4385-b447-3e22a065296b" width="800" controls>
+  </video>
+</div>
+
 #### What is MCP?
 
 The Model Context Protocol (MCP) is an open standard that allows AI models to securely connect to external data sources and tools. It provides a standardized way for AI assistants to access and interact with various services through a unified interface.
