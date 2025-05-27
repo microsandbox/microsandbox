@@ -24,8 +24,10 @@ use reqwest;
 use serde_json::{self, json};
 use serde_yaml;
 use std::path::PathBuf;
-use tokio::fs as tokio_fs;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::{
+    fs as tokio_fs,
+    time::{sleep, timeout, Duration},
+};
 use tracing::{debug, trace, warn};
 
 use crate::{

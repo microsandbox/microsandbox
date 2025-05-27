@@ -31,7 +31,7 @@ use crate::{
 //--------------------------------------------------------------------------------------------------
 
 /// MCP protocol version
-const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Server information
 const SERVER_NAME: &str = "microsandbox-server";
