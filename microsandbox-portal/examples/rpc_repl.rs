@@ -79,7 +79,7 @@ async fn send_rpc_request<T: serde::Serialize>(
         jsonrpc: JSONRPC_VERSION.to_string(),
         method: method.to_string(),
         params: serde_json::to_value(params)?,
-        id: json!(1),
+        id: Some(Value::from(1)),
     };
 
     let response = client

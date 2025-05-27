@@ -64,6 +64,8 @@ pub async fn handle_mcp_initialize(
         }
     });
 
+    println!(">>>> [handle_mcp_initialize]: {}", result);
+
     Ok(JsonRpcResponse::success(result, request.id))
 }
 
