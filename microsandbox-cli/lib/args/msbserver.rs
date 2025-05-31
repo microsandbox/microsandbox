@@ -17,6 +17,10 @@ pub struct MsbserverArgs {
     #[arg(short = 'k', long = "key")]
     pub key: Option<String>,
 
+    /// Host address to listen on
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
     /// Port number to listen on
     #[arg(long, default_value_t = DEFAULT_SERVER_PORT)]
     pub port: u16,
