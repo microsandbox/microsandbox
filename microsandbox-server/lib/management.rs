@@ -71,6 +71,7 @@ pub struct Claims {
 /// Start the sandbox server
 pub async fn start(
     key: Option<String>,
+    host: Option<String>,
     port: Option<u16>,
     namespace_dir: Option<PathBuf>,
     dev_mode: bool,
@@ -141,6 +142,10 @@ pub async fn start(
 
     if dev_mode {
         command.arg("--dev");
+    }
+
+    if let Some(host) = host {
+        command.arg("--host").arg(host);
     }
 
     if let Some(port) = port {

@@ -219,6 +219,7 @@ async fn main() -> MicrosandboxCliResult<()> {
         }
         Some(MicrosandboxSubcommand::Server { subcommand }) => match subcommand {
             ServerSubcommand::Start {
+                host,
                 port,
                 namespace_dir,
                 dev_mode,
@@ -227,6 +228,7 @@ async fn main() -> MicrosandboxCliResult<()> {
                 reset_key,
             } => {
                 handlers::server_start_subcommand(
+                    host,
                     port,
                     namespace_dir,
                     dev_mode,
