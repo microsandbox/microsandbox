@@ -33,6 +33,10 @@ jobs:
         uses: safedep/vet-action@v1
         with:
           policy: .github/vet/policy.yml
+
+          # Allow vet commenting in PR for Summary
+          # https://github.com/safedep/vet-action?tab=readme-ov-file#configuration
+          enable-comments-proxy: true
         env:
           # Required for writing pull request comment
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
