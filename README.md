@@ -50,7 +50,7 @@ Ever needed to run code you don't fully trust? Whether it's AI-generated code, u
 
 <div align='center'>• • •</div>
 
-# <sub><img height="18" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;SDK QUICK START</sub>
+# <sub><img height="18" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;SDK&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
 
 Get started in few easy steps:
 
