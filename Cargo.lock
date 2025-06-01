@@ -1594,7 +1594,7 @@ checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
 name = "microsandbox-cli"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "atty",
@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-core"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-portal"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1692,7 +1692,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-server"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -1721,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
