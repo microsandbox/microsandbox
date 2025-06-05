@@ -40,7 +40,6 @@ console.workspace = true
 pretty-error-debug.workspace = true
 thiserror.workspace = true
 tower-http.workspace = true
-atty.workspace = true
 
 [dev-dependencies]
 serial_test = "3.2.0"

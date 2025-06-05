@@ -48,7 +48,6 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
 ignore = [
-    "RUSTSEC-2021-0145", # atty on windows only
     "RUSTSEC-2023-0071", # Impacts rsa crate, which is only used in dev, see
     # https://github.com/RustCrypto/RSA/pull/394 for remediation
     "RUSTSEC-2024-0336", # Ignore a DOS issue w/ rustls-0.20.9. This will go
