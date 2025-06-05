@@ -144,16 +144,16 @@ check_linux_packages() {
                 fi
             done
             ;;
-				alpine)
-						install_command="apk add"
-						packages=$ALPINE_PACKAGES
-						# Check if apk command exists and packages are installed
-						for pkg in $packages; do
-								if ! apk info -e "$pkg" >/dev/null 2>&1; then
-										missing_packages="$missing_packages $pkg"
-								fi
-						done
-						;;
+        alpine)
+            install_command="apk add"
+            packages=$ALPINE_PACKAGES
+            # Check if apk command exists and packages are installed
+            for pkg in $packages; do
+            		if ! apk info -e "$pkg" >/dev/null 2>&1; then
+            				missing_packages="$missing_packages $pkg"
+            		fi
+            done
+            ;;
         *)
             warn "Unable to detect Linux distribution. Please ensure required packages are installed manually:"
             info "Required packages: patchelf, bc, libelf-dev/elfutils-libelf-devel, gcc, flex, bison"
@@ -164,13 +164,13 @@ check_linux_packages() {
     if [ -n "$missing_packages" ]; then
         error "Missing required packages:$missing_packages"
         info "You can install them using:"
-				if command -v sudo >/dev/null 2>&1; then
-					cmd_prefix="sudo "
-				elif command -v doas >/dev/null 2>&1; then
-					cmd_prefix="doas "
-				else
-					cmd_prefix=""
-				fi
+        if command -v sudo >/dev/null 2>&1; then
+        	cmd_prefix="sudo "
+        elif command -v doas >/dev/null 2>&1; then
+        	cmd_prefix="doas "
+        else
+        	cmd_prefix=""
+        fi
         info "$cmd_prefix$install_command$missing_packages"
         exit 1
     fi
@@ -219,7 +219,7 @@ export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 # Set up variables
 BUILD_DIR="$ORIGINAL_DIR/build"
 LIBKRUNFW_REPO="https://github.com/microsandbox/libkrunfw.git"
-LIBKRUN_REPO="https://github.com/frc4533-lincoln/libkrun.git"
+LIBKRUN_REPO="https://github.com/microsandbox/libkrun.git"
 NO_CLEANUP=false
 FORCE_BUILD=false
 
