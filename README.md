@@ -503,6 +503,8 @@ We'd like to thank the following projects and communities that made microsandbox
 
 Special thanks to all our contributors, testers, and community members who help make microsandbox better every day!
 
+<div align='center'>• • •</div>
+
 # <sub><img height="18" src="https://octicons-col.vercel.app/star/A770EF">&nbsp;&nbsp;STAR HISTORY</sub>
 
 Thanks for all the support!
