@@ -1,3 +1,3 @@
-module github.com/microsandbox/microsandbox/sdk/go
+module github.com/keithang/microsandbox/sdk/go
 
-go 1.19
+go 1.24
