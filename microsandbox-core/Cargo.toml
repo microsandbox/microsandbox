@@ -19,7 +19,6 @@ harness = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-atty.workspace = true
 bytes.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 dirs.workspace = true

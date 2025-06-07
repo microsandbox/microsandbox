@@ -50,7 +50,7 @@ Ever needed to run code you don't fully trust? Whether it's AI-generated code, u
 
 <div align='center'>• • •</div>
 
-# <sub><img height="18" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;SDK QUICK START</sub>
+# <sub><img height="18" src="https://octicons-col.vercel.app/zap/A770EF">&nbsp;&nbsp;SDK&nbsp;&nbsp;<sup><sup>B E T A</sup></sup></sub>
 
 Get started in few easy steps:
 
@@ -120,39 +120,37 @@ cargo add microsandbox
 
 > [!NOTE]
 > There are [SDKs](./sdk) for other languages as well! Join us in expanding support for your favorite language.
-
-<!--
 >
 > <div align="left">
->   <a href="./sdk/c"><img src="https://img.shields.io/badge/C-A8B9CC?style=flat-square&logo=c&logoColor=white" alt="C"></a>
->   <a href="./sdk/cpp"><img src="https://img.shields.io/badge/C++-00599C?style=flat-square&logo=c%2B%2B&logoColor=white" alt="C++"></a>
->   <a href="./sdk/crystal"><img src="https://img.shields.io/badge/Crystal-000000?style=flat-square&logo=crystal&logoColor=white" alt="Crystal"></a>
->   <a href="./sdk/csharp"><img src="https://img.shields.io/badge/C%23-239120?style=flat-square&logo=c-sharp&logoColor=white" alt="C#"></a>
->   <a href="./sdk/dart"><img src="https://img.shields.io/badge/Dart-0175C2?style=flat-square&logo=dart&logoColor=white" alt="Dart"></a>
->   <a href="./sdk/elixir"><img src="https://img.shields.io/badge/Elixir-4B275F?style=flat-square&logo=elixir&logoColor=white" alt="Elixir"></a>
->   <a href="./sdk/elm"><img src="https://img.shields.io/badge/Elm-1293D8?style=flat-square&logo=elm&logoColor=white" alt="Elm"></a>
->   <a href="./sdk/erlang"><img src="https://img.shields.io/badge/Erlang-A90533?style=flat-square&logo=erlang&logoColor=white" alt="Erlang"></a>
->   <a href="./sdk/fsharp"><img src="https://img.shields.io/badge/F%23-378BBA?style=flat-square&logo=f-sharp&logoColor=white" alt="F#"></a>
->   <a href="./sdk/go"><img src="https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go"></a>
->   <a href="./sdk/haskell"><img src="https://img.shields.io/badge/Haskell-5D4F85?style=flat-square&logo=haskell&logoColor=white" alt="Haskell"></a>
->   <a href="./sdk/java"><img src="https://img.shields.io/badge/Java-ED8B00?style=flat-square&logo=java&logoColor=white" alt="Java"></a>
->   <a href="./sdk/javascript"><img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat-square&logo=javascript&logoColor=black" alt="JavaScript"></a>
->   <a href="./sdk/julia"><img src="https://img.shields.io/badge/Julia-9558B2?style=flat-square&logo=julia&logoColor=white" alt="Julia"></a>
->   <a href="./sdk/kotlin"><img src="https://img.shields.io/badge/Kotlin-0095D5?style=flat-square&logo=kotlin&logoColor=white" alt="Kotlin"></a>
->   <a href="./sdk/lua"><img src="https://img.shields.io/badge/Lua-2C2D72?style=flat-square&logo=lua&logoColor=white" alt="Lua"></a>
->   <a href="./sdk/nim"><img src="https://img.shields.io/badge/Nim-FFE953?style=flat-square&logo=nim&logoColor=black" alt="Nim"></a>
->   <a href="./sdk/objc"><img src="https://img.shields.io/badge/Objective--C-438EFF?style=flat-square&logo=apple&logoColor=white" alt="Objective-C"></a>
->   <a href="./sdk/ocaml"><img src="https://img.shields.io/badge/OCaml-EC6813?style=flat-square&logo=ocaml&logoColor=white" alt="OCaml"></a>
->   <a href="./sdk/php"><img src="https://img.shields.io/badge/PHP-777BB4?style=flat-square&logo=php&logoColor=white" alt="PHP"></a>
 >   <a href="./sdk/python"><img src="https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
->   <a href="./sdk/r"><img src="https://img.shields.io/badge/R-276DC3?style=flat-square&logo=r&logoColor=white" alt="R"></a>
->   <a href="./sdk/ruby"><img src="https://img.shields.io/badge/Ruby-CC342D?style=flat-square&logo=ruby&logoColor=white" alt="Ruby"></a>
 >   <a href="./sdk/rust"><img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
->   <a href="./sdk/scala"><img src="https://img.shields.io/badge/Scala-DC322F?style=flat-square&logo=scala&logoColor=white" alt="Scala"></a>
->   <a href="./sdk/swift"><img src="https://img.shields.io/badge/Swift-FA7343?style=flat-square&logo=swift&logoColor=white" alt="Swift"></a>
->   <a href="./sdk/zig"><img src="https://img.shields.io/badge/Zig-F7A41D?style=flat-square&logo=zig&logoColor=white" alt="Zig"></a>
+>   <a href="./sdk/javascript"><img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat-square&logo=javascript&logoColor=black" alt="JavaScript"></a>
+>   <a href="./sdk/c"><img src="https://img.shields.io/badge/C-606060?style=flat-square&logo=c&logoColor=white" alt="C"></a>
+>   <a href="./sdk/cpp"><img src="https://img.shields.io/badge/C++-606060?style=flat-square&logo=c%2B%2B&logoColor=white" alt="C++"></a>
+>   <a href="./sdk/crystal"><img src="https://img.shields.io/badge/Crystal-606060?style=flat-square&logo=crystal&logoColor=white" alt="Crystal"></a>
+>   <a href="./sdk/csharp"><img src="https://img.shields.io/badge/C%23-606060?style=flat-square&logo=c-sharp&logoColor=white" alt="C#"></a>
+>   <a href="./sdk/dart"><img src="https://img.shields.io/badge/Dart-606060?style=flat-square&logo=dart&logoColor=white" alt="Dart"></a>
+>   <a href="./sdk/elixir"><img src="https://img.shields.io/badge/Elixir-606060?style=flat-square&logo=elixir&logoColor=white" alt="Elixir"></a>
+>   <a href="./sdk/elm"><img src="https://img.shields.io/badge/Elm-606060?style=flat-square&logo=elm&logoColor=white" alt="Elm"></a>
+>   <a href="./sdk/erlang"><img src="https://img.shields.io/badge/Erlang-606060?style=flat-square&logo=erlang&logoColor=white" alt="Erlang"></a>
+>   <a href="./sdk/fsharp"><img src="https://img.shields.io/badge/F%23-606060?style=flat-square&logo=f-sharp&logoColor=white" alt="F#"></a>
+>   <a href="./sdk/go"><img src="https://img.shields.io/badge/Go-606060?style=flat-square&logo=go&logoColor=white" alt="Go"></a>
+>   <a href="./sdk/haskell"><img src="https://img.shields.io/badge/Haskell-606060?style=flat-square&logo=haskell&logoColor=white" alt="Haskell"></a>
+>   <a href="./sdk/java"><img src="https://img.shields.io/badge/Java-606060?style=flat-square&logo=java&logoColor=white" alt="Java"></a>
+>   <a href="./sdk/julia"><img src="https://img.shields.io/badge/Julia-606060?style=flat-square&logo=julia&logoColor=white" alt="Julia"></a>
+>   <a href="./sdk/kotlin"><img src="https://img.shields.io/badge/Kotlin-606060?style=flat-square&logo=kotlin&logoColor=white" alt="Kotlin"></a>
+>   <a href="./sdk/lua"><img src="https://img.shields.io/badge/Lua-606060?style=flat-square&logo=lua&logoColor=white" alt="Lua"></a>
+>   <a href="./sdk/nim"><img src="https://img.shields.io/badge/Nim-606060?style=flat-square&logo=nim&logoColor=white" alt="Nim"></a>
+>   <a href="./sdk/objc"><img src="https://img.shields.io/badge/Objective--C-606060?style=flat-square&logo=apple&logoColor=white" alt="Objective-C"></a>
+>   <a href="./sdk/ocaml"><img src="https://img.shields.io/badge/OCaml-606060?style=flat-square&logo=ocaml&logoColor=white" alt="OCaml"></a>
+>   <a href="./sdk/php"><img src="https://img.shields.io/badge/PHP-606060?style=flat-square&logo=php&logoColor=white" alt="PHP"></a>
+>   <a href="./sdk/r"><img src="https://img.shields.io/badge/R-606060?style=flat-square&logo=r&logoColor=white" alt="R"></a>
+>   <a href="./sdk/ruby"><img src="https://img.shields.io/badge/Ruby-606060?style=flat-square&logo=ruby&logoColor=white" alt="Ruby"></a>
+>   <a href="./sdk/scala"><img src="https://img.shields.io/badge/Scala-606060?style=flat-square&logo=scala&logoColor=white" alt="Scala"></a>
+>   <a href="./sdk/swift"><img src="https://img.shields.io/badge/Swift-606060?style=flat-square&logo=swift&logoColor=white" alt="Swift"></a>
+>   <a href="./sdk/zig"><img src="https://img.shields.io/badge/Zig-606060?style=flat-square&logo=zig&logoColor=white" alt="Zig"></a>
 > </div>
--->
+
 
 ##
 
@@ -494,6 +492,16 @@ For contribution guidelines, please refer to [CONTRIBUTING.md](./CONTRIBUTING.md
 # <sub><img height="18" src="https://octicons-col.vercel.app/law/A770EF">&nbsp;&nbsp;LICENSE</sub>
 
 This project is licensed under the [Apache License 2.0](./LICENSE).
+
+<div align='center'>• • •</div>
+
+# <sub><img height="18" src="https://octicons-col.vercel.app/heart/A770EF">&nbsp;&nbsp;ACKNOWLEDGMENTS</sub>
+
+We'd like to thank the following projects and communities that made microsandbox possible:
+
+- **[libkrun](https://github.com/containers/libkrun)** - The lightweight virtualization library that powers our secure microVM isolation
+
+Special thanks to all our contributors, testers, and community members who help make microsandbox better every day!
 
 <div align='center'>• • •</div>
 

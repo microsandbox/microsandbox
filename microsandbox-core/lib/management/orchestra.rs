@@ -25,6 +25,8 @@ use nix::{
     unistd::Pid,
 };
 use once_cell::sync::Lazy;
+#[cfg(feature = "cli")]
+use std::io::{self, IsTerminal};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -809,7 +811,7 @@ pub async fn show_status(
     config: Option<&str>,
 ) -> MicrosandboxResult<()> {
     // Check if we're in a TTY to determine if we should do live updates
-    let is_tty = atty::is(atty::Stream::Stdout);
+    let is_tty = io::stdin().is_terminal();
     let live_view = is_tty;
     let update_interval = std::time::Duration::from_secs(2);
 
@@ -888,7 +890,7 @@ pub async fn show_status_namespaces(
     namespaces_parent_dir: &Path,
 ) -> MicrosandboxResult<()> {
     // Check if we're in a TTY to determine if we should do live updates
-    let is_tty = atty::is(atty::Stream::Stdout);
+    let is_tty = io::stdin().is_terminal();
     let live_view = is_tty;
     let update_interval = std::time::Duration::from_secs(2);
 
