@@ -215,7 +215,6 @@ if execution.HasError() {
 
 - `MSB_API_KEY`: API key for Microsandbox server authentication
 - `MSB_SERVER_URL`: Microsandbox server URL (default: `http://127.0.0.1:5555`)
-- `MSB_NAMESPACE`: Default namespace (default: `"default"`)
 
 ### Start Parameters
 

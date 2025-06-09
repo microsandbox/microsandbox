@@ -73,11 +73,7 @@ func fillDefaultConfigs() Option {
 			}
 		}
 		if msb.cfg.namespace == "" {
-			if envNamespace := os.Getenv("MSB_NAMESPACE"); envNamespace != "" {
-				msb.cfg.namespace = envNamespace
-			} else {
-				msb.cfg.namespace = defaultNamespace
-			}
+			msb.cfg.namespace = defaultNamespace
 		}
 		if msb.cfg.name == "" {
 			b := make([]byte, 4) // 4 bytes == 8 hex chars
