@@ -89,16 +89,20 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     sb.start(None).await?;
 
     // Execute Python code directly
-    let exec = sb.run("print('Hello from Python!')", None).await?;
+    let exec = sb.run("print('Hello from Python!')").await?;
     println!("{}", exec.output().await?);
 
     // Install and use packages
-    sb.run("pip install requests", None).await?;
-    let package_exec = sb.run(r#"
+    sb.run("pip install requests").await?;
+    let package_exec = sb
+        .run(
+            r#"
 import requests
 response = requests.get('https://httpbin.org/json')
 print(response.status_code)
-"#, None).await?;
+"#,
+        )
+        .await?;
     println!("{}", package_exec.output().await?);
 
     sb.stop().await?;
@@ -205,7 +209,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     sb.start(None).await?;
 
     // Execute JavaScript code
-    let exec = sb.run("console.log('Hello from Node.js!');", None).await?;
+    let exec = sb.run("console.log('Hello from Node.js!');").await?;
     println!("Output: {}", exec.output().await?);
 
     // Use Node.js built-in modules
@@ -222,7 +226,7 @@ console.log('File content:', content);
 console.log('Platform:', os.platform());
 console.log('Node.js version:', process.version);
 "#;
-    let node_exec = sb.run(node_code, None).await?;
+    let node_exec = sb.run(node_code).await?;
     println!("{}", node_exec.output().await?);
 
     sb.stop().await?;
