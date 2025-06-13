@@ -15,8 +15,7 @@ import (
 func sequentialExample() {
 	fmt.Println("\n=== Sequential Usage Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("sequential-example"),
 	)
 
@@ -34,7 +33,7 @@ func sequentialExample() {
 
 	for i := range 3 {
 		code := fmt.Sprintf("print('Task %d completed')", i+1)
-		execution, err := sandbox.RunCode(code)
+		execution, err := sandbox.Code().Run(code)
 		if err != nil {
 			log.Printf("Failed to run task %d: %v", i+1, err)
 			continue
@@ -54,8 +53,7 @@ func sequentialExample() {
 func goroutineConcurrentExample() {
 	fmt.Println("\n=== Goroutine Concurrent Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("concurrent-example"),
 	)
 
@@ -84,7 +82,7 @@ time.sleep(0.1)  # Simulate some work
 print(f'Concurrent taskID {%v} completed')
 `, taskID+1)
 
-			execution, err := sandbox.RunCode(code)
+			execution, err := sandbox.Code().Run(code)
 			if err != nil {
 				results <- fmt.Sprintf("Task %d failed: %v", taskID+1, err)
 				return
@@ -115,8 +113,7 @@ print(f'Concurrent taskID {%v} completed')
 func workerPoolExample() {
 	fmt.Println("\n=== Worker Pool Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("worker-pool-example"),
 	)
 
@@ -152,7 +149,7 @@ result = %d * %d
 print(f'Worker %d processed task %d: result = {result}')
 `, taskID, taskID, workerID, taskID)
 
-				execution, err := sandbox.RunCode(code)
+				execution, err := sandbox.Code().Run(code)
 				if err != nil {
 					results <- fmt.Sprintf("Worker %d, Task %d failed: %v", workerID, taskID, err)
 					continue
@@ -198,8 +195,7 @@ func contextCancellationExample() {
 		Timeout: 30 * time.Second,
 	}
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("context-example"),
 		msb.WithHTTPClient(client),
 	)
@@ -231,7 +227,7 @@ print("Starting long-running task...")
 time.sleep(5)  # This will be interrupted by context timeout
 print("Task completed")  # This won't be reached
 `
-		_, executionErr = sandbox.RunCode(code)
+		_, executionErr = sandbox.Code().Run(code)
 	}()
 
 	// Wait for either completion or context cancellation
@@ -252,8 +248,7 @@ print("Task completed")  # This won't be reached
 func channelCoordinationExample() {
 	fmt.Println("\n=== Channel Coordination Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("channel-coordination"),
 	)
 
@@ -304,7 +299,7 @@ processed = {
 print(json.dumps(processed))
 `, data, data)
 
-			execution, err := sandbox.RunCode(code)
+			execution, err := sandbox.Code().Run(code)
 			if err != nil {
 				errorChannel <- fmt.Errorf("failed to process %s: %w", data, err)
 				continue
@@ -344,8 +339,7 @@ print(json.dumps(processed))
 func metricsMonitoringExample() {
 	fmt.Println("\n=== Concurrent Metrics Monitoring Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("metrics-monitoring"),
 	)
 
@@ -378,7 +372,7 @@ while time.time() - start < work_duration:
 print(f"Completed work iteration %d")
 `, i+1, i+1)
 
-			if _, err := sandbox.RunCode(code); err != nil {
+			if _, err := sandbox.Code().Run(code); err != nil {
 				log.Printf("Workload iteration %d failed: %v", i+1, err)
 			}
 			time.Sleep(200 * time.Millisecond)
@@ -403,7 +397,7 @@ print(f"Completed work iteration %d")
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if cpu, err := sandbox.CPU(); err != nil {
+				if cpu, err := sandbox.Metrics().CPU(); err != nil {
 					log.Printf("CPU monitoring error: %v", err)
 				} else {
 					fmt.Printf("[CPU Monitor] CPU: %.2f%%\n", cpu)
@@ -424,7 +418,7 @@ print(f"Completed work iteration %d")
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if memory, err := sandbox.MemoryMiB(); err != nil {
+				if memory, err := sandbox.Metrics().MemoryMiB(); err != nil {
 					log.Printf("Memory monitoring error: %v", err)
 				} else {
 					fmt.Printf("[Memory Monitor] Memory: %d MiB\n", memory)
@@ -445,7 +439,7 @@ print(f"Completed work iteration %d")
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if metrics, err := sandbox.All(); err != nil {
+				if metrics, err := sandbox.Metrics().All(); err != nil {
 					log.Printf("All metrics error: %v", err)
 				} else {
 					fmt.Printf("[All Metrics] CPU: %.2f%%, Memory: %d MiB, Running: %t\n",

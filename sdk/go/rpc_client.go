@@ -15,7 +15,7 @@ import (
 type rpcClient interface {
 	startSandbox(ctx context.Context, cfg *config, image string, memory int, cpus int) error
 	stopSandbox(ctx context.Context, cfg *config) error
-	runRepl(ctx context.Context, cfg *config, code string) (*executionResult, error)
+	runRepl(ctx context.Context, cfg *config, lang progLang, code string) (*executionResult, error)
 	runCommand(ctx context.Context, cfg *config, command string, args []string) (*executionResult, error)
 	getMetrics(ctx context.Context, cfg *config) (*sandboxMetrics, error)
 }
@@ -232,15 +232,15 @@ func (d *jsonRPCHTTPClient) stopSandbox(ctx context.Context, cfg *config) error 
 	return err
 }
 
-func (d *jsonRPCHTTPClient) runRepl(ctx context.Context, cfg *config, code string) (*executionResult, error) {
+func (d *jsonRPCHTTPClient) runRepl(ctx context.Context, cfg *config, lang progLang, code string) (*executionResult, error) {
 	params := replRunParams{
 		Namespace: cfg.namespace,
 		Sandbox:   cfg.name,
-		Language:  cfg.lang.String(),
+		Language:  lang.String(),
 		Code:      code,
 	}
 
-	cfg.logger.Debug("Executing code in REPL", "sandbox", cfg.name, "language", cfg.lang.String())
+	cfg.logger.Debug("Executing code in REPL", "sandbox", cfg.name, "language", lang.String())
 	resp, err := d.makeJSONRPCRequest(ctx, cfg.serverUrl, methodSandboxReplRun, params, cfg.apiKey, cfg.logger, cfg.reqIDPrd)
 	if err != nil {
 		return nil, err

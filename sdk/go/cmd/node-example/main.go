@@ -12,8 +12,7 @@ func basicExample() {
 	fmt.Println("\n=== Basic Node.js Example ===")
 
 	// Create a Node.js sandbox
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangNodeJs),
+	sandbox := msb.NewNodeSandbox(
 		msb.WithName("node-basic"),
 	)
 
@@ -27,7 +26,7 @@ func basicExample() {
 	}()
 
 	// Run a simple JavaScript code snippet
-	execution, err := sandbox.RunCode("console.log('Hello from Node.js!');")
+	execution, err := sandbox.Code().Run("console.log('Hello from Node.js!');")
 	if err != nil {
 		log.Fatalf("Failed to run code: %v", err)
 	}
@@ -43,7 +42,7 @@ func basicExample() {
 const version = process.version;
 const platform = process.platform;
 console.log(` + "`" + `Node.js ${version} running on ${platform}` + "`" + `);`
-	versionExecution, err := sandbox.RunCode(versionCode)
+	versionExecution, err := sandbox.Code().Run(versionCode)
 	if err != nil {
 		log.Fatalf("Failed to run version code: %v", err)
 	}
@@ -59,8 +58,7 @@ console.log(` + "`" + `Node.js ${version} running on ${platform}` + "`" + `);`
 func errorHandlingExample() {
 	fmt.Println("\n=== Error Handling Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangNodeJs),
+	sandbox := msb.NewNodeSandbox(
 		msb.WithName("node-error"),
 	)
 
@@ -82,7 +80,7 @@ try {
     console.error('Caught error:', error.message);
 }
 `
-	caughtExecution, err := sandbox.RunCode(caughtErrorCode)
+	caughtExecution, err := sandbox.Code().Run(caughtErrorCode)
 	if err != nil {
 		log.Fatalf("Failed to run caught error code: %v", err)
 	}
@@ -106,8 +104,7 @@ try {
 func moduleExample() {
 	fmt.Println("\n=== Module Usage Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangNodeJs),
+	sandbox := msb.NewNodeSandbox(
 		msb.WithName("node-module"),
 	)
 
@@ -138,7 +135,7 @@ console.log('Hostname:', os.hostname());
 console.log('Platform:', os.platform());
 console.log('Architecture:', os.arch());
 `
-	fsExecution, err := sandbox.RunCode(fsCode)
+	fsExecution, err := sandbox.Code().Run(fsCode)
 	if err != nil {
 		log.Fatalf("Failed to run fs code: %v", err)
 	}
@@ -154,8 +151,7 @@ console.log('Architecture:', os.arch());
 func executionChainingExample() {
 	fmt.Println("\n=== Execution Chaining Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangNodeJs),
+	sandbox := msb.NewNodeSandbox(
 		msb.WithName("node-chain"),
 	)
 
@@ -169,20 +165,20 @@ func executionChainingExample() {
 	}()
 
 	// Execute a sequence of related code blocks that maintain state
-	if _, err := sandbox.RunCode("const name = 'Node.js';"); err != nil {
+	if _, err := sandbox.Code().Run("const name = 'Node.js';"); err != nil {
 		log.Fatalf("Failed to set name variable: %v", err)
 	}
 
-	if _, err := sandbox.RunCode("const version = process.version;"); err != nil {
+	if _, err := sandbox.Code().Run("const version = process.version;"); err != nil {
 		log.Fatalf("Failed to set version variable: %v", err)
 	}
 
-	if _, err := sandbox.RunCode("const numbers = [1, 2, 3, 4, 5];"); err != nil {
+	if _, err := sandbox.Code().Run("const numbers = [1, 2, 3, 4, 5];"); err != nil {
 		log.Fatalf("Failed to set numbers variable: %v", err)
 	}
 
 	// Use variables from previous executions
-	finalExecution, err := sandbox.RunCode(`
+	finalExecution, err := sandbox.Code().Run(`
 	console.log(` + "`" + `Hello from ${name} ${version}!` + "`" + `);
 const sum = numbers.reduce((a, b) => a + b, 0);
 console.log(` + "`" + `Sum of numbers: ${sum}` + "`" + `);
@@ -202,8 +198,7 @@ console.log(` + "`" + `Sum of numbers: ${sum}` + "`" + `);
 func jsonAndDataExample() {
 	fmt.Println("\n=== JSON and Data Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangNodeJs),
+	sandbox := msb.NewNodeSandbox(
 		msb.WithName("node-json"),
 	)
 
@@ -247,7 +242,7 @@ const emailDomains = parsed.users
     .filter((domain, index, arr) => arr.indexOf(domain) === index);
 console.log('Unique email domains:', emailDomains);
 `
-	jsonExecution, err := sandbox.RunCode(jsonCode)
+	jsonExecution, err := sandbox.Code().Run(jsonCode)
 	if err != nil {
 		log.Fatalf("Failed to run JSON code: %v", err)
 	}

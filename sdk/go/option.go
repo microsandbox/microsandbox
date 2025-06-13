@@ -8,52 +8,46 @@ import (
 	"os"
 )
 
-type Option func(*microSandbox)
-
-func WithLanguage(lang ProgLang) Option {
-	return func(msb *microSandbox) {
-		msb.cfg.lang = lang
-	}
-}
+type Option func(*baseMicroSandbox)
 
 func WithServerUrl(serverUrl string) Option {
-	return func(msb *microSandbox) {
+	return func(msb *baseMicroSandbox) {
 		msb.cfg.serverUrl = serverUrl
 	}
 }
 
 func WithNamespace(namespace string) Option {
-	return func(msb *microSandbox) {
+	return func(msb *baseMicroSandbox) {
 		msb.cfg.namespace = namespace
 	}
 }
 
 func WithName(name string) Option {
-	return func(msb *microSandbox) {
+	return func(msb *baseMicroSandbox) {
 		msb.cfg.name = name
 	}
 }
 
 func WithApiKey(apiKey string) Option {
-	return func(msb *microSandbox) {
+	return func(msb *baseMicroSandbox) {
 		msb.cfg.apiKey = apiKey
 	}
 }
 
 func WithLogger(logger Logger) Option {
-	return func(msb *microSandbox) {
+	return func(msb *baseMicroSandbox) {
 		msb.cfg.logger = logger
 	}
 }
 
 func WithReqIdProducer(reqIdPrd ReqIdProducer) Option {
-	return func(msb *microSandbox) {
+	return func(msb *baseMicroSandbox) {
 		msb.cfg.reqIDPrd = reqIdPrd
 	}
 }
 
 func WithHTTPClient(c *http.Client) Option {
-	return func(msb *microSandbox) {
+	return func(msb *baseMicroSandbox) {
 		msb.rpcClient = newJsonRPCHTTPClient(c)
 	}
 }
@@ -61,10 +55,7 @@ func WithHTTPClient(c *http.Client) Option {
 // --- internal constructor operations ---
 
 func fillDefaultConfigs() Option {
-	return func(msb *microSandbox) {
-		if msb.cfg.lang == LangUnspecified {
-			panic(ErrLanguageMustBeSpecified)
-		}
+	return func(msb *baseMicroSandbox) {
 		if msb.cfg.serverUrl == "" {
 			if envUrl := os.Getenv("MSB_SERVER_URL"); envUrl != "" {
 				msb.cfg.serverUrl = envUrl
@@ -93,25 +84,15 @@ func fillDefaultConfigs() Option {
 }
 
 func fillDefaultLogger() Option {
-	return func(msb *microSandbox) {
+	return func(msb *baseMicroSandbox) {
 		if msb.cfg.logger == nil {
 			msb.cfg.logger = NoOpLogger{}
 		}
 	}
 }
 
-func fillImplementations() Option {
-	return func(msb *microSandbox) {
-		msb.starter = starter{msb}
-		msb.stopper = stopper{msb}
-		msb.codeRunner = codeRunner{msb}
-		msb.commandRunner = commandRunner{msb}
-		msb.metricsReader = metricsReader{msb}
-	}
-}
-
 func fillDefaultRPCClient() Option {
-	return func(msb *microSandbox) {
+	return func(msb *baseMicroSandbox) {
 		if msb.rpcClient == nil {
 			msb.rpcClient = newDefaultJsonRPCHTTPClient()
 		}

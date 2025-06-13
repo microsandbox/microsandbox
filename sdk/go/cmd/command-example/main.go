@@ -12,8 +12,7 @@ func basicExample() {
 	fmt.Println("\n=== Basic Command Example ===")
 
 	// Create a sandbox with explicit configuration
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("command-example"),
 	)
 
@@ -28,7 +27,7 @@ func basicExample() {
 	}()
 
 	// Run a simple command
-	lsExecution, err := sandbox.RunCommand("ls", []string{"-la", "/"})
+	lsExecution, err := sandbox.Command().Run("ls", []string{"-la", "/"})
 	if err != nil {
 		log.Fatalf("Failed to run ls command: %v", err)
 	}
@@ -43,7 +42,7 @@ func basicExample() {
 	}
 
 	// Execute a command with string arguments
-	echoExecution, err := sandbox.RunCommand("echo", []string{"Hello from", "sandbox command!"})
+	echoExecution, err := sandbox.Command().Run("echo", []string{"Hello from", "sandbox command!"})
 	if err != nil {
 		log.Fatalf("Failed to run echo command: %v", err)
 	}
@@ -56,7 +55,7 @@ func basicExample() {
 	}
 
 	// Get system information
-	unameExecution, err := sandbox.RunCommand("uname", []string{"-a"})
+	unameExecution, err := sandbox.Command().Run("uname", []string{"-a"})
 	if err != nil {
 		log.Fatalf("Failed to run uname command: %v", err)
 	}
@@ -73,8 +72,7 @@ func basicExample() {
 func errorHandlingExample() {
 	fmt.Println("\n=== Error Handling Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("error-example"),
 	)
 
@@ -88,7 +86,7 @@ func errorHandlingExample() {
 	}()
 
 	// Run a command that generates an error
-	errorExecution, err := sandbox.RunCommand("ls", []string{"/nonexistent"})
+	errorExecution, err := sandbox.Command().Run("ls", []string{"/nonexistent"})
 	if err != nil {
 		log.Printf("Command execution failed: %v", err)
 		return
@@ -105,7 +103,7 @@ func errorHandlingExample() {
 	}
 
 	// Deliberately cause a command not found error
-	_, err = sandbox.RunCommand("nonexistentcommand", []string{})
+	_, err = sandbox.Command().Run("nonexistentcommand", []string{})
 	if err != nil {
 		fmt.Printf("\nCaught error for nonexistent command: %v\n", err)
 	}
@@ -115,8 +113,7 @@ func errorHandlingExample() {
 func advancedExample() {
 	fmt.Println("\n=== Advanced Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("advanced-example"),
 	)
 
@@ -130,14 +127,14 @@ func advancedExample() {
 	}()
 
 	// Write a file
-	writeCmd, err := sandbox.RunCommand("bash", []string{"-c", "echo 'Hello, file content!' > /tmp/test.txt"})
+	writeCmd, err := sandbox.Command().Run("bash", []string{"-c", "echo 'Hello, file content!' > /tmp/test.txt"})
 	if err != nil {
 		log.Fatalf("Failed to write file: %v", err)
 	}
 	fmt.Printf("Created file, exit code: %d\n", writeCmd.GetExitCode())
 
 	// Read the file back
-	readCmd, err := sandbox.RunCommand("cat", []string{"/tmp/test.txt"})
+	readCmd, err := sandbox.Command().Run("cat", []string{"/tmp/test.txt"})
 	if err != nil {
 		log.Fatalf("Failed to read file: %v", err)
 	}
@@ -148,7 +145,7 @@ func advancedExample() {
 	}
 
 	// Run a more complex pipeline
-	pipelineCmd, err := sandbox.RunCommand("bash", []string{
+	pipelineCmd, err := sandbox.Command().Run("bash", []string{
 		"-c",
 		"mkdir -p /tmp/test_dir && " +
 			"echo 'Line 1' > /tmp/test_dir/data.txt && " +
@@ -166,7 +163,7 @@ func advancedExample() {
 	}
 
 	// Create and run a Python script
-	createScript, err := sandbox.RunCommand("bash", []string{
+	createScript, err := sandbox.Command().Run("bash", []string{
 		"-c",
 		`cat > /tmp/test.py << 'EOF'
 import sys
@@ -180,7 +177,7 @@ EOF`,
 
 	if createScript.IsSuccess() {
 		// Run the script with arguments
-		scriptCmd, err := sandbox.RunCommand("python", []string{"/tmp/test.py", "arg1", "arg2", "arg3"})
+		scriptCmd, err := sandbox.Command().Run("python", []string{"/tmp/test.py", "arg1", "arg2", "arg3"})
 		if err != nil {
 			log.Fatalf("Failed to run script: %v", err)
 		}
@@ -199,8 +196,7 @@ func explicitLifecycleExample() {
 	fmt.Println("\n=== Explicit Lifecycle Example ===")
 
 	// Create sandbox with custom server URL
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("explicit-lifecycle"),
 		msb.WithServerUrl("http://127.0.0.1:5555"),
 	)
@@ -212,7 +208,7 @@ func explicitLifecycleExample() {
 	}
 
 	// Execute commands
-	hostnameCmd, err := sandbox.RunCommand("hostname", []string{})
+	hostnameCmd, err := sandbox.Command().Run("hostname", []string{})
 	if err != nil {
 		log.Printf("Failed to get hostname: %v", err)
 	} else if output, err := hostnameCmd.GetOutput(); err != nil {
@@ -221,7 +217,7 @@ func explicitLifecycleExample() {
 		fmt.Printf("Hostname: %s\n", output)
 	}
 
-	dateCmd, err := sandbox.RunCommand("date", []string{})
+	dateCmd, err := sandbox.Command().Run("date", []string{})
 	if err != nil {
 		log.Printf("Failed to get date: %v", err)
 	} else if output, err := dateCmd.GetOutput(); err != nil {
@@ -248,4 +244,3 @@ func main() {
 
 	fmt.Println("\nAll examples completed!")
 }
-

@@ -12,9 +12,9 @@ var ErrExecutionNotParsed = errors.New("execution output could not be parsed")
 // CodeExecution represents the result of code execution in the sandbox.
 // Use the Get* methods for parsed access to output, or access Output directly for raw JSON.
 type CodeExecution struct {
-	Output    json.RawMessage // Raw JSON response from the server
-	parsed    executionData   // Parsed data for convenience methods
-	parsedOK  bool           // Whether parsing succeeded
+	Output   json.RawMessage // Raw JSON response from the server
+	parsed   executionData   // Parsed data for convenience methods
+	parsedOK bool            // Whether parsing succeeded
 }
 
 // Internal structures for parsing execution results
@@ -24,7 +24,7 @@ type (
 		Status      string       `json:"status"`
 		Language    string       `json:"language"`
 	}
-	
+
 	outputLine struct {
 		Stream string `json:"stream"`
 		Text   string `json:"text"`
@@ -37,7 +37,7 @@ func (ce CodeExecution) GetOutput() (string, error) {
 	if !ce.parsedOK {
 		return "", ErrExecutionNotParsed
 	}
-	
+
 	var output strings.Builder
 	for _, line := range ce.parsed.OutputLines {
 		if line.Stream == "stdout" {
@@ -54,7 +54,7 @@ func (ce CodeExecution) GetError() (string, error) {
 	if !ce.parsedOK {
 		return "", ErrExecutionNotParsed
 	}
-	
+
 	var errorOutput strings.Builder
 	for _, line := range ce.parsed.OutputLines {
 		if line.Stream == "stderr" {
@@ -71,12 +71,12 @@ func (ce CodeExecution) HasError() bool {
 	if !ce.parsedOK {
 		return false
 	}
-	
+
 	// Check status for error or exception
 	if ce.parsed.Status == "error" || ce.parsed.Status == "exception" {
 		return true
 	}
-	
+
 	// Check for stderr output
 	for _, line := range ce.parsed.OutputLines {
 		if line.Stream == "stderr" && line.Text != "" {
@@ -103,3 +103,4 @@ func (ce CodeExecution) GetLanguage() string {
 	}
 	return ce.parsed.Language
 }
+

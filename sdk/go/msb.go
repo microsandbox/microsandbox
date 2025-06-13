@@ -3,37 +3,8 @@ package msb
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"sync/atomic"
 )
-
-// MicroSandbox provides a sandbox environment for executing code and commands safely.
-// All methods are thread-safe and will block on network calls to the Microsandbox server.
-// The underlying HTTP client uses connection pooling for efficient reuse.
-type MicroSandbox interface {
-	Starter
-	Stopper
-	CodeRunner
-	CommandRunner
-	MetricsReader
-}
-
-// NewWithOptions creates a new MicroSandbox instance with the provided configuration options.
-// Language must be specified via WithLanguage(). API key must be provided via WithApiKey()
-// or MSB_API_KEY environment variable.
-func NewWithOptions(options ...Option) MicroSandbox {
-	msb := &microSandbox{}
-	for _, opt := range append(options,
-		fillDefaultConfigs(),
-		fillDefaultLogger(),
-		fillDefaultRPCClient(),
-		fillImplementations(),
-	) {
-		opt(msb)
-	}
-	return msb
-}
 
 // Core sandbox interfaces
 type (
@@ -53,16 +24,16 @@ type (
 
 	// CodeRunner executes code in the sandbox's REPL environment.
 	CodeRunner interface {
-		// RunCode executes the provided code and returns detailed execution results.
+		// Run executes the provided code and returns detailed execution results.
 		// The sandbox must be started before calling this method.
-		RunCode(code string) (CodeExecution, error)
+		Run(code string) (CodeExecution, error)
 	}
 
 	// CommandRunner executes shell commands in the sandbox.
 	CommandRunner interface {
-		// RunCommand executes a shell command with the given arguments.
+		// Run executes a shell command with the given arguments.
 		// The sandbox must be started before calling this method.
-		RunCommand(cmd string, args []string) (CommandExecution, error)
+		Run(cmd string, args []string) (CommandExecution, error)
 	}
 
 	// MetricsReader provides access to sandbox resource metrics.
@@ -78,42 +49,27 @@ type (
 		// IsRunning reports whether the sandbox is currently running.
 		IsRunning() (bool, error)
 	}
-)
 
-// Metrics contains resource usage information for a sandbox.
-type Metrics struct {
-	Name      string  // Sandbox name
-	Namespace string  // Sandbox namespace
-	IsRunning bool    // Whether the sandbox is currently running
-	CPU       float64 // CPU usage percentage (0-100)
-	MemoryMiB int     // Memory usage in mebibytes
-	DiskBytes int     // Disk usage in bytes
-}
+	// Metrics contains resource usage information for a sandbox.
+	Metrics struct {
+		Name      string  // Sandbox name
+		Namespace string  // Sandbox namespace
+		IsRunning bool    // Whether the sandbox is currently running
+		CPU       float64 // CPU usage percentage (0-100)
+		MemoryMiB int     // Memory usage in mebibytes
+		DiskBytes int     // Disk usage in bytes
+	}
+)
 
 // --- API Implementation ---
 
-// container parent struct that holds state, configs, embeds implementation structs
-type microSandbox struct {
-	cfg       config
-	state     atomic.Uint32 // we use a lightweight primitive to prevent racing starts / stops; every other method is safe to route concurrently to the underlying (thread-safe) http client
-	rpcClient rpcClient
-	starter
-	stopper
-	codeRunner
-	commandRunner
-	metricsReader
-}
-
 type starter struct {
-	*microSandbox
+	b *baseMicroSandbox
 }
 
 func (s starter) Start(image string, memoryMB int, cpus int) error {
-	if s.state.Load() == started {
+	if s.b.state.Load() == started {
 		return ErrSandboxAlreadyStarted
-	}
-	if image == "" {
-		image = s.cfg.lang.DefaultImage()
 	}
 	if memoryMB <= 0 {
 		memoryMB = 512
@@ -121,41 +77,42 @@ func (s starter) Start(image string, memoryMB int, cpus int) error {
 	if cpus <= 0 {
 		cpus = 1
 	}
-	err := s.rpcClient.startSandbox(context.Background(), &s.cfg, image, memoryMB, cpus)
+	err := s.b.rpcClient.startSandbox(context.Background(), &s.b.cfg, image, memoryMB, cpus)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrFailedToStartSandbox, err)
 	}
-	s.state.Store(started)
+	s.b.state.Store(started)
 	return nil
 }
 
 type stopper struct {
-	*microSandbox
+	b *baseMicroSandbox
 }
 
 func (s stopper) Stop() error {
-	if s.state.Load() == off {
+	if s.b.state.Load() == off {
 		return ErrSandboxNotStarted
 	}
 	ctx := context.Background()
-	err := s.rpcClient.stopSandbox(ctx, &s.cfg)
+	err := s.b.rpcClient.stopSandbox(ctx, &s.b.cfg)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrFailedToStopSandbox, err)
 	}
-	s.state.Store(off)
+	s.b.state.Store(off)
 	return nil
 }
 
 type codeRunner struct {
-	*microSandbox
+	b *baseMicroSandbox
+	l progLang
 }
 
-func (cr codeRunner) RunCode(code string) (CodeExecution, error) {
-	if cr.state.Load() != started {
+func (cr codeRunner) Run(code string) (CodeExecution, error) {
+	if cr.b.state.Load() != started {
 		return CodeExecution{}, ErrSandboxNotStarted
 	}
 	ctx := context.Background()
-	result, err := cr.rpcClient.runRepl(ctx, &cr.cfg, code)
+	result, err := cr.b.rpcClient.runRepl(ctx, &cr.b.cfg, cr.l, code)
 	if err != nil {
 		return CodeExecution{}, fmt.Errorf("%w: %w", ErrFailedToRunCode, err)
 	}
@@ -170,15 +127,15 @@ func (cr codeRunner) RunCode(code string) (CodeExecution, error) {
 }
 
 type commandRunner struct {
-	*microSandbox
+	b *baseMicroSandbox
 }
 
-func (cr commandRunner) RunCommand(cmd string, args []string) (CommandExecution, error) {
-	if cr.state.Load() != started {
+func (cr commandRunner) Run(cmd string, args []string) (CommandExecution, error) {
+	if cr.b.state.Load() != started {
 		return CommandExecution{}, ErrSandboxNotStarted
 	}
 	ctx := context.Background()
-	result, err := cr.rpcClient.runCommand(ctx, &cr.cfg, cmd, args)
+	result, err := cr.b.rpcClient.runCommand(ctx, &cr.b.cfg, cmd, args)
 	if err != nil {
 		return CommandExecution{}, fmt.Errorf("%w: %w", ErrFailedToRunCommand, err)
 	}
@@ -193,16 +150,16 @@ func (cr commandRunner) RunCommand(cmd string, args []string) (CommandExecution,
 }
 
 type metricsReader struct {
-	*microSandbox
+	b *baseMicroSandbox
 }
 
 func (mr metricsReader) All() (Metrics, error) {
-	if mr.state.Load() != started {
+	if mr.b.state.Load() != started {
 		return Metrics{}, ErrSandboxNotStarted
 	}
 
 	ctx := context.Background()
-	metrics, err := mr.rpcClient.getMetrics(ctx, &mr.cfg)
+	metrics, err := mr.b.rpcClient.getMetrics(ctx, &mr.b.cfg)
 	if err != nil {
 		return Metrics{}, fmt.Errorf("%w: %w", ErrFailedToGetMetrics, err)
 	}
@@ -248,13 +205,3 @@ func (mr metricsReader) IsRunning() (bool, error) {
 	}
 	return metrics.IsRunning, nil
 }
-
-var (
-	ErrSandboxAlreadyStarted = errors.New("sandbox already started")
-	ErrSandboxNotStarted     = errors.New("sandbox not started")
-	ErrFailedToStartSandbox  = errors.New("failed to start sandbox")
-	ErrFailedToStopSandbox   = errors.New("failed to stop sandbox")
-	ErrFailedToRunCode       = errors.New("failed to run code")
-	ErrFailedToRunCommand    = errors.New("failed to run command")
-	ErrFailedToGetMetrics    = errors.New("failed to get metrics")
-)

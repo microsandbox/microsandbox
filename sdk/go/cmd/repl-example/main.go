@@ -12,8 +12,7 @@ func contextManagerEquivalentExample() {
 	fmt.Println("\n=== Context Manager Equivalent Example ===")
 
 	// Create a sandbox (equivalent to async with PythonSandbox.create())
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("sandbox-cm"),
 	)
 
@@ -30,7 +29,7 @@ func contextManagerEquivalentExample() {
 
 	// Run some computation
 	code := `print("Hello, world!")`
-	execution, err := sandbox.RunCode(code)
+	execution, err := sandbox.Code().Run(code)
 	if err != nil {
 		log.Fatalf("Failed to run code: %v", err)
 	}
@@ -47,8 +46,7 @@ func explicitLifecycleExample() {
 	fmt.Println("\n=== Explicit Lifecycle Example ===")
 
 	// Create sandbox with custom configuration
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithServerUrl("http://127.0.0.1:5555"),
 		msb.WithName("sandbox-explicit"),
 	)
@@ -67,15 +65,15 @@ func explicitLifecycleExample() {
 	}()
 
 	// Run multiple code blocks with variable assignments
-	if _, err := sandbox.RunCode("x = 42"); err != nil {
+	if _, err := sandbox.Code().Run("x = 42"); err != nil {
 		log.Fatalf("Failed to set x: %v", err)
 	}
 
-	if _, err := sandbox.RunCode("y = [i**2 for i in range(10)]"); err != nil {
+	if _, err := sandbox.Code().Run("y = [i**2 for i in range(10)]"); err != nil {
 		log.Fatalf("Failed to set y: %v", err)
 	}
 
-	execution3, err := sandbox.RunCode("print(f'x = {x}')\nprint(f'y = {y}')")
+	execution3, err := sandbox.Code().Run("print(f'x = {x}')\nprint(f'y = {y}')")
 	if err != nil {
 		log.Fatalf("Failed to run final code: %v", err)
 	}
@@ -87,7 +85,7 @@ func explicitLifecycleExample() {
 	}
 
 	// Demonstrate error handling
-	errorExecution, err := sandbox.RunCode("1/0") // This will raise a ZeroDivisionError
+	errorExecution, err := sandbox.Code().Run("1/0") // This will raise a ZeroDivisionError
 	if err != nil {
 		fmt.Printf("Caught error: %v\n", err)
 	} else if errorOutput, err := errorExecution.GetError(); err != nil {
@@ -104,8 +102,7 @@ func explicitLifecycleExample() {
 func executionChainingExample() {
 	fmt.Println("\n=== Execution Chaining Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("sandbox-chain"),
 	)
 
@@ -119,19 +116,19 @@ func executionChainingExample() {
 	}()
 
 	// Execute a sequence of related code blocks
-	if _, err := sandbox.RunCode("name = 'Python'"); err != nil {
+	if _, err := sandbox.Code().Run("name = 'Python'"); err != nil {
 		log.Fatalf("Failed to set name: %v", err)
 	}
 
-	if _, err := sandbox.RunCode("import sys"); err != nil {
+	if _, err := sandbox.Code().Run("import sys"); err != nil {
 		log.Fatalf("Failed to import sys: %v", err)
 	}
 
-	if _, err := sandbox.RunCode("version = sys.version"); err != nil {
+	if _, err := sandbox.Code().Run("version = sys.version"); err != nil {
 		log.Fatalf("Failed to set version: %v", err)
 	}
 
-	exec, err := sandbox.RunCode("print(f'Hello from {name} {version}!')")
+	exec, err := sandbox.Code().Run("print(f'Hello from {name} {version}!')")
 	if err != nil {
 		log.Fatalf("Failed to run final code: %v", err)
 	}
@@ -148,8 +145,7 @@ func executionChainingExample() {
 func dataProcessingExample() {
 	fmt.Println("\n=== Data Processing Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("sandbox-data"),
 	)
 
@@ -179,7 +175,7 @@ data = [
 
 print(f"Loaded {len(data)} employee records")
 `
-	if _, err := sandbox.RunCode(setupCode); err != nil {
+	if _, err := sandbox.Code().Run(setupCode); err != nil {
 		log.Fatalf("Failed to run setup code: %v", err)
 	}
 
@@ -211,7 +207,7 @@ print(f"\\nHighest paid in each department:")
 for dept, person in dept_salaries.items():
     print(f"  {dept}: {person['name']} (${person['salary']:,})")
 `
-	analysisExecution, err := sandbox.RunCode(analysisCode)
+	analysisExecution, err := sandbox.Code().Run(analysisCode)
 	if err != nil {
 		log.Fatalf("Failed to run analysis code: %v", err)
 	}
@@ -227,8 +223,7 @@ for dept, person in dept_salaries.items():
 func errorRecoveryExample() {
 	fmt.Println("\n=== Error Recovery Example ===")
 
-	sandbox := msb.NewWithOptions(
-		msb.WithLanguage(msb.LangPython),
+	sandbox := msb.NewPythonSandbox(
 		msb.WithName("sandbox-error-recovery"),
 	)
 
@@ -242,7 +237,7 @@ func errorRecoveryExample() {
 	}()
 
 	// Set up some initial state
-	if _, err := sandbox.RunCode("counter = 0"); err != nil {
+	if _, err := sandbox.Code().Run("counter = 0"); err != nil {
 		log.Fatalf("Failed to initialize counter: %v", err)
 	}
 
@@ -259,12 +254,12 @@ def risky_operation(value):
 
 print("Risky operation function defined")
 `
-	if _, err := sandbox.RunCode(setupCode); err != nil {
+	if _, err := sandbox.Code().Run(setupCode); err != nil {
 		log.Fatalf("Failed to setup risky operation: %v", err)
 	}
 
 	// Test with valid input
-	validExecution, err := sandbox.RunCode(`
+	validExecution, err := sandbox.Code().Run(`
 result = risky_operation(25)
 print(f"Success: risky_operation(25) = {result}")
 print(f"Counter is now: {counter}")
@@ -278,7 +273,7 @@ print(f"Counter is now: {counter}")
 	}
 
 	// Test with invalid input (should show error but sandbox continues)
-	invalidExecution, err := sandbox.RunCode(`
+	invalidExecution, err := sandbox.Code().Run(`
 try:
     result = risky_operation(-5)
     print(f"Unexpected success: {result}")
@@ -305,7 +300,7 @@ except ValueError as e:
 	}
 
 	// Verify sandbox is still functional
-	finalExecution, err := sandbox.RunCode(`
+	finalExecution, err := sandbox.Code().Run(`
 print(f"Sandbox is still working! Final counter: {counter}")
 print("Error recovery complete")
 `)

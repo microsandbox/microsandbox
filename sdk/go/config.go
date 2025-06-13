@@ -3,7 +3,6 @@ package msb
 type ReqIdProducer func() string
 
 type config struct {
-	lang      ProgLang
 	serverUrl string
 	namespace string
 	name      string
