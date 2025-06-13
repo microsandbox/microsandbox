@@ -1,3 +1,41 @@
+// Package msb provides a Go SDK for interacting with Microsandbox environments.
+//
+// This SDK provides thread-safe access to running microsandbox environments for code execution,
+// command running, and resource monitoring, without imposing any particular concurrency paradigm.
+//
+// # Quick Start
+//
+// Create a Python sandbox:
+//
+//	sandbox := msb.NewPythonSandbox(msb.WithName("my-sandbox"))
+//	if err := sandbox.Start("", 512, 1); err != nil {
+//		log.Fatal(err)
+//	}
+//	defer sandbox.Stop()
+//
+// Execute Python code:
+//
+//	execution, err := sandbox.Code().Run("print('Hello World')")
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	output, _ := execution.GetOutput()
+//	fmt.Println(output)
+//
+// Run shell commands:
+//
+//	cmdExec, err := sandbox.Command().Run("ls", []string{"-la"})
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+// Monitor resource usage:
+//
+//	metrics, err := sandbox.Metrics().All()
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	fmt.Printf("CPU: %.2f%%, Memory: %d MiB\n", metrics.CPU, metrics.MemoryMiB)
 package msb
 
 import (

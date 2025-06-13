@@ -25,8 +25,7 @@ import (
 
 func main() {
     // Create a Python sandbox
-    sandbox := msb.NewWithOptions(
-        msb.WithLanguage(msb.LangPython),
+    sandbox := msb.NewPythonSandbox(
         msb.WithName("my-sandbox"),
         msb.WithReqIdProducer(
             func() string {
@@ -41,7 +40,7 @@ func main() {
     defer sandbox.Stop()
 
     // Execute code
-    execution, err := sandbox.RunCode("print('Hello from Go SDK!')")
+    execution, err := sandbox.Code().Run("print('Hello from Go SDK!')")
     if err != nil {
         log.Fatal(err)
     }
@@ -60,7 +59,7 @@ func main() {
 
 ```go
 // Execute shell commands
-cmdExecution, err := sandbox.RunCommand("ls", []string{"-la", "/"})
+cmdExecution, err := sandbox.Command().Run("ls", []string{"-la", "/"})
 if err != nil {
     log.Fatal(err)
 }
@@ -80,7 +79,7 @@ if cmdExecution.IsSuccess() {
 
 ```go
 // Get comprehensive metrics
-metrics, err := sandbox.All()
+metrics, err := sandbox.Metrics().All()
 if err != nil {
     log.Fatal(err)
 }
@@ -89,8 +88,8 @@ fmt.Printf("CPU: %.2f%%, Memory: %d MiB, Disk: %d bytes\n",
     metrics.CPU, metrics.MemoryMiB, metrics.DiskBytes)
 
 // Or get individual metrics
-cpu, err := sandbox.CPU()
-memory, err := sandbox.MemoryMiB()
+cpu, err := sandbox.Metrics().CPU()
+memory, err := sandbox.Metrics().MemoryMiB()
 ```
 
 ## Advanced Usage
@@ -110,7 +109,7 @@ for i := 0; i < 3; i++ {
         defer wg.Done()
 
         code := fmt.Sprintf("print('Task %d completed')", taskID)
-        execution, err := sandbox.RunCode(code)
+        execution, err := sandbox.Code().Run(code)
         if err != nil {
             results <- fmt.Sprintf("Task %d failed: %v", taskID, err)
             return
@@ -142,7 +141,7 @@ results := make(chan string, 10)
 for i := 0; i < 3; i++ {
     go func(workerID int) {
         for code := range tasks {
-            execution, err := sandbox.RunCode(code)
+            execution, err := sandbox.Code().Run(code)
             if err != nil {
                 results <- fmt.Sprintf("Worker %d error: %v", workerID, err)
                 continue
@@ -165,8 +164,7 @@ close(tasks)
 
 ```go
 // Comprehensive configuration
-sandbox := msb.NewWithOptions(
-    msb.WithLanguage(msb.LangNodeJs),
+sandbox := msb.NewNodeSandbox(
     msb.WithName("advanced-sandbox"),
     msb.WithServerUrl("http://localhost:5555"),
     msb.WithNamespace("production"),
@@ -180,11 +178,13 @@ sandbox := msb.NewWithOptions(
 
 ### Logging
 
+The SDK features a lightweight, pluggable logging adapter that allows users to freely configure any logger of their choice.
+By default, no logging is applied.
+
 ```go
 // Enable structured logging
 logger := msb.NewDefaultSlogAdapter()
-sandbox := msb.NewWithOptions(
-    msb.WithLanguage(msb.LangPython),
+sandbox := msb.NewPythonSandbox(
     msb.WithLogger(logger),
 )
 
@@ -195,7 +195,7 @@ customLogger := msb.NewSlogAdapter(slog.New(slog.NewJSONHandler(os.Stdout, nil))
 ### Error Handling
 
 ```go
-execution, err := sandbox.RunCode("1/0")  // Will cause a Python error
+execution, err := sandbox.Code().Run("1/0")  // Will cause a Python error
 if err != nil {
     log.Printf("Execution failed: %v", err)
     return

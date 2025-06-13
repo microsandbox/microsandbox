@@ -2,6 +2,22 @@ package msb
 
 import "errors"
 
+// LangSandBox provides a complete sandbox interface for a specific programming language.
+// It combines lifecycle management (Start/Stop) with execution capabilities (Code/Command)
+// and monitoring (Metrics) in a single, easy-to-use interface.
+//
+// Example usage:
+//
+//	sandbox := msb.NewPythonSandbox(msb.WithName("my-sandbox"))
+//	if err := sandbox.Start("", 512, 1); err != nil {
+//		log.Fatal(err)
+//	}
+//	defer sandbox.Stop()
+//
+//	execution, err := sandbox.Code().Run("print('Hello World')")
+//	if err != nil {
+//		log.Fatal(err)
+//	}
 type LangSandBox interface {
 	Starter
 	Stopper
@@ -17,10 +33,28 @@ type langSandbox struct {
 	l progLang
 }
 
+// NewPythonSandbox creates a new Python sandbox instance with the specified configuration options.
+// The sandbox must be started with Start() before executing code or commands.
+//
+// Example:
+//
+//	sandbox := msb.NewPythonSandbox(
+//		msb.WithName("my-python-sandbox"),
+//		msb.WithServerUrl("http://localhost:5555"),
+//	)
 func NewPythonSandbox(options ...Option) *langSandbox {
 	return newLangSandbox(langPython, options...)
 }
 
+// NewNodeSandbox creates a new Node.js sandbox instance with the specified configuration options.
+// The sandbox must be started with Start() before executing code or commands.
+//
+// Example:
+//
+//	sandbox := msb.NewNodeSandbox(
+//		msb.WithName("my-node-sandbox"),
+//		msb.WithApiKey("your-api-key"),
+//	)
 func NewNodeSandbox(options ...Option) *langSandbox {
 	return newLangSandbox(langNodeJs, options...)
 }
