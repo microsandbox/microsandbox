@@ -16,6 +16,9 @@ version = "0.2.6"
 license = "Apache-2.0"
 edition = "2021"
 
+[profile.release]
+codegen-units = 1
+lto = true
 
 [workspace.dependencies]
 async-stream = "0.3"
