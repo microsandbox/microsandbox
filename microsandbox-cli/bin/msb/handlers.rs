@@ -423,6 +423,7 @@ pub async fn clean_subcommand(
 }
 
 pub async fn server_start_subcommand(
+    host: Option<String>,
     port: Option<u16>,
     namespace_dir: Option<PathBuf>,
     dev_mode: bool,
@@ -430,7 +431,7 @@ pub async fn server_start_subcommand(
     detach: bool,
     reset_key: bool,
 ) -> MicrosandboxCliResult<()> {
-    microsandbox_server::start(key, port, namespace_dir, dev_mode, detach, reset_key).await?;
+    microsandbox_server::start(key, host, port, namespace_dir, dev_mode, detach, reset_key).await?;
     Ok(())
 }
 

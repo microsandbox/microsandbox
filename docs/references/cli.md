@@ -53,6 +53,7 @@ msb server start [options]
 
 | Option              | Description              |
 | ------------------- | ------------------------ |
+| `--host <host>`     | Host to listen on        |
 | `--port <port>`     | Port to listen on        |
 | `-p, --path <path>` | Namespace directory path |
 | `--dev`             | Run in development mode  |
@@ -68,6 +69,9 @@ msb server start --dev
 
 # Start server on custom port
 msb server start --port 8080
+
+# Start server on custom host
+msb server start --host 0.0.0.0
 
 # Start server in background with custom namespace path
 msb server start --detach --path /custom/namespaces
@@ -383,7 +387,7 @@ msb exe python:3.11
 msb exe ubuntu:22.04 --memory 256 --cpus 1 --volume ./code:/workspace
 
 # Execute a specific command
-msb exe node:18 --exec "npm test"
+msb exe node:18 --exec npm -- test
 
 # Run with environment variables and port mapping
 msb exe nginx:alpine --env NODE_ENV=production --port 8080:80
@@ -421,9 +425,6 @@ msb log app --follow
 
 # Show last 50 lines
 msb log app --tail 50
-
-# Show logs for a build sandbox
-msb log --build myapp
 ```
 
 ===
@@ -521,9 +522,6 @@ msb up app database
 
 # Start in background
 msb up --detach
-
-# Start build sandboxes
-msb up --build
 ```
 
 ===
@@ -553,9 +551,6 @@ msb down
 
 # Stop specific sandboxes
 msb down app database
-
-# Stop build sandboxes
-msb down --build
 
 # Stop from specific sandbox file
 msb down --file ./path/to/Sandboxfile
@@ -588,9 +583,6 @@ msb status
 
 # Show status of specific sandboxes
 msb status app database
-
-# Show status of build sandboxes
-msb status --build
 
 # Show status from specific sandbox file
 msb status --file ./path/to/Sandboxfile
@@ -631,9 +623,6 @@ msb build app
 
 # Build multiple sandboxes
 msb build app database
-
-# Build from build definition
-msb build --build myapp
 
 # Create a snapshot while building
 msb build app --snapshot

@@ -35,6 +35,7 @@ pub async fn main() -> MicrosandboxCliResult<()> {
     // Create configuration from arguments
     let config = Arc::new(Config::new(
         args.key,
+        args.host,
         args.port,
         args.namespace_dir.clone(),
         args.dev_mode,

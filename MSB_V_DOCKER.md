@@ -2,11 +2,11 @@
 
 ## 1. Enterprise-Grade Security without Performance Tradeoffs
 
-Microsandbox fundamentally reimagines isolation security through hardware-virtualized boundaries:
+Microsandbox enables stronger isolation security through hardware-virtualized boundaries:
 
 - **Docker** uses container technology with process-level isolation through Linux namespaces and cgroups. While efficient, all containers share the host kernel—creating a potential attack vector that has led to numerous CVEs allowing container escapes.
 
-- **Microsandbox** leverages microVM technology (KVM on Linux, Hypervisor.framework on macOS), providing true hardware-level virtualization. Each sandbox runs its own isolated kernel, creating an impenetrable security boundary through CPU virtualization extensions.
+- **Microsandbox** leverages microVM technology (KVM on Linux, Hypervisor.framework on macOS), providing true hardware-level virtualization. Each sandbox runs its own isolated kernel, creating a significantly stronger security boundary through CPU virtualization extensions.
 
 ```
 (A) Regular container                          (B) Microsandbox microVM
@@ -17,8 +17,8 @@ Microsandbox fundamentally reimagines isolation security through hardware-virtua
 └──────────────────────┘    - CVE‑2024‑23653   ├──────────────────────┤
                             - CVE‑2024‑21626   │  VMM (KVM / Apple HV)│
                             - CVE‑2023‑27561   ├──────────────────────┤
-                            - CVE-2024-26584   │  Host kernel         │ ✔ host is *never*
-                                               └──────────────────────┘   directly reachable
+                            - CVE-2024-26584   │  Host kernel         │ ✔ host access mediated
+                                               └──────────────────────┘   by hardware virtualization
 ```
 
 |                     | **Docker Container**                     | **Microsandbox MicroVM**                         |

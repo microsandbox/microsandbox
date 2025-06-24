@@ -12,13 +12,13 @@
 //! - Environment-based configuration loading
 //! - Namespace directory management
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::{IpAddr, SocketAddr}, path::PathBuf};
 
 use getset::Getters;
 use microsandbox_utils::{env, NAMESPACES_SUBDIR};
 use serde::Deserialize;
 
-use crate::{port::LOCALHOST_IP, MicrosandboxServerError, MicrosandboxServerResult};
+use crate::{MicrosandboxServerError, MicrosandboxServerResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -45,6 +45,12 @@ pub struct Config {
     /// Whether to run the server in development mode
     dev_mode: bool,
 
+    /// Host address to listen on
+    host: IpAddr,
+
+    /// Port number to listen on
+    port: u16,
+
     /// Address to listen on
     addr: SocketAddr,
 }
@@ -57,6 +63,7 @@ impl Config {
     /// Create a new configuration
     pub fn new(
         key: Option<String>,
+        host: String,
         port: u16,
         namespace_dir: Option<PathBuf>,
         dev_mode: bool,
@@ -72,7 +79,12 @@ impl Config {
             }
         };
 
-        let addr = SocketAddr::new(LOCALHOST_IP, port);
+        // Parse host string to IpAddr
+        let host_ip: IpAddr = host.parse().map_err(|_| {
+            MicrosandboxServerError::ConfigError(format!("Invalid host address: {}", host))
+        })?;
+
+        let addr = SocketAddr::new(host_ip, port);
         let namespace_dir = namespace_dir
             .unwrap_or_else(|| env::get_microsandbox_home_path().join(NAMESPACES_SUBDIR));
 
@@ -80,6 +92,8 @@ impl Config {
             key,
             namespace_dir,
             dev_mode,
+            host: host_ip,
+            port,
             addr,
         })
     }

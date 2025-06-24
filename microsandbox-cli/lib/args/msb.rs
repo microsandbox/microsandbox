@@ -608,6 +608,10 @@ pub enum MicrosandboxSubcommand {
 pub enum ServerSubcommand {
     /// Start the sandbox server which is also an MCP server
     Start {
+        /// Host to listen on
+        #[arg(long)]
+        host: Option<String>,
+
         /// Port to listen on
         #[arg(long)]
         port: Option<u16>,
