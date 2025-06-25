@@ -16,6 +16,7 @@ use typed_path::Utf8UnixPathBuf;
 
 use crate::{
     config::{EnvPair, PathPair, PortPair, ReferenceOrPath},
+    vm::LinuxRlimit, // Add LinuxRlimit import
     MicrosandboxError, MicrosandboxResult,
 };
 
@@ -288,6 +289,10 @@ pub struct Sandbox {
     /// The environment variables to use.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(crate) envs: Vec<EnvPair>,
+
+    /// The resource limits to use.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) rlimits: Vec<LinuxRlimit>,
 
     /// The groups to run in.
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]

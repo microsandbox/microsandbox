@@ -121,6 +121,11 @@ pub async fn handle_mcp_list_tools(
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "description": "Environment variables"
+                                },
+                                "rlimits": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Resource limits in format RLIMIT_NAME=soft:hard (e.g., RLIMIT_NOFILE=16384:65536)"
                                 }
                             }
                         }

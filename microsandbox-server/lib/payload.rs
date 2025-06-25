@@ -12,6 +12,7 @@
 //! - Success message formatting for sandbox operations
 //! - Detailed error information handling
 
+use microsandbox_core::vm::LinuxRlimit; // Import LinuxRlimit
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -190,6 +191,11 @@ pub struct SandboxConfig {
 
     /// The exec command to run
     pub exec: Option<String>,
+
+    /// Resource limits for the sandbox process
+    #[serde(default)]
+    pub rlimits: Vec<LinuxRlimit>,
+
     // SECURITY: Needs networking namespacing to be implemented
     // /// The network scope for the sandbox
     // pub scope: Option<String>,
