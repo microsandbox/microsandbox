@@ -48,6 +48,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             volumes,
             ports,
             envs,
+            rlimits,
             env_file,
             depends_on,
             workdir,
@@ -61,7 +62,7 @@ async fn main() -> MicrosandboxCliResult<()> {
         }) => {
             let (path, config) = handlers::parse_file_path(file);
             handlers::add_subcommand(
-                sandbox, build, group, names, image, memory, cpus, volumes, ports, envs, env_file,
+                sandbox, build, group, names, image, memory, cpus, volumes, ports, envs, rlimits, env_file,
                 depends_on, workdir, shell, scripts, start, imports, exports, scope, path, config,
             )
             .await?;

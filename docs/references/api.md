@@ -118,6 +118,7 @@ Start a new sandbox with specified configuration.
 | `volumes` | `array[string]` | No | Volume mounts (format: `host:container`) |
 | `ports` | `array[string]` | No | Port mappings (format: `host:container`) |
 | `envs` | `array[string]` | No | Environment variables (format: `KEY=VALUE`) |
+| `rlimits` | `array[string]` | No | Resource limits (format: `RLIMIT_NAME=soft:hard`, e.g., `RLIMIT_NOFILE=16384:65536` for file handles, `RLIMIT_NPROC=2048:4096` for processes/threads) |
 | `depends_on` | `array[string]` | No | Dependencies on other sandboxes |
 | `workdir` | `string` | No | Working directory |
 | `shell` | `string` | No | Shell to use |
@@ -137,6 +138,7 @@ Start a new sandbox with specified configuration.
       "memory": 1024,
       "cpus": 2,
       "envs": ["DEBUG=true"],
+      "rlimits": ["RLIMIT_NOFILE=16384:65536", "RLIMIT_NPROC=2048:4096"],
       "workdir": "/workspace"
     }
   },

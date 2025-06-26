@@ -272,6 +272,11 @@ pub async fn prepare_run(
         command.arg("--env").arg(env.to_string());
     }
 
+    // Rlimits
+    for rlimit in sandbox_config.get_rlimits() {
+        command.arg("--rlimit").arg(rlimit.to_string());
+    }
+
     // Ports
     for port in sandbox_config.get_ports() {
         command.arg("--port-map").arg(port.to_string());

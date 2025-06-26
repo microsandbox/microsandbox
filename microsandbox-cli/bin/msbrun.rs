@@ -63,7 +63,7 @@ use microsandbox_cli::{McrunArgs, McrunSubcommand};
 use microsandbox_core::{
     config::{EnvPair, PathPair, PortPair},
     runtime::MicroVmMonitor,
-    vm::{MicroVm, Rootfs},
+    vm::{LinuxRlimit, MicroVm, Rootfs},
 };
 use microsandbox_utils::runtime::Supervisor;
 
@@ -86,6 +86,7 @@ async fn main() -> Result<()> {
             workdir_path,
             exec_path,
             env,
+            rlimit,
             mapped_dir,
             port_map,
             scope,
@@ -103,6 +104,7 @@ async fn main() -> Result<()> {
             tracing::debug!("workdir_path: {:#?}", workdir_path);
             tracing::debug!("exec_path: {:#?}", exec_path);
             tracing::debug!("env: {:#?}", env);
+            tracing::debug!("rlimit: {:#?}", rlimit);
             tracing::debug!("mapped_dir: {:#?}", mapped_dir);
             tracing::debug!("port_map: {:#?}", port_map);
             tracing::debug!("scope: {:#?}", scope);
@@ -138,6 +140,9 @@ async fn main() -> Result<()> {
 
             // Parse environment variables
             let env: Vec<EnvPair> = env.iter().map(|s| s.parse()).collect::<Result<_, _>>()?;
+
+            // Parse resource limits
+            let rlimit: Vec<LinuxRlimit> = rlimit.iter().map(|s| s.parse()).collect::<Result<_, _>>()?;
 
             // Create and configure MicroVM
             let mut builder = MicroVm::builder().rootfs(rootfs).exec_path(exec_path);
@@ -192,6 +197,11 @@ async fn main() -> Result<()> {
                 builder = builder.env(env);
             }
 
+            // Set rlimits if provided
+            if !rlimit.is_empty() {
+                builder = builder.rlimits(rlimit);
+            }
+
             // Set args if provided
             if !args.is_empty() {
                 builder = builder.args(args.iter().map(|s| s.as_str()));
@@ -218,6 +228,7 @@ async fn main() -> Result<()> {
             workdir_path,
             exec_path,
             env,
+            rlimit,
             mapped_dir,
             port_map,
             scope,
@@ -293,6 +304,13 @@ async fn main() -> Result<()> {
             if !env.is_empty() {
                 for env in env {
                     child_args.push(format!("--env={}", env));
+                }
+            }
+
+            // Set rlimits if provided
+            if !rlimit.is_empty() {
+                for rlimit in rlimit {
+                    child_args.push(format!("--rlimit={}", rlimit));
                 }
             }
 

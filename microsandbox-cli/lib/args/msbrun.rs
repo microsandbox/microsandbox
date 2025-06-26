@@ -55,6 +55,10 @@ pub enum McrunSubcommand {
         #[arg(long)]
         env: Vec<String>,
 
+        /// Resource limits (RLIMIT_RESOURCE=SOFT:HARD format)
+        #[arg(long)]
+        rlimit: Vec<String>,
+
         /// Directory mappings (host:guest format)
         #[arg(long)]
         mapped_dir: Vec<String>,
@@ -138,6 +142,10 @@ pub enum McrunSubcommand {
         /// Environment variables (KEY=VALUE format)
         #[arg(long)]
         env: Vec<String>,
+
+        /// Resource limits (RLIMIT_RESOURCE=SOFT:HARD format)
+        #[arg(long)]
+        rlimit: Vec<String>,
 
         /// Directory mappings (host:guest format)
         #[arg(long)]
