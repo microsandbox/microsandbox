@@ -117,16 +117,16 @@ async with PythonSandbox.create(
 
 **TypeScript SDK:**
 ```typescript
-import { PythonSandbox } from 'microsandbox';
+import { NodeSandbox } from 'microsandbox';
 
 // Using environment variable (recommended)
-const sandbox = await PythonSandbox.create({
+const sandbox = await NodeSandbox.create({
   name: 'my-sandbox'
   // API key automatically loaded from MSB_API_KEY
 });
 
 // Explicit API key
-const sandbox = await PythonSandbox.create({
+const sandbox = await NodeSandbox.create({
   name: 'my-sandbox',
   apiKey: 'your-api-key-here'
 });
