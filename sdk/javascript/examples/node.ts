@@ -15,10 +15,10 @@
 
 import { NodeSandbox } from "../src";
 
+/**
+ * Example showing basic JavaScript code execution with context manager.
+ */
 async function basicExample() {
-  /**
-   * Example showing basic JavaScript code execution with context manager.
-   */
   console.log("\n=== Basic Node.js Example ===");
 
   // Create a sandbox (with try/finally to simulate Python's context manager)
@@ -43,10 +43,10 @@ console.log(\`Node.js \${version} running on \${platform}\`);
   }
 }
 
+/**
+ * Example showing how to handle JavaScript errors.
+ */
 async function errorHandlingExample() {
-  /**
-   * Example showing how to handle JavaScript errors.
-   */
   console.log("\n=== Error Handling Example ===");
 
   const sandbox = await NodeSandbox.create({ name: "node-error" });
@@ -70,10 +70,10 @@ try {
   }
 }
 
+/**
+ * Example showing Node.js module usage.
+ */
 async function moduleExample() {
-  /**
-   * Example showing Node.js module usage.
-   */
   console.log("\n=== Module Usage Example ===");
 
   const sandbox = await NodeSandbox.create({ name: "node-module" });
@@ -104,10 +104,10 @@ console.log('Architecture:', os.arch());
   }
 }
 
+/**
+ * Example demonstrating execution chaining with variables.
+ */
 async function executionChainingExample() {
-  /**
-   * Example demonstrating execution chaining with variables.
-   */
   console.log("\n=== Execution Chaining Example ===");
 
   const sandbox = await NodeSandbox.create({ name: "node-chain" });
@@ -131,10 +131,10 @@ console.log(\`Sum of numbers: \${sum}\`);
   }
 }
 
+/**
+ * Run all examples.
+ */
 async function main() {
-  /**
-   * Run all examples.
-   */
   console.log("Node.js Sandbox Examples");
   console.log("=======================");
 

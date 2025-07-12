@@ -40,7 +40,7 @@
   "homepage": "https://github.com/microsandbox/microsandbox",
   "devDependencies": {
     "@types/jest": "^29.5.0",
-    "@types/node": "^18.15.0",
+    "@types/node": "^18.19.111",
     "@types/node-fetch": "^2.6.4",
     "@types/uuid": "^9.0.1",
     "eslint": "^8.36.0",

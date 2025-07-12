@@ -19,10 +19,10 @@
 
 import { PythonSandbox } from "../src";
 
+/**
+ * Example demonstrating basic sandbox creation and cleanup.
+ */
 async function exampleContextManager() {
-  /**
-   * Example demonstrating basic sandbox creation and cleanup.
-   */
   console.log("\n=== Simple Sandbox Example ===");
 
   // Create and start a sandbox (equivalent to Python's async with)
@@ -42,10 +42,10 @@ print("Hello, world!")
   }
 }
 
+/**
+ * Example using explicit lifecycle management.
+ */
 async function exampleExplicitLifecycle() {
-  /**
-   * Example using explicit lifecycle management.
-   */
   console.log("\n=== Explicit Lifecycle Example ===");
 
   // Create sandbox with custom configuration
@@ -84,10 +84,10 @@ async function exampleExplicitLifecycle() {
   }
 }
 
+/**
+ * Example demonstrating execution chaining with variables.
+ */
 async function exampleExecutionChaining() {
-  /**
-   * Example demonstrating execution chaining with variables.
-   */
   console.log("\n=== Execution Chaining Example ===");
 
   const sandbox = await PythonSandbox.create({ name: "sandbox-chain" });
@@ -106,10 +106,10 @@ async function exampleExecutionChaining() {
   }
 }
 
+/**
+ * Run all examples.
+ */
 async function main() {
-  /**
-   * Run all examples.
-   */
   try {
     await exampleContextManager();
     await exampleExplicitLifecycle();

@@ -9,10 +9,10 @@
 
 import { PythonSandbox } from "../src";
 
+/**
+ * Example showing basic command execution with context manager.
+ */
 async function basicExample() {
-  /**
-   * Example showing basic command execution with context manager.
-   */
   console.log("\n=== Basic Command Example ===");
 
   // Create a sandbox using a try/finally pattern (equivalent to Python's context manager)
@@ -43,10 +43,10 @@ async function basicExample() {
   }
 }
 
+/**
+ * Example showing how to handle command errors.
+ */
 async function errorHandlingExample() {
-  /**
-   * Example showing how to handle command errors.
-   */
   console.log("\n=== Error Handling Example ===");
 
   const sandbox = await PythonSandbox.create({ name: "error-example" });
@@ -78,10 +78,10 @@ async function errorHandlingExample() {
   }
 }
 
+/**
+ * Example showing how to use command timeouts.
+ */
 async function timeoutExample() {
-  /**
-   * Example showing how to use command timeouts.
-   */
   console.log("\n=== Timeout Example ===");
 
   const sandbox = await PythonSandbox.create({ name: "timeout-example" });
@@ -106,10 +106,10 @@ async function timeoutExample() {
   }
 }
 
+/**
+ * Example showing more advanced command usage.
+ */
 async function advancedExample() {
-  /**
-   * Example showing more advanced command usage.
-   */
   console.log("\n=== Advanced Example ===");
 
   const sandbox = await PythonSandbox.create({ name: "advanced-example" });
@@ -164,10 +164,10 @@ EOF`,
   }
 }
 
+/**
+ * Example showing explicit lifecycle management.
+ */
 async function explicitLifecycleExample() {
-  /**
-   * Example showing explicit lifecycle management.
-   */
   console.log("\n=== Explicit Lifecycle Example ===");
 
   // Create sandbox without context manager
@@ -191,10 +191,10 @@ async function explicitLifecycleExample() {
   }
 }
 
+/**
+ * Main function to run all examples.
+ */
 async function main() {
-  /**
-   * Main function to run all examples.
-   */
   console.log("Command Execution Examples");
   console.log("=========================");
 

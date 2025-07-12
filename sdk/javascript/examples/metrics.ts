@@ -9,10 +9,10 @@
 
 import { PythonSandbox } from "../src";
 
+/**
+ * Example showing how to get individual metrics for a sandbox.
+ */
 async function basicMetricsExample() {
-  /**
-   * Example showing how to get individual metrics for a sandbox.
-   */
   console.log("\n=== Basic Metrics Example ===");
 
   // Create a sandbox using try/finally pattern
@@ -38,6 +38,7 @@ async function basicMetricsExample() {
     try {
       // Get CPU usage
       const cpu = await sandbox.metrics.cpu();
+
       // CPU metrics may be 0.0 when idle or undefined if unavailable
       if (cpu === undefined) {
         console.log("CPU Usage: Not available");
@@ -66,10 +67,10 @@ async function basicMetricsExample() {
   }
 }
 
+/**
+ * Example showing how to get all metrics at once.
+ */
 async function allMetricsExample() {
-  /**
-   * Example showing how to get all metrics at once.
-   */
   console.log("\n=== All Metrics Example ===");
 
   // Create a sandbox
@@ -79,6 +80,7 @@ async function allMetricsExample() {
     // Run some commands to generate activity
     console.log("Running commands to generate some sandbox activity...");
     await sandbox.command.run("cat", ["/etc/os-release"]);
+
     // Using a simpler command that won't time out or cause errors
     await sandbox.command.run("ls", ["-la", "/usr"]);
 
@@ -117,11 +119,10 @@ async function allMetricsExample() {
     await sandbox.stop();
   }
 }
-
+/**
+ * Example showing how to continuously monitor sandbox metrics.
+ */
 async function continuousMonitoringExample() {
-  /**
-   * Example showing how to continuously monitor sandbox metrics.
-   */
   console.log("\n=== Continuous Monitoring Example ===");
 
   // Create a sandbox
@@ -175,10 +176,11 @@ async function continuousMonitoringExample() {
   }
 }
 
+/**
+ * Example generating CPU load to test CPU metrics.
+ */
 async function cpuLoadTestExample() {
-  /**
-   * Example generating CPU load to test CPU metrics.
-   */
+
   console.log("\n=== CPU Load Test Example ===");
 
   // Create a sandbox
@@ -252,10 +254,10 @@ print("CPU load test complete")
   }
 }
 
+/**
+ * Example showing error handling with metrics.
+ */
 async function errorHandlingExample() {
-  /**
-   * Example showing error handling with metrics.
-   */
   console.log("\n=== Error Handling Example ===");
 
   // Create a sandbox without starting it immediately
@@ -277,6 +279,7 @@ async function errorHandlingExample() {
 
     // Get metrics after starting
     const cpu = await sandbox.metrics.cpu();
+
     // Format CPU usage (could be 0.0 or undefined)
     const cpuStr = cpu !== undefined ? `${cpu}%` : "Not available";
     console.log(`CPU usage after starting: ${cpuStr}`);
@@ -291,9 +294,6 @@ async function errorHandlingExample() {
 }
 
 async function main() {
-  /**
-   * Main function to run all examples.
-   */
   console.log("Sandbox Metrics Examples");
   console.log("=======================");
 
