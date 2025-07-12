@@ -18,7 +18,6 @@ edition = "2021"
 
 [profile.release]
 codegen-units = 1
-lto = true
 
 [workspace.dependencies]
 async-stream = "0.3"

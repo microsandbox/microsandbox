@@ -17,9 +17,13 @@ endif
 # -----------------------------------------------------------------------------
 # Build Configuration
 # -----------------------------------------------------------------------------
-BUILD_TYPE ?= release
-CARGO_BUILD_MODE := $(if $(filter debug,$(BUILD_TYPE)),,--release)
-CARGO_TARGET_DIR := target/$(if $(filter debug,$(BUILD_TYPE)),debug,release)
+DEBUG ?= 0
+LTO ?= 0
+CARGO_BUILD_MODE := $(if $(filter 1,$(DEBUG)),,--release)
+CARGO_TARGET_DIR := target/$(if $(filter 1,$(DEBUG)),debug,release)
+
+# Set CARGO_PROFILE_RELEASE_LTO based on LTO setting
+export CARGO_PROFILE_RELEASE_LTO := $(if $(filter 1,$(LTO)),true,off)
 
 # -----------------------------------------------------------------------------
 # Installation Paths
@@ -69,7 +73,7 @@ _build_msb: $(MSB_BIN) $(MSBRUN_BIN) $(MSBSERVER_BIN)
 	@cp $(MSB_BIN) $(BUILD_DIR)/
 	@cp $(MSBRUN_BIN) $(BUILD_DIR)/
 	@cp $(MSBSERVER_BIN) $(BUILD_DIR)/
-	@echo "Msb build artifacts ($(BUILD_TYPE) mode) copied to $(BUILD_DIR)/"
+	@echo "Msb build artifacts ($(if $(filter 1,$(DEBUG)),debug,release) mode) copied to $(BUILD_DIR)/"
 
 _build_aliases:
 	@mkdir -p $(BUILD_DIR)
@@ -110,7 +114,7 @@ endif
 # Installation
 # -----------------------------------------------------------------------------
 install: build
-	@echo "Installing $(BUILD_TYPE) build..."
+	@echo "Installing $(if $(filter 1,$(DEBUG)),debug,release) build..."
 	install -d $(HOME_BIN)
 	install -d $(HOME_LIB)
 	install -m 755 $(BUILD_DIR)/msb $(HOME_BIN)/msb
@@ -131,7 +135,7 @@ install: build
 	else \
 		echo "Warning: libkrun library not found in build directory"; \
 	fi
-	@echo "Installation of $(BUILD_TYPE) build complete."
+	@echo "Installation of $(if $(filter 1,$(DEBUG)),debug,release) build complete."
 
 # -----------------------------------------------------------------------------
 # Maintenance
@@ -171,11 +175,37 @@ help:
 	@echo "======================"
 	@echo
 	@echo "Main Targets:"
-	@echo "  make build                  - Build microsandbox components"
-	@echo "  make install                - Install binaries and libraries to ~/.local/{bin,lib}"
-	@echo "  make uninstall              - Remove all installed components"
-	@echo "  make clean                  - Remove build artifacts"
-	@echo "  make build_libkrun          - Build libkrun dependency"
+	@echo "  make build                    - Build microsandbox components (release mode, no LTO)"
+	@echo "  make install                  - Install binaries and libraries to ~/.local/{bin,lib}"
+	@echo "  make uninstall                - Remove all installed components"
+	@echo "  make clean                    - Remove build artifacts"
+	@echo "  make build_libkrun            - Build libkrun dependency"
 	@echo
-	@echo "Note: For commands that accept arguments, use -- to separate them"
-	@echo "      from the make target name."
+	@echo "Build Modes:"
+	@echo "  make build                    - Build in release mode (fast, no LTO)"
+	@echo "  make DEBUG=1 build            - Build in debug mode"
+	@echo "  make DEBUG=1 install          - Install debug build"
+	@echo
+	@echo "LTO Control (Link Time Optimization):"
+	@echo "  make LTO=1 build              - Enable LTO for smaller binary (slower build)"
+	@echo "  make LTO=1 install            - Install with LTO optimization"
+	@echo "  make LTO=0 build              - Disable LTO (default, faster build)"
+	@echo
+	@echo "Examples:"
+	@echo "  # Standard release build (fast, no LTO)"
+	@echo "  make build"
+	@echo
+	@echo "  # Optimized build with LTO (slower build, smaller binary)"
+	@echo "  make LTO=1 build"
+	@echo
+	@echo "  # Debug build for development"
+	@echo "  make DEBUG=1 build"
+	@echo
+	@echo "  # Install standard release build"
+	@echo "  make install"
+	@echo
+	@echo "  # Install optimized build with LTO"
+	@echo "  make LTO=1 install"
+	@echo
+	@echo "Note: LTO (Link Time Optimization) is now disabled by default for faster builds."
+	@echo "      Enable it with LTO=1 for smaller, more optimized binaries."
