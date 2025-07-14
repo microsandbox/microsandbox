@@ -96,6 +96,10 @@ pub enum MicrosandboxSubcommand {
         #[arg(long = "env", name = "ENV")]
         envs: Vec<String>,
 
+        /// Resource limits, format: <resource>=<soft>:<hard>
+        #[arg(long = "rlimit", name = "RLIMIT")]
+        rlimits: Vec<String>,
+
         /// Environment file
         #[arg(long)]
         env_file: Option<Utf8UnixPathBuf>,

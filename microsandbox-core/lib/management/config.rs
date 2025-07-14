@@ -48,6 +48,9 @@ pub enum Component {
         /// The environment variables to use.
         envs: Vec<String>,
 
+        /// The resource limits to use.
+        rlimits: Vec<String>,
+
         /// The environment file to use.
         env_file: Option<Utf8UnixPathBuf>,
 
@@ -133,6 +136,7 @@ pub async fn add(
                 volumes,
                 ports,
                 envs,
+                rlimits,
                 env_file,
                 depends_on,
                 workdir,
@@ -219,6 +223,17 @@ pub async fn add(
 
                     for env in envs {
                         envs_sequence.push_string(env);
+                    }
+                }
+
+                // Add rlimits if any
+                if !rlimits.is_empty() {
+                    let mut rlimits_sequence = sandbox_mapping
+                        .insert("rlimits", yaml::Separator::Auto)
+                        .make_sequence();
+
+                    for rlimit in rlimits {
+                        rlimits_sequence.push_string(rlimit);
                     }
                 }
 

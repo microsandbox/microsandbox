@@ -6,6 +6,7 @@ use typed_path::Utf8UnixPathBuf;
 
 use crate::{
     config::{EnvPair, PathPair, PortPair, ReferenceOrPath},
+    vm::LinuxRlimit,
     MicrosandboxResult,
 };
 
@@ -65,6 +66,7 @@ pub struct SandboxBuilder<I> {
     volumes: Vec<PathPair>,
     ports: Vec<PortPair>,
     envs: Vec<EnvPair>,
+    rlimits: Vec<LinuxRlimit>,
     env_file: Option<Utf8UnixPathBuf>,
     groups: HashMap<String, SandboxGroup>,
     depends_on: Vec<String>,
@@ -155,6 +157,7 @@ impl<I> SandboxBuilder<I> {
             volumes: self.volumes,
             ports: self.ports,
             envs: self.envs,
+            rlimits: self.rlimits,
             env_file: self.env_file,
             groups: self.groups,
             depends_on: self.depends_on,
@@ -195,6 +198,12 @@ impl<I> SandboxBuilder<I> {
     /// Sets the environment variables for the sandbox
     pub fn envs(mut self, envs: impl IntoIterator<Item = EnvPair>) -> SandboxBuilder<I> {
         self.envs = envs.into_iter().collect();
+        self
+    }
+
+    /// Sets the resource limits for the sandbox
+    pub fn rlimits(mut self, rlimits: impl IntoIterator<Item = LinuxRlimit>) -> SandboxBuilder<I> {
+        self.rlimits = rlimits.into_iter().collect();
         self
     }
 
@@ -283,6 +292,7 @@ impl SandboxBuilder<ReferenceOrPath> {
             volumes: self.volumes,
             ports: self.ports,
             envs: self.envs,
+            rlimits: self.rlimits,
             groups: self.groups,
             depends_on: self.depends_on,
             workdir: self.workdir,
@@ -311,6 +321,7 @@ impl Default for SandboxBuilder<()> {
             volumes: Vec::new(),
             ports: Vec::new(),
             envs: Vec::new(),
+            rlimits: Vec::new(),
             env_file: None,
             groups: HashMap::new(),
             depends_on: Vec::new(),

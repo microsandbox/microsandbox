@@ -584,6 +584,18 @@ pub async fn sandbox_start_impl(
                 );
             }
 
+            if !config.rlimits.is_empty() {
+                let rlimits_array = config
+                    .rlimits
+                    .iter()
+                    .map(|r| serde_yaml::Value::String(r.to_string()))
+                    .collect::<Vec<_>>();
+                sandbox_map.insert(
+                    serde_yaml::Value::String("rlimits".to_string()),
+                    serde_yaml::Value::Sequence(rlimits_array),
+                );
+            }
+
             // Replace or add the sandbox in the config
             sandboxes_map.insert(
                 serde_yaml::Value::String(sandbox.clone()),
