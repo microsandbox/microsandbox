@@ -3,12 +3,10 @@
 use std::{
     collections::HashMap,
     fmt::{self, Display},
-    net::Ipv4Addr,
     str::FromStr,
 };
 
 use getset::{Getters, Setters};
-use ipnetwork::Ipv4Network as Ipv4Net;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
@@ -54,10 +52,6 @@ pub struct Microsandbox {
     /// The sandboxes to run.
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub(crate) sandboxes: HashMap<String, Sandbox>,
-
-    /// The groups to run the sandboxes in.
-    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
-    pub(crate) groups: HashMap<String, Group>,
 }
 
 /// The metadata about the configuration.
@@ -215,7 +209,7 @@ pub enum NetworkScope {
     #[serde(rename = "none")]
     None = 0,
 
-    /// Sandboxes can only communicate within their subnet
+    /// Sandboxes can only communicate within their subnet (Not implemented)
     #[serde(rename = "group")]
     Group = 1,
 
@@ -227,31 +221,6 @@ pub enum NetworkScope {
     /// Sandboxes can communicate with any address
     #[serde(rename = "any")]
     Any = 3,
-}
-
-/// Network configuration for a sandbox in a group.
-#[derive(Debug, Clone, Serialize, Deserialize, TypedBuilder, PartialEq, Eq, Getters)]
-#[getset(get = "pub with_prefix")]
-pub struct SandboxGroupNetwork {
-    /// The IP address for the sandbox in this group
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    #[builder(default, setter(strip_option))]
-    pub(crate) ip: Option<Ipv4Addr>,
-
-    /// The hostname for this sandbox in the group
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    #[builder(default, setter(strip_option))]
-    pub(crate) hostname: Option<String>,
-}
-
-/// Network configuration for a group.
-#[derive(Debug, Clone, Serialize, Deserialize, TypedBuilder, PartialEq, Eq, Getters)]
-#[getset(get = "pub with_prefix")]
-pub struct GroupNetwork {
-    /// The subnet CIDR for the group. Must be an IPv4 network.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    #[builder(default, setter(strip_option))]
-    pub(crate) subnet: Option<Ipv4Net>,
 }
 
 /// The sandbox to run.
@@ -288,10 +257,6 @@ pub struct Sandbox {
     /// The environment variables to use.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(crate) envs: Vec<EnvPair>,
-
-    /// The groups to run in.
-    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
-    pub(crate) groups: HashMap<String, SandboxGroup>,
 
     /// The sandboxes to depend on.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -341,51 +306,6 @@ pub struct Sandbox {
     pub(crate) scope: NetworkScope,
 }
 
-/// Configuration for a sandbox's group membership.
-#[derive(Debug, Clone, Serialize, Deserialize, TypedBuilder, PartialEq, Getters)]
-#[getset(get = "pub with_prefix")]
-pub struct SandboxGroup {
-    /// The volumes to mount.
-    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
-    #[builder(default)]
-    pub(crate) volumes: HashMap<String, String>,
-
-    /// The network configuration for this sandbox in the group.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    #[builder(default, setter(strip_option))]
-    pub(crate) network: Option<SandboxGroupNetwork>,
-}
-
-/// The group to run the sandboxes in.
-#[derive(Debug, Clone, Serialize, Deserialize, TypedBuilder, PartialEq, Eq, Getters)]
-#[getset(get = "pub with_prefix")]
-pub struct Group {
-    /// The version of the group.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    #[builder(default, setter(strip_option))]
-    pub(crate) version: Option<Version>,
-
-    /// The metadata about the group.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    #[builder(default, setter(strip_option))]
-    pub(crate) meta: Option<Meta>,
-
-    /// The network configuration for the group.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    #[builder(default, setter(strip_option))]
-    pub(crate) network: Option<GroupNetwork>,
-
-    /// The volumes to mount.
-    #[serde(
-        skip_serializing_if = "HashMap::is_empty",
-        default,
-        serialize_with = "serialize_path_map",
-        deserialize_with = "deserialize_path_map"
-    )]
-    #[builder(default)]
-    pub(crate) volumes: HashMap<String, Utf8UnixPathBuf>,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -397,11 +317,6 @@ impl Microsandbox {
     /// Get a sandbox by name in this configuration
     pub fn get_sandbox(&self, sandbox_name: &str) -> Option<&Sandbox> {
         self.sandboxes.get(sandbox_name)
-    }
-
-    /// Get a group by name in this configuration
-    pub fn get_group(&self, group_name: &str) -> Option<&Group> {
-        self.groups.get(group_name)
     }
 
     /// Get a build by name in this configuration
@@ -570,7 +485,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
 
     #[test]
     fn test_microsandbox_config_empty_config() {
@@ -583,7 +497,6 @@ mod tests {
         assert!(config.modules.is_empty());
         assert!(config.builds.is_empty());
         assert!(config.sandboxes.is_empty());
-        assert!(config.groups.is_empty());
     }
 
     #[test]
@@ -594,7 +507,6 @@ mod tests {
         assert!(config.modules.is_empty());
         assert!(config.builds.is_empty());
         assert!(config.sandboxes.is_empty());
-        assert!(config.groups.is_empty());
 
         // Test empty sections
         let yaml = r#"
@@ -602,7 +514,6 @@ mod tests {
             modules: {}
             builds: {}
             sandboxes: {}
-            groups: {}
         "#;
 
         let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
@@ -610,7 +521,6 @@ mod tests {
         assert!(config.modules.is_empty());
         assert!(config.builds.is_empty());
         assert!(config.sandboxes.is_empty());
-        assert!(config.groups.is_empty());
     }
 
     #[test]
@@ -634,17 +544,17 @@ mod tests {
         assert!(sandbox.workdir.is_none());
         assert!(sandbox.shell.is_none());
         assert!(sandbox.scripts.is_empty());
-        assert_eq!(sandbox.scope, NetworkScope::Group);
+        assert_eq!(sandbox.scope, NetworkScope::Public);
     }
 
     #[test]
     fn test_microsandbox_config_default_scope() {
-        // Test default scope for sandbox is Group
+        // Test default scope for sandbox is Public
         let sandbox = Sandbox::builder()
             .image(ReferenceOrPath::Reference("alpine:latest".parse().unwrap()))
             .shell("/bin/sh")
             .build();
-        assert_eq!(sandbox.scope, NetworkScope::Group);
+        assert_eq!(sandbox.scope, NetworkScope::Public);
 
         // Test default scope in YAML
         let yaml = r#"
@@ -658,7 +568,7 @@ mod tests {
         let sandboxes = &config.sandboxes;
         let sandbox = sandboxes.get("test").unwrap();
 
-        assert_eq!(sandbox.scope, NetworkScope::Group);
+        assert_eq!(sandbox.scope, NetworkScope::Public);
     }
 
     #[test]
@@ -768,10 +678,6 @@ mod tests {
                   requirements: "./requirements.txt"
                 exports:
                   packages: "/build/dist/packages"
-                groups:
-                  build_group:
-                    volumes:
-                      logs: "/var/log"
 
             sandboxes:
               api:
@@ -793,21 +699,6 @@ mod tests {
                 scripts:
                   start: "python -m uvicorn src.main:app"
                 scope: "public"
-                groups:
-                  backend_group:
-                    network:
-                      ip: "10.0.1.10"
-                      hostname: "api.internal"
-
-            groups:
-              backend_group:
-                version: "1.0.0"
-                meta:
-                  description: "Backend services group"
-                network:
-                  subnet: "10.0.1.0/24"
-                volumes:
-                  logs: "/var/log"
         "#;
 
         let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
@@ -854,103 +745,6 @@ mod tests {
         assert_eq!(api.cpus.unwrap(), 1);
         assert_eq!(api.depends_on, vec!["database", "cache"]);
         assert_eq!(api.scope, NetworkScope::Public);
-
-        let api_group = api.groups.get("backend_group").unwrap();
-        assert_eq!(
-            api_group.network.as_ref().unwrap().ip.unwrap(),
-            Ipv4Addr::new(10, 0, 1, 10)
-        );
-        assert_eq!(
-            api_group
-                .network
-                .as_ref()
-                .unwrap()
-                .hostname
-                .as_ref()
-                .unwrap(),
-            "api.internal"
-        );
-
-        // Test groups
-        let groups = &config.groups;
-        let backend_group = groups.get("backend_group").unwrap();
-        assert_eq!(backend_group.version.as_ref().unwrap().to_string(), "1.0.0");
-        assert_eq!(
-            backend_group
-                .meta
-                .as_ref()
-                .unwrap()
-                .description
-                .as_ref()
-                .unwrap(),
-            "Backend services group"
-        );
-        assert_eq!(
-            backend_group
-                .network
-                .as_ref()
-                .unwrap()
-                .subnet
-                .unwrap()
-                .to_string(),
-            "10.0.1.0/24"
-        );
-        assert_eq!(
-            backend_group.volumes.get("logs").unwrap(),
-            &Utf8UnixPathBuf::from("/var/log")
-        );
-    }
-
-    #[test]
-    fn test_microsandbox_config_network_configuration() {
-        let yaml = r#"
-            sandboxes:
-              test_sandbox:
-                image: "alpine:latest"
-                shell: "/bin/sh"
-                scope: "group"
-                groups:
-                  test_group:
-                    network:
-                      ip: "10.0.1.10"
-                      hostname: "test.internal"
-
-            groups:
-              test_group:
-                network:
-                  subnet: "10.0.1.0/24"
-        "#;
-
-        let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
-
-        // Fix temporary value dropped issue by using direct reference
-        let sandboxes = &config.sandboxes;
-        let sandbox = sandboxes.get("test_sandbox").unwrap();
-        assert_eq!(sandbox.scope, NetworkScope::Group);
-
-        let sandbox_group = sandbox.groups.get("test_group").unwrap();
-        assert_eq!(
-            sandbox_group.network.as_ref().unwrap().ip.unwrap(),
-            Ipv4Addr::new(10, 0, 1, 10)
-        );
-        assert_eq!(
-            sandbox_group
-                .network
-                .as_ref()
-                .unwrap()
-                .hostname
-                .as_ref()
-                .unwrap(),
-            "test.internal"
-        );
-
-        // Fix temporary value dropped issue for groups
-        let groups = &config.groups;
-        let group = groups.get("test_group").unwrap();
-        assert_eq!(
-            group.network.as_ref().unwrap().subnet.unwrap().to_string(),
-            "10.0.1.0/24"
-        );
     }
 
     #[test]
@@ -1022,361 +816,5 @@ mod tests {
                 version: "invalid"
         "#;
         assert!(serde_yaml::from_str::<Microsandbox>(yaml).is_err());
-    }
-
-    #[test]
-    fn test_microsandbox_config_group_basic() {
-        let yaml = r#"
-            groups:
-              simple_group:
-                version: "1.0.0"
-        "#;
-
-        let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
-        let groups = &config.groups;
-
-        assert!(groups.contains_key("simple_group"));
-        let group = groups.get("simple_group").unwrap();
-        assert_eq!(group.version.as_ref().unwrap().to_string(), "1.0.0");
-        assert!(group.meta.is_none());
-        assert!(group.network.is_none());
-        assert!(group.volumes.is_empty());
-    }
-
-    #[test]
-    fn test_microsandbox_config_group_metadata() {
-        let yaml = r#"
-            groups:
-              metadata_group:
-                meta:
-                  description: "A group with metadata"
-                  authors:
-                    - "Test Author <test@example.com>"
-                  tags:
-                    - "test"
-                    - "metadata"
-        "#;
-
-        let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
-        let groups = &config.groups;
-
-        assert!(groups.contains_key("metadata_group"));
-        let group = groups.get("metadata_group").unwrap();
-        assert!(group.version.is_none());
-
-        let meta = group.meta.as_ref().unwrap();
-        assert_eq!(meta.description.as_ref().unwrap(), "A group with metadata");
-        assert_eq!(
-            meta.authors.as_ref().unwrap()[0],
-            "Test Author <test@example.com>"
-        );
-        assert_eq!(meta.tags.as_ref().unwrap(), &vec!["test", "metadata"]);
-    }
-
-    #[test]
-    fn test_microsandbox_config_group_network() {
-        let yaml = r#"
-            groups:
-              network_group:
-                network:
-                  subnet: "10.0.2.0/24"
-        "#;
-
-        let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
-        let groups = &config.groups;
-
-        assert!(groups.contains_key("network_group"));
-        let group = groups.get("network_group").unwrap();
-        assert!(group.version.is_none());
-        assert!(group.meta.is_none());
-
-        let network = group.network.as_ref().unwrap();
-        assert_eq!(network.subnet.unwrap().to_string(), "10.0.2.0/24");
-    }
-
-    #[test]
-    fn test_microsandbox_config_group_volumes() {
-        let yaml = r#"
-            groups:
-              volume_group:
-                volumes:
-                  data: "/data"
-                  logs: "/var/log"
-                  static: "/var/www/static"
-        "#;
-
-        let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
-        let groups = &config.groups;
-
-        assert!(groups.contains_key("volume_group"));
-        let group = groups.get("volume_group").unwrap();
-        assert!(group.version.is_none());
-        assert!(group.meta.is_none());
-        assert!(group.network.is_none());
-
-        let volumes = &group.volumes;
-        assert_eq!(volumes.len(), 3);
-        assert_eq!(
-            volumes.get("data").unwrap(),
-            &Utf8UnixPathBuf::from("/data")
-        );
-        assert_eq!(
-            volumes.get("logs").unwrap(),
-            &Utf8UnixPathBuf::from("/var/log")
-        );
-        assert_eq!(
-            volumes.get("static").unwrap(),
-            &Utf8UnixPathBuf::from("/var/www/static")
-        );
-    }
-
-    #[test]
-    fn test_microsandbox_config_group_complete() {
-        let yaml = r#"
-            groups:
-              complete_group:
-                version: "2.1.0"
-                meta:
-                  description: "A complete group with all properties"
-                  authors:
-                    - "Test Author <test@example.com>"
-                  tags:
-                    - "test"
-                    - "complete"
-                  readme: "./README.md"
-                network:
-                  subnet: "10.1.0.0/16"
-                volumes:
-                  cache: "/var/cache"
-                  db: "/var/lib/database"
-        "#;
-
-        let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
-        let groups = &config.groups;
-
-        assert!(groups.contains_key("complete_group"));
-        let group = groups.get("complete_group").unwrap();
-
-        // Check version
-        assert_eq!(group.version.as_ref().unwrap().to_string(), "2.1.0");
-
-        // Check metadata
-        let meta = group.meta.as_ref().unwrap();
-        assert_eq!(
-            meta.description.as_ref().unwrap(),
-            "A complete group with all properties"
-        );
-        assert_eq!(
-            meta.authors.as_ref().unwrap()[0],
-            "Test Author <test@example.com>"
-        );
-        assert_eq!(meta.tags.as_ref().unwrap(), &vec!["test", "complete"]);
-        assert_eq!(
-            meta.readme.as_ref().unwrap(),
-            &Utf8UnixPathBuf::from("./README.md")
-        );
-
-        // Check network
-        let network = group.network.as_ref().unwrap();
-        assert_eq!(network.subnet.unwrap().to_string(), "10.1.0.0/16");
-
-        // Check volumes
-        let volumes = &group.volumes;
-        assert_eq!(volumes.len(), 2);
-        assert_eq!(
-            volumes.get("cache").unwrap(),
-            &Utf8UnixPathBuf::from("/var/cache")
-        );
-        assert_eq!(
-            volumes.get("db").unwrap(),
-            &Utf8UnixPathBuf::from("/var/lib/database")
-        );
-    }
-
-    #[test]
-    fn test_microsandbox_config_group_sandbox_association() {
-        let yaml = r#"
-            sandboxes:
-              web:
-                image: "nginx:alpine"
-                shell: "/bin/sh"
-                groups:
-                  frontend_group:
-                    network:
-                      ip: "10.2.0.10"
-                      hostname: "web.internal"
-              api:
-                image: "python:3.9-slim"
-                shell: "/bin/bash"
-                groups:
-                  backend_group:
-                    network:
-                      ip: "10.3.0.20"
-                      hostname: "api.internal"
-                  frontend_group:
-                    network:
-                      ip: "10.2.0.20"
-                      hostname: "api-frontend.internal"
-
-            groups:
-              frontend_group:
-                network:
-                  subnet: "10.2.0.0/24"
-              backend_group:
-                network:
-                  subnet: "10.3.0.0/24"
-        "#;
-
-        let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
-
-        // Check that sandboxes are properly associated with groups
-        let sandboxes = &config.sandboxes;
-        let groups = &config.groups;
-
-        // Check web sandbox in frontend group
-        let web = sandboxes.get("web").unwrap();
-        assert!(web.groups.contains_key("frontend_group"));
-        let web_frontend = web.groups.get("frontend_group").unwrap();
-        assert_eq!(
-            web_frontend.network.as_ref().unwrap().ip.unwrap(),
-            Ipv4Addr::new(10, 2, 0, 10)
-        );
-        assert_eq!(
-            web_frontend
-                .network
-                .as_ref()
-                .unwrap()
-                .hostname
-                .as_ref()
-                .unwrap(),
-            "web.internal"
-        );
-
-        // Check api sandbox in backend and frontend groups
-        let api = sandboxes.get("api").unwrap();
-        assert!(api.groups.contains_key("backend_group"));
-        assert!(api.groups.contains_key("frontend_group"));
-
-        let api_backend = api.groups.get("backend_group").unwrap();
-        assert_eq!(
-            api_backend.network.as_ref().unwrap().ip.unwrap(),
-            Ipv4Addr::new(10, 3, 0, 20)
-        );
-        assert_eq!(
-            api_backend
-                .network
-                .as_ref()
-                .unwrap()
-                .hostname
-                .as_ref()
-                .unwrap(),
-            "api.internal"
-        );
-
-        let api_frontend = api.groups.get("frontend_group").unwrap();
-        assert_eq!(
-            api_frontend.network.as_ref().unwrap().ip.unwrap(),
-            Ipv4Addr::new(10, 2, 0, 20)
-        );
-        assert_eq!(
-            api_frontend
-                .network
-                .as_ref()
-                .unwrap()
-                .hostname
-                .as_ref()
-                .unwrap(),
-            "api-frontend.internal"
-        );
-
-        // Check group subnets
-        let frontend_group = groups.get("frontend_group").unwrap();
-        assert_eq!(
-            frontend_group
-                .network
-                .as_ref()
-                .unwrap()
-                .subnet
-                .unwrap()
-                .to_string(),
-            "10.2.0.0/24"
-        );
-
-        let backend_group = groups.get("backend_group").unwrap();
-        assert_eq!(
-            backend_group
-                .network
-                .as_ref()
-                .unwrap()
-                .subnet
-                .unwrap()
-                .to_string(),
-            "10.3.0.0/24"
-        );
-    }
-
-    #[test]
-    fn test_microsandbox_config_group_multiple() {
-        let yaml = r#"
-            groups:
-              group_a:
-                version: "1.0.0"
-                network:
-                  subnet: "10.10.0.0/24"
-              group_b:
-                version: "1.0.0"
-                network:
-                  subnet: "10.20.0.0/24"
-              group_c:
-                version: "1.0.0"
-                network:
-                  subnet: "10.30.0.0/24"
-        "#;
-
-        let config: Microsandbox = serde_yaml::from_str(yaml).unwrap();
-        let groups = &config.groups;
-
-        assert_eq!(groups.len(), 3);
-        assert!(groups.contains_key("group_a"));
-        assert!(groups.contains_key("group_b"));
-        assert!(groups.contains_key("group_c"));
-
-        // Check subnets of each group
-        assert_eq!(
-            groups
-                .get("group_a")
-                .unwrap()
-                .network
-                .as_ref()
-                .unwrap()
-                .subnet
-                .unwrap()
-                .to_string(),
-            "10.10.0.0/24"
-        );
-        assert_eq!(
-            groups
-                .get("group_b")
-                .unwrap()
-                .network
-                .as_ref()
-                .unwrap()
-                .subnet
-                .unwrap()
-                .to_string(),
-            "10.20.0.0/24"
-        );
-        assert_eq!(
-            groups
-                .get("group_c")
-                .unwrap()
-                .network
-                .as_ref()
-                .unwrap()
-                .subnet
-                .unwrap()
-                .to_string(),
-            "10.30.0.0/24"
-        );
     }
 }

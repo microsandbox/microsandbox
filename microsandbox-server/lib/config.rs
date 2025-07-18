@@ -12,7 +12,10 @@
 //! - Environment-based configuration loading
 //! - Namespace directory management
 
-use std::{net::{IpAddr, SocketAddr}, path::PathBuf};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
 
 use getset::Getters;
 use microsandbox_utils::{env, NAMESPACES_SUBDIR};

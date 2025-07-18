@@ -50,7 +50,6 @@ pub fn log_level(args: &MicrosandboxArgs) {
 pub async fn add_subcommand(
     sandbox: bool,
     build: bool,
-    group: bool,
     names: Vec<String>,
     image: String,
     memory: Option<u32>,
@@ -70,8 +69,8 @@ pub async fn add_subcommand(
     path: Option<PathBuf>,
     config: Option<String>,
 ) -> MicrosandboxCliResult<()> {
-    trio_conflict_error(build, sandbox, group, "add", Some("[NAMES]"));
-    unsupported_build_group_error(build, group, "add", Some("[NAMES]"));
+    validate_build_sandbox_conflict(build, sandbox, "add", Some("[NAMES]"), None);
+    unsupported_build_error(build, "add", Some("[NAMES]"));
 
     let mut scripts = scripts
         .into_iter()
@@ -107,12 +106,11 @@ pub async fn add_subcommand(
 pub async fn remove_subcommand(
     sandbox: bool,
     build: bool,
-    group: bool,
     names: Vec<String>,
     file: Option<PathBuf>,
 ) -> MicrosandboxCliResult<()> {
-    trio_conflict_error(build, sandbox, group, "remove", Some("[NAMES]"));
-    unsupported_build_group_error(build, group, "remove", Some("[NAMES]"));
+    validate_build_sandbox_conflict(build, sandbox, "remove", Some("[NAMES]"), None);
+    unsupported_build_error(build, "remove", Some("[NAMES]"));
 
     let (path, config) = parse_file_path(file);
     config::remove(
@@ -129,11 +127,10 @@ pub async fn remove_subcommand(
 pub async fn list_subcommand(
     sandbox: bool,
     build: bool,
-    group: bool,
     file: Option<PathBuf>,
 ) -> MicrosandboxCliResult<()> {
-    trio_conflict_error(build, sandbox, group, "list", None);
-    unsupported_build_group_error(build, group, "list", None);
+    validate_build_sandbox_conflict(build, sandbox, "list", None, None);
+    unsupported_build_error(build, "list", None);
 
     let (path, config) = parse_file_path(file);
     let (config, _, _) = config::load_config(path.as_deref(), config.as_deref()).await?;
@@ -158,21 +155,9 @@ pub async fn run_subcommand(
     exec: Option<String>,
     args: Vec<String>,
 ) -> MicrosandboxCliResult<()> {
-    if build && sandbox {
-        MicrosandboxArgs::command()
-            .override_usage(usage("run", Some("[NAME]"), Some("<ARGS>")))
-            .error(
-                ErrorKind::ArgumentConflict,
-                format!(
-                    "cannot specify both `{}` and `{}` flags",
-                    "--sandbox".literal(),
-                    "--build".literal()
-                ),
-            )
-            .exit();
-    }
+    validate_build_sandbox_conflict(build, sandbox, "run", Some("[NAME]"), Some("<ARGS>"));
 
-    unsupported_build_group_error(build, false, "run", Some("[NAME]"));
+    unsupported_build_error(build, "run", Some("[NAME]"));
 
     let (sandbox, script) = parse_name_and_script(&name);
     if matches!((script, &exec), (Some(_), Some(_))) {
@@ -213,21 +198,9 @@ pub async fn script_run_subcommand(
     detach: bool,
     args: Vec<String>,
 ) -> MicrosandboxCliResult<()> {
-    if build && sandbox {
-        MicrosandboxArgs::command()
-            .override_usage(usage(&script, Some("[NAME]"), Some("<ARGS>")))
-            .error(
-                ErrorKind::ArgumentConflict,
-                format!(
-                    "cannot specify both `{}` and `{}` flags",
-                    "--sandbox".literal(),
-                    "--build".literal()
-                ),
-            )
-            .exit();
-    }
+    validate_build_sandbox_conflict(build, sandbox, &script, Some("[NAME]"), Some("<ARGS>"));
 
-    unsupported_build_group_error(build, false, &script, Some("[NAME]"));
+    unsupported_build_error(build, &script, Some("[NAME]"));
 
     let (path, config) = parse_file_path(file);
     sandbox::run(
@@ -295,13 +268,12 @@ pub async fn exe_subcommand(
 pub async fn up_subcommand(
     sandbox: bool,
     build: bool,
-    group: bool,
     names: Vec<String>,
     file: Option<PathBuf>,
     detach: bool,
 ) -> MicrosandboxCliResult<()> {
-    trio_conflict_error(build, sandbox, group, "up", Some("[NAMES]"));
-    unsupported_build_group_error(build, group, "up", Some("[NAMES]"));
+    validate_build_sandbox_conflict(build, sandbox, "up", Some("[NAMES]"), None);
+    unsupported_build_error(build, "up", Some("[NAMES]"));
 
     let (path, config) = parse_file_path(file);
     orchestra::up(names, path.as_deref(), config.as_deref(), detach).await?;
@@ -312,12 +284,11 @@ pub async fn up_subcommand(
 pub async fn down_subcommand(
     sandbox: bool,
     build: bool,
-    group: bool,
     names: Vec<String>,
     file: Option<PathBuf>,
 ) -> MicrosandboxCliResult<()> {
-    trio_conflict_error(build, sandbox, group, "down", Some("[NAMES]"));
-    unsupported_build_group_error(build, group, "down", Some("[NAMES]"));
+    validate_build_sandbox_conflict(build, sandbox, "down", Some("[NAMES]"), None);
+    unsupported_build_error(build, "down", Some("[NAMES]"));
 
     let (path, config) = parse_file_path(file);
     orchestra::down(names, path.as_deref(), config.as_deref()).await?;
@@ -329,12 +300,11 @@ pub async fn down_subcommand(
 pub async fn status_subcommand(
     sandbox: bool,
     build: bool,
-    group: bool,
     names: Vec<String>,
     file: Option<PathBuf>,
 ) -> MicrosandboxCliResult<()> {
-    trio_conflict_error(build, sandbox, group, "status", Some("[NAMES]"));
-    unsupported_build_group_error(build, group, "status", Some("[NAMES]"));
+    validate_build_sandbox_conflict(build, sandbox, "status", Some("[NAMES]"), None);
+    unsupported_build_error(build, "status", Some("[NAMES]"));
 
     let (path, config) = parse_file_path(file);
     orchestra::show_status(&names, path.as_deref(), config.as_deref()).await?;
@@ -346,14 +316,13 @@ pub async fn status_subcommand(
 pub async fn log_subcommand(
     sandbox: bool,
     build: bool,
-    group: bool,
     name: String,
     file: Option<PathBuf>,
     follow: bool,
     tail: Option<usize>,
 ) -> MicrosandboxCliResult<()> {
-    trio_conflict_error(build, sandbox, group, "log", Some("[NAME]"));
-    unsupported_build_group_error(build, group, "log", Some("[NAME]"));
+    validate_build_sandbox_conflict(build, sandbox, "log", Some("[NAME]"), None);
+    unsupported_build_error(build, "log", Some("[NAME]"));
 
     // Check if tail command exists when follow mode is requested
     if follow {
@@ -708,11 +677,7 @@ pub async fn login_subcommand() -> MicrosandboxCliResult<()> {
     Ok(())
 }
 
-pub async fn push_subcommand(
-    _image: bool,
-    _image_group: bool,
-    _name: String,
-) -> MicrosandboxCliResult<()> {
+pub async fn push_subcommand(_image: bool, _name: String) -> MicrosandboxCliResult<()> {
     println!(
         "{} push functionality is not yet implemented",
         "error:".error()
@@ -724,52 +689,16 @@ pub async fn push_subcommand(
 // Functions: Common Errors
 //--------------------------------------------------------------------------------------------------
 
-fn trio_conflict_error(
-    build: bool,
-    sandbox: bool,
-    group: bool,
-    command: &str,
-    positional_placeholder: Option<&str>,
-) {
-    match (build, sandbox, group) {
-        (true, true, _) => conflict_error("build", "sandbox", command, positional_placeholder),
-        (true, _, true) => conflict_error("build", "group", command, positional_placeholder),
-        (_, true, true) => conflict_error("sandbox", "group", command, positional_placeholder),
-        _ => (),
-    }
-}
-
-fn conflict_error(arg1: &str, arg2: &str, command: &str, positional_placeholder: Option<&str>) {
-    MicrosandboxArgs::command()
-        .override_usage(usage(command, positional_placeholder, None))
-        .error(
-            ErrorKind::ArgumentConflict,
-            format!(
-                "cannot specify both `{}` and `{}` flags",
-                format!("--{}", arg1).literal(),
-                format!("--{}", arg2).literal()
-            ),
-        )
-        .exit();
-}
-
-fn unsupported_build_group_error(
-    build: bool,
-    group: bool,
-    command: &str,
-    positional_placeholder: Option<&str>,
-) {
-    if build || group {
+fn unsupported_build_error(build: bool, command: &str, positional_placeholder: Option<&str>) {
+    if build {
         MicrosandboxArgs::command()
             .override_usage(usage(command, positional_placeholder, None))
             .error(
                 ErrorKind::ArgumentConflict,
                 format!(
-                    "`{}`, `{}`, `{}`, and `{}` flags are not yet supported.",
+                    "`{}` and `{}` flags are not yet supported.",
                     "--build".literal(),
-                    "-b".literal(),
-                    "--group".literal(),
-                    "-g".literal()
+                    "-b".literal()
                 ),
             )
             .exit();
@@ -915,5 +844,36 @@ fn parse_duration_string(duration_str: &str) -> MicrosandboxCliResult<chrono::Du
             "Invalid duration unit: {}. Expected one of: s, m, h, d, w, mo, y",
             unit
         ))),
+    }
+}
+
+/// Validate that both `--build` and `--sandbox` flags are not specified together.
+///
+/// # Arguments
+///
+/// * `build` - Whether the --build flag is set
+/// * `sandbox` - Whether the --sandbox flag is set
+/// * `command` - The command name for the error message
+/// * `positional_placeholder` - Optional positional arguments placeholder for usage
+/// * `varargs` - Optional varargs placeholder for usage
+fn validate_build_sandbox_conflict(
+    build: bool,
+    sandbox: bool,
+    command: &str,
+    positional_placeholder: Option<&str>,
+    varargs: Option<&str>,
+) {
+    if build && sandbox {
+        MicrosandboxArgs::command()
+            .override_usage(usage(command, positional_placeholder, varargs))
+            .error(
+                ErrorKind::ArgumentConflict,
+                format!(
+                    "cannot specify both `{}` and `{}` flags",
+                    "--sandbox".literal(),
+                    "--build".literal()
+                ),
+            )
+            .exit();
     }
 }

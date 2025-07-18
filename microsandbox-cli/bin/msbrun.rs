@@ -23,7 +23,7 @@
 //!     --exec-path=/usr/bin/python3 \
 //!     --mapped-dirs=/host/path:/guest/path \
 //!     --port-maps=8080:80 \
-//!     --scope=group \
+//!     --scope=public \
 //!     --ip=192.168.1.1 \
 //!     --subnet=192.168.1.0/24 \
 //!     --envs=KEY=VALUE \
@@ -49,7 +49,7 @@
 //!     --port-maps=8080:80 \
 //!     --envs=KEY=VALUE \
 //!     --forward-output \
-//!     --scope=group \
+//!     --scope=public \
 //!     --ip=192.168.1.1 \
 //!     --subnet=192.168.1.0/24 \
 //!     -- -m http.server 8080

@@ -25,8 +25,6 @@ use std::path::{Path, PathBuf};
 use tar::Archive;
 use tempfile::tempdir;
 use tokio::fs;
-#[cfg(not(feature = "cli"))]
-use tokio::process::Command;
 #[cfg(feature = "cli")]
 use tokio::task::spawn_blocking;
 
@@ -95,26 +93,19 @@ const EXTRACT_LAYERS_MSG: &str = "Extracting layers";
 /// image::pull("alpine:latest".parse().unwrap(), true, false, None).await?;
 ///
 /// // Pull an image from Docker registry and store the layers in a custom directory
-/// image::pull("docker.io/library/ubuntu:latest".parse().unwrap(), true, false, Some(PathBuf::from("/custom/path"))).await?;
+/// image::pull("docker.io/library/ubuntu:latest".parse().unwrap(), true, Some(PathBuf::from("/custom/path"))).await?;
 /// # Ok(())
 /// # }
 /// ```
 pub async fn pull(
     name: Reference,
     image: bool,
-    image_group: bool,
     layer_path: Option<PathBuf>,
 ) -> MicrosandboxResult<()> {
-    // Both cannot be true
-    if image && image_group {
+    // Image must be true
+    if !image {
         return Err(MicrosandboxError::InvalidArgument(
-            "both image and image_group cannot be true".to_string(),
-        ));
-    }
-
-    if image_group {
-        return Err(MicrosandboxError::InvalidArgument(
-            "image group pull is currently not supported".to_string(),
+            "image must be true".to_string(),
         ));
     }
 
@@ -435,6 +426,7 @@ async fn extract_layer(
         inner: R,
         bar: ProgressBar,
     }
+
     #[cfg(feature = "cli")]
     impl<R: Read> Read for ProgressReader<R> {
         fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
@@ -487,26 +479,19 @@ async fn extract_layer(
 
     #[cfg(not(feature = "cli"))]
     {
-        // Fallback to system tar when cli disabled
-        let output = Command::new("tar")
-            .arg("-xzf")
-            .arg(layer_path)
-            .arg("-C")
-            .arg(&extract_dir)
-            .output()
-            .await
-            .map_err(|e| MicrosandboxError::LayerHandling {
+        use flate2::read::GzDecoder;
+        use tar::Archive;
+
+        let file =
+            std::fs::File::open(layer_path).map_err(|e| MicrosandboxError::LayerHandling {
                 source: e,
                 layer: file_name.to_string(),
             })?;
-
-        if !output.status.success() {
-            let error_msg = String::from_utf8_lossy(&output.stderr);
-            return Err(MicrosandboxError::LayerExtraction(format!(
-                "Failed to extract layer {}: {}",
-                file_name, error_msg
-            )));
-        }
+        let decoder = GzDecoder::new(file);
+        let mut archive = Archive::new(decoder);
+        archive
+            .unpack(&extract_dir)
+            .map_err(|e| MicrosandboxError::LayerExtraction(format!("{:?}", e)))?;
     }
 
     tracing::info!(
