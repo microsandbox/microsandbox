@@ -249,7 +249,7 @@ pub async fn install(
     // Apply image configuration defaults if enabled
     if use_image_defaults {
         // Pull the image from the registry if not already pulled
-        image::pull(image.clone(), true, false, None).await?;
+        image::pull(image.clone(), true, None).await?;
 
         // Get the OCI database path and create a connection pool
         let db_path = home_path.join(OCI_DB_FILENAME);

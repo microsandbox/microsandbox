@@ -64,10 +64,6 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply to a group
-        #[arg(short, long)]
-        group: bool,
-
         /// Names of components to add
         #[arg(required = true)]
         names: Vec<String>,
@@ -148,10 +144,6 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply to a group
-        #[arg(short, long)]
-        group: bool,
-
         /// Names of components to remove
         #[arg(required = true)]
         names: Vec<String>,
@@ -172,16 +164,12 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply to a group
-        #[arg(short, long)]
-        group: bool,
-
         /// Path to the sandbox file or the project directory
         #[arg(short, long)]
         file: Option<PathBuf>,
     },
 
-    /// Show logs of a build, sandbox, or group
+    /// Show logs of a build or sandbox
     #[command(name = "log")]
     Log {
         /// Whether command should apply to a sandbox
@@ -192,10 +180,6 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply to a group
-        #[arg(short, long)]
-        group: bool,
-
         /// Name of the component
         #[arg(required = true)]
         name: String,
@@ -205,7 +189,7 @@ pub enum MicrosandboxSubcommand {
         file: Option<PathBuf>,
 
         /// Follow the logs
-        #[arg(short, long)]
+        #[arg(short = 'F', long)]
         follow: bool,
 
         /// Number of lines to show from the end
@@ -224,16 +208,12 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply to a group
-        #[arg(short, long)]
-        group: bool,
-
         /// Names of components to show
         #[arg(required = true)]
         names: Vec<String>,
 
         /// Maximum depth level
-        #[arg(short = 'L')]
+        #[arg(short = 'L', long)]
         level: Option<usize>,
     },
 
@@ -427,10 +407,6 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply to a group
-        #[arg(short, long)]
-        group: bool,
-
         /// Names of components to start. If omitted, starts all sandboxes defined in the configuration.
         names: Vec<String>,
 
@@ -454,10 +430,6 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         build: bool,
 
-        /// Whether command should apply to a group
-        #[arg(short, long)]
-        group: bool,
-
         /// Names of components to stop. If omitted, stops all sandboxes defined in the configuration.
         names: Vec<String>,
 
@@ -476,10 +448,6 @@ pub enum MicrosandboxSubcommand {
         /// Whether command should apply to a build sandbox
         #[arg(short, long)]
         build: bool,
-
-        /// Whether command should apply to a group
-        #[arg(short, long)]
-        group: bool,
 
         /// Names of components to show status for
         #[arg()]
@@ -521,17 +489,13 @@ pub enum MicrosandboxSubcommand {
     /// Build images
     #[command(name = "build")]
     Build {
-        /// Build from build definition
-        #[arg(short, long)]
-        build: bool,
-
         /// Build from sandbox
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Build from group
+        /// Build from build definition
         #[arg(short, long)]
-        group: bool,
+        build: bool,
 
         /// Names of components to build
         #[arg(required = true)]
@@ -549,11 +513,7 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         image: bool,
 
-        /// Whether command should apply to an image group
-        #[arg(short = 'G', long)]
-        image_group: bool,
-
-        /// Name of the image or image group
+        /// Name of the image
         #[arg(required = true)]
         name: Reference,
 
@@ -573,11 +533,7 @@ pub enum MicrosandboxSubcommand {
         #[arg(short, long)]
         image: bool,
 
-        /// Whether command should apply to an image group
-        #[arg(short = 'G', long)]
-        image_group: bool,
-
-        /// Name of the image or image group
+        /// Name of the image
         #[arg(required = true)]
         name: String,
     },

@@ -9,7 +9,7 @@ use crate::{
     MicrosandboxResult,
 };
 
-use super::{Build, Group, Meta, Microsandbox, Module, NetworkScope, Sandbox, SandboxGroup};
+use super::{Build, Meta, Microsandbox, Module, NetworkScope, Sandbox};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -22,14 +22,12 @@ use super::{Build, Group, Meta, Microsandbox, Module, NetworkScope, Sandbox, San
 /// - `modules`: The modules to import
 /// - `builds`: The builds to run
 /// - `sandboxes`: The sandboxes to run
-/// - `groups`: The groups to run the sandboxes in
 #[derive(Default)]
 pub struct MicrosandboxBuilder {
     meta: Option<Meta>,
     modules: HashMap<String, Module>,
     builds: HashMap<String, Build>,
     sandboxes: HashMap<String, Sandbox>,
-    groups: HashMap<String, Group>,
 }
 
 /// Builder for Sandbox configuration
@@ -47,7 +45,6 @@ pub struct MicrosandboxBuilder {
 /// - `ports`: The ports to expose
 /// - `envs`: The environment variables to use
 /// - `env_file`: The environment file to use
-/// - `groups`: The groups to run the sandbox in
 /// - `depends_on`: The sandboxes to depend on
 /// - `workdir`: The working directory to use
 /// - `shell`: The shell to use
@@ -66,7 +63,6 @@ pub struct SandboxBuilder<I> {
     ports: Vec<PortPair>,
     envs: Vec<EnvPair>,
     env_file: Option<Utf8UnixPathBuf>,
-    groups: HashMap<String, SandboxGroup>,
     depends_on: Vec<String>,
     workdir: Option<Utf8UnixPathBuf>,
     shell: Option<String>,
@@ -106,12 +102,6 @@ impl MicrosandboxBuilder {
         self
     }
 
-    /// Sets the groups to run the sandboxes in
-    pub fn groups(mut self, groups: impl IntoIterator<Item = (String, Group)>) -> Self {
-        self.groups = groups.into_iter().collect();
-        self
-    }
-
     /// Builds the Microsandbox configuration with validation
     pub fn build(self) -> MicrosandboxResult<Microsandbox> {
         let microsandbox = self.build_unchecked();
@@ -126,7 +116,6 @@ impl MicrosandboxBuilder {
             modules: self.modules,
             builds: self.builds,
             sandboxes: self.sandboxes,
-            groups: self.groups,
         }
     }
 }
@@ -156,7 +145,6 @@ impl<I> SandboxBuilder<I> {
             ports: self.ports,
             envs: self.envs,
             env_file: self.env_file,
-            groups: self.groups,
             depends_on: self.depends_on,
             workdir: self.workdir,
             shell: self.shell,
@@ -201,15 +189,6 @@ impl<I> SandboxBuilder<I> {
     /// Sets the environment file for the sandbox
     pub fn env_file(mut self, env_file: impl Into<Utf8UnixPathBuf>) -> SandboxBuilder<I> {
         self.env_file = Some(env_file.into());
-        self
-    }
-
-    /// Sets the groups for the sandbox
-    pub fn groups(
-        mut self,
-        groups: impl IntoIterator<Item = (String, SandboxGroup)>,
-    ) -> SandboxBuilder<I> {
-        self.groups = groups.into_iter().collect();
         self
     }
 
@@ -283,7 +262,6 @@ impl SandboxBuilder<ReferenceOrPath> {
             volumes: self.volumes,
             ports: self.ports,
             envs: self.envs,
-            groups: self.groups,
             depends_on: self.depends_on,
             workdir: self.workdir,
             shell: self.shell,
@@ -312,7 +290,6 @@ impl Default for SandboxBuilder<()> {
             ports: Vec::new(),
             envs: Vec::new(),
             env_file: None,
-            groups: HashMap::new(),
             depends_on: Vec::new(),
             workdir: None,
             shell: Some(DEFAULT_SHELL.to_string()),

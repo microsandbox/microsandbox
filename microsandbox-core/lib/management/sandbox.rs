@@ -544,7 +544,7 @@ async fn setup_image_rootfs(
 ) -> MicrosandboxResult<Rootfs> {
     // Pull the image from the registry
     tracing::info!("pulling image: {}", image);
-    image::pull(image.clone(), true, false, None).await?;
+    image::pull(image.clone(), true, None).await?;
 
     // Get the microsandbox home path and database path
     let microsandbox_home_path = env::get_microsandbox_home_path();

@@ -938,10 +938,6 @@ mod tests {
             "sandboxes table not found"
         );
         assert!(
-            table_names.contains(&"groups".to_string()),
-            "groups table not found"
-        );
-        assert!(
             table_names.contains(&"sandbox_metrics".to_string()),
             "sandbox_metrics table not found"
         );

@@ -201,7 +201,7 @@ export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 # Set up variables
 BUILD_DIR="$ORIGINAL_DIR/build"
 LIBKRUNFW_REPO="https://github.com/microsandbox/libkrunfw.git"
-LIBKRUN_REPO="https://github.com/microsandbox/libkrun.git"
+LIBKRUN_REPO="/Users/steveakinyemi/Desktop/Personal/libkrun"
 NO_CLEANUP=false
 FORCE_BUILD=false
 
@@ -456,7 +456,7 @@ fi
 check_existing_lib "libkrun"
 if [ $? -eq 0 ]; then
     create_build_directory
-    clone_repo "$LIBKRUN_REPO" "libkrun" --single-branch --branch develop
+    clone_repo "$LIBKRUN_REPO" "libkrun" --single-branch --branch appcypher/fs-linux-override-xattr
     build_libkrun
 fi
 

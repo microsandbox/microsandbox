@@ -40,7 +40,6 @@ async fn main() -> MicrosandboxCliResult<()> {
         Some(MicrosandboxSubcommand::Add {
             sandbox,
             build,
-            group,
             names,
             image,
             memory,
@@ -61,7 +60,7 @@ async fn main() -> MicrosandboxCliResult<()> {
         }) => {
             let (path, config) = handlers::parse_file_path(file);
             handlers::add_subcommand(
-                sandbox, build, group, names, image, memory, cpus, volumes, ports, envs, env_file,
+                sandbox, build, names, image, memory, cpus, volumes, ports, envs, env_file,
                 depends_on, workdir, shell, scripts, start, imports, exports, scope, path, config,
             )
             .await?;
@@ -69,27 +68,24 @@ async fn main() -> MicrosandboxCliResult<()> {
         Some(MicrosandboxSubcommand::Remove {
             sandbox,
             build,
-            group,
             names,
             file,
         }) => {
-            handlers::remove_subcommand(sandbox, build, group, names, file).await?;
+            handlers::remove_subcommand(sandbox, build, names, file).await?;
         }
         Some(MicrosandboxSubcommand::List {
             sandbox,
             build,
-            group,
             file,
         }) => {
-            handlers::list_subcommand(sandbox, build, group, file).await?;
+            handlers::list_subcommand(sandbox, build, file).await?;
         }
         Some(MicrosandboxSubcommand::Pull {
             image,
-            image_group,
             name,
             layer_path,
         }) => {
-            image::pull(name, image, image_group, layer_path).await?;
+            image::pull(name, image, layer_path).await?;
         }
         Some(MicrosandboxSubcommand::Run {
             sandbox,
@@ -168,41 +164,37 @@ async fn main() -> MicrosandboxCliResult<()> {
         Some(MicrosandboxSubcommand::Up {
             sandbox,
             build,
-            group,
             names,
             file,
             detach,
         }) => {
-            handlers::up_subcommand(sandbox, build, group, names, file, detach).await?;
+            handlers::up_subcommand(sandbox, build, names, file, detach).await?;
         }
         Some(MicrosandboxSubcommand::Down {
             sandbox,
             build,
-            group,
             names,
             file,
         }) => {
-            handlers::down_subcommand(sandbox, build, group, names, file).await?;
+            handlers::down_subcommand(sandbox, build, names, file).await?;
         }
         Some(MicrosandboxSubcommand::Status {
             sandbox,
             build,
-            group,
             names,
             file,
         }) => {
-            handlers::status_subcommand(sandbox, build, group, names, file).await?;
+            handlers::status_subcommand(sandbox, build, names, file).await?;
         }
         Some(MicrosandboxSubcommand::Log {
             sandbox,
             build,
-            group,
             name,
             file,
             follow,
             tail,
         }) => {
-            handlers::log_subcommand(sandbox, build, group, name, file, follow, tail).await?;
+            handlers::log_subcommand(sandbox, build, name, file, follow, tail).await?;
         }
         Some(MicrosandboxSubcommand::Clean {
             sandbox,
@@ -274,12 +266,8 @@ async fn main() -> MicrosandboxCliResult<()> {
         Some(MicrosandboxSubcommand::Login) => {
             handlers::login_subcommand().await?;
         }
-        Some(MicrosandboxSubcommand::Push {
-            image,
-            image_group,
-            name,
-        }) => {
-            handlers::push_subcommand(image, image_group, name).await?;
+        Some(MicrosandboxSubcommand::Push { image, name }) => {
+            handlers::push_subcommand(image, name).await?;
         }
         Some(_) => (), // TODO: implement other subcommands
         None => {
