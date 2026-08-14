@@ -3883,6 +3883,7 @@ name = "microsandbox-agentd"
 version = "0.6.15"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "chrono",
  "ciborium",
  "libc",
@@ -4124,6 +4125,7 @@ dependencies = [
 name = "microsandbox-protocol"
 version = "0.6.15"
 dependencies = [
+ "bytes",
  "chrono",
  "ciborium",
  "microsandbox-types",
