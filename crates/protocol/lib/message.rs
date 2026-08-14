@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 7;
+pub const PROTOCOL_VERSION: u8 = 8;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -27,8 +27,11 @@ pub const FLAG_SESSION_START: u8 = 0b0000_0010;
 /// drain escalation (SIGTERM → SIGKILL) if the guest doesn't exit voluntarily.
 pub const FLAG_SHUTDOWN: u8 = 0b0000_0100;
 
+/// Frame flag: the body is a generation-8 raw bulk record rather than CBOR.
+pub const FLAG_BULK: u8 = 0b0000_1000;
+
 /// Size of the frame header fields that sit between the length prefix and the
-/// CBOR payload: `[id: u32 BE][flags: u8]` = 5 bytes.
+/// control or raw body: `[id: u32 BE][flags: u8]` = 5 bytes.
 pub const FRAME_HEADER_SIZE: usize = 5;
 
 //--------------------------------------------------------------------------------------------------
@@ -137,6 +140,22 @@ pub enum MessageType {
     /// Peer reports a recoverable protocol-level error.
     #[strum(serialize = "core.error")]
     CoreError,
+
+    /// Guest accepts the raw-bulk offer on an opening operation.
+    #[strum(serialize = "core.bulk.accepted")]
+    BulkAccepted,
+
+    /// Receiver grants an absolute send limit for one bulk flow.
+    #[strum(serialize = "core.bulk.credit")]
+    BulkCredit,
+
+    /// Sender declares the exact final offset of one bulk flow.
+    #[strum(serialize = "core.bulk.finish")]
+    BulkFinish,
+
+    /// Peer asks to stop an entire bulk correlation.
+    #[strum(serialize = "core.bulk.cancel")]
+    BulkCancel,
 
     /// Host requests command execution.
     #[strum(serialize = "core.exec.request")]
@@ -329,6 +348,7 @@ impl MessageType {
             Self::CoreError => 5,
             Self::Ping | Self::Pong | Self::Touch | Self::Touched => 6,
             Self::Bootstrap => 7,
+            Self::BulkAccepted | Self::BulkCredit | Self::BulkFinish | Self::BulkCancel => 8,
             Self::TcpConnect
             | Self::TcpConnected
             | Self::TcpData
@@ -416,6 +436,10 @@ mod tests {
             (MessageType::Touch, "core.touch"),
             (MessageType::Touched, "core.touched"),
             (MessageType::CoreError, "core.error"),
+            (MessageType::BulkAccepted, "core.bulk.accepted"),
+            (MessageType::BulkCredit, "core.bulk.credit"),
+            (MessageType::BulkFinish, "core.bulk.finish"),
+            (MessageType::BulkCancel, "core.bulk.cancel"),
             (MessageType::ExecRequest, "core.exec.request"),
             (MessageType::ExecStarted, "core.exec.started"),
             (MessageType::ExecStdin, "core.exec.stdin"),
@@ -459,6 +483,10 @@ mod tests {
             MessageType::Touch,
             MessageType::Touched,
             MessageType::CoreError,
+            MessageType::BulkAccepted,
+            MessageType::BulkCredit,
+            MessageType::BulkFinish,
+            MessageType::BulkCancel,
             MessageType::ExecRequest,
             MessageType::ExecStarted,
             MessageType::ExecStdin,
@@ -529,6 +557,10 @@ mod tests {
         assert_eq!(MessageType::ClockSync.flags(), 0);
         assert_eq!(MessageType::Ping.flags(), 0);
         assert_eq!(MessageType::Touch.flags(), 0);
+        assert_eq!(MessageType::BulkAccepted.flags(), 0);
+        assert_eq!(MessageType::BulkCredit.flags(), 0);
+        assert_eq!(MessageType::BulkFinish.flags(), 0);
+        assert_eq!(MessageType::BulkCancel.flags(), 0);
         assert_eq!(MessageType::ExecStarted.flags(), 0);
         assert_eq!(MessageType::ExecStdin.flags(), 0);
         assert_eq!(MessageType::ExecStdout.flags(), 0);
@@ -593,7 +625,11 @@ mod tests {
         assert!(MessageType::Ping.is_available_at(PROTOCOL_VERSION));
         // Bootstrap is internal to generation-7 host/agent boot.
         assert!(!MessageType::Bootstrap.is_available_at(6));
-        assert!(MessageType::Bootstrap.is_available_at(PROTOCOL_VERSION));
+        assert!(MessageType::Bootstrap.is_available_at(7));
+        // Raw bulk controls are generation-8 only. A bootstrap-capable
+        // generation-7 peer must remain on the framed compatibility path.
+        assert!(!MessageType::BulkAccepted.is_available_at(7));
+        assert!(MessageType::BulkAccepted.is_available_at(8));
     }
 
     #[test]
@@ -642,6 +678,14 @@ mod tests {
         }
 
         assert_eq!(MessageType::Bootstrap.min_protocol_version(), 7);
+        for mt in [
+            MessageType::BulkAccepted,
+            MessageType::BulkCredit,
+            MessageType::BulkFinish,
+            MessageType::BulkCancel,
+        ] {
+            assert_eq!(mt.min_protocol_version(), 8, "{mt:?} should require gen 8");
+        }
 
         // Every current type must be sendable to a current peer.
         assert!(MessageType::FsRequest.min_protocol_version() <= PROTOCOL_VERSION);
