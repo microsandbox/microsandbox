@@ -380,6 +380,9 @@ pub async fn run(
                 .as_ref()
                 .map(|port| BulkTransportReady::dual_port_v1(port.connection_id)),
             relay_lease: Some(RelayLeaseReady::range_lease_v1()),
+            // Shared arenas are negotiated only on the local SDK-to-runtime hop. Agentd speaks to
+            // the runtime over the guest consoles, so the runtime injects this capability later.
+            local_transport: None,
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
