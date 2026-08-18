@@ -78,7 +78,7 @@ const _: () = assert!(
 /// Virtio-console port name for the agent channel.
 pub const AGENT_PORT_NAME: &str = "agent";
 
-/// Virtio-console port name for the optional generation-7 bulk lane.
+/// Virtio-console port name for the optional generation-8 bulk lane.
 pub const AGENT_BULK_PORT_NAME: &str = "agent-bulk";
 
 /// Internal kernel command-line selector for the first dual-port transport profile.

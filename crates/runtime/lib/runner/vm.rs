@@ -73,10 +73,10 @@ const EXIT_REASON_STARTUP_COMMAND_FAILED: u8 = 7;
 /// Bounds how long an existing VMM can retain an obsolete fair share after membership changes.
 const WRITEBACK_PRESSURE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Virtqueue size retained for the latency-sensitive control port.
+/// Virtqueue size retained when the primary agent port carries control traffic only.
 const AGENT_CONTROL_QUEUE_SIZE: u16 = 32;
 
-/// Initial experimental virtqueue size for the dedicated bulk port.
+/// Virtqueue size for every physical port that carries generation-8 bulk records.
 const AGENT_BULK_QUEUE_SIZE: u16 = 256;
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -85,8 +85,11 @@ const AGENT_BULK_QUEUE_SIZE: u16 = 256;
 /// Internal host/guest topology for the agent data plane.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTransportProfile {
-    /// Control messages and generation-7 raw records share the `agent` port.
+    /// Offer the dedicated bulk port and retain combined mode when agentd does not select it.
     #[default]
+    Auto,
+
+    /// Control messages and generation-8 raw records share the `agent` port.
     Combined,
 
     /// Raw records use a separately bound `agent-bulk` port.
@@ -105,7 +108,7 @@ struct AgentConsoleBackends {
 /// agent relay, lifecycle policies). Passed to [`enter()`].
 #[derive(Debug)]
 pub struct Config {
-    /// Unstable per-boot agent transport selection.
+    /// Internal per-boot agent transport policy.
     pub agent_transport: AgentTransportProfile,
 
     /// Name of the sandbox.
@@ -412,6 +415,16 @@ type VmBuildOutput = (
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl AgentTransportProfile {
+    /// Whether this boot should provision the optional bulk port and advertise its kernel hint.
+    ///
+    /// Provisioning is safe for old agentd builds: an agent that does not recognize the hint
+    /// simply leaves the port unbound, and the relay closes it before selecting combined mode.
+    fn offers_dual_port(self) -> bool {
+        matches!(self, Self::Auto | Self::DualPortV1)
+    }
+}
+
 impl BindIdentityMapRegistration {
     fn new() -> Self {
         Self {
@@ -521,7 +534,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
     // Each physical port gets an independent byte budget and wake domain.
     let shared = Arc::new(ConsoleSharedState::new());
-    let bulk_shared = (config.agent_transport == AgentTransportProfile::DualPortV1)
+    let bulk_shared = config
+        .agent_transport
+        .offers_dual_port()
         .then(|| Arc::new(ConsoleSharedState::new()));
     let console_backends = AgentConsoleBackends {
         control: AgentConsoleBackend::new(Arc::clone(&shared)),
@@ -1405,6 +1420,15 @@ fn is_writeback_limited_disk(format: msb_krun::DiskImageFormat, read_only: bool)
     !read_only && matches!(format, msb_krun::DiskImageFormat::Raw)
 }
 
+/// Select the primary agent-port depth from the traffic assigned to it by this VM topology.
+fn agent_primary_queue_size(has_dedicated_bulk_port: bool) -> u16 {
+    if has_dedicated_bulk_port {
+        AGENT_CONTROL_QUEUE_SIZE
+    } else {
+        AGENT_BULK_QUEUE_SIZE
+    }
+}
+
 /// Build the `Vm` from config with an exit observer for cleanup.
 struct HostPlacement<'a> {
     vcpu_targets: Option<&'a [crate::cpu::LogicalCpuId]>,
@@ -1425,6 +1449,9 @@ fn build_vm(
         control: console_backend,
         bulk: bulk_console_backend,
     } = console_backends;
+    // In combined mode the primary port is also the bulk data plane and needs the same queue depth
+    // as a dedicated bulk port. Once dual-port is selected it returns to the small control queue.
+    let agent_queue_size = agent_primary_queue_size(bulk_console_backend.is_some());
     let vm = &config.vm;
     let mut bootstrap = vm.bootstrap.clone();
     let balloon_stats_interval = config
@@ -1878,7 +1905,7 @@ fn build_vm(
             let c = c.output(&kernel_log_path).custom_with_options(
                 microsandbox_protocol::AGENT_PORT_NAME,
                 Box::new(console_backend),
-                msb_krun::ConsolePortOptions::new().queue_size(AGENT_CONTROL_QUEUE_SIZE),
+                msb_krun::ConsolePortOptions::new().queue_size(agent_queue_size),
             );
             match bulk_console_backend {
                 Some(backend) => c.custom_with_options(
@@ -1894,7 +1921,9 @@ fn build_vm(
     {
         let _ = (console_backend, bulk_console_backend);
         let agent_pipe = agent_console_pipe_name(config.sandbox_id);
-        let bulk_pipe = (config.agent_transport == AgentTransportProfile::DualPortV1)
+        let bulk_pipe = config
+            .agent_transport
+            .offers_dual_port()
             .then(|| agent_bulk_console_pipe_name(config.sandbox_id));
         builder = builder.console(|c| {
             // Windows WHP/x64 currently uses virtio-console for reliable
@@ -1906,7 +1935,7 @@ fn build_vm(
                 .named_pipe_with_options(
                     microsandbox_protocol::AGENT_PORT_NAME,
                     agent_pipe,
-                    msb_krun::ConsolePortOptions::new().queue_size(AGENT_CONTROL_QUEUE_SIZE),
+                    msb_krun::ConsolePortOptions::new().queue_size(agent_queue_size),
                 );
             match bulk_pipe {
                 Some(pipe) => c.named_pipe_with_options(
@@ -2790,7 +2819,7 @@ fn agent_kernel_cmdline(
     transport: AgentTransportProfile,
 ) -> String {
     let mut cmdline = thp_kernel_cmdline(thp);
-    if transport == AgentTransportProfile::DualPortV1 {
+    if transport.offers_dual_port() {
         cmdline.push(' ');
         cmdline.push_str(microsandbox_protocol::AGENT_TRANSPORT_DUAL_PORT_CMDLINE);
     }
@@ -2805,17 +2834,18 @@ fn agent_kernel_cmdline(
 mod tests {
     #[cfg(feature = "net")]
     use super::to_krun_network_rate_limiters;
+    use super::{
+        AGENT_BULK_QUEUE_SIZE, AGENT_CONTROL_QUEUE_SIZE, AgentTransportProfile, ConsoleSharedState,
+        HostPermissions, StatVirtualization, agent_kernel_cmdline, agent_primary_queue_size,
+        append_block_root_env, bind_rootfs_backend, encode_bootstrap_frame,
+        guest_shutdown_flush_timeout, guest_shutdown_flush_timeout_with_override, parse_mount_spec,
+        prepend_scripts_path, request_guest_shutdown, request_guest_shutdown_with_timeout,
+        thp_kernel_cmdline, validate_disk_format,
+    };
     #[cfg(unix)]
     use super::{
         BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
         bind_identity_map_for_mount, read_parent_watchdog_signal,
-    };
-    use super::{
-        ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
-        bind_rootfs_backend, encode_bootstrap_frame, guest_shutdown_flush_timeout,
-        guest_shutdown_flush_timeout_with_override, parse_mount_spec, prepend_scripts_path,
-        request_guest_shutdown, request_guest_shutdown_with_timeout, thp_kernel_cmdline,
-        validate_disk_format,
     };
 
     use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
@@ -2909,6 +2939,30 @@ mod tests {
             thp_kernel_cmdline(TransparentHugePagePolicy::Never),
             "transparent_hugepage=never"
         );
+    }
+
+    #[test]
+    fn agent_transport_auto_offers_dual_port_with_combined_escape_hatch() {
+        use microsandbox_types::TransparentHugePagePolicy;
+
+        assert_eq!(
+            AgentTransportProfile::default(),
+            AgentTransportProfile::Auto
+        );
+        assert!(AgentTransportProfile::Auto.offers_dual_port());
+        assert!(AgentTransportProfile::DualPortV1.offers_dual_port());
+        assert!(!AgentTransportProfile::Combined.offers_dual_port());
+
+        let auto = agent_kernel_cmdline(
+            TransparentHugePagePolicy::Madvise,
+            AgentTransportProfile::Auto,
+        );
+        let forced_combined = agent_kernel_cmdline(
+            TransparentHugePagePolicy::Madvise,
+            AgentTransportProfile::Combined,
+        );
+        assert!(auto.contains(microsandbox_protocol::AGENT_TRANSPORT_DUAL_PORT_CMDLINE));
+        assert!(!forced_combined.contains("microsandbox.agent_transport="));
     }
 
     #[test]
@@ -3157,7 +3211,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bootstrap_frame_is_a_generation_seven_control_message() {
+    fn test_bootstrap_frame_is_a_current_generation_control_message() {
         let bootstrap = GuestBootstrap {
             default_env: vec![microsandbox_protocol::bootstrap::BootstrapEnvVar {
                 key: "APP_CONFIG".to_string(),
@@ -3175,6 +3229,12 @@ mod tests {
         assert_eq!(message.v, microsandbox_protocol::message::PROTOCOL_VERSION);
         assert_eq!(message.payload::<GuestBootstrap>().unwrap(), bootstrap);
         assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn test_primary_agent_queue_tracks_whether_it_carries_bulk() {
+        assert_eq!(agent_primary_queue_size(false), AGENT_BULK_QUEUE_SIZE);
+        assert_eq!(agent_primary_queue_size(true), AGENT_CONTROL_QUEUE_SIZE);
     }
 
     #[test]

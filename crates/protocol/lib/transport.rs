@@ -71,7 +71,7 @@ pub struct IncarnatedBulkFrame {
     /// SDK client that owned the correlation range when this record was admitted.
     pub incarnation: ClientIncarnation,
 
-    /// Exact generation-7 frame bytes after removing the transport prefix.
+    /// Exact generation-8 frame bytes after removing the transport prefix.
     pub frame: Bytes,
 
     /// Validated raw record whose payload shares the frame allocation.
@@ -211,9 +211,9 @@ pub fn decode_bulk_ack(bytes: &[u8], expected_id: [u8; 16]) -> ProtocolResult<()
     Ok(())
 }
 
-/// Decode one incarnation-prefixed generation-7 record from a stream buffer.
+/// Decode one incarnation-prefixed generation-8 record from a stream buffer.
 ///
-/// The 128-bit incarnation sits outside the generation-7 length prefix. The returned `frame`
+/// The 128-bit incarnation sits outside the generation-8 length prefix. The returned `frame`
 /// can therefore be forwarded to an SDK byte-for-byte after the prefix is removed.
 pub fn try_decode_incarnated_bulk_from_bytes(
     bytes: &mut BytesMut,
