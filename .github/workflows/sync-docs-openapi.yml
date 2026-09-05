@@ -1,6 +1,6 @@
 name: Sync docs OpenAPI
 
-# Refresh the staging API reference without making unrelated pull requests
+# Refresh the production API reference without making unrelated pull requests
 # depend on the live API. Scheduled workflows run from the default branch,
 # while the generated docs are proposed against the Mintlify deploy branch.
 
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   sync:
-    name: Refresh staging API reference
+    name: Refresh production API reference
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -28,23 +28,23 @@ jobs:
           ref: mintlify
 
       - name: Generate reference
-        run: python3 scripts/sync-docs-openapi.py --environment staging --audience all
+        run: python3 scripts/sync-docs-openapi.py --environment production --audience all
 
       - name: Validate reference
         run: |
-          python3 scripts/sync-docs-openapi.py --environment staging --audience all --check
+          python3 scripts/sync-docs-openapi.py --environment production --audience all --check
           jq empty \
-            docs/api-reference/openapi.staging.json \
-            docs/api-reference/openapi.personal.staging.json
+            docs/api-reference/openapi.json \
+            docs/api-reference/openapi.personal.json
 
       - name: Open update PR
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          title: "docs(api): refresh staging reference"
+          title: "docs(api): refresh production reference"
           body: |
             ## TL;DR
 
-            Refreshes the checked-in API reference from the staging OpenAPI contract.
+            Refreshes the checked-in API reference from the production OpenAPI contract.
 
             ## Description
 
@@ -54,12 +54,12 @@ jobs:
 
             ## Test Plan
 
-            - `python3 scripts/sync-docs-openapi.py --environment staging --audience all --check`
+            - `python3 scripts/sync-docs-openapi.py --environment production --audience all --check`
             - validate both generated files with `jq`
           branch: automation/sync-docs-openapi
           base: mintlify
-          commit-message: "docs(api): refresh staging reference"
+          commit-message: "docs(api): refresh production reference"
           add-paths: |
-            docs/api-reference/openapi.staging.json
-            docs/api-reference/openapi.personal.staging.json
+            docs/api-reference/openapi.json
+            docs/api-reference/openapi.personal.json
           delete-branch: true
