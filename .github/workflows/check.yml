@@ -814,7 +814,7 @@ jobs:
         working-directory: sdk/node-ts
         run: |
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false
+          npm ci
           npm run build:ci
 
       - name: Build MCP server
