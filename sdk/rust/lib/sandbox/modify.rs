@@ -126,54 +126,24 @@ impl SandboxModificationBuilder {
         self
     }
 
-    /// Set the desired effective guest memory.
+    /// Set the desired effective guest memory. Accepts a bare `u32` in MiB or a typed size.
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
         self.patch.memory_mib = Some(size.into().as_u32());
         self
     }
 
-    /// Set the desired effective guest memory in MiB.
-    pub fn memory_mib(mut self, memory_mib: u32) -> Self {
-        self.patch.memory_mib = Some(memory_mib);
-        self
-    }
-
-    /// Set the desired boot-time maximum hotpluggable memory.
+    /// Set the boot-time maximum hotpluggable memory. Accepts a bare `u32` in MiB or a typed size.
     pub fn max_memory(mut self, size: impl Into<Mebibytes>) -> Self {
         self.patch.max_memory_mib = Some(size.into().as_u32());
         self
     }
 
-    /// Set the desired boot-time maximum hotpluggable memory in MiB.
-    pub fn max_memory_mib(mut self, max_memory_mib: u32) -> Self {
-        self.patch.max_memory_mib = Some(max_memory_mib);
-        self
-    }
-
-    /// Set the desired root disk size. Managed kind: grow-only (shrinking an
-    /// existing upper risks data loss and is rejected). Tmpfs kind: any
-    /// direction, effective next boot. Disk-image kind: rejected (user-owned).
+    /// Set the desired total root disk size, accepting a bare `u32` in MiB or a typed size.
+    /// Managed and flat roots are grow-only. Tmpfs changes take effect on the next boot;
+    /// user-owned disk images cannot be resized through this API.
     pub fn root_disk_size(mut self, size: impl Into<Mebibytes>) -> Self {
         self.patch.root_disk_size_mib = Some(size.into().as_u32());
         self
-    }
-
-    /// Set the desired root disk size in MiB. See [`root_disk_size`](Self::root_disk_size).
-    pub fn root_disk_size_mib(mut self, size_mib: u32) -> Self {
-        self.patch.root_disk_size_mib = Some(size_mib);
-        self
-    }
-
-    /// Set the desired OCI writable overlay upper size.
-    #[deprecated(since = "0.6.0", note = "use `root_disk_size` instead")]
-    pub fn oci_upper_size(self, size: impl Into<Mebibytes>) -> Self {
-        self.root_disk_size(size)
-    }
-
-    /// Set the desired OCI writable overlay upper size in MiB.
-    #[deprecated(since = "0.6.0", note = "use `root_disk_size_mib` instead")]
-    pub fn oci_upper_size_mib(self, size_mib: u32) -> Self {
-        self.root_disk_size_mib(size_mib)
     }
 
     /// Set an environment variable for future execs.
@@ -2473,6 +2443,32 @@ mod tests {
 
     use super::*;
     use crate::backend::LocalBackend;
+    use crate::size::SizeExt;
+
+    #[tokio::test]
+    async fn size_setters_accept_bare_mib_and_typed_sizes() {
+        let temp = tempdir().unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(
+            LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let plain = SandboxModificationBuilder::new(backend.clone(), "size-api")
+            .memory(1024)
+            .max_memory(8192)
+            .root_disk_size(4096);
+        let typed = SandboxModificationBuilder::new(backend, "size-api")
+            .memory(1.gib())
+            .max_memory(8.gib())
+            .root_disk_size(4.gib());
+        for patch in [&plain.patch, &typed.patch] {
+            assert_eq!(patch.memory_mib, Some(1024));
+            assert_eq!(patch.max_memory_mib, Some(8192));
+            assert_eq!(patch.root_disk_size_mib, Some(4096));
+        }
+    }
 
     #[test]
     #[cfg(unix)]

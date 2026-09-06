@@ -187,14 +187,13 @@ fn apply_resource_args(
         builder = builder.max_cpus(max_cpus);
     }
     if let Some(memory) = &args.memory {
-        builder = builder.memory_mib(ui::parse_size_mib(memory).map_err(anyhow::Error::msg)?);
+        builder = builder.memory(ui::parse_size_mib(memory).map_err(anyhow::Error::msg)?);
     }
     if let Some(max_memory) = &args.max_memory {
-        builder =
-            builder.max_memory_mib(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
+        builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
     }
     if let Some(size) = args.root_disk.as_ref().or(args.oci_upper_size.as_ref()) {
-        builder = builder.root_disk_size_mib(ui::parse_size_mib(size).map_err(anyhow::Error::msg)?);
+        builder = builder.root_disk_size(ui::parse_size_mib(size).map_err(anyhow::Error::msg)?);
     }
     Ok(builder)
 }

@@ -116,7 +116,7 @@ The plan labels each change as `live`, `next start`, `requires restart`, or `uns
 | `labels` | Live | Host-side metadata; no guest process changes |
 | `env`, `workdir` | Future execs | Running processes keep what they already have |
 | `secrets` | Live for rotation | Placeholder changes need a restart |
-| Root disk size | Restart or next start | Managed and flat OCI disks grow only; tmpfs changes on next boot |
+| Root disk size | Live, restart or next start | Managed and flat ext4 roots grow only; tmpfs changes on next boot |
 | Other storage | Create or mount time | Named volumes, mount tmpfs, and user disk images are sized outside `modify` |
 
 ## Dry runs
@@ -126,7 +126,7 @@ Use a dry run to see what would happen before applying the patch:
 <CodeGroup>
 ```rust Rust
 let plan = sb.modify()
-    .max_memory_mib(16 * 1024)
+    .max_memory(16 * 1024)
     .dry_run()
     .await?;
 ```
@@ -158,7 +158,7 @@ By default, `modify` only applies changes that do not require a restart. Use `--
 <CodeGroup>
 ```rust Rust
 sb.modify()
-    .max_memory_mib(16 * 1024)
+    .max_memory(16 * 1024)
     .next_start()
     .apply()
     .await?;
@@ -341,7 +341,7 @@ Resize an OCI sandbox's root disk through `modify`:
 <CodeGroup>
 ```rust Rust
 sb.modify()
-    .root_disk_size_mib(8192)
+    .root_disk_size(8192)
     .apply()
     .await?;
 ```
