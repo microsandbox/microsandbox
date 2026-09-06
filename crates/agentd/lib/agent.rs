@@ -1723,10 +1723,24 @@ mod tests {
     fn bootstrap_rejects_older_protocol_generation() {
         let mut message =
             Message::with_payload(MessageType::Bootstrap, 0, &GuestBootstrap::default()).unwrap();
-        message.v = PROTOCOL_VERSION - 1;
+        let min_version = MessageType::Bootstrap.min_protocol_version();
+        assert!(min_version > 0);
+        message.v = min_version - 1;
 
         let error = decode_bootstrap_message(message).unwrap_err();
         assert!(error.to_string().contains("or newer"));
+    }
+
+    #[test]
+    fn bootstrap_accepts_minimum_supported_protocol_generation() {
+        let mut message =
+            Message::with_payload(MessageType::Bootstrap, 0, &GuestBootstrap::default()).unwrap();
+        message.v = MessageType::Bootstrap.min_protocol_version();
+
+        assert_eq!(
+            decode_bootstrap_message(message).unwrap(),
+            GuestBootstrap::default()
+        );
     }
 
     #[test]
