@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 8;
+pub const PROTOCOL_VERSION: u8 = 9;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -149,6 +149,18 @@ pub enum MessageType {
     /// Guest confirms that agent-managed workload processes may run again.
     #[strum(serialize = "core.workload.thawed")]
     WorkloadThawed,
+
+    /// Host checks mounted root-filesystem growth before changing block capacity.
+    #[strum(serialize = "core.root_disk.prepare")]
+    RootDiskPrepare,
+
+    /// Host requests mounted root-filesystem expansion after block capacity changed.
+    #[strum(serialize = "core.root_disk.grow")]
+    RootDiskGrow,
+
+    /// Guest reports the root filesystem and device capacities.
+    #[strum(serialize = "core.root_disk.state")]
+    RootDiskState,
 
     /// Peer reports a recoverable protocol-level error.
     #[strum(serialize = "core.error")]
@@ -293,6 +305,7 @@ impl MessageType {
             | Self::Touched
             | Self::WorkloadFrozen
             | Self::WorkloadThawed
+            | Self::RootDiskState
             | Self::CoreError
             | Self::ExecExited
             | Self::ExecFailed
@@ -351,6 +364,7 @@ impl MessageType {
             | Self::WorkloadFrozen
             | Self::WorkloadThaw
             | Self::WorkloadThawed => 8,
+            Self::RootDiskPrepare | Self::RootDiskGrow | Self::RootDiskState => 9,
             Self::TcpConnect
             | Self::TcpConnected
             | Self::TcpData

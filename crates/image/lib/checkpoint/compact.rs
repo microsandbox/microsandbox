@@ -42,6 +42,18 @@ pub struct CompactMaterialization {
 
 /// Open a complete, explicitly supplied immutable chain read-only.
 async fn open_chain(layers: &[CompactLayer]) -> io::Result<SharedImage> {
+    open_chain_access(layers, false).await
+}
+
+/// Resolve an owned chain with writes confined to its caller-private staging head.
+pub(crate) async fn open_writable_chain(layers: &[CompactLayer]) -> io::Result<SharedImage> {
+    open_chain_access(layers, true).await
+}
+
+async fn open_chain_access(
+    layers: &[CompactLayer],
+    writable_head: bool,
+) -> io::Result<SharedImage> {
     if layers.is_empty() || layers.iter().skip(1).any(|layer| !layer.qcow2) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -49,12 +61,17 @@ async fn open_chain(layers: &[CompactLayer]) -> io::Result<SharedImage> {
         ));
     }
     let mut backing: Option<SharedImage> = None;
-    for layer in layers {
-        let storage: Box<dyn DynStorage> =
-            Box::new(ImagoFile::try_from(std::fs::File::open(&layer.path)?)?);
+    for (index, layer) in layers.iter().enumerate() {
+        let writable = writable_head && index + 1 == layers.len();
+        let storage: Box<dyn DynStorage> = Box::new(ImagoFile::try_from(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(writable)
+                .open(&layer.path)?,
+        )?);
         backing = Some(if layer.qcow2 {
             let image = Qcow2::<Box<dyn DynStorage>, SharedImage>::builder(storage)
-                .write(false)
+                .write(writable)
                 .backing(backing)
                 .data_file(None)
                 .open(DenyImplicitOpenGate::default())
@@ -69,7 +86,7 @@ async fn open_chain(layers: &[CompactLayer]) -> io::Result<SharedImage> {
         } else {
             Arc::new(FormatAccess::new(
                 Raw::<Box<dyn DynStorage>>::builder(storage)
-                    .write(false)
+                    .write(writable)
                     .open(DenyImplicitOpenGate::default())
                     .await?,
             ))
@@ -153,6 +170,25 @@ pub async fn materialize_compact_prefix(
 /// Read a raw or qcow2 file's declared capacity without opening its backing filename.
 pub async fn compact_layer_capacity(layer: CompactLayer) -> io::Result<u64> {
     Ok(open_chain(&[layer]).await?.size())
+}
+
+/// Read the capacities of a pinned closure from synchronous descriptor-building code.
+/// A separate current-thread executor also permits use by callers already inside Tokio.
+pub fn layer_capacities(layers: Vec<CompactLayer>) -> io::Result<Vec<u64>> {
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let mut capacities = Vec::with_capacity(layers.len());
+                for layer in layers {
+                    capacities.push(compact_layer_capacity(layer).await?);
+                }
+                Ok(capacities)
+            })
+    })
+    .join()
+    .map_err(|_| io::Error::other("layer-capacity worker panicked"))?
 }
 
 //--------------------------------------------------------------------------------------------------

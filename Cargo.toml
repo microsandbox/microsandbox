@@ -205,3 +205,17 @@ parking_lot = "0.12"
 rpassword = "7"
 russh = "0.62.4"
 russh-sftp = "2.3.0"
+
+# Keep this stack reproducible until the block-capacity API is released.
+[patch.crates-io]
+msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }
+msb_krun_arch = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }
+msb_krun_arch_gen = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }
+msb_krun_cpuid = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }
+msb_krun_devices = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }
+msb_krun_hvf = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }
+msb_krun_kernel = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }
+msb_krun_polly = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }
+msb_krun_smbios = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }
+msb_krun_vmm = { git = "https://github.com/superradcompany/libkrun", rev = "ec9f119dcc144f1c011fe62ebd224d660c2191a3" }

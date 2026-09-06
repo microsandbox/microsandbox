@@ -42,6 +42,11 @@ pub const CONTROL_SOCKET_EXTENSION: &str = "control.sock";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Grow the owned root disk and mounted ext4 filesystem without rebooting.
+    RootDiskGrow {
+        /// Target capacity in bytes.
+        size_bytes: u64,
+    },
     /// Explicitly consolidate the oldest sealed root-disk layers.
     DiskCompact {
         /// Oldest layer count including the base; omitted selects all sealed layers.
@@ -140,6 +145,9 @@ pub struct SecretValue(pub String);
 /// The reply to any control request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlResponse {
+    /// Guest-observed root capacities after successful filesystem expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_disk: Option<RootDiskGrowthResult>,
     /// Explicit disk-compaction result or dry-run projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<crate::checkpoint::DiskCompactionResult>,
@@ -189,12 +197,30 @@ pub struct CheckpointControlState {
     pub memory_emitted_bytes: u64,
 }
 
+/// Verified capacity and measured phases of a completed online root growth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootDiskGrowthResult {
+    /// Committed ext4 capacity in bytes.
+    pub filesystem_bytes: u64,
+    /// Guest-observed virtio-block capacity in bytes.
+    pub device_bytes: u64,
+    /// Total runtime operation time, including preflight and persistence.
+    pub total_us: u64,
+    /// VM pause through resume; excludes online filesystem expansion.
+    pub pause_us: u64,
+    /// Guest expansion and verification time after VM resume.
+    pub guest_us: u64,
+}
+
 /// Live-control operations supported by this sandbox process, carried in
 /// [`ControlResponse`]. Runtimes that predate this op only served the socket
 /// when they could resize, so the SDK treats a missing reply as
 /// resize-capable and secrets-incapable.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct ControlCapabilities {
+    /// Host control supports root growth; guest capability is checked before mutation.
+    #[serde(default)]
+    pub root_disk_grow: bool,
     /// Explicit root-disk prefix compaction is supported.
     #[serde(default)]
     pub disk_compact: bool,
@@ -556,6 +582,7 @@ mod tests {
         let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
+                root_disk_grow: true,
                 disk_compact: true,
                 cpu_resize: true,
                 memory_resize: false,

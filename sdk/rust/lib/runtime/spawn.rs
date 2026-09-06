@@ -953,22 +953,21 @@ async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> Micros
         | Some(microsandbox_types::RootDisk::Managed { size_mib }) => *size_mib,
         _ => None,
     };
-    if let Some(chain) = microsandbox_runtime::checkpoint::load_runtime_owned_root_chain(
-        &sandbox_dir.join("runtime"),
-    )
-    .map_err(|error| {
-        MicrosandboxError::Runtime(format!(
-            "cannot inspect the root-disk chain before startup: {error}"
-        ))
-    })? && chain.layers.len() > 1
-    {
-        if desired_mib.is_some_and(|desired| u64::from(desired) * 1024 * 1024 > chain.virtual_size)
-        {
-            return Err(MicrosandboxError::Custom(
-                "cannot grow a checkpoint-backed root disk yet; its sealed raw ancestor must not be resized"
-                    .into(),
-            ));
+    let runtime_dir = sandbox_dir.join("runtime");
+    let handled = tokio::task::spawn_blocking(move || {
+        microsandbox_runtime::checkpoint::recover_stopped_root_growth(&runtime_dir)?;
+        match desired_mib {
+            Some(desired) => microsandbox_runtime::checkpoint::grow_stopped_root(
+                &runtime_dir,
+                u64::from(desired) * 1024 * 1024,
+            ),
+            None => Ok(runtime_dir.join("root-disk.json").exists()),
         }
+    })
+    .await
+    .map_err(|e| MicrosandboxError::Runtime(e.to_string()))?
+    .map_err(MicrosandboxError::Runtime)?;
+    if handled {
         return Ok(());
     }
     match &oci.root_disk {
@@ -4043,7 +4042,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_persisted_checkpoint_chain_refuses_deferred_root_grow() {
+    async fn test_invalid_checkpoint_chain_cannot_mutate_the_sealed_base_during_deferred_grow() {
         let temp = tempdir().unwrap();
         let runtime = temp.path().join("runtime");
         std::fs::create_dir(&runtime).unwrap();
@@ -4091,7 +4090,7 @@ mod tests {
         let error = super::prepare_oci_upper(&config, temp.path())
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("checkpoint-backed root disk"));
+        assert!(!error.to_string().is_empty());
         assert_eq!(std::fs::metadata(base).unwrap().len(), 4096);
     }
 

@@ -91,6 +91,8 @@ struct ExistingSecret {
 /// discovered through the control socket's `capabilities` op.
 #[derive(Debug, Clone, Copy, Default)]
 struct LiveControl {
+    /// Host understands root growth; the runtime separately preflights its guest.
+    root_disk_grow: bool,
     /// CPU and memory resize targets are served.
     resize: bool,
 
@@ -375,6 +377,33 @@ impl SandboxModificationBuilder {
                 }
             }
         }
+        if running_status(status)
+            && !restart_required
+            && self.policy == ModificationPolicy::NoRestart
+            && let Some(target_mib) = root_disk_grow_target(&plan, &self.patch, &config)
+        {
+            let size_bytes = u64::from(target_mib) * 1024 * 1024;
+            let request = serde_json::to_string(
+                &microsandbox_runtime::control::ControlRequest::RootDiskGrow { size_bytes },
+            )? + "\n";
+            let response = control_request(&self.name, request).await?;
+            let observed = response.root_disk.ok_or_else(|| {
+                crate::MicrosandboxError::Runtime("root growth reply missing capacity".into())
+            })?;
+            if observed.filesystem_bytes != size_bytes || observed.device_bytes < size_bytes {
+                return Err(crate::MicrosandboxError::Runtime(
+                    "root growth did not confirm usable capacity".into(),
+                ));
+            }
+            if let Some(active) = active.as_mut() {
+                let disk_patch = SandboxModificationPatch {
+                    root_disk_size_mib: Some(target_mib),
+                    ..Default::default()
+                };
+                apply_patch_to_config(active, &disk_patch);
+                persist_active_config(&self.backend, &handle, active).await?;
+            }
+        }
         // Grow the real upper.ext4 before persisting the new desired size:
         // the persisted value may only ever claim capacity the file actually
         // has. A running sandbox under `--next-start` keeps its mounted upper
@@ -481,6 +510,23 @@ fn build_plan(
         &mut warnings,
     );
     push_root_disk_size_change(status, config, &patch, policy, &mut changes);
+    if live.root_disk_grow
+        && running_status(status)
+        && policy == ModificationPolicy::NoRestart
+        && matches!(
+            root_disk_size_state(config),
+            Some(RootDiskSizeState::Managed { .. })
+        )
+    {
+        for change in &mut changes {
+            if let PlannedChange::Config(change) = change
+                && change.field == ROOT_DISK_FIELD
+            {
+                change.disposition = ModificationDisposition::Live;
+                change.reason = None;
+            }
+        }
+    }
     push_spec_changes(status, config, &patch, policy, &mut changes, &mut warnings);
     push_secret_changes(
         status,
@@ -578,7 +624,25 @@ async fn grow_root_disk_now(
         )
     })?;
     let sandbox_dir = local_backend.sandboxes_dir().join(name);
-    refuse_checkpoint_backed_root_grow(&sandbox_dir)?;
+    let runtime_dir = sandbox_dir.join("runtime");
+    let handled = tokio::task::spawn_blocking(move || {
+        microsandbox_runtime::checkpoint::grow_stopped_root(
+            &runtime_dir,
+            u64::from(target_mib) * 1024 * 1024,
+        )
+    })
+    .await
+    .map_err(|e| crate::MicrosandboxError::Runtime(e.to_string()))?
+    .map_err(crate::MicrosandboxError::Runtime)?;
+    if handled {
+        return Ok(());
+    }
+    if !config.snapshot_upper_layers.is_empty() {
+        return Err(crate::MicrosandboxError::Runtime(
+            "start this restored sandbox once to initialize its owned root chain before resizing"
+                .into(),
+        ));
+    }
     if matches!(
         &config.spec.image,
         RootfsSource::Oci(oci) if matches!(&oci.root_disk, Some(RootDisk::Flat { .. }))
@@ -590,29 +654,6 @@ async fn grow_root_disk_now(
         .await;
     }
     super::upper::grow_upper_to_mib(sandbox_dir.join("upper.ext4"), target_mib).await
-}
-
-/// Refuse the legacy raw-file grow path once checkpoint rollover has installed a qcow2 head.
-///
-/// A one-layer journal still names the ordinary mutable raw disk and is safe to grow in place.
-/// With two or more layers, however, the raw file is a sealed ancestor and only a future
-/// chain-aware resize may extend the active qcow2 head and filesystem.
-fn refuse_checkpoint_backed_root_grow(sandbox_dir: &std::path::Path) -> MicrosandboxResult<()> {
-    let chain = microsandbox_runtime::checkpoint::load_runtime_owned_root_chain(
-        &sandbox_dir.join("runtime"),
-    )
-    .map_err(|error| {
-        crate::MicrosandboxError::Runtime(format!(
-            "cannot inspect the root-disk chain before resize: {error}"
-        ))
-    })?;
-    if chain.is_some_and(|chain| chain.layers.len() > 1) {
-        return Err(crate::MicrosandboxError::Custom(
-            "cannot grow a checkpoint-backed root disk yet; its sealed raw ancestor must not be resized"
-                .into(),
-        ));
-    }
-    Ok(())
 }
 
 /// Path of the sandbox's host-side runtime control socket.
@@ -658,12 +699,14 @@ async fn live_control(name: &str, status: SandboxStatus) -> LiveControl {
     }
     match control_capabilities(name).await {
         Ok(caps) => LiveControl {
+            root_disk_grow: caps.root_disk_grow,
             resize: caps.cpu_resize || caps.memory_resize,
             secrets: caps.secrets_update,
         },
         // Runtimes that predate the capabilities op served the socket only
         // when they could resize; live secret ops did not exist yet.
         Err(_) => LiveControl {
+            root_disk_grow: false,
             resize: true,
             secrets: false,
         },
@@ -2638,6 +2681,7 @@ mod tests {
             &desired,
             Some(&active),
             LiveControl {
+                root_disk_grow: false,
                 resize: true,
                 secrets: false,
             },
@@ -2675,6 +2719,7 @@ mod tests {
                 &desired,
                 Some(&active),
                 LiveControl {
+                    root_disk_grow: false,
                     resize: live_memory_supported,
                     secrets: false,
                 },
@@ -2709,6 +2754,7 @@ mod tests {
             &config(2, 1024),
             Some(&active),
             LiveControl {
+                root_disk_grow: false,
                 resize: true,
                 secrets: false,
             },
@@ -2938,7 +2984,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_backed_root_grow_refuses_to_mutate_the_sealed_base() {
+    fn invalid_checkpoint_backed_root_grow_does_not_mutate_the_sealed_base() {
         let sandbox = tempdir().unwrap();
         let runtime = sandbox.path().join("runtime");
         std::fs::create_dir(&runtime).unwrap();
@@ -2973,8 +3019,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = refuse_checkpoint_backed_root_grow(sandbox.path()).unwrap_err();
-        assert!(error.to_string().contains("checkpoint-backed root disk"));
+        assert!(microsandbox_runtime::checkpoint::grow_stopped_root(&runtime, 8192).is_err());
         assert_eq!(
             std::fs::metadata(sandbox.path().join("rootfs.raw"))
                 .unwrap()
@@ -2984,19 +3029,20 @@ mod tests {
     }
 
     #[test]
-    fn running_upper_grow_is_restart_backed_never_live() {
+    fn old_runtime_upper_grow_requires_explicit_restart() {
         let patch = SandboxModificationPatch {
             root_disk_size_mib: Some(8192),
             ..SandboxModificationPatch::default()
         };
 
-        // Even a resize-capable runtime cannot grow the mounted upper live.
+        // CPU/memory resize capability alone does not advertise root growth.
         let plan = build_plan(
             "api".to_string(),
             SandboxStatus::Running,
             &oci_config_with_upper(4096),
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: true,
                 secrets: true,
             },
@@ -3027,6 +3073,47 @@ mod tests {
         );
         assert!(validate_apply_supported(&restart_plan).is_ok());
         assert!(plan_requires_restart(&restart_plan));
+    }
+
+    #[test]
+    fn owned_root_growth_uses_live_capability_but_respects_explicit_policies() {
+        for root in [RootDisk::managed(512), RootDisk::flat(512)] {
+            let config = oci_config_with_root_disk(root);
+            for (policy, expected) in [
+                (ModificationPolicy::NoRestart, ModificationDisposition::Live),
+                (
+                    ModificationPolicy::NextStart,
+                    ModificationDisposition::NextStart,
+                ),
+                (
+                    ModificationPolicy::Restart,
+                    ModificationDisposition::RequiresRestart,
+                ),
+            ] {
+                let plan = build_plan(
+                    "grow".into(),
+                    SandboxStatus::Running,
+                    &config,
+                    None,
+                    LiveControl {
+                        root_disk_grow: true,
+                        resize: false,
+                        secrets: false,
+                    },
+                    SandboxModificationPatch {
+                        root_disk_size_mib: Some(1024),
+                        ..Default::default()
+                    },
+                    policy,
+                );
+                assert!(plan.conflicts.is_empty());
+                let PlannedChange::Config(change) = &plan.changes[0] else {
+                    panic!("expected disk change")
+                };
+                assert_eq!(change.disposition, expected);
+                assert!(validate_apply_supported(&plan).is_ok());
+            }
+        }
     }
 
     #[test]
@@ -3663,6 +3750,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -3688,6 +3776,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -3719,6 +3808,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -3754,6 +3844,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -4131,6 +4222,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -4199,6 +4291,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -4249,6 +4342,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -4269,6 +4363,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },

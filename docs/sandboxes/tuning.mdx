@@ -342,45 +342,46 @@ Resize an OCI sandbox's root disk through `modify`:
 ```rust Rust
 sb.modify()
     .root_disk_size_mib(8192)
-    .restart()
     .apply()
     .await?;
 ```
 
 ```typescript TypeScript
-await sandbox.modify({ rootDiskSize: 8192, policy: "restart" });
+await sandbox.modify({ rootDiskSize: 8192 });
 ```
 
 ```python Python
 await sb.modify(
     root_disk_size=8192,
-    policy=ModificationPolicy.RESTART,
 )
 ```
 
 ```go Go
 _, err := sb.Modify(ctx, m.ModifyOptions{
     RootDiskSizeMiB: 8192,
-    Policy:          m.ModificationPolicyRestart,
 })
 ```
 
 ```bash CLI
-msb modify worker --root-disk 8G --restart
+msb modify worker --root-disk 8G
 ```
 </CodeGroup>
 
-Root disk changes are offline, not live. For a running sandbox, use the restart policy to make the new size active immediately, or the next-start policy to save it without touching the running VM. A stopped sandbox grows before the new size is persisted.
+Managed and flat ext4 roots can grow while the sandbox is running, including roots backed by checkpoint layers. Microsandbox briefly pauses the VM to extend the writable disk, resumes it, then asks ext4 to make the space usable. Existing snapshots and sealed backing layers are unchanged. A stopped sandbox grows before the new size is persisted.
+
+Use `--next-start` to defer a running sandbox's growth until its next boot, or `--restart` to explicitly use stopped growth. Older runtimes and guest filesystems without online-resize support return an error instead of silently restarting. Cloud and user-owned disk behavior is unchanged.
 
 The backing determines which changes are valid:
 
 - Managed and flat OCI root disks are grow-only. Shrinking is rejected because it risks filesystem data loss.
-- After a full snapshot has rolled a root disk onto a qcow2 chain, root-disk growth is refused for now. Microsandbox will not resize the chain's sealed raw ancestor; chain-aware online growth is tracked separately.
+- Checkpoint-backed roots grow only their writable head. New snapshots capture the new capacity; old snapshots retain their original capacity.
 - A tmpfs OCI root disk can grow or shrink on the next boot, but its size cannot exceed sandbox memory.
 - User-supplied root disk images are not resized or deleted by microsandbox; resize the image file yourself while it is detached.
 - Existing disk-backed named volumes do not have a resize operation. Their capacity is fixed when the volume is created.
 
 The ext4 grower uses the image's reserved metadata headroom. If an older image cannot grow to the requested size in place, recreate the sandbox with a larger root disk.
+
+If the disk grows but guest filesystem expansion fails, the error reports incomplete growth. Retry the same target, or stop and restart to finish recovery. Microsandbox never truncates the disk to roll back; snapshots and compaction are blocked until recovery completes.
 
 Other storage capacity is still chosen where the storage is defined:
 

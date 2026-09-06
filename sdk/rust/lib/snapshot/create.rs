@@ -779,15 +779,25 @@ fn new_file_manifest_with_id(
         .last()
         .expect("checked non-empty layer inputs")
         .1;
+    let capacities = microsandbox_image::checkpoint::layer_capacities(
+        disk.sources
+            .iter()
+            .map(|source| microsandbox_image::checkpoint::CompactLayer {
+                path: source.path.clone(),
+                qcow2: source.format == SnapshotFormat::Qcow2,
+            })
+            .collect(),
+    )?;
     let mut predecessor = None;
     let layers = layer_inputs
         .into_iter()
-        .map(|(layer_id, format, integrity)| {
+        .zip(capacities)
+        .map(|((layer_id, format, integrity), virtual_size)| {
             let backing = predecessor.replace(layer_id.clone());
             DiskLayer {
                 layer_id,
                 format,
-                virtual_size: disk.virtual_size,
+                virtual_size,
                 backing,
                 payload: LayerPayload {
                     file_kind: LayerFileKind::Regular,
