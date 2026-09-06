@@ -19,7 +19,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-#[cfg(unix)]
 use bytes::Buf;
 use bytes::Bytes;
 use crossbeam_queue::ArrayQueue;
