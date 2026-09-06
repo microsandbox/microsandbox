@@ -19,6 +19,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+#[cfg(unix)]
 use bytes::Buf;
 use bytes::Bytes;
 use crossbeam_queue::ArrayQueue;
@@ -285,6 +286,7 @@ impl QueuedBytes {
     }
 
     /// Copy and release up to `out.len()` bytes from the front of the fragment.
+    #[cfg(unix)]
     fn copy_prefix_into(&mut self, out: &mut [u8]) -> usize {
         let len = self.len().min(out.len());
         out[..len].copy_from_slice(&self.bytes[..len]);
