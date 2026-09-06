@@ -35,6 +35,34 @@ Stopped CLI growth from 1700 to 1792 MiB took 45.65 ms managed and 43.66 ms flat
 - Pinned CLI build/check succeeds offline after seeding Cargo's cache from the exact signed local libkrun commit. The companion commit must be pushed before other machines can fetch it.
 - Strict Clippy initially found pre-existing `derivable_impls` and `too_many_arguments` warnings in #6. Focused linting allows those two baseline classes; new lint findings were fixed.
 
+## One-shot MiB-to-GiB growth
+
+The original matrix did not establish large one-shot growth. Follow-up release qualification on the same Mac uses `scripts/smoke/cli/root-disk-large-growth.py`: 16 scenarios and 424 recorded checks passed, plus 96 independent offline validation checks. No runtime implementation changes were required. Each scenario starts afresh at 512 MiB, rather than reaching its target through intermediate grows.
+
+These measurements time the first SDK-backed CLI `modify` invocation from process launch through successful exit, including planning, control communication and configuration persistence. They are single observations, not percentiles. Stopped timings exclude the separately tested stop and start operations. Unlike the earlier phase table, these are not same-target reconciliation measurements and do not isolate VM pause time.
+
+| One-shot target | Initial backing | Managed live (ms) | Managed stopped (ms) | Flat live (ms) | Flat stopped (ms) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 512 MiB → 4 GiB | Raw | 74.37 | 40.95 | 75.83 | 38.12 |
+| 512 MiB → 4 GiB | Qcow2 | 84.16 | 34.24 | 78.39 | 35.20 |
+| 512 MiB → 8320 MiB (8.125 GiB) | Raw | 76.99 | 45.30 | 78.05 | 48.11 |
+| 512 MiB → 8320 MiB (8.125 GiB) | Qcow2 | 85.97 | 35.93 | 84.62 | 40.32 |
+
+The 8320 MiB target crosses from 64 to 65 ext4 groups, requiring another group-descriptor block in the current 4 KiB-block/64-byte-descriptor layout. Every scenario verifies:
+
+- Exact head capacity, no pending-growth marker, unchanged chain depth and sealed-ancestor SHA-256 values.
+- Same-target CLI rejection with the expected reason and shrink refusal without reducing capacity. Completed CLI requests deliberately reject an already configured size; this differs from retrying unfinished runtime growth. The first harness run incorrectly expected redundant CLI requests to succeed and was corrected without changing runtime behavior.
+- For live growth, unchanged guest boot ID and a retained tmpfs marker.
+- Real allocation and fsync of a 3 GiB file at the 4 GiB target, with allocated-block counts checked to exclude a sparse-only test. Boundary cases allocate 768 MiB. Both also write and read an 8 MiB random marker at a file offset 256 MiB below the new capacity; that is a file-offset check, not proof of allocation in the last physical block group.
+- A full snapshot with that file present, full restore at the enlarged capacity, original/random-payload and large-file checksum checks, and retained tmpfs contents.
+- For qcow2 cases, restoration of the pre-grow full snapshot at exactly 512 MiB with its original data and without files created after growth.
+- A separate cold boot and checksum verification after the grown snapshot is captured.
+- Independent `qemu-img info --backing-chain`, flattening to a disposable raw copy, journal-only replay on that copy, then `e2fsck -f -n` with exit zero. All 16 full read-only filesystem checks passed; source disks were not repaired or modified by these tools.
+
+The 4 GiB full snapshots containing the allocated 3 GiB file took 5.34–7.18 seconds and their full restores took 8.05–8.56 seconds. Those timings describe this populated-disk workload, not growth latency or empty snapshot performance. All VMs created by both large-jump runs were confirmed stopped. Test sandbox and snapshot artifacts remain available for inspection; disposable filesystem-check copies were removed automatically.
+
+Reproduce with an isolated `MSB_HOME`, matching `MSB_BIN`/`MSB_LIBKRUNFW_PATH`, a fresh `QUAL_PREFIX` and output `QUAL_ROOT`. The default targets are `4096,8320` MiB; `QUAL_TARGETS` can override them. Run the script normally first, then set `QUAL_OFFLINE_ONLY=1`, `E2FSCK` and optionally `QEMU_IMG` to independently validate those same stopped cases using a separate output directory. This run's outputs are `/private/tmp/msb-grow-qual.6VfI8S/large-jumps2` and `/private/tmp/msb-grow-qual.6VfI8S/large-jumps2-fsck`.
+
 ## Remaining qualification and limitations
 
 Linux/KVM and Windows/WHP have not been tested for this item. Both machines were reachable, but transferring unreleased source was blocked pending explicit approval. SDK bindings already route the existing modification options through Rust; fresh Python/TypeScript/Go native live runs have not been performed for #7. Direct/dependent archives after growth, sustained concurrent-I/O latency, request cancellation, process/power-loss injection, and every admission-failure variant remain additional qualification work. Do not describe this report as exhaustive fault testing.
