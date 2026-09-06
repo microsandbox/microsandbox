@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use bytes::BytesMut;
 use chrono::Utc;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::watch;
@@ -167,7 +168,9 @@ pub async fn run(
 
     // Buffer for serial reads.
     let mut read_buf = vec![0u8; SERIAL_READ_BUF_SIZE];
-    let mut serial_in_buf = boot_console.input;
+    // The final bootstrap read may also contain the first ordinary frame. Preserve that tail while
+    // moving into the cursor-based buffer used by the bounded main-loop decoder.
+    let mut serial_in_buf = BytesMut::from(boot_console.input.as_slice());
     let mut serial_out_buf = Vec::new();
 
     let mut state = AgentState::default();
