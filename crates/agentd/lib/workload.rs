@@ -33,6 +33,7 @@ pub(crate) struct WorkloadLatch {
 enum LatchState {
     Running { last_thawed: Option<String> },
     Frozen { attempt_id: String },
+    RecoveryRequired { attempt_id: String },
 }
 
 trait FreezerControl: Send {
@@ -116,9 +117,9 @@ impl WorkloadLatch {
             .transpose()
     }
 
-    /// Whether a checkpoint attempt currently holds the workload frozen.
+    /// Whether an attempt blocks new work, including an uncertain freezer transition.
     pub(crate) fn is_frozen(&self) -> bool {
-        matches!(self.state, LatchState::Frozen { .. })
+        !matches!(self.state, LatchState::Running { .. })
     }
 
     /// Freeze every process in the agentd-managed workload cgroup.
@@ -130,14 +131,23 @@ impl WorkloadLatch {
             } if current == attempt_id => return Ok(()),
             LatchState::Frozen {
                 attempt_id: current,
+            }
+            | LatchState::RecoveryRequired {
+                attempt_id: current,
             } => {
                 return Err(WorkloadLatchError::Conflict(format!(
-                    "attempt {current:?} already owns the freeze"
+                    "attempt {current:?} owns the latch; thaw it before another freeze"
                 )));
             }
             LatchState::Running { .. } => {}
         }
 
+        self.freezer()?;
+        // Record ownership before writing: an error may follow a successful cgroup write.
+        // Only a confirmed thaw can release an uncertain transition.
+        self.state = LatchState::RecoveryRequired {
+            attempt_id: attempt_id.to_string(),
+        };
         self.freezer()?.set_frozen(true)?;
         // Agentd itself remains outside the workload cgroup, so it can flush every mounted
         // filesystem after user processes stop mutating them and before the host pauses the VM.
@@ -163,14 +173,21 @@ impl WorkloadLatch {
             }
             LatchState::Frozen {
                 attempt_id: current,
+            }
+            | LatchState::RecoveryRequired {
+                attempt_id: current,
             } if current != attempt_id => {
                 return Err(WorkloadLatchError::Conflict(format!(
                     "attempt {current:?} owns the freeze"
                 )));
             }
-            LatchState::Frozen { .. } => {}
+            LatchState::Frozen { .. } | LatchState::RecoveryRequired { .. } => {}
         }
 
+        // A failed thaw must not leave a state that freeze retries can acknowledge as frozen.
+        self.state = LatchState::RecoveryRequired {
+            attempt_id: attempt_id.to_string(),
+        };
         self.freezer()?.set_frozen(false)?;
         self.state = LatchState::Running {
             last_thawed: Some(attempt_id.to_string()),
@@ -324,12 +341,74 @@ fn parse_frozen_event(events: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
     use super::*;
 
     struct FakeFreezer {
         states: Arc<Mutex<Vec<bool>>>,
+    }
+
+    struct FailingFreezer {
+        outcomes: Mutex<VecDeque<bool>>,
+    }
+
+    impl FreezerControl for FailingFreezer {
+        fn placement(&self) -> io::Result<WorkloadPlacement> {
+            unreachable!()
+        }
+
+        fn set_frozen(&self, _frozen: bool) -> io::Result<()> {
+            // Model either a failed write or a write that succeeded before acknowledgement failed.
+            if self.outcomes.lock().unwrap().pop_front().unwrap() {
+                Ok(())
+            } else {
+                Err(io::Error::other("injected freezer transition failure"))
+            }
+        }
+    }
+
+    #[test]
+    fn failed_freeze_retains_ownership_until_confirmed_thaw() {
+        let mut latch = WorkloadLatch::with_freezer(Box::new(FailingFreezer {
+            outcomes: Mutex::new(VecDeque::from([false, false, true])),
+        }));
+        assert!(latch.freeze("a").is_err());
+        assert!(latch.is_frozen());
+        assert!(latch.freeze("a").is_err());
+        assert!(latch.freeze("b").is_err());
+        assert!(latch.thaw("b").is_err());
+        assert!(latch.thaw("a").is_err());
+        assert!(latch.is_frozen());
+        latch.thaw("a").unwrap();
+        assert!(!latch.is_frozen());
+        latch.thaw("a").unwrap();
+    }
+
+    #[test]
+    fn failed_thaw_never_acknowledges_a_freeze_retry() {
+        let mut latch = WorkloadLatch::with_freezer(Box::new(FailingFreezer {
+            outcomes: Mutex::new(VecDeque::from([true, false, true])),
+        }));
+        latch.freeze("a").unwrap();
+        assert!(latch.thaw("a").is_err());
+        assert!(latch.is_frozen());
+        assert!(latch.freeze("a").is_err());
+        latch.thaw("a").unwrap();
+        assert!(!latch.is_frozen());
+    }
+
+    #[test]
+    fn known_unavailable_never_takes_ownership() {
+        let mut latch = WorkloadLatch::unavailable("no cgroup freezer");
+        for attempt in ["a", "b"] {
+            assert!(matches!(
+                latch.freeze(attempt),
+                Err(WorkloadLatchError::Unavailable(_))
+            ));
+            assert!(!latch.is_frozen());
+        }
     }
 
     impl FreezerControl for FakeFreezer {

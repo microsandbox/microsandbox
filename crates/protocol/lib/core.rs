@@ -139,6 +139,32 @@ pub struct CoreError {
     /// Wire message type involved in the error, when it could be determined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offending_type: Option<String>,
+
+    /// Attempt-scoped freezer disposition. Absence is ambiguous, not proof that no work froze.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_failure: Option<WorkloadFailure>,
+}
+
+/// Additional recovery information for a workload control error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkloadFailure {
+    /// Attempt whose request failed.
+    pub attempt_id: String,
+    /// Whether a freeze was rejected before any freezer operation or needs recovery.
+    pub disposition: WorkloadFailureDisposition,
+}
+
+/// Freezer failure dispositions; unknown future values never authorize a fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadFailureDisposition {
+    /// No freezer exists and no freeze was attempted.
+    Unavailable,
+    /// The caller must obtain a confirmed thaw before treating the workload as running.
+    RecoveryRequired,
+    /// Unrecognized additional information from a newer agent.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Machine-readable `core.error` categories.
@@ -207,4 +233,37 @@ pub struct RelayClientDisconnected {
 
     /// Exclusive upper bound of the disconnected client's ID range.
     pub id_end_exclusive: u32,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freezer_error_details_are_additive_and_unknown_details_are_not_unavailable() {
+        let old = serde_json::json!({"kind":"capability_unavailable", "message":"freezer failed"});
+        let decoded: CoreError = serde_json::from_value(old.clone()).unwrap();
+        assert!(decoded.workload_failure.is_none());
+        let mut new = old;
+        new["workload_failure"] =
+            serde_json::json!({"attempt_id":"a", "disposition":"future_state"});
+        let decoded: CoreError = serde_json::from_value(new.clone()).unwrap();
+        assert_eq!(
+            decoded.workload_failure.unwrap().disposition,
+            WorkloadFailureDisposition::Unknown
+        );
+
+        #[derive(Deserialize)]
+        struct OldCoreError {
+            kind: CoreErrorKind,
+            message: String,
+        }
+        let old_reader: OldCoreError = serde_json::from_value(new).unwrap();
+        assert_eq!(old_reader.kind, CoreErrorKind::CapabilityUnavailable);
+        assert_eq!(old_reader.message, "freezer failed");
+    }
 }

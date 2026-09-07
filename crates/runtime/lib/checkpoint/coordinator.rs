@@ -14,7 +14,8 @@ use microsandbox_image::checkpoint::{
 };
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::core::{
-    CoreError, Ready, WorkloadFreeze, WorkloadFrozen, WorkloadThaw, WorkloadThawed,
+    CoreError, CoreErrorKind, Ready, WorkloadFailureDisposition, WorkloadFreeze, WorkloadFrozen,
+    WorkloadThaw, WorkloadThawed,
 };
 use microsandbox_protocol::message::{Message, MessageType};
 use msb_krun::{
@@ -325,11 +326,11 @@ impl CheckpointCoordinator {
         let workload = match user_pause {
             Some(paused) => paused.workload.as_ref().expect("validated workload latch"),
             None => {
-                acquired_workload = match self.freeze_workload(checkpoint_id) {
+                acquired_workload = match self.freeze_workload(vm, checkpoint_id) {
                     Ok(workload) => workload,
                     Err(error) => {
                         let _ = std::fs::remove_dir_all(&staging);
-                        return Err(CheckpointFailure::before_pause(error));
+                        return Err(error);
                     }
                 };
                 &acquired_workload
@@ -475,14 +476,33 @@ impl CheckpointCoordinator {
         Ok(captured.result)
     }
 
-    fn freeze_workload(&self, attempt_id: &str) -> Result<FrozenWorkload, String> {
+    fn freeze_workload(
+        &self,
+        vm: &msb_krun::VmControl,
+        attempt_id: &str,
+    ) -> Result<FrozenWorkload, CheckpointFailure> {
         let client = self
             .runtime
             .block_on(AgentClient::connect_with_timeout(
                 &self.agent_sock,
                 WORKLOAD_CONTROL_TIMEOUT,
             ))
-            .map_err(|error| format!("connect workload latch: {error}"))?;
+            .map_err(|error| {
+                CheckpointFailure::before_pause(format!("connect workload latch: {error}"))
+            })?;
+        // Gather identity before sending anything with side effects. From the first freeze
+        // request onward, a transport error is ambiguous and requires an acknowledged thaw.
+        let protocol_generation = client.negotiated_version();
+        let ready = client.ready().map_err(CheckpointFailure::before_pause)?;
+        client
+            .ensure_version_compat(MessageType::WorkloadFreeze)
+            .map_err(CheckpointFailure::before_pause)?;
+        let workload = FrozenWorkload {
+            client,
+            attempt_id: attempt_id.to_string(),
+            protocol_generation,
+            ready,
+        };
         let request = WorkloadFreeze {
             attempt_id: attempt_id.to_string(),
         };
@@ -491,28 +511,36 @@ impl CheckpointCoordinator {
             .block_on(async {
                 tokio::time::timeout(
                     WORKLOAD_CONTROL_TIMEOUT,
-                    client.request(MessageType::WorkloadFreeze, &request),
+                    workload
+                        .client
+                        .request(MessageType::WorkloadFreeze, &request),
                 )
                 .await
             })
-            .map_err(|_| "workload freeze timed out".to_string())?
-            .map_err(|error| format!("request workload freeze: {error}"))?;
-        validate_workload_reply::<WorkloadFrozen>(
-            reply,
-            MessageType::WorkloadFrozen,
-            attempt_id,
-            |payload| &payload.attempt_id,
-        )?;
-        let protocol_generation = client.negotiated_version();
-        let ready = client
-            .ready()
-            .map_err(|error| format!("read workload-agent identity: {error}"))?;
-        Ok(FrozenWorkload {
-            client,
-            attempt_id: attempt_id.to_string(),
-            protocol_generation,
-            ready,
-        })
+            .map_err(|_| "workload freeze timed out".to_string())
+            .and_then(|reply| reply.map_err(|error| format!("request workload freeze: {error}")));
+        if let Ok(reply) = &reply
+            && let Some(reason) = unavailable_freezer_reason(reply, attempt_id)
+        {
+            return Err(CheckpointFailure::before_pause(reason));
+        }
+        let result = reply.and_then(|reply| {
+            validate_workload_reply::<WorkloadFrozen>(
+                reply,
+                MessageType::WorkloadFrozen,
+                attempt_id,
+                |payload| &payload.attempt_id,
+            )
+        });
+        if let Err(error) = result {
+            return Err(recover_failed_freeze(
+                attempt_id,
+                error,
+                || self.thaw_workload(&workload),
+                || vm.pause().map(|_| ()).map_err(|error| error.to_string()),
+            ));
+        }
+        Ok(workload)
     }
 
     fn thaw_workload(&self, workload: &FrozenWorkload) -> Result<(), String> {
@@ -1004,6 +1032,42 @@ async fn root_growth_request(
     reply.payload().map_err(|e| e.to_string())
 }
 
+/// Only new, scoped evidence of no attempted freeze permits a capability fallback.
+fn unavailable_freezer_reason(reply: &Message, attempt_id: &str) -> Option<String> {
+    if reply.t != MessageType::CoreError {
+        return None;
+    }
+    let error = reply.payload::<CoreError>().ok()?;
+    let detail = error.workload_failure?;
+    (error.kind == CoreErrorKind::CapabilityUnavailable
+        && error.offending_type.as_deref() == Some(MessageType::WorkloadFreeze.as_str())
+        && detail.attempt_id == attempt_id
+        && detail.disposition == WorkloadFailureDisposition::Unavailable)
+        .then_some(error.message)
+}
+
+fn recover_failed_freeze(
+    attempt_id: &str,
+    error: String,
+    thaw: impl FnOnce() -> Result<(), String>,
+    pause: impl FnOnce() -> Result<(), String>,
+) -> CheckpointFailure {
+    match thaw() {
+        Ok(()) => CheckpointFailure::before_pause(error),
+        Err(thaw_error) => {
+            // Stop further guest progress if possible, and fence host mutations even if the
+            // hypervisor pause itself fails. Never turn uncertainty into a running disposition.
+            let pause_status = match pause() {
+                Ok(()) => "VM paused".to_string(),
+                Err(error) => format!("VM pause also failed: {error}"),
+            };
+            CheckpointFailure::paused(format!(
+                "attempt {attempt_id}: {error}; workload recovery required: {thaw_error}; {pause_status}"
+            ))
+        }
+    }
+}
+
 fn validate_workload_reply<T>(
     reply: Message,
     expected_type: MessageType,
@@ -1413,6 +1477,72 @@ mod tests {
     use msb_krun::{GuestMemoryRange, MemoryCaptureSink};
 
     #[test]
+    fn unavailable_freezer_requires_explicit_matching_evidence() {
+        use microsandbox_protocol::core::{WorkloadFailure, WorkloadFailureDisposition};
+        let mut error = CoreError {
+            kind: CoreErrorKind::CapabilityUnavailable,
+            message: "missing freezer".into(),
+            offending_type: Some(MessageType::WorkloadFreeze.as_str().into()),
+            workload_failure: None,
+        };
+        let check = |error: &CoreError| {
+            let reply = Message::with_payload(MessageType::CoreError, 7, error).unwrap();
+            super::unavailable_freezer_reason(&reply, "a").is_some()
+        };
+        assert!(!check(&error), "older agent errors are ambiguous");
+        for disposition in [
+            WorkloadFailureDisposition::RecoveryRequired,
+            WorkloadFailureDisposition::Unknown,
+        ] {
+            error.workload_failure = Some(WorkloadFailure {
+                attempt_id: "a".into(),
+                disposition,
+            });
+            assert!(!check(&error));
+        }
+        error.workload_failure.as_mut().unwrap().disposition =
+            WorkloadFailureDisposition::Unavailable;
+        assert!(check(&error));
+        error.workload_failure.as_mut().unwrap().attempt_id = "b".into();
+        assert!(!check(&error));
+        error.workload_failure.as_mut().unwrap().attempt_id = "a".into();
+        error.offending_type = Some(MessageType::WorkloadThaw.as_str().into());
+        assert!(!check(&error));
+        error.offending_type = Some(MessageType::WorkloadFreeze.as_str().into());
+        error.kind = CoreErrorKind::InvalidSession;
+        assert!(!check(&error));
+    }
+
+    #[test]
+    fn failed_freeze_returns_running_only_after_confirmed_recovery() {
+        let failure = super::recover_failed_freeze(
+            "a",
+            "lost reply".into(),
+            || Ok(()),
+            || panic!("must not pause after thaw"),
+        );
+        assert!(!failure.keep_paused);
+        for pause_fails in [false, true] {
+            let failure = super::recover_failed_freeze(
+                "a",
+                "lost reply".into(),
+                || Err("thaw failed".into()),
+                || {
+                    if pause_fails {
+                        Err("pause failed".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert!(failure.keep_paused);
+            assert!(failure.message.contains("attempt a"));
+            assert!(failure.message.contains("recovery required"));
+            assert_eq!(failure.message.contains("pause also failed"), pause_fails);
+        }
+    }
+
+    #[test]
     fn incremental_updates_split_and_reuse_unchanged_object_ranges() {
         let original = ObjectId::from_bytes(b"original").unwrap();
         let changed = ObjectId::from_bytes(b"changed").unwrap();
@@ -1642,6 +1772,7 @@ mod tests {
                 kind: CoreErrorKind::CapabilityUnavailable,
                 message: "freezer unavailable".into(),
                 offending_type: Some(MessageType::WorkloadFreeze.as_str().into()),
+                workload_failure: None,
             },
         )
         .unwrap();

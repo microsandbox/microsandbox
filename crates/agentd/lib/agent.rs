@@ -18,8 +18,8 @@ use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
     ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ping, Pong, Ready,
-    RelayClientDisconnected, ResolvedUser, Touch, Touched, WorkloadFreeze, WorkloadFrozen,
-    WorkloadThaw, WorkloadThawed,
+    RelayClientDisconnected, ResolvedUser, Touch, Touched, WorkloadFailure,
+    WorkloadFailureDisposition, WorkloadFreeze, WorkloadFrozen, WorkloadThaw, WorkloadThawed,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
@@ -512,6 +512,7 @@ async fn handle_message(
                         kind: CoreErrorKind::CapabilityUnavailable,
                         message,
                         offending_type: Some(msg.t.as_str().into()),
+                        workload_failure: None,
                     },
                 ),
             }
@@ -565,6 +566,7 @@ async fn handle_message(
                         };
                         encode_workload_error(
                             &msg,
+                            &request.attempt_id,
                             WorkloadLatchError::Io(std::io::Error::other(message)),
                             out_buf,
                         )?;
@@ -588,7 +590,7 @@ async fn handle_message(
                         })?;
                     }
                 }
-                Err(error) => encode_workload_error(&msg, error, out_buf)?,
+                Err(error) => encode_workload_error(&msg, &request.attempt_id, error, out_buf)?,
             }
         }
 
@@ -615,7 +617,7 @@ async fn handle_message(
                         AgentdError::ExecSession(format!("encode workload-thawed frame: {error}"))
                     })?;
                 }
-                Err(error) => encode_workload_error(&msg, error, out_buf)?,
+                Err(error) => encode_workload_error(&msg, &request.attempt_id, error, out_buf)?,
             }
         }
 
@@ -1185,6 +1187,7 @@ fn encode_core_error(
             kind,
             message,
             offending_type,
+            workload_failure: None,
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode core error: {e}")))?;
@@ -1195,6 +1198,7 @@ fn encode_core_error(
 
 fn encode_workload_error(
     source: &Message,
+    attempt_id: &str,
     error: WorkloadLatchError,
     out_buf: &mut Vec<u8>,
 ) -> AgentdResult<()> {
@@ -1205,14 +1209,33 @@ fn encode_workload_error(
         WorkloadLatchError::InvalidAttempt(_) => CoreErrorKind::InvalidPayload,
         WorkloadLatchError::Conflict(_) => CoreErrorKind::InvalidSession,
     };
-    encode_core_error_if_supported(
-        source,
+    // Keep the existing error category readable by older hosts. Only the additive,
+    // attempt-scoped detail proves that a basic-pause fallback is safe.
+    let disposition = match &error {
+        WorkloadLatchError::Unavailable(_) => WorkloadFailureDisposition::Unavailable,
+        _ => WorkloadFailureDisposition::RecoveryRequired,
+    };
+    if !MessageType::CoreError.is_available_at(source.v) {
+        return Err(AgentdError::ExecSession(
+            "peer cannot receive workload errors".into(),
+        ));
+    }
+    let reply = Message::with_payload(
+        MessageType::CoreError,
         source.id,
-        kind,
-        error.to_string(),
-        Some(source.t.as_str().to_string()),
-        out_buf,
+        &CoreError {
+            kind,
+            message: error.to_string(),
+            offending_type: Some(source.t.as_str().to_string()),
+            workload_failure: Some(WorkloadFailure {
+                attempt_id: attempt_id.to_string(),
+                disposition,
+            }),
+        },
     )
+    .map_err(|error| AgentdError::ExecSession(format!("encode workload error: {error}")))?;
+    codec::encode_to_buf(&reply, out_buf)
+        .map_err(|error| AgentdError::ExecSession(format!("encode workload error frame: {error}")))
 }
 
 fn encode_exec_failed(id: u32, payload: ExecFailed, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
