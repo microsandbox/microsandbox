@@ -41,7 +41,6 @@ local = [
     "dep:reqwest",
     "dep:sea-orm",
     "dep:tar",
-    "dep:tempfile",
 ]
 cloud = [
     "dep:reqwest",
@@ -101,7 +100,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, optional = true }
