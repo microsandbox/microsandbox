@@ -2,6 +2,7 @@
 
 mod coordinator;
 mod disk;
+mod memory_cache;
 mod restore;
 
 //--------------------------------------------------------------------------------------------------
@@ -14,6 +15,7 @@ pub use disk::{
     DiskCompactionResult, RuntimeOwnedRootChain, RuntimeOwnedRootLayer, compact_stopped_root,
     grow_stopped_root, load_runtime_owned_root_chain, recover_stopped_root_growth,
 };
+pub use memory_cache::{CachedMemory, CachedMemoryRegion, MemoryCache};
 pub(crate) use restore::{PreparedCheckpointRestore, RestoredAgentState};
 
 //--------------------------------------------------------------------------------------------------

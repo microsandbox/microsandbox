@@ -95,10 +95,10 @@ const snap = await h.snapshot("after-pip-install");
 const worker = await Sandbox.get("worker");
 const plan = await worker.compact({ layers: 3, dryRun: true });
 const result = await worker.compact({ layers: 3 });
-await Snapshot.save("checkpoint-b", "changes.tar.zst", { since: "checkpoint-a" });
-await Snapshot.load("changes.tar.zst", undefined, "checkpoint-a");
+await Snapshot.save("checkpoint-b", "changes.msnap", { since: "checkpoint-a" });
+await Snapshot.load("changes.msnap", undefined, "checkpoint-a");
 const child = await Sandbox.builder("child")
-  .fromSnapshot("changes.tar.zst").snapshotBase("checkpoint-a").create();
+  .fromSnapshot("changes.msnap").snapshotBase("checkpoint-a").create();
 ```
 
 The count includes the oldest base but excludes the writable head. Omit `layers` to compact all sealed layers. `lastLayers` selects the newest N sealed export layers instead of `since`. Results expose physical counts, `materializedBytes`, `totalUs`, and `pauseUs`; materialized bytes are not reclaimed space. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
@@ -267,7 +267,7 @@ Capture directly into an archive without installing a snapshot directory or inde
 ```typescript
 const archive = await Snapshot.builder("after-pip-install")
   .fromSandbox("baseline")
-  .createArchive("/tmp/after-pip-install.tar.zst");
+  .createArchive("/tmp/after-pip-install.msnap");
 ```
 
 ---
@@ -468,7 +468,7 @@ Walk the snapshots directory (default: the configured snapshots dir) and rebuild
 static save(nameOrPath: string, out: string, opts?: SaveOpts): Promise<void>
 ```
 
-Bundle a snapshot into a `.tar.zst` archive. The recorded manifest is archived as-is, so create the snapshot with [`recordIntegrity()`](#recordintegrity) if receivers must verify content. See [`SaveOpts`](#saveopts-interface) for bundling options.
+Bundle a snapshot into a `.msnap` archive. The recorded manifest is archived as-is, so create the snapshot with [`recordIntegrity()`](#recordintegrity) if receivers must verify content. See [`SaveOpts`](#saveopts-interface) for bundling options.
 
 <p className="msb-label">Parameters</p>
 
@@ -490,7 +490,7 @@ Bundle a snapshot into a `.tar.zst` archive. The recorded manifest is archived a
 <Accordion title="Example">
 
 ```typescript
-await Snapshot.save("after-pip-install", "./baseline.tar.zst", {
+await Snapshot.save("after-pip-install", "./baseline.msnap", {
   withImage: true,
 });
 ```
@@ -506,7 +506,7 @@ await Snapshot.save("after-pip-install", "./baseline.tar.zst", {
 static load(archive: string, dest?: string): Promise<SnapshotHandle>
 ```
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
+Unpack a snapshot archive (`.msnap` or `.tar`) into the snapshots directory. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
 
 <p className="msb-label">Parameters</p>
 
@@ -533,7 +533,7 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. S
 <Accordion title="Example">
 
 ```typescript
-const h = await Snapshot.load("./baseline.tar.zst");
+const h = await Snapshot.load("./baseline.msnap");
 console.log("loaded", h.digest);
 ```
 

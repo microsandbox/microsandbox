@@ -1,4 +1,5 @@
-//! Snapshot save / load via `.tar.zst` bundles.
+//! Snapshot save / load via `.msnap` bundles (tar + zstd, or explicit plain tar).
+//! Encoding is detected from contents; legacy suffixes and extensionless inputs remain valid.
 //!
 //! Default archive format is zstd-compressed tar. Regular files with holes, notably the sparse `upper.ext4` whose logical size is the configured upper cap rather than the data
 //! written, are stored as old-GNU sparse entries (type `S`): only allocated extents are read and archived, so save cost scales with the data a sandbox actually wrote instead of
@@ -4101,7 +4102,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().join("home");
         let source = directory.path().join("upper.ext4");
-        let archive = directory.path().join("snapshot.tar.zst");
         let child_stage = directory.path().join("child");
         let mut payload = b"direct archive payload".to_vec();
         payload.resize(4096, 0);
@@ -4147,28 +4147,42 @@ mod tests {
         };
         let local = LocalBackend::builder().home(&home).build().await.unwrap();
 
-        save_direct_file_snapshot(
-            &manifest,
-            &BTreeMap::new(),
-            "test-snapshot",
-            std::slice::from_ref(&source),
-            &archive,
-            false,
-            false,
-        )
-        .await
-        .unwrap();
-        let restored = materialize_archive_for_child(&local, &archive, &child_stage, false)
-            .await
-            .unwrap();
-
-        assert_eq!(restored.manifest.snapshot_id, snapshot_id);
-        assert_eq!(
-            std::fs::read(child_stage.join("upper.ext4")).unwrap(),
-            payload
-        );
-        assert!(!child_stage.join(snapshot_id.as_str()).exists());
-        assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
+        // The suffix is only a user-facing convention, never the encoding discriminator.
+        // Exercise compressed and plain tar under both conventional and misleading names.
+        for plain_tar in [false, true] {
+            let archive_dir = directory.path().join(plain_tar.to_string());
+            std::fs::create_dir(&archive_dir).unwrap();
+            for name in [
+                "snapshot.msnap",
+                "snapshot.tar.zst",
+                "snapshot.tar",
+                "snapshot",
+            ] {
+                let archive = archive_dir.join(name);
+                save_direct_file_snapshot(
+                    &manifest,
+                    &BTreeMap::new(),
+                    "test-snapshot",
+                    std::slice::from_ref(&source),
+                    &archive,
+                    plain_tar,
+                    false,
+                )
+                .await
+                .unwrap();
+                let child_stage = child_stage.join(format!("{plain_tar}-{name}"));
+                let restored = materialize_archive_for_child(&local, &archive, &child_stage, false)
+                    .await
+                    .unwrap();
+                assert_eq!(restored.manifest.snapshot_id, snapshot_id);
+                assert_eq!(
+                    std::fs::read(child_stage.join("upper.ext4")).unwrap(),
+                    payload
+                );
+                assert!(!child_stage.join(snapshot_id.as_str()).exists());
+                assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
+            }
+        }
     }
 
     #[tokio::test]

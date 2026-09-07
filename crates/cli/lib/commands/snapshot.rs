@@ -40,7 +40,7 @@ pub enum SnapshotCommands {
     /// Rebuild the local index from artifacts on disk.
     Reindex(SnapshotReindexArgs),
 
-    /// Save a snapshot into a `.tar.zst` archive.
+    /// Save a snapshot into a `.msnap` archive (tar + zstd).
     Save(SnapshotSaveArgs),
 
     /// Load a snapshot archive into the snapshots directory.
@@ -151,7 +151,7 @@ pub struct SnapshotSaveArgs {
     /// Snapshot to save (path, name, or digest).
     pub snapshot: String,
 
-    /// Output archive path (`.tar.zst` recommended).
+    /// Output archive path (`.msnap` recommended; explicit filenames are preserved).
     pub out: std::path::PathBuf,
 
     /// Walk the parent chain and include each ancestor in the archive.
@@ -163,7 +163,7 @@ pub struct SnapshotSaveArgs {
     #[arg(long)]
     pub with_image: bool,
 
-    /// Write a plain `.tar` instead of `.tar.zst`. Tradeoff: smaller
+    /// Write plain tar instead of zstd-compressed tar. Tradeoff: smaller
     /// CPU but much larger file for sparse uppers.
     #[arg(long)]
     pub plain_tar: bool,
