@@ -83,6 +83,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		CPUPlacement:      string(o.CPUPlacement),
 		PlacementProfile:  o.PlacementProfile,
 		THP:               string(o.THP),
+		MemorySnapshot:    string(o.MemorySnapshot),
 		Workdir:           o.Workdir,
 		Shell:             o.Shell,
 		SecurityProfile:   string(o.SecurityProfile),
@@ -771,6 +772,16 @@ func (h *SandboxHandle) RequestStop(ctx context.Context) error {
 	return wrapFFI(ffi.RequestStopSandboxByName(ctx, h.name))
 }
 
+// Pause controls resident execution without creating a snapshot.
+func (h *SandboxHandle) Pause(ctx context.Context) error {
+	return wrapFFI(ffi.PauseSandboxByName(ctx, h.name))
+}
+
+// Resume controls resident execution without creating a snapshot.
+func (h *SandboxHandle) Resume(ctx context.Context) error {
+	return wrapFFI(ffi.ResumeSandboxByName(ctx, h.name))
+}
+
 // Kill force-kills the sandbox and waits until stopped state is observed.
 func (h *SandboxHandle) Kill(ctx context.Context, opts ...KillOption) error {
 	return wrapFFI(ffi.KillSandboxByName(ctx, h.name, killTimeoutMillis(opts)))
@@ -822,6 +833,16 @@ func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
 // RequestStop requests graceful shutdown and returns once the request is sent.
 func (s *Sandbox) RequestStop(ctx context.Context) error {
 	return wrapFFI(s.inner.RequestStop(ctx))
+}
+
+// Pause controls resident execution without creating a snapshot.
+func (s *Sandbox) Pause(ctx context.Context) error {
+	return wrapFFI(s.inner.Pause(ctx))
+}
+
+// Resume controls resident execution without creating a snapshot.
+func (s *Sandbox) Resume(ctx context.Context) error {
+	return wrapFFI(s.inner.Resume(ctx))
 }
 
 // Kill force-kills the sandbox and waits until stopped state is observed.

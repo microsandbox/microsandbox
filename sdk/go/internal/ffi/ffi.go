@@ -121,6 +121,10 @@ typedef char *(*msb_sandbox_close_fn)(uint64_t cancel_id, uint64_t handle, uint8
 typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_resume_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_pause_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_resume_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_kill_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_request_kill_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_list_fn)(uint64_t cancel_id, const char *filter_json, uint8_t *buf, size_t buf_len);
@@ -273,6 +277,10 @@ static msb_sandbox_close_fn      ptr_msb_sandbox_close      = NULL;
 static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
 static msb_sandbox_stop_fn       ptr_msb_sandbox_stop       = NULL;
 static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
+static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
+static msb_sandbox_resume_fn ptr_msb_sandbox_resume = NULL;
+static msb_sandbox_handle_pause_fn ptr_msb_sandbox_handle_pause = NULL;
+static msb_sandbox_handle_resume_fn ptr_msb_sandbox_handle_resume = NULL;
 static msb_sandbox_kill_fn       ptr_msb_sandbox_kill       = NULL;
 static msb_sandbox_request_kill_fn ptr_msb_sandbox_request_kill = NULL;
 static msb_sandbox_list_fn       ptr_msb_sandbox_list       = NULL;
@@ -451,6 +459,10 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_detach);
 	RESOLVE(msb_sandbox_stop);
 	RESOLVE(msb_sandbox_request_stop);
+	RESOLVE(msb_sandbox_pause);
+	RESOLVE(msb_sandbox_resume);
+	RESOLVE(msb_sandbox_handle_pause);
+	RESOLVE(msb_sandbox_handle_resume);
 	RESOLVE(msb_sandbox_kill);
 	RESOLVE(msb_sandbox_request_kill);
 	RESOLVE(msb_sandbox_list);
@@ -647,6 +659,18 @@ char *call_msb_sandbox_stop(uint64_t cancel_id, uint64_t handle, uint64_t timeou
 }
 char *call_msb_sandbox_request_stop(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_request_stop ? ptr_msb_sandbox_request_stop(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_pause(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_pause ? ptr_msb_sandbox_pause(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_resume(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_resume ? ptr_msb_sandbox_resume(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_pause(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_pause ? ptr_msb_sandbox_handle_pause(cancel_id, name, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_resume(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_resume ? ptr_msb_sandbox_handle_resume(cancel_id, name, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_kill(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_kill ? ptr_msb_sandbox_kill(cancel_id, handle, timeout_ms, buf, buf_len) : NULL;
@@ -1572,6 +1596,7 @@ type CreateOptions struct {
 	CPUPlacement         string               `json:"cpu_placement,omitempty"`
 	PlacementProfile     string               `json:"placement_profile,omitempty"`
 	THP                  string               `json:"thp,omitempty"`
+	MemorySnapshot       string               `json:"memory_snapshot,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
 	SecurityProfile      string               `json:"security_profile,omitempty"`
@@ -2055,6 +2080,32 @@ func RequestStopSandboxByName(ctx context.Context, name string) error {
 	return err
 }
 
+// PauseSandboxByName controls resident execution without an agent connection.
+func PauseSandboxByName(ctx context.Context, name string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_pause(cancelID, cName, buf, bufLen)
+	})
+	return err
+}
+
+// ResumeSandboxByName controls resident execution without an agent connection.
+func ResumeSandboxByName(ctx context.Context, name string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_resume(cancelID, cName, buf, bufLen)
+	})
+	return err
+}
+
 // KillSandboxByName terminates a sandbox identified by name and waits for stopped observation.
 func KillSandboxByName(ctx context.Context, name string, timeoutMs uint64) error {
 	if err := ensureLoaded(); err != nil {
@@ -2263,6 +2314,28 @@ func (s *Sandbox) RequestStop(ctx context.Context) error {
 	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_sandbox_request_stop(cancelID, s.h(), buf, bufLen)
+	})
+	return err
+}
+
+// Pause controls resident execution through the host runtime.
+func (s *Sandbox) Pause(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_pause(cancelID, s.h(), buf, bufLen)
+	})
+	return err
+}
+
+// Resume controls resident execution through the host runtime.
+func (s *Sandbox) Resume(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_resume(cancelID, s.h(), buf, bufLen)
 	})
 	return err
 }

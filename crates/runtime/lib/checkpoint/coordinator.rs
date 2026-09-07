@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -56,6 +56,8 @@ pub(crate) struct CheckpointCoordinator {
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
     network_resource_binding: Option<String>,
     previous_memory: Option<MemoryManifest>,
+    memory_cache: Option<super::MemoryCache>,
+    cached_baseline: Option<(MemoryManifest, super::CachedMemory)>,
 }
 
 /// Published checkpoint identity returned to the control executor.
@@ -73,6 +75,7 @@ pub(crate) struct CheckpointResult {
 #[derive(Debug)]
 pub(crate) struct CheckpointFailure {
     message: String,
+    freezer_unavailable: bool,
     pub(crate) keep_paused: bool,
     pub(crate) published: Option<Box<CheckpointResult>>,
 }
@@ -139,6 +142,72 @@ struct PendingDeviceState {
 //--------------------------------------------------------------------------------------------------
 
 impl CheckpointCoordinator {
+    /// Establish a resident, user-owned pause without requiring snapshot resource admission.
+    pub(crate) fn pause_user(
+        &self,
+        vm: &msb_krun::VmControl,
+        attempt_id: &str,
+    ) -> Result<UserPause, CheckpointFailure> {
+        if !vm.clock_sync_supported() {
+            return Err(CheckpointFailure::before_pause(
+                "guest kernel lacks clock-only resume support",
+            ));
+        }
+        let (workload, capture_unavailable) = match self.freeze_workload(vm, attempt_id) {
+            Ok(workload) => (Some(workload), None),
+            Err(error) if error.freezer_unavailable => (None, Some(error.to_string())),
+            Err(error) => return Err(error),
+        };
+        match vm.pause() {
+            Ok(generation) => Ok(UserPause {
+                generation,
+                workload,
+                capture_unavailable,
+            }),
+            Err(error) => {
+                if let Some(workload) = workload {
+                    return Err(recover_failed_freeze(
+                        attempt_id,
+                        error.to_string(),
+                        || self.thaw_workload(&workload),
+                        || vm.pause().map(|_| ()).map_err(|error| error.to_string()),
+                    ));
+                }
+                Err(CheckpointFailure::before_pause(error))
+            }
+        }
+    }
+
+    /// Resume this exact resident VM, processing clock correction before releasing workloads.
+    pub(crate) fn resume_user(
+        &self,
+        vm: &msb_krun::VmControl,
+        paused: &UserPause,
+    ) -> Result<(), CheckpointFailure> {
+        paused.validate(vm).map_err(CheckpointFailure::paused)?;
+        let request = vm
+            .request_clock_sync()
+            .ok_or_else(|| CheckpointFailure::paused("clock-only resume request unavailable"))?;
+        vm.resume(paused.generation)
+            .map_err(CheckpointFailure::paused)?;
+        let result = if vm.wait_vm_generation_processed(request, WORKLOAD_CONTROL_TIMEOUT)
+            == Some(msb_krun::VmGenerationWaitOutcome::Processed)
+        {
+            match &paused.workload {
+                Some(workload) => self.thaw_workload(workload),
+                None => Ok(()),
+            }
+        } else {
+            Err("guest did not acknowledge resident resume clock correction".into())
+        };
+        result.map_err(|error| {
+            let pause_error = vm.pause().err();
+            CheckpointFailure::paused(format!(
+                "resume recovery required: {error}; pause error: {pause_error:?}"
+            ))
+        })
+    }
+
     pub(crate) fn compact(
         &mut self,
         vm: &msb_krun::VmControl,
@@ -261,6 +330,17 @@ impl CheckpointCoordinator {
             fs_resource_bindings,
             network_resource_binding,
             previous_memory: None,
+            memory_cache: if vm.memory_snapshot == microsandbox_types::MemorySnapshotMode::Cow {
+                Some(
+                    super::MemoryCache::open(vm.memory_cache_dir.as_ref().ok_or_else(|| {
+                        "CoW memory requires its backend-resolved cache directory".to_string()
+                    })?)
+                    .map_err(|error| error.to_string())?,
+                )
+            } else {
+                None
+            },
+            cached_baseline: None,
         })
     }
 
@@ -413,6 +493,7 @@ impl CheckpointCoordinator {
             && let Err(error) = vm.resume(pause)
         {
             return Err(CheckpointFailure {
+                freezer_unavailable: false,
                 message: format!("checkpoint published but source resume failed: {error}"),
                 keep_paused: true,
                 published: Some(Box::new(captured.result)),
@@ -432,6 +513,7 @@ impl CheckpointCoordinator {
                 None => format!("checkpoint published but workload thaw failed: {error}"),
             };
             return Err(CheckpointFailure {
+                freezer_unavailable: false,
                 message,
                 keep_paused: true,
                 published: Some(Box::new(captured.result)),
@@ -439,6 +521,51 @@ impl CheckpointCoordinator {
         }
         let thaw_us = thaw_started.elapsed().as_micros();
         let workload_unavailable_us = workload_unavailable_started.elapsed().as_micros();
+        if let Some(cache) = &self.memory_cache {
+            // Source execution has resumed (unless explicitly user-paused). Read only the
+            // completed immutable capture, never live RAM, while preparing child acceleration.
+            let prepared = (|| -> Result<super::CachedMemory, String> {
+                let bytes = captured
+                    .memory_manifest
+                    .to_canonical_bytes()
+                    .map_err(|e| e.to_string())?;
+                let identity = ObjectId::from_bytes(&bytes).map_err(|e| e.to_string())?;
+                cache
+                    .materialize_with_baseline(
+                        &captured.memory_manifest,
+                        &identity,
+                        self.cached_baseline
+                            .as_ref()
+                            .map(|(manifest, cached)| (manifest, cached)),
+                        |id| {
+                            let mut bytes = Vec::new();
+                            std::fs::File::open(self.store.object_path(id))?
+                                .take(MEMORY_OBJECT_PACK_SIZE as u64 + 1)
+                                .read_to_end(&mut bytes)?;
+                            if bytes.len() > MEMORY_OBJECT_PACK_SIZE
+                                || ObjectId::from_bytes(&bytes).map_err(io::Error::other)? != *id
+                            {
+                                return Err(io::Error::other(
+                                    "memory object failed size/identity validation",
+                                ));
+                            }
+                            Ok(bytes)
+                        },
+                    )
+                    .map_err(|e| e.to_string())
+            })();
+            match prepared {
+                Ok(cached) => {
+                    tracing::info!(target: "microsandbox_checkpoint_timing", operation = "memory_cache", prepare_us = cached.prepare_us, cache_hit = cached.cache_hit, reflink = cached.reflink, "prepared immutable capture cache");
+                    self.cached_baseline = Some((captured.memory_manifest.clone(), cached));
+                }
+                Err(error) => {
+                    // Publication already succeeded. Losing optional acceleration does not
+                    // erase the artifact or turn its successful capture into a false failure.
+                    tracing::warn!(%error, "checkpoint published without memory cache acceleration");
+                }
+            }
+        }
         if baseline_published {
             self.previous_memory = Some(captured.memory_manifest);
         } else {
@@ -522,7 +649,9 @@ impl CheckpointCoordinator {
         if let Ok(reply) = &reply
             && let Some(reason) = unavailable_freezer_reason(reply, attempt_id)
         {
-            return Err(CheckpointFailure::before_pause(reason));
+            let mut error = CheckpointFailure::before_pause(reason);
+            error.freezer_unavailable = true;
+            return Err(error);
         }
         let result = reply.and_then(|reply| {
             validate_workload_reply::<WorkloadFrozen>(
@@ -616,6 +745,7 @@ impl CheckpointCoordinator {
                 let rollover = disk
                     .rollover(vm, &self.runtime, staging, pause_generation)
                     .map_err(|error| CheckpointFailure {
+                        freezer_unavailable: false,
                         message: error.to_string(),
                         keep_paused: error.keep_paused,
                         published: None,
@@ -873,6 +1003,7 @@ impl CheckpointFailure {
     fn before_pause(error: impl fmt::Display) -> Self {
         Self {
             message: error.to_string(),
+            freezer_unavailable: false,
             keep_paused: false,
             published: None,
         }
@@ -881,6 +1012,7 @@ impl CheckpointFailure {
     fn paused(error: impl fmt::Display) -> Self {
         Self {
             message: error.to_string(),
+            freezer_unavailable: false,
             keep_paused: true,
             published: None,
         }
@@ -898,6 +1030,7 @@ impl FrozenWorkload {
             kind: "agent".into(),
             treatment: ResourceTreatment::Serialize,
             binding: BTreeMap::from([
+                ("attempt_id".into(), self.attempt_id.clone()),
                 (
                     "protocol_generation".into(),
                     self.protocol_generation.to_string(),

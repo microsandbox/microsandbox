@@ -231,6 +231,19 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Select explicit private file-backed memory or standard anonymous memory.
+    #[napi(ts_args_type = "mode: 'standard' | 'cow'")]
+    pub fn memory_snapshot(&mut self, mode: String) -> Result<&Self> {
+        let mode = serde_json::from_value(serde_json::Value::String(mode))
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let prev = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("builder already consumed"))?;
+        self.inner = Some(prev.memory_snapshot(mode));
+        Ok(self)
+    }
+
     /// Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`.
     #[napi(js_name = "logLevel")]
     pub fn log_level(&mut self, level: String) -> Result<&Self> {

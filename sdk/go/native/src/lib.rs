@@ -1016,6 +1016,7 @@ struct SandboxCreateOpts {
     cpu_placement: Option<String>,
     placement_profile: Option<String>,
     thp: Option<String>,
+    memory_snapshot: Option<microsandbox::sandbox::MemorySnapshotMode>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -2226,6 +2227,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     .map_err(FfiError::invalid_argument)?;
                 builder = builder.thp(policy);
             }
+            if let Some(mode) = opts.memory_snapshot {
+                builder = builder.memory_snapshot(mode);
+            }
             if let Some(w) = opts.workdir {
                 builder = builder.workdir(w);
             }
@@ -2602,6 +2606,40 @@ pub unsafe extern "C" fn msb_sandbox_handle_stop(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_pause(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let sb = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            sb.pause().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_resume(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let sb = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            sb.resume().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_handle_request_stop(
     cancel_id: u64,
     name: *const c_char,
@@ -2874,6 +2912,38 @@ pub unsafe extern "C" fn msb_sandbox_stop(
             sb.stop_with_timeout(Duration::from_millis(timeout_ms))
                 .await
                 .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_pause(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            sb.pause().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_resume(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            sb.resume().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })

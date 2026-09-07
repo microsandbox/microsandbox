@@ -9,7 +9,7 @@ mod restore;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult};
+pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult, UserPause};
 pub(crate) use disk::recover_runtime_owned_root;
 pub use disk::{
     DiskCompactionResult, RuntimeOwnedRootChain, RuntimeOwnedRootLayer, compact_stopped_root,

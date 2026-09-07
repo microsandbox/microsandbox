@@ -779,6 +779,7 @@ impl Default for SandboxConfig {
         Self {
             spec: SandboxSpec {
                 resources: SandboxResources {
+                    memory_snapshot: Default::default(),
                     cpus: default_cpus(),
                     memory_mib: default_memory_mib(),
                     max_cpus: default_cpus(),
@@ -1535,6 +1536,7 @@ mod tests {
             resources: SandboxResources {
                 cpus: 2,
                 memory_mib: 1024,
+                memory_snapshot: Default::default(),
                 max_cpus: 2,
                 max_memory_mib: 1024,
                 cpu_placement: Default::default(),

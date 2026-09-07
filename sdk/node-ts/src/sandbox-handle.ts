@@ -160,6 +160,16 @@ export class SandboxHandle {
     await withMappedErrors(() => this.inner.stop());
   }
 
+  /** Explicit resident pause; no snapshot is created. */
+  async pause(): Promise<void> {
+    await withMappedErrors(() => this.inner.pause());
+  }
+
+  /** Explicit resident resume; no snapshot is created. */
+  async resume(): Promise<void> {
+    await withMappedErrors(() => this.inner.resume());
+  }
+
   async requestStop(): Promise<void> {
     await withMappedErrors(() => this.inner.requestStop());
   }

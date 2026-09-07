@@ -27,6 +27,7 @@ stateDiagram-v2
 |--------|-------------|
 | **Creating** | The VM is booting. The kernel is loaded, the filesystem is mounted, and the guest agent is initializing (configuring network, setting up the environment). |
 | **Running** | The guest agent is ready. You can call `exec`, `shell`, and `fs`. |
+| **Paused** | The VM is resident but suspended. Use `resume` to continue its processes, or `stop` to shut it down. |
 | **Draining** | Graceful shutdown in progress. Existing commands run to completion, but new `exec` calls are rejected. Transitions to Stopped when all commands finish. |
 | **Stopped** | The VM has shut down. Sandbox configuration and state are persisted to the database and can be restarted. |
 | **Crashed** | The VM exited unexpectedly (e.g., kernel panic, OOM kill). |
@@ -90,6 +91,45 @@ msb run -d python --name worker
 ```
 
 </CodeGroup>
+
+## Pause and resume
+
+Pause keeps the local VM and its RAM allocated without creating a snapshot. Resume continues the same processes and corrects guest wall clock before releasing prepared workloads. New guest commands fail while paused; host inspection and stop remain available. Network peers may time out during a long pause.
+
+<CodeGroup>
+```bash CLI
+msb pause worker
+msb snapshot create paused-state --from worker --full
+msb resume worker
+```
+
+```rust Rust
+let worker = Sandbox::get("worker").await?;
+worker.pause().await?;
+worker.resume().await?;
+```
+
+```python Python
+worker = await Sandbox.get("worker")
+await worker.pause()
+await worker.resume()
+```
+
+```typescript TypeScript
+const worker = await Sandbox.get("worker");
+await worker.pause();
+await worker.resume();
+```
+
+```go Go
+worker, err := m.GetSandbox(ctx, "worker")
+if err != nil { return err }
+if err := worker.Pause(ctx); err != nil { return err }
+if err := worker.Resume(ctx); err != nil { return err }
+```
+</CodeGroup>
+
+Pausing an already-paused VM and resuming an already-running VM are no-ops. Full snapshots taken while paused leave it paused. A stopped VM has no resident execution state: use `start` to boot it again. Pause/resume requires a matching runtime and guest kernel; cloud sandboxes are not supported.
 
 ## Stop and restart
 

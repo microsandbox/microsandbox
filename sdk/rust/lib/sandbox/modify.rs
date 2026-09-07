@@ -684,7 +684,7 @@ async fn live_control(name: &str, status: SandboxStatus) -> LiveControl {
 }
 
 /// Ask the sandbox process which live-control operations it serves.
-async fn control_capabilities(
+pub(super) async fn control_capabilities(
     name: &str,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlCapabilities> {
     let response = control_request(name, "{\"op\":\"capabilities\"}\n".to_string()).await?;
@@ -723,7 +723,7 @@ async fn connect_control_pipe(
 }
 
 /// Send one control request line and parse the reply.
-async fn control_request(
+pub(super) async fn control_request(
     name: &str,
     request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
@@ -734,6 +734,33 @@ async fn control_request(
             response
                 .error
                 .unwrap_or_else(|| "unknown error".to_string())
+        )));
+    }
+    Ok(response)
+}
+
+/// Use the handle's local backend, never an ambient backend with a matching sandbox name.
+pub(super) async fn control_request_for(
+    local: &crate::backend::LocalBackend,
+    name: &str,
+    request: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    let candidates = crate::runtime::sandbox_agent_socket_path_candidates_for(local, name)
+        .into_iter()
+        .map(|path| microsandbox_runtime::control::control_socket_path_for(&path));
+    #[cfg(unix)]
+    let stream = connect_control_socket(candidates).await?;
+    #[cfg(windows)]
+    let stream =
+        connect_control_pipe(&candidates.into_iter().next().ok_or_else(|| {
+            crate::MicrosandboxError::Runtime("no backend control endpoint".into())
+        })?)
+        .await?;
+    let response = control_request_over_stream(stream, &request).await?;
+    if !response.ok {
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "runtime control refused: {}",
+            response.error.unwrap_or_else(|| "unknown error".into())
         )));
     }
     Ok(response)

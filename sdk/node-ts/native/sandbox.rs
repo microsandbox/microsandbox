@@ -529,6 +529,22 @@ impl Sandbox {
         sb.stop().await.map_err(to_napi_error)
     }
 
+    /// Explicit resident pause through host control.
+    #[napi]
+    pub async fn pause(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.pause().await.map_err(to_napi_error)
+    }
+
+    /// Explicit resident resume through host control.
+    #[napi]
+    pub async fn resume(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.resume().await.map_err(to_napi_error)
+    }
+
     /// Stop and wait for exit, returning the exit status.
     #[napi]
     pub async fn stop_and_wait(&self) -> Result<ExitStatus> {

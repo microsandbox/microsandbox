@@ -800,6 +800,7 @@ impl AgentRelay {
                                 next_id_clone,
                                 id_start,
                                 id_end_exclusive,
+                                Arc::clone(&self.shared.resident_paused),
                             ));
                         }
                         Err(e) => {
@@ -1225,6 +1226,7 @@ async fn client_reader_task(
     next_session_id: Arc<AtomicU64>,
     id_start: u32,
     id_end_exclusive: u32,
+    resident_paused: Arc<std::sync::atomic::AtomicBool>,
 ) {
     loop {
         let frame = match read_raw_frame(&mut reader).await {
@@ -1248,6 +1250,31 @@ async fn client_reader_task(
                 id_end_exclusive
             );
             break;
+        }
+
+        // Reject new work on the host: a paused guest cannot return its own error.
+        // Existing stream data retains the normal bounded backpressure path.
+        if is_session_start && resident_paused.load(Ordering::Acquire) {
+            let error = CoreError {
+                kind: microsandbox_protocol::core::CoreErrorKind::InvalidSession,
+                message: "sandbox is paused; resume it before starting guest work".into(),
+                offending_type: None,
+                workload_failure: None,
+            };
+            if let Ok(reply) = Message::with_payload(MessageType::CoreError, frame.id, &error) {
+                let mut bytes = Vec::new();
+                if codec::encode_to_buf(&reply, &mut bytes).is_ok() {
+                    let writer = clients
+                        .lock()
+                        .await
+                        .get(&slot)
+                        .map(|client| client.write_tx.clone());
+                    if let Some(writer) = writer {
+                        let _ = writer.send(Bytes::from(bytes)).await;
+                    }
+                }
+            }
+            continue;
         }
 
         // Forward shutdown to agentd (via the agent_tx send below) so the

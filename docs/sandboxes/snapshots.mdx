@@ -9,7 +9,7 @@ icon: "code-branch"
 A snapshot is a portable artifact that can hold either a sandbox's writable disk state or a full checkpoint of a running sandbox. Managed and flat OCI roots are supported; the descriptor preserves the root layout so a flat `rootfs.raw` is never mistaken for a managed OverlayFS upper. Move it with `scp`, archive it as `.msnap`, or create a child sandbox from it.
 
 <Note>
-Disk snapshots capture stopped or crashed sandboxes. Full snapshots use `--full` and capture a running sandbox without requiring the user to pause it first.
+Disk snapshots capture stopped or crashed sandboxes. Full snapshots use `--full` and capture a running or user-paused sandbox. You do not need to pause it first; if you do, capture leaves it paused.
 </Note>
 
 ## What gets captured
@@ -19,9 +19,24 @@ Disk snapshots capture stopped or crashed sandboxes. Full snapshots use `--full`
 | Mode | Source | Captured state | Restore behavior |
 | ---- | ------ | -------------- | ---------------- |
 | Disk (default) | Stopped or crashed sandbox | Writable disk closure and pinned image | Cold-boots a fresh VM |
-| Full | Running sandbox | Disk, memory, vCPU, device, and admitted resource state | Eagerly resumes the captured execution in a child VM |
+| Full | Running or user-paused sandbox | Disk, memory, vCPU, device, and admitted resource state | Resumes the captured execution in a child VM |
 
 Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `state.kind` is either `file` or `checkpoint`, and `root_disk.layout` records `managed`, `flat`, or `tmpfs`. Checkpoint payloads live in a content-addressed closure rather than a standalone disk file. A tmpfs root has no stopped disk snapshot because its writable state exists only in memory, but it is included in a running full snapshot; such a snapshot must be resumed and cannot use `--disk-only`.
+
+## Share restored memory with CoW
+
+On Linux and macOS, request `--memory-snapshot cow` when creating a sandbox to use private file-backed memory. Children restored from the same full snapshot can share clean memory pages; writes stay private to each child. Each child must opt in explicitly. The default, `standard`, keeps eager anonymous memory.
+
+```bash
+msb create alpine --name baseline --root-disk flat:1G --memory-snapshot cow
+msb snapshot create ready --from baseline --full
+msb create --name worker-a --from-snapshot ready --memory-snapshot cow
+msb create --name worker-b --from-snapshot ready --memory-snapshot cow
+```
+
+The SDK creation options are Rust `.memory_snapshot(MemorySnapshotMode::Cow)`, Python `memory_snapshot=MemorySnapshotMode.COW`, TypeScript `.memorySnapshot("cow")`, and Go `WithMemorySnapshot(MemorySnapshotCow)`.
+
+Snapshots are still manual. CoW uses a protected local memory cache; the first uncached restore must build it, while later children reuse it. Repeated captures use filesystem reflinks when available. Removing the input archive does not invalidate a running child's backing. Windows CoW and explicit NUMA placement with CoW are not supported yet; requests fail instead of silently switching modes.
 
 ## Quick start
 

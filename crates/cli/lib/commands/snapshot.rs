@@ -20,7 +20,7 @@ pub struct SnapshotArgs {
 /// Snapshot subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SnapshotCommands {
-    /// Create a disk snapshot from a stopped sandbox or a full snapshot from a running one.
+    /// Create a disk snapshot from a stopped sandbox or a full snapshot from a running or paused one.
     Create(SnapshotCreateArgs),
 
     /// List indexed snapshots.

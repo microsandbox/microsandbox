@@ -48,7 +48,7 @@ pub const DEFAULT_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// [`connect`](SandboxHandle::connect) when the sandbox is already running, or
 /// [`start`](SandboxHandle::start) to boot a stopped sandbox.
 pub struct SandboxHandle {
-    backend: Arc<dyn Backend>,
+    pub(super) backend: Arc<dyn Backend>,
     inner: SandboxHandleInner,
     name: String,
 }
@@ -321,7 +321,10 @@ impl SandboxHandle {
             .local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleMetrics))?;
 
-        if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
+        if !matches!(
+            local.status,
+            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+        ) {
             return Err(MicrosandboxError::SandboxNotRunning(format!(
                 "'{}' is not running (status: {:?})",
                 self.name, local.status

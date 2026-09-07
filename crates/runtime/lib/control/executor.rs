@@ -17,7 +17,7 @@ use super::{
     CheckpointCaptureIntent, CheckpointControlState, ControlCapabilities, ControlRequest,
     ControlResponse, CpuControlState, MemoryControlState, SecretLiveChange,
 };
-use crate::checkpoint::{CheckpointCoordinator, CheckpointResult};
+use crate::checkpoint::{CheckpointCoordinator, CheckpointResult, UserPause};
 use crate::vm::VmConfig;
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 
@@ -93,6 +93,8 @@ pub struct ControlEnvelopeResponse {
 
 /// One in-process authority for all host-owned runtime mutations.
 pub struct RuntimeControlExecutor {
+    pause_observation: std::sync::RwLock<ControlResponse>,
+    resident_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     vm: msb_krun::VmControl,
     #[cfg(feature = "net")]
     secrets: Option<microsandbox_network::secrets::handle::SecretsHandle>,
@@ -106,6 +108,7 @@ struct ExecutorState {
     dedup: BTreeMap<String, DedupEntry>,
     dedup_order: VecDeque<String>,
     checkpoint: CheckpointCoordinator,
+    user_pause: Option<UserPause>,
 }
 
 #[derive(Clone)]
@@ -130,6 +133,7 @@ impl RuntimeControlExecutor {
         guest_bootstrap: &GuestBootstrap,
         runtime: tokio::runtime::Handle,
         agent_sock: &Path,
+        resident_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Self, String> {
         let runtime_boot_id = new_runtime_boot_id();
         persist_runtime_boot_id(runtime_dir, &runtime_boot_id)
@@ -142,6 +146,16 @@ impl RuntimeControlExecutor {
             agent_sock,
         )?;
         Ok(Self {
+            pause_observation: std::sync::RwLock::new(ControlResponse {
+                ok: true,
+                pause: Some(super::PauseControlState {
+                    paused: false,
+                    recovery_required: false,
+                    capture_unavailable: None,
+                }),
+                ..Default::default()
+            }),
+            resident_paused,
             vm,
             #[cfg(feature = "net")]
             secrets,
@@ -152,14 +166,22 @@ impl RuntimeControlExecutor {
                 dedup: BTreeMap::new(),
                 dedup_order: VecDeque::new(),
                 checkpoint,
+                user_pause: None,
             }),
         })
     }
 
     /// Execute a legacy command through the same exclusive mutation path.
     pub fn execute_legacy(&self, command: ControlRequest) -> ControlResponse {
+        // Observation remains available during a long capture. It describes the last completed
+        // lifecycle transition; it neither borrows nor releases mutation/pause authority.
+        if matches!(command, ControlRequest::PauseState) {
+            return self.pause_observation.read().unwrap().clone();
+        }
         let mut state = self.state.lock().unwrap();
-        self.execute_locked(&mut state, command)
+        let response = self.execute_locked(&mut state, command);
+        *self.pause_observation.write().unwrap() = pause_response(&state);
+        response
     }
 
     /// Execute a fenced, idempotent control request.
@@ -223,6 +245,7 @@ impl RuntimeControlExecutor {
 
         let request_id = envelope.request_id;
         let response = self.execute_locked(&mut state, envelope.command);
+        *self.pause_observation.write().unwrap() = pause_response(&state);
         let response = ControlEnvelopeResponse {
             request_id: request_id.clone(),
             runtime: snapshot_state(&state),
@@ -250,8 +273,17 @@ impl RuntimeControlExecutor {
                 | ControlRequest::SecretsUpdate { .. }
                 | ControlRequest::CheckpointCreate { .. }
                 | ControlRequest::DiskCompact { dry_run: false, .. }
+                | ControlRequest::Pause
+                | ControlRequest::Resume
         );
-        if mutation && state.lifecycle != RuntimeLifecycle::Running {
+        let resident_operation = state.user_pause.is_some()
+            && matches!(
+                request,
+                ControlRequest::Pause
+                    | ControlRequest::Resume
+                    | ControlRequest::CheckpointCreate { .. }
+            );
+        if mutation && state.lifecycle != RuntimeLifecycle::Running && !resident_operation {
             return control_error(
                 "runtime_busy",
                 "runtime lifecycle does not currently admit mutations",
@@ -259,6 +291,45 @@ impl RuntimeControlExecutor {
         }
 
         let response = match request {
+            ControlRequest::Pause => {
+                if state.user_pause.is_none() {
+                    self.resident_paused
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let attempt = format!("pause-{}-{}", state.runtime_boot_id, state.revision);
+                    state.lifecycle = RuntimeLifecycle::Quiescing;
+                    match state.checkpoint.pause_user(&self.vm, &attempt) {
+                        Ok(paused) => {
+                            state.user_pause = Some(paused);
+                            state.lifecycle = RuntimeLifecycle::Quiesced;
+                        }
+                        Err(error) => {
+                            state.lifecycle = if error.keep_paused {
+                                RuntimeLifecycle::Quiesced
+                            } else {
+                                RuntimeLifecycle::Running
+                            };
+                            self.resident_paused
+                                .store(error.keep_paused, std::sync::atomic::Ordering::Release);
+                            return control_error("pause_failed", error.to_string());
+                        }
+                    }
+                }
+                pause_response(state)
+            }
+            ControlRequest::Resume => {
+                if let Some(paused) = state.user_pause.take() {
+                    if let Err(error) = state.checkpoint.resume_user(&self.vm, &paused) {
+                        // A failed resume becomes recovery-owned, never a public resume token.
+                        state.lifecycle = RuntimeLifecycle::Quiesced;
+                        return control_error("resume_recovery_required", error.to_string());
+                    }
+                    state.lifecycle = RuntimeLifecycle::Running;
+                    self.resident_paused
+                        .store(false, std::sync::atomic::Ordering::Release);
+                }
+                pause_response(state)
+            }
+            ControlRequest::PauseState => pause_response(state),
             ControlRequest::RootDiskGrow { size_bytes } => {
                 match state.checkpoint.grow_root(&self.vm, size_bytes) {
                     Ok(root_disk) => ControlResponse {
@@ -315,14 +386,23 @@ impl RuntimeControlExecutor {
                             microsandbox_image::checkpoint::CaptureIntent::TransparentTransfer
                         }
                     },
-                    None,
+                    state.user_pause.as_ref(),
                 ) {
                     Ok(result) => {
-                        state.lifecycle = RuntimeLifecycle::Running;
+                        state.lifecycle = if state.user_pause.is_some() {
+                            RuntimeLifecycle::Quiesced
+                        } else {
+                            RuntimeLifecycle::Running
+                        };
                         checkpoint_response(Some(result), true, None, None)
                     }
                     Err(error) => {
-                        state.lifecycle = if error.keep_paused {
+                        // A failed rebind can invalidate the user's original pause authority.
+                        // Recovery-owned suspension must never be released by ordinary resume.
+                        if error.keep_paused {
+                            state.user_pause = None;
+                        }
+                        state.lifecycle = if error.keep_paused || state.user_pause.is_some() {
                             RuntimeLifecycle::Quiesced
                         } else {
                             RuntimeLifecycle::Running
@@ -338,6 +418,10 @@ impl RuntimeControlExecutor {
             }
             request => self.handle_request(request),
         };
+        self.resident_paused.store(
+            state.lifecycle != RuntimeLifecycle::Running,
+            std::sync::atomic::Ordering::Release,
+        );
         if mutation && response.ok {
             match state.revision.checked_add(1) {
                 Some(revision) => state.revision = revision,
@@ -397,6 +481,7 @@ impl RuntimeControlExecutor {
                     checkpoint_create: true,
                     disk_compact: true,
                     root_disk_grow: true,
+                    pause_resume: self.vm.clock_sync_supported(),
                 }),
                 ..Default::default()
             },
@@ -416,6 +501,9 @@ impl RuntimeControlExecutor {
             ControlRequest::CpuState => cpu(self.vm.cpu_state()),
             ControlRequest::SecretsUpdate { changes } => self.handle_secrets_update(changes),
             ControlRequest::CheckpointCreate { .. }
+            | ControlRequest::Pause
+            | ControlRequest::Resume
+            | ControlRequest::PauseState
             | ControlRequest::DiskCompact { .. }
             | ControlRequest::RootDiskGrow { .. } => {
                 unreachable!("checkpoint requests are handled by the executor lifecycle path")
@@ -482,6 +570,22 @@ fn new_runtime_boot_id() -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
     format!("boot_{}", hex::encode(bytes))
+}
+
+fn pause_response(state: &ExecutorState) -> ControlResponse {
+    ControlResponse {
+        ok: true,
+        pause: Some(super::PauseControlState {
+            paused: state.user_pause.is_some(),
+            recovery_required: state.lifecycle == RuntimeLifecycle::Quiesced
+                && state.user_pause.is_none(),
+            capture_unavailable: state
+                .user_pause
+                .as_ref()
+                .and_then(|paused| paused.capture_unavailable.clone()),
+        }),
+        ..Default::default()
+    }
 }
 
 fn checkpoint_response(

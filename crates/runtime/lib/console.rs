@@ -54,6 +54,8 @@ const NAMED_PIPE_BRIDGE_TX_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// transmitted by the guest agent", `rx_ring` = "bytes received by the guest
 /// agent".
 pub struct ConsoleSharedState {
+    /// User pause or recovery fence; checked only for new guest operations and idle policy.
+    pub resident_paused: Arc<std::sync::atomic::AtomicBool>,
     /// Guest → Host: console TX thread pushes byte chunks, relay pops them.
     pub tx_ring: ArrayQueue<Vec<u8>>,
 
@@ -102,6 +104,7 @@ impl ConsoleSharedState {
     /// Create shared state with a specific queue capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
+            resident_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx_ring: ArrayQueue::new(capacity),
             rx_ring: ArrayQueue::new(capacity),
             tx_wake: WakePipe::new(),

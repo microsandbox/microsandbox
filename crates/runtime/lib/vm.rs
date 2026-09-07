@@ -280,6 +280,12 @@ pub struct VmConfig {
     /// Guest transparent huge-page policy selected at boot.
     pub thp: microsandbox_types::TransparentHugePagePolicy,
 
+    /// Explicit construction-time memory representation.
+    pub memory_snapshot: microsandbox_types::MemorySnapshotMode,
+
+    /// Protected memory cache resolved by the sandbox's owning local backend.
+    pub memory_cache_dir: Option<PathBuf>,
+
     /// Number of virtual CPUs online at boot.
     pub vcpus: u8,
 
@@ -1012,6 +1018,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
             &resolved_bootstrap,
             tokio_rt.handle().clone(),
             &config.agent_sock_path,
+            Arc::clone(&shared.resident_paused),
         );
         let context = crate::control::ControlContext {
             executor: match executor {
@@ -1251,6 +1258,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     {
         let shutdown_exit_handle = exit_handle.clone();
         let shutdown_reason = Arc::clone(&exit_reason);
+        let shutdown_paused = Arc::clone(&shared.resident_paused);
         tokio_rt.spawn(async move {
             if relay_drain_rx.recv().await.is_some() {
                 shutdown_reason.store(
@@ -1260,7 +1268,9 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
                 tracing::info!(
                     "core.shutdown forwarded to agentd, allowing flush window before host fallback"
                 );
-                tokio::time::sleep(shutdown_flush_timeout).await;
+                if !shutdown_paused.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::time::sleep(shutdown_flush_timeout).await;
+                }
                 tracing::info!("flush window elapsed, triggering host exit");
                 shutdown_exit_handle.trigger();
             }
@@ -1312,6 +1322,13 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
                 }
             }
 
+            if startup_shared
+                .resident_paused
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                startup_exit_handle.trigger();
+                return;
+            }
             match request_guest_shutdown(&startup_shared) {
                 Ok(()) => {
                     tokio::time::sleep(startup_shutdown_flush_timeout).await;
@@ -1343,6 +1360,12 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
+                if heartbeat_shared
+                    .resident_paused
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    continue;
+                }
                 let decision = heartbeat_reader.check(idle_timeout);
 
                 match decision {
@@ -2070,12 +2093,28 @@ fn build_vm(
             &restore.checkpoint_root,
         )
         .map_err(|error| RuntimeError::Custom(format!("prepare checkpoint restore: {error}")))?;
-        Some(prepared.install(&mut vm))
+        let cache_root = (config.vm.memory_snapshot == microsandbox_types::MemorySnapshotMode::Cow)
+            .then(|| {
+                config.vm.memory_cache_dir.clone().ok_or_else(|| {
+                    RuntimeError::Custom(
+                        "CoW memory requires its backend-resolved cache directory".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        Some(
+            prepared
+                .install(&mut vm, cache_root)
+                .map_err(RuntimeError::Custom)?,
+        )
     } else {
         None
     };
 
     let bootstrap_frame = if restored_agent.is_none() {
+        if config.vm.memory_snapshot == microsandbox_types::MemorySnapshotMode::Cow {
+            vm.set_private_memory_boot(true);
+        }
         Some(encode_bootstrap_frame(&bootstrap)?)
     } else {
         None
@@ -2625,6 +2664,15 @@ fn spawn_parent_watchdog(
                 Ok(ParentWatchdogSignal::ParentExited) => {
                     tracing::info!("creator process exited; stopping attached sandbox");
                     exit_reason.store(EXIT_REASON_PARENT_EXIT, std::sync::atomic::Ordering::SeqCst);
+                    // A suspended guest cannot process shutdown. Release the resident VM
+                    // directly without thawing user workloads merely to stop them.
+                    if shared
+                        .resident_paused
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        exit_handle.trigger();
+                        return;
+                    }
                     if let Err(err) = request_guest_shutdown(&shared) {
                         tracing::warn!(error = %err, "parent-watch shutdown request failed");
                     } else {

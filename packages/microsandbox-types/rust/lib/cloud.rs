@@ -972,6 +972,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
         };
 
         let resources = SandboxResources {
+            memory_snapshot: crate::MemorySnapshotMode::Standard,
             cpus: spec.resources.vcpus,
             memory_mib: spec.resources.memory_mib,
             // The cloud wire type has no boot-capacity fields yet; treat the

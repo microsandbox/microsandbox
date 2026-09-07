@@ -268,6 +268,8 @@ pub fn run(args: SandboxArgs) -> ! {
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         thp: launch.thp,
+        memory_snapshot: launch.memory_snapshot,
+        memory_cache_dir: launch.memory_cache_dir,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
         max_cpus: args.max_vcpus.unwrap_or(args.vcpus).max(args.vcpus),

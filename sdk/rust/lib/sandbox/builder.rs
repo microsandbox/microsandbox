@@ -378,6 +378,12 @@ impl SandboxBuilder {
         self
     }
 
+    /// Select explicit private file-backed memory or the default anonymous representation.
+    pub fn memory_snapshot(mut self, mode: microsandbox_types::MemorySnapshotMode) -> Self {
+        self.config.spec.resources.memory_snapshot = mode;
+        self
+    }
+
     /// Set the runtime log level for the sandbox process.
     ///
     /// This controls the verbosity of the `msb sandbox` process.

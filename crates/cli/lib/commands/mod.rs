@@ -21,6 +21,7 @@ pub mod list;
 pub mod logs;
 pub mod metrics;
 pub mod modify;
+pub mod pause;
 pub mod ping;
 pub mod ps;
 pub mod pull;

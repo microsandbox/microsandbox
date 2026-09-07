@@ -28,12 +28,16 @@ pub struct CachedMemoryRegion {
 
 /// An opened realization pinned against cooperative eviction until the handle is dropped.
 pub struct CachedMemory {
+    path: PathBuf,
+    identity: ObjectId,
     /// Read-only backing ownership. Transfer this handle to the VMM, not merely its pathname.
     pub file: File,
     /// Exact guest coverage, with address holes omitted from physical storage.
     pub regions: Vec<CachedMemoryRegion>,
     /// Whether existing verified bytes were reused without rereading portable objects.
     pub cache_hit: bool,
+    /// Whether this construction cloned its baseline using a filesystem reflink.
+    pub reflink: bool,
     /// Time spent resolving or constructing this backing, in microseconds.
     pub prepare_us: u128,
 }
@@ -59,6 +63,10 @@ impl MemoryCache {
             }
             let root = root.into();
             std::fs::create_dir_all(&root)?;
+            // Cache contents are guest RAM, not public image data. Restrict traversal even
+            // when the caller's umask permits other local users to read ordinary cache files.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
             Ok(Self {
                 root,
                 page_size: page_size as u64,
@@ -83,6 +91,18 @@ impl MemoryCache {
         &self,
         manifest: &MemoryManifest,
         identity: &ObjectId,
+        read_object: impl FnMut(&ObjectId) -> io::Result<Vec<u8>>,
+    ) -> io::Result<CachedMemory> {
+        self.materialize_with_baseline(manifest, identity, None, read_object)
+    }
+
+    /// Reuse a pinned complete baseline before overlaying immutable changed object slices.
+    /// The source VM is never read or remapped here; both inputs are completed captures.
+    pub fn materialize_with_baseline(
+        &self,
+        manifest: &MemoryManifest,
+        identity: &ObjectId,
+        baseline: Option<(&MemoryManifest, &CachedMemory)>,
         mut read_object: impl FnMut(&ObjectId) -> io::Result<Vec<u8>>,
     ) -> io::Result<CachedMemory> {
         let started = Instant::now();
@@ -100,19 +120,53 @@ impl MemoryCache {
         let path = self.entry_path(identity);
         if let Some(file) = open_pinned(&path, length)? {
             return Ok(CachedMemory {
+                path,
+                identity: identity.clone(),
                 file,
                 regions,
                 cache_hit: true,
+                reflink: false,
                 prepare_us: started.elapsed().as_micros(),
             });
         }
 
-        let mut staging = tempfile::Builder::new()
+        let staging_dir = tempfile::Builder::new()
             .prefix(".memory-")
-            .tempfile_in(&self.root)?;
+            .tempdir_in(&self.root)?;
+        let staging_path = staging_dir.path().join("memory");
+        let baseline = baseline.filter(|(_, cached)| cached.regions == regions);
+        if let Some((previous, cached)) = baseline {
+            let bytes = previous.to_canonical_bytes().map_err(io::Error::other)?;
+            if ObjectId::from_bytes(&bytes).map_err(io::Error::other)? != cached.identity {
+                return Err(invalid("cache baseline does not match its pinned manifest"));
+            }
+        }
+        let mut reflink = false;
+        if let Some((_, cached)) = baseline {
+            let (_, strategy) =
+                microsandbox_utils::copy::fast_copy_with_strategy(&cached.path, &staging_path)?;
+            reflink = strategy == microsandbox_utils::copy::FastCopyStrategy::Reflink;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        let mut staging = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&staging_path)?;
         // A fresh sparse file supplies all zero extents without allocating or writing RAM-sized
         // buffers. Only immutable nonzero object slices are copied into it.
-        staging.as_file().set_len(length)?;
+        staging.set_len(length)?;
+        let previous = baseline.map(|(manifest, _)| {
+            manifest
+                .extents
+                .iter()
+                .map(|extent| (extent.start, extent))
+                .collect::<BTreeMap<_, _>>()
+        });
         let mut objects = BTreeMap::<ObjectId, Vec<(u64, u64, u64)>>::new();
         let mut region_index = 0;
         for extent in &manifest.extents {
@@ -120,14 +174,28 @@ impl MemoryCache {
             {
                 region_index += 1;
             }
+            if previous.as_ref().and_then(|map| map.get(&extent.start)) == Some(&extent) {
+                continue;
+            }
+            let region = &regions[region_index];
+            let offset = region.file_offset + (extent.start - region.guest_address);
             if let MemoryExtentContent::Object(content) = &extent.content {
-                let region = &regions[region_index];
-                let offset = region.file_offset + (extent.start - region.guest_address);
                 objects.entry(content.object.clone()).or_default().push((
                     offset,
                     content.object_offset,
                     extent.length,
                 ));
+            } else if baseline.is_some() {
+                // A newly zero range must overwrite the cloned bytes, never resurrect them.
+                // Bound the temporary allocation independently of guest RAM size.
+                staging.seek(SeekFrom::Start(offset))?;
+                let zeros = [0u8; 64 * 1024];
+                let mut remaining = extent.length;
+                while remaining > 0 {
+                    let count = remaining.min(zeros.len() as u64) as usize;
+                    staging.write_all(&zeros[..count])?;
+                    remaining -= count as u64;
+                }
             }
         }
         for (id, slices) in objects {
@@ -150,17 +218,15 @@ impl MemoryCache {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            staging
-                .as_file()
-                .set_permissions(std::fs::Permissions::from_mode(0o400))?;
+            staging.set_permissions(std::fs::Permissions::from_mode(0o400))?;
         }
-        staging.as_file().sync_all()?;
+        staging.sync_all()?;
         // Publish the inode without replacement. Concurrent builders may do duplicate work, but
         // no winner can overwrite backing another VM has already pinned or mapped.
-        match staging.persist_noclobber(&path) {
-            Ok(file) => drop(file),
-            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.error),
+        match std::fs::hard_link(&staging_path, &path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
         }
         #[cfg(unix)]
         File::open(&self.root)?.sync_all()?;
@@ -171,9 +237,12 @@ impl MemoryCache {
             )
         })?;
         Ok(CachedMemory {
+            path,
+            identity: identity.clone(),
             file,
             regions,
             cache_hit: false,
+            reflink,
             prepare_us: started.elapsed().as_micros(),
         })
     }
@@ -390,6 +459,84 @@ mod tests {
         drop(second);
         assert!(cache.evict(&id).unwrap());
         assert!(!cache.evict(&id).unwrap());
+    }
+
+    #[test]
+    fn descendant_reuses_unchanged_objects_and_clears_new_zero_ranges() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = MemoryCache::open(directory.path()).unwrap();
+        let (manifest, id, bytes) = fixture(cache.page_size);
+        let baseline = cache
+            .materialize(&manifest, &id, |_| Ok(bytes.clone()))
+            .unwrap();
+        let mut descendant = manifest.clone();
+        descendant.generation += 1;
+        descendant.extents[0].content = MemoryExtentContent::Zero;
+        let changed = vec![0x7c; cache.page_size as usize];
+        let changed_id = ObjectId::from_bytes(&changed).unwrap();
+        descendant.extents[1].content = MemoryExtentContent::Object(ContentRef {
+            object: changed_id.clone(),
+            object_offset: 0,
+        });
+        let descendant_id =
+            ObjectId::from_bytes(&descendant.to_canonical_bytes().unwrap()).unwrap();
+        let mut reads = 0;
+        let child = cache
+            .materialize_with_baseline(
+                &descendant,
+                &descendant_id,
+                Some((&manifest, &baseline)),
+                |id| {
+                    assert_eq!(id, &changed_id, "unchanged object was reread");
+                    reads += 1;
+                    Ok(changed.clone())
+                },
+            )
+            .unwrap();
+        assert_eq!(reads, 1);
+        let mut result = vec![0; cache.page_size as usize * 3];
+        child.file.read_exact_at(&mut result, 0).unwrap();
+        assert!(
+            result[..cache.page_size as usize]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        assert_eq!(
+            &result[cache.page_size as usize..cache.page_size as usize * 2],
+            &changed
+        );
+        assert_eq!(&result[cache.page_size as usize * 2..], &bytes);
+        baseline
+            .file
+            .read_exact_at(&mut result[..cache.page_size as usize], 0)
+            .unwrap();
+        assert_eq!(
+            &result[..cache.page_size as usize],
+            &bytes,
+            "baseline was mutated"
+        );
+        assert!(!cache.evict(&id).unwrap());
+    }
+
+    #[test]
+    fn reject_a_manifest_paired_with_the_wrong_baseline() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = MemoryCache::open(directory.path()).unwrap();
+        let (manifest, id, bytes) = fixture(cache.page_size);
+        let baseline = cache
+            .materialize(&manifest, &id, |_| Ok(bytes.clone()))
+            .unwrap();
+        let mut wrong = manifest.clone();
+        wrong.generation += 1;
+        let target = ObjectId::from_bytes(&wrong.to_canonical_bytes().unwrap()).unwrap();
+        assert!(
+            cache
+                .materialize_with_baseline(&wrong, &target, Some((&wrong, &baseline)), |_| panic!(
+                    "must reject before reads"
+                ))
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -2548,6 +2548,10 @@ fn sandbox_cli_args(
         agent_sock: agent_sock_path.to_path_buf(),
         libkrunfw_path: libkrunfw_path.to_path_buf(),
         thp: config.spec.resources.thp,
+        memory_snapshot: config.spec.resources.memory_snapshot,
+        memory_cache_dir: (config.spec.resources.memory_snapshot
+            == microsandbox_types::MemorySnapshotMode::Cow)
+            .then(|| local.cache_dir().join("memory")),
         startup: startup_command(config),
         lifecycle: Lifecycle {
             max_duration_secs: config.spec.lifecycle.max_duration_secs,

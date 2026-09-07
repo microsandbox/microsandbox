@@ -41,6 +41,13 @@ class PullPolicy(StrEnum):
     NEVER = "never"
 
 
+class MemorySnapshotMode(StrEnum):
+    """Explicit memory representation; snapshots are still created manually."""
+
+    STANDARD = "standard"
+    COW = "cow"
+
+
 class CpuPlacement(StrEnum):
     """Host placement policy for sandbox vCPU threads."""
 

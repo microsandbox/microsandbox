@@ -18,6 +18,7 @@ pub mod init;
 pub(crate) mod metrics;
 mod modify;
 mod patch;
+pub(crate) mod pause;
 #[cfg(windows)]
 mod reap;
 #[cfg(feature = "ssh")]
@@ -137,8 +138,9 @@ pub use microsandbox_network::dns::Nameserver;
 pub use microsandbox_network::policy::{
     Action as NetworkAction, NetworkPolicy, NetworkProfile, Rule as NetworkRule,
 };
+pub use microsandbox_runtime::control::PauseControlState as SandboxPauseState;
 pub use microsandbox_runtime::logging::LogLevel;
-pub use microsandbox_types::{CpuPlacement, PullPolicy};
+pub use microsandbox_types::{CpuPlacement, MemorySnapshotMode, PullPolicy};
 pub use microsandbox_types::{
     EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, PortProtocol,
     PublishedPortSpec, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,

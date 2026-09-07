@@ -157,9 +157,42 @@ impl PreparedCheckpointRestore {
     }
 
     /// Install all restore sources and leave the VM at an explicit activation gate.
-    pub(crate) fn install(self, vm: &mut msb_krun::Vm) -> RestoredAgentState {
+    pub(crate) fn install(
+        self,
+        vm: &mut msb_krun::Vm,
+        cache_root: Option<PathBuf>,
+    ) -> Result<RestoredAgentState, String> {
         vm.set_execution_restore(self.execution);
-        vm.set_memory_restore(self.memory);
+        if let Some(root) = cache_root {
+            let closure = &self.memory.closure;
+            let cache = super::MemoryCache::open(root).map_err(|e| e.to_string())?;
+            let cached = cache
+                .materialize(closure.memory(), &closure.checkpoint().memory, |id| {
+                    closure
+                        .read_object(id, MAX_MEMORY_OBJECT_BYTES)
+                        .map_err(io::Error::other)
+                })
+                .map_err(|e| e.to_string())?;
+            tracing::info!(
+                cache_hit = cached.cache_hit,
+                prepare_us = cached.prepare_us,
+                "prepared private memory backing"
+            );
+            let regions = cached
+                .regions
+                .into_iter()
+                .map(|region| msb_krun::PrivateMemoryRegion {
+                    guest_address: region.guest_address,
+                    length: region.length,
+                    file_offset: region.file_offset,
+                })
+                .collect();
+            let backing = msb_krun::PrivateMemoryBacking::new(cached.file, regions)
+                .map_err(|e| e.to_string())?;
+            vm.set_private_memory_backing(backing);
+        } else {
+            vm.set_memory_restore(self.memory);
+        }
         for device in self.devices {
             match device {
                 PreparedDeviceRestore::Block { device_id, state } => {
@@ -169,7 +202,7 @@ impl PreparedCheckpointRestore {
             }
         }
         vm.set_start_paused(true);
-        self.agent
+        Ok(self.agent)
     }
 }
 
@@ -317,7 +350,11 @@ fn parse_restored_agent_resource(
             ready_time_ns: parse_u64("ready_time_ns")?,
             agent_version: value("agent_version")?.clone(),
         },
-        attempt_id: checkpoint_id.into(),
+        attempt_id: resource
+            .binding
+            .get("attempt_id")
+            .cloned()
+            .unwrap_or_else(|| checkpoint_id.into()),
     })
 }
 

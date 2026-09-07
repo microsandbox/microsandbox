@@ -162,6 +162,18 @@ impl JsSandboxHandle {
         self.inner.stop().await.map_err(to_napi_error)
     }
 
+    /// Explicit resident pause through host control.
+    #[napi]
+    pub async fn pause(&self) -> Result<()> {
+        self.inner.pause().await.map_err(to_napi_error)
+    }
+
+    /// Explicit resident resume through host control.
+    #[napi]
+    pub async fn resume(&self) -> Result<()> {
+        self.inner.resume().await.map_err(to_napi_error)
+    }
+
     /// Request graceful shutdown without waiting.
     #[napi]
     pub async fn request_stop(&self) -> Result<()> {

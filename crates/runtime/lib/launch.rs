@@ -74,6 +74,14 @@ pub struct LaunchConfig {
     #[serde(default)]
     pub thp: TransparentHugePagePolicy,
 
+    /// Explicit memory representation selected at construction.
+    #[serde(default)]
+    pub memory_snapshot: microsandbox_types::MemorySnapshotMode,
+
+    /// Backend-resolved protected cache; required only for explicit CoW construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_cache_dir: Option<PathBuf>,
+
     /// Per-writable-raw-disk hard budget for buffered host dirty data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_writeback_limit_bytes: Option<u64>,

@@ -22,8 +22,9 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         heading: "Sandboxes",
         commands: &[
-            "run", "create", "modify", "start", "stop", "restart", "ping", "touch", "list",
-            "status", "metrics", "remove", "exec", "copy", "logs", "ssh", "inspect",
+            "run", "create", "modify", "start", "stop", "pause", "resume", "restart", "ping",
+            "touch", "list", "status", "metrics", "remove", "exec", "copy", "logs", "ssh",
+            "inspect",
         ],
     },
     CommandGroup {
@@ -107,6 +108,10 @@ enum Commands {
 
     /// Stop one or more running sandboxes.
     Stop(stop::StopArgs),
+    /// Suspend a resident sandbox without creating a snapshot.
+    Pause(microsandbox_cli::commands::pause::PauseArgs),
+    /// Resume a user-paused resident sandbox.
+    Resume(microsandbox_cli::commands::pause::PauseArgs),
 
     /// Restart one or more sandboxes.
     Restart(restart::RestartArgs),
@@ -666,6 +671,8 @@ fn run_async_command_anyhow(
             Commands::Modify(args) => modify::run(args).await,
             Commands::Start(args) => start::run(args).await,
             Commands::Stop(args) => stop::run(args).await,
+            Commands::Pause(args) => microsandbox_cli::commands::pause::run(args, false).await,
+            Commands::Resume(args) => microsandbox_cli::commands::pause::run(args, true).await,
             Commands::Restart(args) => restart::run(args).await,
             Commands::Ping(args) => ping::run(args).await,
             Commands::Touch(args) => touch::run(args).await,

@@ -81,6 +81,16 @@ char *msb_sandbox_handle_stop(uint64_t cancel_id,
                               unsigned char *buf,
                               uintptr_t buf_len);
 
+char *msb_sandbox_handle_pause(uint64_t cancel_id,
+                               const char *name,
+                               unsigned char *buf,
+                               uintptr_t buf_len);
+
+char *msb_sandbox_handle_resume(uint64_t cancel_id,
+                                const char *name,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
 char *msb_sandbox_handle_request_stop(uint64_t cancel_id,
                                       const char *name,
                                       unsigned char *buf,
@@ -147,6 +157,10 @@ char *msb_sandbox_stop(uint64_t cancel_id,
                        uint64_t timeout_ms,
                        unsigned char *buf,
                        uintptr_t buf_len);
+
+char *msb_sandbox_pause(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_sandbox_resume(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_request_stop(uint64_t cancel_id,
                                Handle handle,

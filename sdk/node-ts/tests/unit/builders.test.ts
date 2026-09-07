@@ -351,6 +351,16 @@ describe("PatchBuilder", () => {
 });
 
 describe("SandboxBuilder.build", () => {
+  it("makes CoW memory an explicit creation policy", async () => {
+    const config = await Sandbox.builder("cow-policy")
+      .image("alpine")
+      .memorySnapshot("cow")
+      .build();
+    expect((config.resources as { memorySnapshot: string }).memorySnapshot).toBe("cow");
+    const standard = await Sandbox.builder("standard-policy").image("alpine").build();
+    expect((standard.resources as { memorySnapshot?: string }).memorySnapshot).toBeUndefined();
+  });
+
   it("requires .image()", async () => {
     await expect(Sandbox.builder("x").build()).rejects.toThrow(
       InvalidConfigError,

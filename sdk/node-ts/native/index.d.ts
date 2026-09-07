@@ -984,6 +984,10 @@ export declare class Sandbox {
   attachShell(): Promise<number>
   /** Stop the sandbox gracefully and wait for it to exit. */
   stop(): Promise<void>
+  /** Explicit resident pause through host control. */
+  pause(): Promise<void>
+  /** Explicit resident resume through host control. */
+  resume(): Promise<void>
   /** Stop and wait for exit, returning the exit status. */
   stopAndWait(): Promise<ExitStatus>
   /** Request graceful shutdown without waiting for observed exit. */
@@ -1086,6 +1090,8 @@ export declare class SandboxBuilder {
   maxMemory(mib: number): this
   /** Guest transparent huge-page policy selected at boot. */
   thp(policy: 'always' | 'madvise' | 'never'): this
+  /** Select explicit private file-backed memory or standard anonymous memory. */
+  memorySnapshot(mode: 'standard' | 'cow'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
   logLevel(level: string): this
   /** Suppress sandbox logs. */
@@ -1356,6 +1362,10 @@ export declare class SandboxHandle {
    * override with `stopWithTimeout(timeoutMs)`.
    */
   stop(): Promise<void>
+  /** Explicit resident pause through host control. */
+  pause(): Promise<void>
+  /** Explicit resident resume through host control. */
+  resume(): Promise<void>
   /** Request graceful shutdown without waiting. */
   requestStop(): Promise<void>
   /**

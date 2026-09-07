@@ -42,6 +42,12 @@ pub const CONTROL_SOCKET_EXTENSION: &str = "control.sock";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Retain a resident pause until an explicit resume or stop.
+    Pause,
+    /// Resume a user-owned resident pause.
+    Resume,
+    /// Inspect user pause and full-capture availability without entering the guest.
+    PauseState,
     /// Grow the owned root disk and mounted ext4 filesystem without rebooting.
     RootDiskGrow {
         /// Target capacity in bytes.
@@ -145,6 +151,9 @@ pub struct SecretValue(pub String);
 /// The reply to any control request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlResponse {
+    /// Resident pause status for lifecycle operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<PauseControlState>,
     /// Guest-observed root capacities after successful filesystem expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_disk: Option<RootDiskGrowthResult>,
@@ -218,6 +227,9 @@ pub struct RootDiskGrowthResult {
 /// resize-capable and secrets-incapable.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct ControlCapabilities {
+    /// Resident pause/resume with identity-preserving clock correction.
+    #[serde(default)]
+    pub pause_resume: bool,
     /// Host control supports root growth; guest capability is checked before mutation.
     #[serde(default)]
     pub root_disk_grow: bool,
@@ -236,6 +248,17 @@ pub struct ControlCapabilities {
     /// Same-epoch composite checkpoint capture is available.
     #[serde(default)]
     pub checkpoint_create: bool,
+}
+
+/// Host-confirmed resident suspension state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PauseControlState {
+    /// Whether a user pause is currently held.
+    pub paused: bool,
+    /// Whether a failed operation has fenced ordinary resume and mutations.
+    pub recovery_required: bool,
+    /// Why full capture cannot use this pause, if guest preparation is unavailable.
+    pub capture_unavailable: Option<String>,
 }
 
 /// Memory sizing carried in [`ControlResponse`], all in MiB.
@@ -582,6 +605,7 @@ mod tests {
         let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
+                pause_resume: true,
                 root_disk_grow: true,
                 disk_compact: true,
                 cpu_resize: true,

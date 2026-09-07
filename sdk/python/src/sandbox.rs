@@ -963,6 +963,26 @@ impl PySandbox {
         })
     }
 
+    /// Suspend this resident VM without releasing RAM.
+    fn pause<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            sandbox.pause().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    /// Resume the same resident VM and its workloads.
+    fn resume<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            sandbox.resume().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
     /// Request graceful shutdown without waiting.
     fn request_stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();

@@ -11,6 +11,8 @@ EXPECTED_KWARGS = [
     "image",
     "from_snapshot",
     "disk_only",
+    "snapshot_base",
+    "memory_snapshot",
     "memory",
     "cpus",
     "max_memory",
@@ -83,6 +85,7 @@ def test_create_closed_values_are_precisely_typed() -> None:
     }
 
     assert annotations["security"] == "SecurityProfile | None"
+    assert annotations["memory_snapshot"] == "MemorySnapshotMode | None"
     assert annotations["init"] == "str | InitConfig | InitOptions | None"
     assert annotations["pull_policy"] == "PullPolicy | None"
     assert annotations["log_level"] == "LogLevel | None"

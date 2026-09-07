@@ -915,7 +915,8 @@ impl SandboxBackend for LocalBackend {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<SandboxHandle>> {
         Box::pin(async move {
-            let (model, pid) = self.sandbox_handle_state(name).await?;
+            let (mut model, pid) = self.sandbox_handle_state(name).await?;
+            model.status = crate::sandbox::pause::projected_status(self, name, model.status).await;
             Ok(SandboxHandle::from_local_model(backend, model, pid))
         })
     }
@@ -927,10 +928,22 @@ impl SandboxBackend for LocalBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<SandboxPage>> {
         Box::pin(async move {
             let (rows, next_cursor) = self.list_sandbox_handle_state(&query).await?;
-            let sandboxes = rows
-                .into_iter()
-                .map(|(model, pid)| SandboxHandle::from_local_model(backend.clone(), model, pid))
-                .collect();
+            let sandboxes = stream::iter(rows)
+                .map(|(mut model, pid)| {
+                    let backend = backend.clone();
+                    async move {
+                        model.status = crate::sandbox::pause::projected_status(
+                            self,
+                            &model.name,
+                            model.status,
+                        )
+                        .await;
+                        SandboxHandle::from_local_model(backend, model, pid)
+                    }
+                })
+                .buffered(16)
+                .collect()
+                .await;
             Ok(SandboxPage {
                 sandboxes,
                 next_cursor,

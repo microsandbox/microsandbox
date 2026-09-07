@@ -243,6 +243,10 @@ pub enum Operation {
     SandboxStart,
     /// `Sandbox::stop`.
     SandboxStop,
+    /// `Sandbox::pause`.
+    SandboxPause,
+    /// `Sandbox::resume`.
+    SandboxResume,
     /// `Sandbox::remove`.
     SandboxRemove,
     /// `Sandbox::remove_persisted`.
@@ -411,6 +415,8 @@ impl Operation {
             Operation::SandboxCreate => "Sandbox::create",
             Operation::SandboxStart => "Sandbox::start",
             Operation::SandboxStop => "Sandbox::stop",
+            Operation::SandboxPause => "Sandbox::pause",
+            Operation::SandboxResume => "Sandbox::resume",
             Operation::SandboxRemove => "Sandbox::remove",
             Operation::SandboxRemovePersisted => "Sandbox::remove_persisted",
             Operation::SandboxKill => "Sandbox::kill",
