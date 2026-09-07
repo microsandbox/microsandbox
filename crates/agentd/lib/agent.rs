@@ -11,7 +11,7 @@ use std::time::Instant;
 use bytes::BytesMut;
 use chrono::Utc;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::time::{self, Duration};
 
 use microsandbox_protocol::AGENT_TRANSPORT_DUAL_PORT_CMDLINE;
@@ -112,6 +112,9 @@ const BULK_READER_MAX_BYTES_PER_TURN: usize = 1024 * 1024;
 const FS_BULK_INPUT_ITEM_CAPACITY: usize =
     DEFAULT_BULK_WINDOW as usize / MIN_BULK_RECORD_PAYLOAD as usize;
 
+/// Aggregate host-to-guest payload retained across every relay client and bulk destination.
+const BULK_INPUT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
+
 /// Filesystem activity bytes coalesced before publishing an otherwise empty worker event.
 const FS_ACTIVITY_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
@@ -129,9 +132,9 @@ const BULK_FAILURE_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 // Types
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Default)]
 struct AgentState {
     client_incarnations: HashMap<u32, ClientIncarnation>,
+    bulk_input_budget: Arc<Semaphore>,
     sessions: HashMap<u32, ExecSession>,
     write_sessions: HashMap<u32, FsWriteSession>,
     bulk_write_workers: HashMap<u32, FsBulkWriteWorker>,
@@ -144,9 +147,22 @@ struct AgentState {
 
 /// Bounded command path for one filesystem bulk write, isolated from the control loop.
 struct FsBulkWriteWorker {
-    records: tokio::sync::mpsc::Sender<BulkRecord>,
+    records: tokio::sync::mpsc::Sender<AdmittedBulkRecord>,
     finish: tokio::sync::mpsc::Sender<BulkFinish>,
     task: tokio::task::JoinHandle<()>,
+}
+
+/// One host-to-guest record whose global input capacity remains charged until the destination
+/// filesystem or TCP socket has consumed its payload.
+pub(crate) struct AdmittedBulkRecord {
+    record: BulkRecord,
+    _permit: OwnedSemaphorePermit,
+}
+
+/// Dedicated-lane input waiting for aggregate client capacity while the control actor stays live.
+struct PendingBulkInput {
+    frame: IncarnatedBulkFrame,
+    budget: Arc<Semaphore>,
 }
 
 struct ActivityTracker {
@@ -207,6 +223,46 @@ enum BulkOutputCleanup {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl Default for AgentState {
+    fn default() -> Self {
+        Self {
+            client_incarnations: HashMap::new(),
+            bulk_input_budget: Arc::new(Semaphore::new(BULK_INPUT_BYTE_CAPACITY)),
+            sessions: HashMap::new(),
+            write_sessions: HashMap::new(),
+            bulk_write_workers: HashMap::new(),
+            read_sessions: HashMap::new(),
+            tcp_sessions: HashMap::new(),
+            bulk_received_offsets: HashMap::new(),
+            pending_bulk_finishes: HashMap::new(),
+            fs: FsState::default(),
+        }
+    }
+}
+
+impl AdmittedBulkRecord {
+    pub(crate) fn record(&self) -> &BulkRecord {
+        &self.record
+    }
+
+    pub(crate) fn into_parts(self) -> (BulkRecord, OwnedSemaphorePermit) {
+        (self.record, self._permit)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(record: BulkRecord) -> Self {
+        let payload_len = record.payload.len();
+        let budget = Arc::new(Semaphore::new(payload_len));
+        let permit = budget
+            .try_acquire_many_owned(payload_len as u32)
+            .expect("test record fits its exact input budget");
+        Self {
+            record,
+            _permit: permit,
+        }
+    }
+}
 
 impl ActivityTracker {
     fn new() -> Self {
@@ -380,6 +436,9 @@ pub async fn run(
                 .as_ref()
                 .map(|port| BulkTransportReady::dual_port_v1(port.connection_id)),
             relay_lease: Some(RelayLeaseReady::range_lease_v1()),
+            // Shared arenas are negotiated only on the local SDK-to-runtime hop. Agentd speaks to
+            // the runtime over the guest consoles, so the runtime injects this capability later.
+            local_transport: None,
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -401,11 +460,25 @@ pub async fn run(
             }
         };
     let dual_port_active = bulk_input.is_some();
+    let mut pending_bulk_inputs = VecDeque::<PendingBulkInput>::new();
     let mut bulk_input_bytes_since_snapshot = 0usize;
     let mut last_bulk_input_snapshot = Instant::now();
 
     // Main loop.
     'agent: loop {
+        // A control-lane disconnect cancels the pending acquire future at the select boundary.
+        // Remove its stale record before rebuilding that future against the global budget.
+        pending_bulk_inputs.retain(|pending| {
+            client_incarnation_for_id(&state, pending.frame.record.id)
+                == Some(pending.frame.incarnation)
+        });
+        let pending_bulk_admission = pending_bulk_inputs.front().map(|pending| {
+            (
+                Arc::clone(&pending.budget),
+                pending.frame.record.payload.len(),
+            )
+        });
+        let has_pending_bulk_admission = pending_bulk_admission.is_some();
         tokio::select! {
             failure = process_manager_failure.changed() => {
                 let error = match failure {
@@ -439,6 +512,59 @@ pub async fn run(
                 publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
             }
 
+            permit = acquire_bulk_input_permit(pending_bulk_admission), if has_pending_bulk_admission => {
+                let pending = pending_bulk_inputs
+                    .pop_front()
+                    .expect("guarded pending bulk input exists");
+                let permit = match permit {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        // The process-wide budget is never normally closed. Preserve the
+                        // ownership check so a future epoch-scoped budget can cancel stale waits
+                        // without allowing old bytes into a recycled correlation range.
+                        if validate_bulk_client_incarnation(
+                            &state,
+                            pending.frame.record.id,
+                            pending.frame.incarnation,
+                        )? {
+                            return Err(error);
+                        }
+                        continue;
+                    }
+                };
+                if !validate_bulk_client_incarnation(
+                    &state,
+                    pending.frame.record.id,
+                    pending.frame.incarnation,
+                )? {
+                    continue;
+                }
+                let payload_len = pending.frame.record.payload.len();
+                let bulk_session_tx = session_tx.with_incarnation(Some(pending.frame.incarnation));
+                handle_bulk_record(
+                    AdmittedBulkRecord {
+                        record: pending.frame.record,
+                        _permit: permit,
+                    },
+                    &mut state,
+                    &mut activity,
+                    &mut serial_out_buf,
+                    &bulk_session_tx,
+                ).await?;
+                bulk_input_bytes_since_snapshot =
+                    bulk_input_bytes_since_snapshot.saturating_add(payload_len);
+                if bulk_input_bytes_since_snapshot >= BULK_ACTIVITY_PUBLISH_BYTES
+                    || last_bulk_input_snapshot.elapsed() >= BULK_ACTIVITY_PUBLISH_INTERVAL
+                {
+                    publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                    bulk_input_bytes_since_snapshot = 0;
+                    last_bulk_input_snapshot = Instant::now();
+                }
+                if !serial_out_buf.is_empty() {
+                    flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                }
+            }
+
             Some(envelope) = recv_optional(&mut combined_bulk_rx) => {
                 if envelope.incarnation.is_some()
                     && client_incarnation_for_id(&state, envelope.id) != envelope.incarnation
@@ -464,7 +590,7 @@ pub async fn run(
                     .expect("guarded dedicated bulk input")
                     .read_turn()
                     .await
-            }, if bulk_input.is_some() => {
+            }, if bulk_input.is_some() && pending_bulk_inputs.is_empty() => {
                 let frames = match turn {
                     Ok(frames) => frames,
                     Err(error) => {
@@ -483,6 +609,7 @@ pub async fn run(
                         )));
                     }
                 };
+                let mut capacity_deferred = false;
                 for frame in frames {
                     if !validate_bulk_client_incarnation(
                         &state,
@@ -493,10 +620,34 @@ pub async fn run(
                         // the other physical lane. They must not affect the new owner's ID.
                         continue;
                     }
+                    let budget = Arc::clone(&state.bulk_input_budget);
+                    if capacity_deferred {
+                        pending_bulk_inputs.push_back(PendingBulkInput { frame, budget });
+                        continue;
+                    }
                     let payload_len = frame.record.payload.len();
+                    let charged = u32::try_from(payload_len).map_err(|_| {
+                        AgentdError::ExecSession("bulk input payload budget overflow".into())
+                    })?;
+                    let permit = match Arc::clone(&budget).try_acquire_many_owned(charged) {
+                        Ok(permit) => permit,
+                        Err(_) if !budget.is_closed() => {
+                            capacity_deferred = true;
+                            pending_bulk_inputs.push_back(PendingBulkInput { frame, budget });
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(AgentdError::ExecSession(format!(
+                                "bulk input budget closed unexpectedly: {error}"
+                            )));
+                        }
+                    };
                     let bulk_session_tx = session_tx.with_incarnation(Some(frame.incarnation));
                     handle_bulk_record(
-                        frame.record,
+                        AdmittedBulkRecord {
+                            record: frame.record,
+                            _permit: permit,
+                        },
                         &mut state,
                         &mut activity,
                         &mut serial_out_buf,
@@ -581,8 +732,16 @@ pub async fn run(
                                         client_incarnation_for_id(&state, record.id),
                                     );
                                     let payload_len = record.payload.len();
+                                    let budget = Arc::clone(&state.bulk_input_budget);
+                                    let permit = acquire_bulk_input_permit(Some((
+                                        budget,
+                                        payload_len,
+                                    ))).await?;
                                     handle_bulk_record(
-                                        record,
+                                        AdmittedBulkRecord {
+                                            record,
+                                            _permit: permit,
+                                        },
                                         &mut state,
                                         &mut activity,
                                         &mut serial_out_buf,
@@ -1283,7 +1442,7 @@ fn ensure_fs_bulk_write_worker(
 
 fn enqueue_fs_bulk_record(
     id: u32,
-    record: BulkRecord,
+    record: AdmittedBulkRecord,
     state: &mut AgentState,
     session_tx: &SessionOutputSender,
 ) -> Result<(), String> {
@@ -1328,7 +1487,7 @@ fn finish_fs_bulk_write(
 async fn run_fs_bulk_write_worker(
     id: u32,
     mut session: FsWriteSession,
-    mut record_rx: tokio::sync::mpsc::Receiver<BulkRecord>,
+    mut record_rx: tokio::sync::mpsc::Receiver<AdmittedBulkRecord>,
     mut finish_rx: tokio::sync::mpsc::Receiver<BulkFinish>,
     output_tx: SessionOutputSender,
 ) {
@@ -1395,18 +1554,23 @@ async fn run_fs_bulk_write_worker(
         let mut records = Vec::with_capacity(
             FS_BULK_WRITE_COALESCE_BYTES.div_ceil(DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD as usize),
         );
-        let mut payload_len = record.payload.len();
+        let mut retained_permits = Vec::with_capacity(records.capacity());
+        let mut payload_len = record.record().payload.len();
+        let (record, permit) = record.into_parts();
         records.push(record);
+        retained_permits.push(permit);
         while payload_len < FS_BULK_WRITE_COALESCE_BYTES {
             match record_rx.try_recv() {
                 Ok(record) => {
-                    let next_len = payload_len.saturating_add(record.payload.len());
+                    let next_len = payload_len.saturating_add(record.record().payload.len());
                     if next_len > FS_BULK_WRITE_COALESCE_BYTES {
                         pending_record = Some(record);
                         break;
                     }
+                    let (record, permit) = record.into_parts();
                     payload_len = next_len;
                     records.push(record);
+                    retained_permits.push(permit);
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
@@ -1436,6 +1600,9 @@ async fn run_fs_bulk_write_worker(
                     true
                 }
             };
+        // Filesystem effects have consumed every payload in this batch. Release aggregate input
+        // capacity before potentially waiting to publish credit or heartbeat output.
+        drop(retained_permits);
 
         if !completed
             && pending_finish
@@ -1478,29 +1645,32 @@ async fn run_fs_bulk_write_worker(
 
 /// Handles a single incoming message from the host.
 async fn handle_bulk_record(
-    record: BulkRecord,
+    record: AdmittedBulkRecord,
     state: &mut AgentState,
     activity: &mut ActivityTracker,
     out_buf: &mut Vec<u8>,
     session_tx: &SessionOutputSender,
 ) -> AgentdResult<()> {
     activity.record_host_message();
-    let id = record.id;
+    let id = record.record().id;
     let record_end = record
+        .record()
         .offset
-        .checked_add(record.payload.len() as u64)
+        .checked_add(record.record().payload.len() as u64)
         .ok_or_else(|| AgentdError::ExecSession("bulk record offset overflow".into()))?;
-    let record_payload_len = record.payload.len();
+    let record_payload_len = record.record().payload.len();
+    let kind = record.record().kind;
+    let flow = record.record().flow;
     let mut accepted = false;
-    match record.kind {
+    match kind {
         BulkKind::Filesystem => {
-            if record.flow != BulkFlow::HostToGuest {
+            if flow != BulkFlow::HostToGuest {
                 encode_bulk_fs_failure(
-                    record.id,
+                    id,
                     "host sent a filesystem record in the guest-to-host flow".into(),
                     out_buf,
                 )?;
-                cancel_bulk_correlation(record.id, BulkKind::Filesystem, state, session_tx);
+                cancel_bulk_correlation(id, BulkKind::Filesystem, state, session_tx);
                 return Ok(());
             }
 
@@ -1512,13 +1682,13 @@ async fn handle_bulk_record(
             }
         }
         BulkKind::Tcp => {
-            if record.flow != BulkFlow::HostToGuest {
+            if flow != BulkFlow::HostToGuest {
                 encode_bulk_tcp_failure(
-                    record.id,
+                    id,
                     "host sent a TCP record in the guest-to-host flow".into(),
                     out_buf,
                 )?;
-                cancel_bulk_correlation(record.id, BulkKind::Tcp, state, session_tx);
+                cancel_bulk_correlation(id, BulkKind::Tcp, state, session_tx);
                 return Ok(());
             }
             let result = match state.tcp_sessions.get(&id) {
@@ -1758,6 +1928,18 @@ fn validate_bulk_client_incarnation(
         )));
     }
     Ok(false)
+}
+
+async fn acquire_bulk_input_permit(
+    admission: Option<(Arc<Semaphore>, usize)>,
+) -> AgentdResult<OwnedSemaphorePermit> {
+    let (budget, payload_len) = admission.expect("bulk admission future is guarded by queue state");
+    let charged = u32::try_from(payload_len)
+        .map_err(|_| AgentdError::ExecSession("bulk input payload budget overflow".into()))?;
+    budget
+        .acquire_many_owned(charged)
+        .await
+        .map_err(|error| AgentdError::ExecSession(format!("bulk input budget closed: {error}")))
 }
 
 /// Validate that an internal lifecycle message names one complete relay-owned range.
@@ -3302,6 +3484,19 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_bulk_input_budget_is_bounded_and_recoverable() {
+        let state = AgentState::default();
+        let budget = state.bulk_input_budget;
+        let held = Arc::clone(&budget)
+            .try_acquire_many_owned(BULK_INPUT_BYTE_CAPACITY as u32)
+            .unwrap();
+
+        assert!(Arc::clone(&budget).try_acquire_owned().is_err());
+        drop(held);
+        assert_eq!(budget.available_permits(), BULK_INPUT_BYTE_CAPACITY);
+    }
+
+    #[test]
     fn disconnect_ack_does_not_refresh_idle_activity() {
         let ack = encode_relay_client_disconnected_ack(RelayClientDisconnectedAck {
             id_start: 1,
@@ -3475,13 +3670,13 @@ mod tests {
         for index in 0..FS_BULK_INPUT_ITEM_CAPACITY {
             worker
                 .records
-                .try_send(BulkRecord {
+                .try_send(AdmittedBulkRecord::for_test(BulkRecord {
                     id: 17,
                     kind: BulkKind::Filesystem,
                     flow: BulkFlow::HostToGuest,
                     offset: (index * MIN_BULK_RECORD_PAYLOAD as usize) as u64,
                     payload: payload.clone(),
-                })
+                }))
                 .unwrap();
         }
         assert_eq!(worker.records.capacity(), 0);

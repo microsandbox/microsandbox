@@ -29,6 +29,16 @@ use crate::{
 };
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Largest known filesystem write that stays on the legacy inline exchange.
+///
+/// Raw bulk wins once payload work can amortize its offer, acceptance, credit, finish, and terminal
+/// lifecycle. Below this cutoff the already-supported inline exchange has lower fixed latency.
+const FS_INLINE_WRITE_MAX: u64 = 16 * 1024;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -305,7 +315,7 @@ impl<'a> SandboxFsOps<'a> {
         len: Option<u64>,
     ) -> MicrosandboxResult<FsWriteSink> {
         let client = self.agent_client(Operation::SandboxFsWriteHandleStream)?;
-        agent::write_handle_stream(client, handle, offset, len, None).await
+        agent::write_handle_stream(client, handle, offset, len, None, false).await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -1082,6 +1092,16 @@ fn write_open_options() -> FsOpenOptions {
     }
 }
 
+/// Keep raw bulk unless an exact owned payload is small enough that its lifecycle cannot amortize.
+fn should_offer_fs_write_bulk(
+    bulk_supported: bool,
+    exact_owned_payload: bool,
+    transfer_len_hint: Option<u64>,
+) -> bool {
+    bulk_supported
+        && (!exact_owned_payload || transfer_len_hint.is_none_or(|len| len > FS_INLINE_WRITE_MAX))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Module: agent (backend-agnostic ops driven over an agent connection)
 //--------------------------------------------------------------------------------------------------
@@ -1115,7 +1135,7 @@ pub(crate) mod agent {
     use super::{
         FsEntry, FsHandle, FsMetadata, FsReadStream, FsWriteSink, HostCopyDurability,
         HostCopyOptions, check_response, entry_info_to_fs_entry, entry_info_to_metadata,
-        receive_fs_bulk_acceptance,
+        receive_fs_bulk_acceptance, should_offer_fs_write_bulk,
     };
 
     /// Open a fresh agent connection for the named sandbox.
@@ -1265,8 +1285,8 @@ pub(crate) mod agent {
         offset: u64,
         data: &[u8],
     ) -> MicrosandboxResult<()> {
-        let sink =
-            write_handle_stream(client, handle, offset, Some(data.len() as u64), None).await?;
+        let sink = write_handle_stream(client, handle, offset, Some(data.len() as u64), None, true)
+            .await?;
         for chunk in data.chunks(FS_CHUNK_SIZE) {
             sink.write(chunk).await?;
         }
@@ -1279,6 +1299,7 @@ pub(crate) mod agent {
         offset: u64,
         len: Option<u64>,
         close_handle: Option<FsHandle>,
+        exact_owned_payload: bool,
     ) -> MicrosandboxResult<FsWriteSink> {
         let req = FsRequest {
             op: FsOp::Write {
@@ -1286,9 +1307,12 @@ pub(crate) mod agent {
                 offset,
                 len,
             },
-            bulk: client
-                .supports(MessageType::BulkAccepted)
-                .then(BulkOffer::filesystem_write),
+            bulk: should_offer_fs_write_bulk(
+                client.supports(MessageType::BulkAccepted),
+                exact_owned_payload,
+                len,
+            )
+            .then(BulkOffer::filesystem_write),
         };
         let (id, mut rx) = client.stream_frames(MessageType::FsRequest, &req).await?;
         let bulk = match req.bulk {
@@ -1413,8 +1437,15 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<()> {
         let client = Arc::new(connect_agent(backend, name).await?);
         let handle = open_file(&client, path, super::write_open_options()).await?;
-        let sink =
-            write_handle_stream(client, handle, 0, Some(data.len() as u64), Some(handle)).await?;
+        let sink = write_handle_stream(
+            client,
+            handle,
+            0,
+            Some(data.len() as u64),
+            Some(handle),
+            true,
+        )
+        .await?;
         for chunk in data.chunks(FS_CHUNK_SIZE) {
             sink.write(chunk).await?;
         }
@@ -1429,7 +1460,7 @@ pub(crate) mod agent {
         let client = Arc::new(connect_agent(backend, name).await?);
         let handle = open_file(&client, path, super::write_open_options()).await?;
 
-        write_handle_stream(client, handle, 0, None, Some(handle)).await
+        write_handle_stream(client, handle, 0, None, Some(handle), false).await
     }
 
     pub(crate) async fn list(
@@ -1707,7 +1738,39 @@ pub(crate) mod agent {
         guest_path: &str,
     ) -> MicrosandboxResult<()> {
         let mut file = tokio::fs::File::open(host_path).await?;
+        let small_candidate = file.metadata().await?.len() <= super::FS_INLINE_WRITE_MAX;
+        let first = if small_candidate {
+            let mut first = Vec::with_capacity((super::FS_INLINE_WRITE_MAX + 1) as usize);
+            (&mut file)
+                .take(super::FS_INLINE_WRITE_MAX + 1)
+                .read_to_end(&mut first)
+                .await?;
+            if first.len() as u64 <= super::FS_INLINE_WRITE_MAX {
+                // Metadata is only a hint. EOF inside the bounded probe proves that the complete
+                // owned payload can use inline without risking an unbounded control-lane stream.
+                return write(backend, name, guest_path, first).await;
+            }
+
+            // The candidate grew across the cutoff. Refill the ordinary first record before raw
+            // bulk opens rather than penalizing the transfer with a tiny leading record.
+            while first.len() < FS_CHUNK_SIZE {
+                let start = first.len();
+                first.resize(FS_CHUNK_SIZE, 0);
+                let n = file.read(&mut first[start..]).await?;
+                first.truncate(start + n);
+                if n == 0 {
+                    break;
+                }
+            }
+            Some(first)
+        } else {
+            None
+        };
+
         let sink = write_stream(backend, name, guest_path).await?;
+        if let Some(first) = first {
+            sink.write_owned(first).await?;
+        }
         loop {
             let mut buf = vec![0u8; FS_CHUNK_SIZE];
             let n = file.read(&mut buf).await?;
@@ -2008,6 +2071,28 @@ pub(crate) mod agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_exact_owned_small_filesystem_writes_stay_inline() {
+        assert!(!should_offer_fs_write_bulk(false, true, None));
+        assert!(!should_offer_fs_write_bulk(true, true, Some(0)));
+        assert!(!should_offer_fs_write_bulk(
+            true,
+            true,
+            Some(FS_INLINE_WRITE_MAX)
+        ));
+        assert!(should_offer_fs_write_bulk(
+            true,
+            true,
+            Some(FS_INLINE_WRITE_MAX + 1)
+        ));
+        assert!(should_offer_fs_write_bulk(true, true, None));
+        assert!(should_offer_fs_write_bulk(
+            true,
+            false,
+            Some(FS_INLINE_WRITE_MAX)
+        ));
+    }
 
     #[tokio::test]
     async fn read_stream_rejects_channel_close_without_terminal_response() {
