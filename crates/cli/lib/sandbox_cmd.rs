@@ -40,7 +40,7 @@ pub struct SandboxArgs {
         default_value = "auto",
         value_parser = parse_agent_transport_profile
     )]
-    pub agent_transport: AgentTransportProfile,
+    pub(crate) agent_transport: AgentTransportProfile,
 
     /// Name of the sandbox.
     #[arg(long = "name")]

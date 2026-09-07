@@ -84,6 +84,8 @@ const AGENT_BULK_QUEUE_SIZE: u16 = 256;
 
 /// Internal host/guest topology for the agent data plane.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+#[non_exhaustive]
 pub enum AgentTransportProfile {
     /// Offer the dedicated bulk port and retain combined mode when agentd does not select it.
     #[default]
@@ -109,6 +111,7 @@ struct AgentConsoleBackends {
 #[derive(Debug)]
 pub struct Config {
     /// Internal per-boot agent transport policy.
+    #[doc(hidden)]
     pub agent_transport: AgentTransportProfile,
 
     /// Name of the sandbox.

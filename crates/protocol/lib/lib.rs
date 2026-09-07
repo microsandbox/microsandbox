@@ -79,9 +79,11 @@ const _: () = assert!(
 pub const AGENT_PORT_NAME: &str = "agent";
 
 /// Virtio-console port name for the optional generation-8 bulk lane.
+#[doc(hidden)]
 pub const AGENT_BULK_PORT_NAME: &str = "agent-bulk";
 
 /// Internal kernel command-line selector for the first dual-port transport profile.
+#[doc(hidden)]
 pub const AGENT_TRANSPORT_DUAL_PORT_CMDLINE: &str = "microsandbox.agent_transport=dual-port-v1";
 
 /// Virtiofs tag for the runtime filesystem (scripts, heartbeat).
@@ -446,6 +448,7 @@ pub mod fs;
 pub mod heartbeat;
 pub mod message;
 pub mod tcp;
+#[doc(hidden)]
 pub mod transport;
 
 pub use error::*;

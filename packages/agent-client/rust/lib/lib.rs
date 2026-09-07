@@ -13,8 +13,11 @@
 
 pub mod client;
 pub mod error;
-/// Unix-local shared-memory bulk transport primitives.
+/// Internal Unix-local shared-memory transport used by the UDS adapter and runtime relay.
+///
+/// Callers connect through [`AgentClient`]; arena negotiation and lifecycle are automatic.
 #[cfg(all(feature = "uds", unix))]
+#[doc(hidden)]
 pub mod local_shm;
 pub mod message;
 pub mod stream;
