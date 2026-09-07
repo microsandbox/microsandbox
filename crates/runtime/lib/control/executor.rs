@@ -315,6 +315,7 @@ impl RuntimeControlExecutor {
                             microsandbox_image::checkpoint::CaptureIntent::TransparentTransfer
                         }
                     },
+                    None,
                 ) {
                     Ok(result) => {
                         state.lifecycle = RuntimeLifecycle::Running;

@@ -107,6 +107,13 @@ struct FrozenWorkload {
     ready: Ready,
 }
 
+/// Executor-owned resident pause. A recovery pause never acquires this public resume authority.
+pub(crate) struct UserPause {
+    generation: msb_krun::VmPauseGeneration,
+    workload: Option<FrozenWorkload>,
+    pub(crate) capture_unavailable: Option<String>,
+}
+
 struct MemoryObjectSink<'a> {
     store: &'a LocalObjectStore,
     updates: Vec<MemoryExtent>,
@@ -256,13 +263,22 @@ impl CheckpointCoordinator {
         })
     }
 
-    /// Capture and publish one complete same-epoch checkpoint, then restore source execution.
+    /// Capture a same-epoch checkpoint while preserving the caller's prior execution state.
     pub(crate) fn capture(
         &mut self,
         vm: &msb_krun::VmControl,
         checkpoint_id: &str,
         intent: CaptureIntent,
+        user_pause: Option<&UserPause>,
     ) -> Result<CheckpointResult, CheckpointFailure> {
+        if let Some(paused) = user_pause {
+            paused
+                .validate(vm)
+                .map_err(CheckpointFailure::before_pause)?;
+            if let Some(reason) = &paused.capture_unavailable {
+                return Err(CheckpointFailure::before_pause(reason));
+            }
+        }
         if self
             .root_disk
             .as_ref()
@@ -301,13 +317,22 @@ impl CheckpointCoordinator {
         // The guest latch is acquired while vCPUs can still service agentd.
         // It remains held in captured guest memory so a restored child cannot
         // run application code before VM Generation ID activation completes.
+        // An already-paused source borrows its original latch and token: even a brief resume
+        // here would invalidate the user's paused boundary and require another guest handshake.
         let workload_unavailable_started = Instant::now();
         let freeze_started = Instant::now();
-        let workload = match self.freeze_workload(checkpoint_id) {
-            Ok(workload) => workload,
-            Err(error) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                return Err(CheckpointFailure::before_pause(error));
+        let acquired_workload;
+        let workload = match user_pause {
+            Some(paused) => paused.workload.as_ref().expect("validated workload latch"),
+            None => {
+                acquired_workload = match self.freeze_workload(checkpoint_id) {
+                    Ok(workload) => workload,
+                    Err(error) => {
+                        let _ = std::fs::remove_dir_all(&staging);
+                        return Err(CheckpointFailure::before_pause(error));
+                    }
+                };
+                &acquired_workload
             }
         };
         let freeze_us = freeze_started.elapsed().as_micros();
@@ -315,11 +340,14 @@ impl CheckpointCoordinator {
 
         let vm_pause_window_started = Instant::now();
         let pause_started = Instant::now();
-        let pause = match vm.pause() {
+        let pause = match user_pause
+            .map(|paused| Ok(paused.generation))
+            .unwrap_or_else(|| vm.pause())
+        {
             Ok(pause) => pause,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&staging);
-                return match self.thaw_workload(&workload) {
+                return match self.thaw_workload(workload) {
                     Ok(()) => Err(CheckpointFailure::before_pause(error)),
                     Err(thaw_error) => Err(CheckpointFailure::paused(format!(
                         "VM pause failed: {error}; workload thaw failed: {thaw_error}"
@@ -343,13 +371,15 @@ impl CheckpointCoordinator {
         let captured = match paused {
             Ok(captured) => captured,
             Err(mut failure) => {
-                if !failure.keep_paused
+                if user_pause.is_none()
+                    && !failure.keep_paused
                     && let Err(error) = vm.resume(pause)
                 {
                     failure.keep_paused = true;
                     failure.message = format!("{}; source resume failed: {error}", failure.message);
-                } else if !failure.keep_paused
-                    && let Err(error) = self.thaw_workload(&workload)
+                } else if user_pause.is_none()
+                    && !failure.keep_paused
+                    && let Err(error) = self.thaw_workload(workload)
                 {
                     failure.keep_paused = true;
                     failure.message = format!("{}; workload thaw failed: {error}", failure.message);
@@ -378,7 +408,9 @@ impl CheckpointCoordinator {
         };
         let baseline_publish_us = baseline_started.elapsed().as_micros();
         let resume_started = Instant::now();
-        if let Err(error) = vm.resume(pause) {
+        if user_pause.is_none()
+            && let Err(error) = vm.resume(pause)
+        {
             return Err(CheckpointFailure {
                 message: format!("checkpoint published but source resume failed: {error}"),
                 keep_paused: true,
@@ -388,7 +420,9 @@ impl CheckpointCoordinator {
         let resume_us = resume_started.elapsed().as_micros();
         let vm_pause_window_us = vm_pause_window_started.elapsed().as_micros();
         let thaw_started = Instant::now();
-        if let Err(error) = self.thaw_workload(&workload) {
+        if user_pause.is_none()
+            && let Err(error) = self.thaw_workload(workload)
+        {
             let repause = vm.pause().err();
             let message = match repause {
                 Some(pause_error) => format!(
@@ -412,6 +446,7 @@ impl CheckpointCoordinator {
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
             operation = "capture",
+            source_already_paused = user_pause.is_some(),
             checkpoint_id,
             memory_mode = ?captured.result.memory_mode,
             memory_logical_bytes = captured.result.memory_logical_bytes,
@@ -791,6 +826,18 @@ impl CheckpointCoordinator {
                 .map(|plan| (plan, MemoryCaptureMode::Full, Vec::new()))
                 .map_err(|error| error.to_string()),
         }
+    }
+}
+
+impl UserPause {
+    fn validate(&self, vm: &msb_krun::VmControl) -> Result<(), String> {
+        if vm.execution_state() != Some(msb_krun::VmExecutionState::Paused(self.generation)) {
+            return Err("user pause no longer owns the current VM execution boundary".into());
+        }
+        if self.workload.is_none() && self.capture_unavailable.is_none() {
+            return Err("user pause has no prepared workload latch for full capture".into());
+        }
+        Ok(())
     }
 }
 
