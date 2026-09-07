@@ -708,25 +708,6 @@ impl CheckpointCoordinator {
         final_path: &Path,
     ) -> Result<PausedCapture, CheckpointFailure> {
         let mut timings = PausedCaptureTimings::default();
-        let execution_started = Instant::now();
-        let execution = vm
-            .capture_execution_state()
-            .map_err(CheckpointFailure::resumable)?;
-        if execution.pause_generation() != pause_generation {
-            return Err(CheckpointFailure::resumable(
-                "execution state belongs to another pause generation",
-            ));
-        }
-        let execution_bytes = execution.encode().map_err(CheckpointFailure::resumable)?;
-        let execution_id = self
-            .store
-            .put_bytes(&execution_bytes)
-            .map_err(CheckpointFailure::resumable)?;
-        self.store
-            .link_into(&execution_id, staging)
-            .map_err(CheckpointFailure::resumable)?;
-        timings.execution_us = execution_started.elapsed().as_micros();
-
         let devices_started = Instant::now();
         let mut pending_devices = Vec::with_capacity(inventory.len());
         let mut disk_roots = Vec::new();
@@ -807,6 +788,30 @@ impl CheckpointCoordinator {
         let device_refs = persist_device_states(&self.store, staging, &pending_devices)
             .map_err(CheckpointFailure::resumable)?;
         timings.devices_us = devices_started.elapsed().as_micros();
+
+        // Device capture parks each worker. Capture interrupt-controller state
+        // only after their final completions have been published; otherwise a
+        // used queue could survive in RAM without its corresponding interrupt.
+        // Execution capture must also precede RAM capture: KVM flushes its LPI
+        // pending tables into guest RAM as part of this operation.
+        let execution_started = Instant::now();
+        let execution = vm
+            .capture_execution_state()
+            .map_err(CheckpointFailure::resumable)?;
+        if execution.pause_generation() != pause_generation {
+            return Err(CheckpointFailure::resumable(
+                "execution state belongs to another pause generation",
+            ));
+        }
+        let execution_bytes = execution.encode().map_err(CheckpointFailure::resumable)?;
+        let execution_id = self
+            .store
+            .put_bytes(&execution_bytes)
+            .map_err(CheckpointFailure::resumable)?;
+        self.store
+            .link_into(&execution_id, staging)
+            .map_err(CheckpointFailure::resumable)?;
+        timings.execution_us = execution_started.elapsed().as_micros();
 
         let memory_plan_started = Instant::now();
         let (memory_plan, memory_mode, base_extents) =

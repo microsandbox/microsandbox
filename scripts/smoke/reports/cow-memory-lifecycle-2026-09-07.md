@@ -1,5 +1,7 @@
 # CoW memory and resident lifecycle — 2026-09-07
 
+Follow-up: [execution-state fixes and qualification](execution-state-2026-09-07.md) supersedes the Windows post-restore failure status below and adds Linux ARM64 coverage. The observations below describe the earlier backend revision.
+
 Status: development integration and live smoke coverage, not full platform or performance qualification. Microsandbox #8 remains stacked directly on #7 `ce04099b`, with libkrun `94d680b21bf7ea7c2bed5262ed211833bd4379bd` and firmware `6cca413ac248f63e65d4ea4748b3bc36cd1b22f3`. The kernel and agentd used below were built from matching development sources on the authorized OVH host, including the ARM64 guest artifacts used on macOS and Windows.
 
 ## Reproduce

@@ -60,6 +60,14 @@ try:
         "--root-disk", layout, "--memory", "256M", "--cpus", "2",
         *(["--max-memory", "512M"] if resize else []), "alpine",
         "--", "sh", "-c", "mkdir -p /dev/shm; echo captured > /dev/shm/cow-marker; i=0; while :; do echo $i > /tmp/cow-counter; i=$((i+1)); sleep 0.05; done")
+    # Detached launch acknowledges the runtime, not the application's first write.
+    for attempt in range(30):
+        ready = run("application-ready-" + str(attempt), "exec", source, "--", "test", "-s", "/dev/shm/cow-marker", expected=None)
+        if ready.returncode == 0:
+            break
+        time.sleep(0.1)
+    else:
+        raise RuntimeError("application did not initialize its marker")
     run("marker-source", "exec", source, "--", "cat", "/dev/shm/cow-marker")
     boot_id = run("boot-id-before", "exec", source, "--", "cat", "/proc/sys/kernel/random/boot_id").stdout.strip()
     process = run("process-before", "exec", source, "--", "sh", "-c", "for p in /proc/[0-9]*/cmdline; do tr '\\0' ' ' < $p; echo; done").stdout
