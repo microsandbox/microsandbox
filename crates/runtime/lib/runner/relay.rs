@@ -27,23 +27,27 @@ use microsandbox_agent_client::local_shm::{
 #[cfg(unix)]
 use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle};
 use microsandbox_protocol::AGENT_RELAY_MAX_CLIENTS;
+#[cfg(unix)]
+use microsandbox_protocol::bulk::BulkRecord;
 use microsandbox_protocol::bulk::{
     BULK_FLOW_MASK_GUEST_TO_HOST, BULK_HEADER_SIZE, BulkAccepted, BulkCancel, BulkCancelReason,
-    BulkFinish, BulkFlow, BulkKind, BulkRecord, MAX_BULK_RECORD_PAYLOAD,
+    BulkFinish, BulkFlow, BulkKind, MAX_BULK_RECORD_PAYLOAD,
 };
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE, MAX_WIRE_FRAME};
 use microsandbox_protocol::core::{InitAck, InitResolved, Ready, RelayClientDisconnected};
 use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
-use microsandbox_protocol::fs::FsRequest;
+use microsandbox_protocol::fs::{FsRequest, FsResponse};
 use microsandbox_protocol::message::{
     FLAG_BULK, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message,
     MessageType,
 };
-use microsandbox_protocol::tcp::TcpConnect;
+use microsandbox_protocol::tcp::{TcpConnect, TcpFailed};
+#[cfg(unix)]
+use microsandbox_protocol::transport::LocalTransportReady;
 use microsandbox_protocol::transport::{
-    BULK_BINDING_SIZE, CLIENT_INCARNATION_SIZE, ClientIncarnation, LocalTransportReady,
-    RELAY_LEASE_FORMAT_V1, decode_bulk_hello, encode_bulk_ack, encode_relay_client_connected,
-    relay_client_id_range, relay_client_slot, try_decode_incarnated_bulk_from_bytes,
+    BULK_BINDING_SIZE, CLIENT_INCARNATION_SIZE, ClientIncarnation, RELAY_LEASE_FORMAT_V1,
+    decode_bulk_hello, encode_bulk_ack, encode_relay_client_connected, relay_client_id_range,
+    relay_client_slot, try_decode_incarnated_bulk_from_bytes,
     try_decode_relay_client_disconnected_ack_from_bytes,
 };
 use microsandbox_protocol::transport::{RelayClientConnected, RelayClientDisconnectedAck};
@@ -220,8 +224,10 @@ struct RingReaderContext {
 /// A client-bound frame whose aggregate capacity lives until the socket accepts it.
 struct ClientWrite {
     data: ClientWriteData,
-    /// Aggregate physical-lane admission, retained until the SDK socket consumes the frame.
-    _lane_permit: tokio::sync::OwnedSemaphorePermit,
+    /// Aggregate physical-lane admission, retained until the SDK socket consumes a guest frame.
+    /// Runtime-generated terminal rejections have no guest-lane allocation and therefore carry
+    /// no permit here.
+    _lane_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     /// Per-client admission, retained for the same lifetime as the aggregate permit.
     _client_permit: tokio::sync::OwnedSemaphorePermit,
 }
@@ -235,6 +241,31 @@ enum ClientWriteData {
     Inline(Bytes),
     #[cfg(unix)]
     LocalBulk(PreparedLocalBulk),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BulkOpenAdmission {
+    Accepted,
+    Duplicate,
+    LimitReached,
+}
+
+impl ClientWriteData {
+    fn inline(&self) -> Option<&Bytes> {
+        match self {
+            Self::Inline(data) => Some(data),
+            #[cfg(unix)]
+            Self::LocalBulk(_) => None,
+        }
+    }
+
+    fn inline_mut(&mut self) -> Option<&mut Bytes> {
+        match self {
+            Self::Inline(data) => Some(data),
+            #[cfg(unix)]
+            Self::LocalBulk(_) => None,
+        }
+    }
 }
 
 /// Nonblocking handles cloned from one live client owner before guest-output routing.
@@ -939,7 +970,7 @@ impl AgentRelay {
                                 .into(),
                         ));
                     }
-                    let mut ready: Ready = msg.payload().map_err(|error| {
+                    let ready: Ready = msg.payload().map_err(|error| {
                         RuntimeError::Custom(format!("decode core.ready payload: {error}"))
                     })?;
                     self.select_ready_transport(&ready)?;
@@ -948,12 +979,14 @@ impl AgentRelay {
                         "agent relay: received core.ready from agentd"
                     );
                     #[cfg(unix)]
-                    {
+                    let ready = {
+                        let mut ready = ready;
                         // This capability describes only the already authenticated local SDK
                         // hop. Agentd remains unaware of shared mappings and the guest generation
                         // stays unchanged.
                         ready.local_transport = Some(LocalTransportReady::shared_arena_v1());
-                    }
+                        ready
+                    };
                     let mut client_ready =
                         Message::with_payload(MessageType::Ready, msg.id, &ready).map_err(
                             |error| {
@@ -1247,6 +1280,20 @@ impl AgentRelay {
                                 "agent relay: client connected slot={slot} id_start={id_start} id_end_exclusive={id_end_exclusive}"
                             );
 
+                            // Duplicate the descriptor before the guest learns this incarnation.
+                            // Once RelayClientConnected is admitted, every local failure must use
+                            // the acknowledged disconnect path before the slot can be recycled.
+                            #[cfg(unix)]
+                            let ancillary_fd = match stream.as_fd().try_clone_to_owned() {
+                                Ok(fd) => fd,
+                                Err(error) => {
+                                    tracing::error!(%error, "agent relay: duplicate client socket for local transport failed");
+                                    used_slots.lock().await.remove(&slot);
+                                    drop(stream);
+                                    continue;
+                                }
+                            };
+
                             // Establish the dual-port range owner on the ordered control lane before
                             // the SDK sees its handshake and can submit work on either physical lane.
                             if let Some(incarnation) = incarnation
@@ -1266,16 +1313,6 @@ impl AgentRelay {
 
                             // Perform handshake: send
                             // [id_start: u32 BE][id_end_exclusive: u32 BE][ready_frame_bytes...].
-                            #[cfg(unix)]
-                            let ancillary_fd = match stream.as_fd().try_clone_to_owned() {
-                                Ok(fd) => fd,
-                                Err(error) => {
-                                    tracing::error!(%error, "agent relay: duplicate client socket for local transport failed");
-                                    used_slots.lock().await.remove(&slot);
-                                    drop(stream);
-                                    continue;
-                                }
-                            };
                             let (reader_half, mut writer_half) = tokio::io::split(stream);
                             let (disconnect_tx, disconnect_rx) = watch::channel(false);
 
@@ -1344,6 +1381,9 @@ impl AgentRelay {
                             ));
 
                             let active_bulk = Arc::new(std::sync::Mutex::new(HashMap::new()));
+                            let write_budget = Arc::new(Semaphore::new(
+                                CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY,
+                            ));
 
                             // Register the client.
                             {
@@ -1352,10 +1392,8 @@ impl AgentRelay {
                                     incarnation,
                                     active_sessions: HashSet::new(),
                                     active_bulk: Arc::clone(&active_bulk),
-                                    write_tx,
-                                    write_budget: Arc::new(Semaphore::new(
-                                        CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY,
-                                    )),
+                                    write_tx: write_tx.clone(),
+                                    write_budget: Arc::clone(&write_budget),
                                     disconnect_tx,
                                     #[cfg(unix)]
                                     local_outbound: None,
@@ -1391,6 +1429,8 @@ impl AgentRelay {
                                 id_end_exclusive,
                                 incarnation,
                                 active_bulk,
+                                write_tx,
+                                write_budget,
                                 disconnect_rx,
                                 #[cfg(unix)]
                                 local_write_tx,
@@ -1710,7 +1750,7 @@ async fn client_writer_task<W>(
             let Ok(write) = write_rx.try_recv() else {
                 break;
             };
-            let ClientWriteData::Inline(data) = &write.data else {
+            let Some(data) = write.data.inline() else {
                 // A local descriptor is an ordering barrier: flush every preceding in-band frame
                 // before publishing its arena slot to the SDK.
                 deferred = Some(write);
@@ -1808,7 +1848,7 @@ async fn write_client_batch<W: AsyncWrite + Unpin>(
             .iter()
             .take(CLIENT_WRITE_BATCH_FRAMES)
             .map(|write| {
-                let ClientWriteData::Inline(data) = &write.data else {
+                let Some(data) = write.data.inline() else {
                     unreachable!("local bulk descriptors are ordering barriers, never batch data")
                 };
                 IoSlice::new(data)
@@ -1830,7 +1870,7 @@ async fn write_client_batch<W: AsyncWrite + Unpin>(
         let mut remaining = written;
         while remaining != 0 {
             let front = batch.front_mut().expect("non-empty batch after write");
-            let ClientWriteData::Inline(data) = &mut front.data else {
+            let Some(data) = front.data.inline_mut() else {
                 unreachable!("local bulk descriptors are ordering barriers, never batch data")
             };
             if remaining < data.len() {
@@ -2660,7 +2700,7 @@ async fn route_guest_lane_frame(
                     Ok(prepared) => {
                         if let Err(error) = route.write_tx.send(ClientWrite {
                             data: ClientWriteData::LocalBulk(prepared),
-                            _lane_permit: lane_permit,
+                            _lane_permit: Some(lane_permit),
                             _client_permit: client_permit,
                         }) {
                             tracing::warn!(
@@ -2682,7 +2722,7 @@ async fn route_guest_lane_frame(
 
             if let Err(error) = route.write_tx.send(ClientWrite {
                 data: ClientWriteData::Inline(frame.data),
-                _lane_permit: lane_permit,
+                _lane_permit: Some(lane_permit),
                 _client_permit: client_permit,
             }) {
                 tracing::warn!(
@@ -2961,6 +3001,71 @@ async fn read_raw_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> RuntimeResul
     })
 }
 
+fn admit_bulk_open(
+    active_bulk: &std::sync::Mutex<HashMap<u32, BulkKind>>,
+    id: u32,
+    kind: BulkKind,
+) -> BulkOpenAdmission {
+    let mut active = active_bulk.lock().unwrap();
+    if active.contains_key(&id) {
+        return BulkOpenAdmission::Duplicate;
+    }
+    if active.len() >= BULK_WRITE_MAX_FLOWS_PER_CLIENT {
+        return BulkOpenAdmission::LimitReached;
+    }
+    active.insert(id, kind);
+    BulkOpenAdmission::Accepted
+}
+
+fn queue_bulk_open_rejection(
+    write_tx: &mpsc::UnboundedSender<ClientWrite>,
+    write_budget: &Arc<Semaphore>,
+    version: u8,
+    id: u32,
+    kind: BulkKind,
+) -> RuntimeResult<()> {
+    let error = format!(
+        "client already has the maximum of {BULK_WRITE_MAX_FLOWS_PER_CLIENT} active bulk operations"
+    );
+    let mut message = match kind {
+        BulkKind::Filesystem => Message::with_payload(
+            MessageType::FsResponse,
+            id,
+            &FsResponse {
+                ok: false,
+                error: Some(error),
+                data: None,
+            },
+        ),
+        BulkKind::Tcp => Message::with_payload(MessageType::TcpFailed, id, &TcpFailed { error }),
+    }
+    .map_err(|error| RuntimeError::Custom(format!("encode bulk admission rejection: {error}")))?;
+    // Match the initiating request so an older compatible SDK can decode the terminal response.
+    message.v = version;
+    let mut wire = Vec::new();
+    codec::encode_to_buf(&message, &mut wire).map_err(|error| {
+        RuntimeError::Custom(format!("encode bulk admission rejection frame: {error}"))
+    })?;
+    let charged = wire
+        .len()
+        .div_ceil(OUTPUT_BUDGET_GRANULE)
+        .saturating_mul(OUTPUT_BUDGET_GRANULE);
+    let charged = u32::try_from(charged)
+        .map_err(|_| RuntimeError::Custom("bulk admission rejection budget overflow".into()))?;
+    let client_permit = Arc::clone(write_budget)
+        .try_acquire_many_owned(charged)
+        .map_err(|_| {
+            RuntimeError::Custom("client output full while rejecting a bulk operation".into())
+        })?;
+    write_tx
+        .send(ClientWrite {
+            data: ClientWriteData::Inline(Bytes::from(wire)),
+            _lane_permit: None,
+            _client_permit: client_permit,
+        })
+        .map_err(|_| RuntimeError::Custom("client writer stopped during bulk rejection".into()))
+}
+
 /// Background task that reads frames from a client and forwards them to the
 /// ring writer channel. Handles client disconnect with session cleanup.
 ///
@@ -2988,6 +3093,8 @@ async fn client_reader_task(
     id_end_exclusive: u32,
     incarnation: Option<ClientIncarnation>,
     active_bulk: Arc<std::sync::Mutex<HashMap<u32, BulkKind>>>,
+    write_tx: mpsc::UnboundedSender<ClientWrite>,
+    write_budget: Arc<Semaphore>,
     mut disconnect_rx: watch::Receiver<bool>,
     #[cfg(unix)] local_write_tx: mpsc::UnboundedSender<LocalClientWrite>,
 ) {
@@ -3024,7 +3131,7 @@ async fn client_reader_task(
             }
         };
         #[cfg(not(unix))]
-        let mut frame = tokio::select! {
+        let frame = tokio::select! {
             result = read_raw_frame(&mut reader) => match result {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -3188,6 +3295,38 @@ async fn client_reader_task(
                 _ => None,
             });
 
+        if let Some(kind) = opened_bulk_kind {
+            match admit_bulk_open(&active_bulk, frame.id, kind) {
+                BulkOpenAdmission::Accepted => {}
+                BulkOpenAdmission::Duplicate => {
+                    tracing::error!(
+                        id = frame.id,
+                        "agent relay: client reused an active bulk correlation"
+                    );
+                    break;
+                }
+                BulkOpenAdmission::LimitReached => {
+                    let version = decoded_message
+                        .as_ref()
+                        .expect("bulk opening was decoded")
+                        .v;
+                    if let Err(error) =
+                        queue_bulk_open_rejection(&write_tx, &write_budget, version, frame.id, kind)
+                    {
+                        tracing::error!(
+                            %error,
+                            id = frame.id,
+                            "agent relay: failed to reject excess bulk operation"
+                        );
+                        break;
+                    }
+                    // The rejected operation never enters either guest lane, so it needs no
+                    // BulkCancel or merger cut. Its typed terminal is the complete lifecycle.
+                    continue;
+                }
+            }
+        }
+
         // The merger must know an operation exists before agentd can produce output for it. The
         // acknowledgement creates an actor-ordering cut across the command and physical lanes.
         if bulk_tx.is_some()
@@ -3208,20 +3347,12 @@ async fn client_reader_task(
                 .is_err()
                 || !matches!(completed.await, Ok(Ok(())))
             {
+                if opened_bulk_kind.is_some() {
+                    active_bulk.lock().unwrap().remove(&frame.id);
+                }
                 tracing::error!(
                     id = frame.id,
                     "agent relay: failed to register client operation"
-                );
-                break;
-            }
-        }
-
-        if let Some(kind) = opened_bulk_kind {
-            let duplicate = active_bulk.lock().unwrap().insert(frame.id, kind).is_some();
-            if duplicate {
-                tracing::error!(
-                    id = frame.id,
-                    "agent relay: client reused an active bulk correlation"
                 );
                 break;
             }
@@ -3432,6 +3563,10 @@ async fn client_reader_task(
     let active_sessions = {
         let mut map = clients.lock().await;
         if let Some(client) = map.remove(&slot) {
+            #[cfg(unix)]
+            if let Some(producer) = client.local_outbound.as_ref() {
+                producer.close();
+            }
             client.active_sessions
         } else {
             HashSet::new()
@@ -3938,7 +4073,7 @@ mod tests {
         frame
     }
 
-    fn encoded_raw_flow(id: u32, flow: BulkFlow, offset: u64, payload: &'static [u8]) -> Vec<u8> {
+    fn encoded_raw_flow(id: u32, flow: BulkFlow, offset: u64, payload: &[u8]) -> Vec<u8> {
         let mut frame = Vec::new();
         codec::encode_bulk_to_buf(
             &BulkRecord {
@@ -3946,7 +4081,7 @@ mod tests {
                 kind: BulkKind::Filesystem,
                 flow,
                 offset,
-                payload: Bytes::from_static(payload),
+                payload: Bytes::copy_from_slice(payload),
             },
             &mut frame,
         )
@@ -4066,14 +4201,14 @@ mod tests {
         write_tx
             .send(ClientWrite {
                 data: ClientWriteData::LocalBulk(prepared),
-                _lane_permit: Arc::clone(&lane_budget).acquire_owned().await.unwrap(),
+                _lane_permit: Some(Arc::clone(&lane_budget).acquire_owned().await.unwrap()),
                 _client_permit: Arc::clone(&client_budget).acquire_owned().await.unwrap(),
             })
             .unwrap();
         write_tx
             .send(ClientWrite {
                 data: ClientWriteData::Inline(terminal_wire.clone()),
-                _lane_permit: Arc::clone(&lane_budget).acquire_owned().await.unwrap(),
+                _lane_permit: Some(Arc::clone(&lane_budget).acquire_owned().await.unwrap()),
                 _client_permit: Arc::clone(&client_budget).acquire_owned().await.unwrap(),
             })
             .unwrap();
@@ -4100,6 +4235,7 @@ mod tests {
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let (local_write_tx, local_write_rx) = mpsc::unbounded_channel();
         let (disconnect_tx, disconnect_rx) = watch::channel(false);
+        let write_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY));
         let active_bulk = Arc::new(std::sync::Mutex::new(HashMap::from([(
             1,
             BulkKind::Filesystem,
@@ -4110,8 +4246,8 @@ mod tests {
                 incarnation: Some(TEST_INCARNATION),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
-                write_tx,
-                write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
+                write_tx: write_tx.clone(),
+                write_budget: Arc::clone(&write_budget),
                 disconnect_tx: disconnect_tx.clone(),
                 local_outbound: None,
             },
@@ -4147,6 +4283,8 @@ mod tests {
             AGENT_RELAY_ID_RANGE_STEP,
             Some(TEST_INCARNATION),
             active_bulk,
+            write_tx,
+            write_budget,
             disconnect_rx,
             local_write_tx,
         ));
@@ -4340,6 +4478,7 @@ mod tests {
         #[cfg(unix)]
         let (local_write_tx, _local_write_rx) = mpsc::unbounded_channel();
         let (disconnect_tx, disconnect_rx) = watch::channel(false);
+        let write_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY));
         let active_bulk = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let clients = Arc::new(Mutex::new(HashMap::from([(
             slot,
@@ -4347,8 +4486,8 @@ mod tests {
                 incarnation: Some(incarnation),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
-                write_tx,
-                write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
+                write_tx: write_tx.clone(),
+                write_budget: Arc::clone(&write_budget),
                 disconnect_tx,
                 #[cfg(unix)]
                 local_outbound: None,
@@ -4376,6 +4515,8 @@ mod tests {
             id_end_exclusive,
             Some(incarnation),
             active_bulk,
+            write_tx,
+            write_budget,
             disconnect_rx,
             #[cfg(unix)]
             local_write_tx,
@@ -4987,12 +5128,12 @@ mod tests {
         let mut batch = VecDeque::from([
             ClientWrite {
                 data: ClientWriteData::Inline(Bytes::from_static(b"abc")),
-                _lane_permit: first_lane,
+                _lane_permit: Some(first_lane),
                 _client_permit: first_client,
             },
             ClientWrite {
                 data: ClientWriteData::Inline(Bytes::from_static(b"defgh")),
-                _lane_permit: second_lane,
+                _lane_permit: Some(second_lane),
                 _client_permit: second_client,
             },
         ]);
@@ -5027,7 +5168,7 @@ mod tests {
                 .unwrap();
             tx.send(ClientWrite {
                 data: ClientWriteData::Inline(Bytes::from(vec![0u8; FRAME_BYTES])),
-                _lane_permit: lane_permit,
+                _lane_permit: Some(lane_permit),
                 _client_permit: client_permit,
             })
             .unwrap();
@@ -5288,6 +5429,51 @@ mod tests {
 
         assert!(!relay.dual_port_active);
         assert!(bulk_shared.is_closed());
+    }
+
+    #[test]
+    fn bulk_open_admission_rejects_only_the_excess_operation() {
+        let active = std::sync::Mutex::new(HashMap::new());
+        for id in 1..=BULK_WRITE_MAX_FLOWS_PER_CLIENT as u32 {
+            assert_eq!(
+                admit_bulk_open(&active, id, BulkKind::Filesystem),
+                BulkOpenAdmission::Accepted
+            );
+        }
+
+        assert_eq!(
+            admit_bulk_open(&active, 1, BulkKind::Filesystem),
+            BulkOpenAdmission::Duplicate
+        );
+        assert_eq!(
+            admit_bulk_open(&active, 1000, BulkKind::Tcp),
+            BulkOpenAdmission::LimitReached
+        );
+        assert_eq!(
+            active.lock().unwrap().len(),
+            BULK_WRITE_MAX_FLOWS_PER_CLIENT
+        );
+    }
+
+    #[test]
+    fn bulk_open_rejection_is_typed_terminal_at_the_request_version() {
+        let (write_tx, mut write_rx) = mpsc::unbounded_channel();
+        let budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY));
+        let version = microsandbox_protocol::message::PROTOCOL_VERSION - 1;
+
+        for (id, kind, expected_type) in [
+            (7, BulkKind::Filesystem, MessageType::FsResponse),
+            (8, BulkKind::Tcp, MessageType::TcpFailed),
+        ] {
+            queue_bulk_open_rejection(&write_tx, &budget, version, id, kind).unwrap();
+            let output = write_rx.try_recv().unwrap();
+            assert!(output._lane_permit.is_none());
+            let message = decode_frame(output.data.inline().unwrap()).unwrap();
+            assert_eq!(message.v, version);
+            assert_eq!(message.id, id);
+            assert_eq!(message.t, expected_type);
+            assert_eq!(message.flags, FLAG_TERMINAL);
+        }
     }
 
     #[derive(Default)]

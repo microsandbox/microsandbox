@@ -49,6 +49,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 #[cfg(all(feature = "named-pipe", windows))]
 use tokio::net::windows::named_pipe::ClientOptions;
+#[cfg(all(feature = "stream", feature = "uds", unix))]
+use tokio::sync::watch;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 #[cfg(feature = "stream")]
@@ -814,6 +816,8 @@ where
     #[cfg(all(feature = "uds", unix))]
     let (local_release_tx, local_release_rx) = mpsc::unbounded_channel();
     #[cfg(all(feature = "uds", unix))]
+    let (connection_shutdown_tx, connection_shutdown_rx) = watch::channel(false);
+    #[cfg(all(feature = "uds", unix))]
     let (local_inbound, local_outbound) = match local {
         Some(local) => (Some(local.inbound), Some(local.outbound)),
         None => (None, None),
@@ -825,11 +829,20 @@ where
         local_inbound,
         local_outbound.clone(),
         local_release_tx,
+        connection_shutdown_tx.clone(),
+        connection_shutdown_rx.clone(),
     ));
     #[cfg(not(all(feature = "uds", unix)))]
     let reader_handle = tokio::spawn(reader_loop(reader, Arc::clone(&pending)));
     #[cfg(all(feature = "uds", unix))]
-    let writer_handle = tokio::spawn(stream_writer_loop(writer, writer_rx, local_release_rx));
+    let writer_handle = tokio::spawn(stream_writer_loop(
+        writer,
+        writer_rx,
+        local_release_rx,
+        local_outbound.clone(),
+        connection_shutdown_tx,
+        connection_shutdown_rx,
+    ));
     #[cfg(not(all(feature = "uds", unix)))]
     let writer_handle = tokio::spawn(stream_writer_loop(writer, writer_rx));
 
@@ -1043,14 +1056,24 @@ async fn stream_writer_loop<W>(
     mut writer: W,
     mut rx: mpsc::Receiver<WriterCommand>,
     mut local_release_rx: mpsc::UnboundedReceiver<LocalBulkRelease>,
+    local_outbound: Option<SharedArenaProducer>,
+    connection_shutdown_tx: watch::Sender<bool>,
+    mut connection_shutdown_rx: watch::Receiver<bool>,
 ) where
     W: tokio::io::AsyncWrite + Unpin,
 {
     loop {
         tokio::select! {
             biased;
+            changed = connection_shutdown_rx.changed() => {
+                if changed.is_err() || *connection_shutdown_rx.borrow() {
+                    break;
+                }
+            }
             release = local_release_rx.recv() => {
-                let Some(release) = release else { continue; };
+                // The reader owns every release sender. Its exit therefore closes this channel;
+                // continuing here would create a permanently-ready branch and busy-spin.
+                let Some(release) = release else { break; };
                 let result = async {
                     let wire = encode_local_bulk_release(release)
                         .map_err(|error| AgentClientError::LocalTransport(error.to_string()))?;
@@ -1075,6 +1098,11 @@ async fn stream_writer_loop<W>(
             }
         }
     }
+
+    if let Some(producer) = local_outbound.as_ref() {
+        producer.close();
+    }
+    let _ = connection_shutdown_tx.send(true);
 }
 
 #[cfg(all(feature = "stream", not(all(feature = "uds", unix))))]
@@ -1125,11 +1153,21 @@ async fn reader_loop<R>(
     local_inbound: Option<SharedArenaConsumer>,
     local_outbound: Option<SharedArenaProducer>,
     local_release_tx: mpsc::UnboundedSender<LocalBulkRelease>,
+    connection_shutdown_tx: watch::Sender<bool>,
+    mut connection_shutdown_rx: watch::Receiver<bool>,
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
     loop {
-        let frame = match codec::read_raw_frame(&mut reader).await {
+        let frame = match tokio::select! {
+            changed = connection_shutdown_rx.changed() => {
+                if changed.is_err() || *connection_shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+            frame = codec::read_raw_frame(&mut reader) => frame,
+        } {
             Ok(frame) => frame,
             Err(e) => {
                 tracing::debug!("agent client: reader EOF or error: {e}");
@@ -1181,6 +1219,11 @@ async fn reader_loop<R>(
 
         dispatch_frame(InboundFrame::Raw(frame), &pending).await;
     }
+
+    if let Some(producer) = local_outbound.as_ref() {
+        producer.close();
+    }
+    let _ = connection_shutdown_tx.send(true);
 
     // Reader exited — drop all senders so outstanding receivers wake up.
     let mut map = pending.lock().await;

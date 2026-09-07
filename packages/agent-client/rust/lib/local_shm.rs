@@ -8,7 +8,7 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io::{IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{Ordering, fence};
+use std::sync::atomic::{AtomicBool, Ordering, fence};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -29,6 +29,12 @@ pub const LOCAL_SHM_FORMAT_V1: u8 = 1;
 
 /// Total bytes mapped for each transfer direction.
 pub const LOCAL_SHM_ARENA_BYTES: usize = 64 * 1024 * 1024;
+
+/// Maximum payload bytes retained by active leases in one direction.
+///
+/// The mapping is deliberately larger so TCP-sized and filesystem-sized slots can coexist, but
+/// active transport ownership must remain within the stack-wide directional bulk budget.
+pub const LOCAL_SHM_ACTIVE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Bytes in one small record slot.
 pub const LOCAL_SHM_SMALL_SLOT_BYTES: usize = 256 * 1024;
@@ -78,6 +84,10 @@ pub enum LocalShmError {
     /// The selected shared arena has no fitting free slot right now.
     #[error("local shared arena has no free {0} slot")]
     Full(&'static str),
+
+    /// The connection owning this arena has closed and cannot return further releases.
+    #[error("local shared arena connection is closed")]
+    Closed,
 }
 
 /// Result alias for local shared-arena operations.
@@ -96,7 +106,7 @@ pub enum LocalShmFrame {
     BulkRelease(LocalBulkRelease),
 }
 
-/// Metadata referring to one generation-7 bulk payload in a shared slot.
+/// Metadata referring to one generation-8 bulk payload in a shared slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalBulkRef {
     /// Arena slot containing the payload.
@@ -152,11 +162,19 @@ struct ProducerInner {
     mapping: Mutex<MmapMut>,
     slots: Mutex<ProducerSlots>,
     available: Notify,
+    closed: AtomicBool,
 }
 
 struct ProducerSlots {
     generations: Vec<u32>,
-    leased: Vec<Option<u32>>,
+    leased: Vec<Option<ProducerLease>>,
+    active_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ProducerLease {
+    generation: u32,
+    payload_len: usize,
 }
 
 /// Consumer for one directional shared arena.
@@ -253,8 +271,10 @@ impl SharedArenaProducer {
                 slots: Mutex::new(ProducerSlots {
                     generations: vec![0; LOCAL_SHM_SLOT_COUNT as usize],
                     leased: vec![None; LOCAL_SHM_SLOT_COUNT as usize],
+                    active_bytes: 0,
                 }),
                 available: Notify::new(),
+                closed: AtomicBool::new(false),
             }),
         })
     }
@@ -293,6 +313,13 @@ impl SharedArenaProducer {
         }
         fence(Ordering::Release);
 
+        // Teardown can race the payload copy after the slot lock is released. Do not publish a
+        // descriptor into a dead connection; close() has already revoked this lease generation.
+        if self.inner.closed.load(Ordering::Acquire) {
+            self.release_uncommitted(LocalBulkRelease { slot, generation });
+            return Err(LocalShmError::Closed);
+        }
+
         Ok(PreparedLocalBulk {
             producer: self.clone(),
             descriptor: LocalBulkRef {
@@ -310,18 +337,24 @@ impl SharedArenaProducer {
 
     /// Return an exact remotely released slot generation.
     pub fn release(&self, release: LocalBulkRelease) -> LocalShmResult<()> {
+        if self.inner.closed.load(Ordering::Acquire) {
+            // Connection teardown revokes every lease at once. A late release is no longer
+            // authoritative and must not resurrect or mutate the closed epoch.
+            return Ok(());
+        }
         let index = validate_slot(release.slot)?;
         let mut slots = self.inner.slots.lock().unwrap();
         match slots.leased[index] {
-            Some(generation) if generation == release.generation => {
+            Some(lease) if lease.generation == release.generation => {
                 slots.leased[index] = None;
+                slots.active_bytes = slots.active_bytes.saturating_sub(lease.payload_len);
                 drop(slots);
                 self.inner.available.notify_one();
                 Ok(())
             }
-            Some(generation) => Err(LocalShmError::Protocol(format!(
-                "stale release for slot {} generation {}, current generation is {generation}",
-                release.slot, release.generation
+            Some(lease) => Err(LocalShmError::Protocol(format!(
+                "stale release for slot {} generation {}, current generation is {}",
+                release.slot, release.generation, lease.generation
             ))),
             None => Err(LocalShmError::Protocol(format!(
                 "duplicate release for free slot {} generation {}",
@@ -330,8 +363,30 @@ impl SharedArenaProducer {
         }
     }
 
+    /// Revoke this connection epoch and wake every producer waiting for a remote release.
+    pub fn close(&self) {
+        if self.inner.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let mut slots = self.inner.slots.lock().unwrap();
+        slots.leased.fill(None);
+        slots.active_bytes = 0;
+        drop(slots);
+        self.inner.available.notify_waiters();
+    }
+
     fn lease_slot(&self, payload_len: usize) -> LocalShmResult<(u16, u32)> {
         let mut slots = self.inner.slots.lock().unwrap();
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(LocalShmError::Closed);
+        }
+        let active_bytes = slots
+            .active_bytes
+            .checked_add(payload_len)
+            .ok_or(LocalShmError::Full("directional byte-budget"))?;
+        if active_bytes > LOCAL_SHM_ACTIVE_BYTES {
+            return Err(LocalShmError::Full("directional byte-budget"));
+        }
         let preferred = if payload_len <= LOCAL_SHM_SMALL_SLOT_BYTES {
             0..LOCAL_SHM_SMALL_SLOTS
         } else {
@@ -355,7 +410,11 @@ impl SharedArenaProducer {
             generation = 1;
         }
         slots.generations[index] = generation;
-        slots.leased[index] = Some(generation);
+        slots.leased[index] = Some(ProducerLease {
+            generation,
+            payload_len,
+        });
+        slots.active_bytes = active_bytes;
         Ok((slot, generation))
     }
 
@@ -364,8 +423,10 @@ impl SharedArenaProducer {
             return;
         };
         let mut slots = self.inner.slots.lock().unwrap();
-        if slots.leased[index] == Some(release.generation) {
+        if slots.leased[index].is_some_and(|lease| lease.generation == release.generation) {
+            let lease = slots.leased[index].expect("matching local shared lease exists");
             slots.leased[index] = None;
+            slots.active_bytes = slots.active_bytes.saturating_sub(lease.payload_len);
             drop(slots);
             self.inner.available.notify_one();
         }
@@ -970,6 +1031,62 @@ mod tests {
                 generation: descriptor.generation,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn active_payload_budget_is_stricter_than_mapping_capacity() {
+        let server = LocalShmServer::create().unwrap();
+        let record = BulkRecord {
+            id: 1,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::GuestToHost,
+            offset: 0,
+            payload: Bytes::from(vec![0x5a; LOCAL_SHM_LARGE_SLOT_BYTES]),
+        };
+        let mut leased = Vec::new();
+        for _ in 0..(LOCAL_SHM_ACTIVE_BYTES / LOCAL_SHM_LARGE_SLOT_BYTES) {
+            let mut prepared = server.outbound.try_prepare(&record).unwrap();
+            prepared.commit();
+            leased.push(prepared.descriptor());
+        }
+
+        assert!(matches!(
+            server.outbound.try_prepare(&record),
+            Err(LocalShmError::Full("directional byte-budget"))
+        ));
+        assert_eq!(
+            server.outbound.inner.slots.lock().unwrap().active_bytes,
+            leased.len() * LOCAL_SHM_LARGE_SLOT_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_close_wakes_producer_with_every_slot_leased() {
+        let server = LocalShmServer::create().unwrap();
+        let record = BulkRecord {
+            id: 1,
+            kind: BulkKind::Tcp,
+            flow: BulkFlow::GuestToHost,
+            offset: 0,
+            payload: Bytes::from_static(b"x"),
+        };
+        for _ in 0..LOCAL_SHM_SLOT_COUNT {
+            let mut prepared = server.outbound.try_prepare(&record).unwrap();
+            prepared.commit();
+        }
+
+        let waiting = {
+            let producer = server.outbound.clone();
+            let record = record.clone();
+            tokio::spawn(async move { producer.prepare(&record).await })
+        };
+        tokio::task::yield_now().await;
+        server.outbound.close();
+
+        assert!(matches!(waiting.await.unwrap(), Err(LocalShmError::Closed)));
+        let slots = server.outbound.inner.slots.lock().unwrap();
+        assert_eq!(slots.active_bytes, 0);
+        assert!(slots.leased.iter().all(Option::is_none));
     }
 
     #[tokio::test]

@@ -1438,9 +1438,11 @@ impl SshSession {
                 ));
                 let (output_tx, output_rx) = mpsc::channel(TCP_OUTPUT_QUEUE_CAPACITY);
                 let output = tokio::spawn(relay_tcp_output_to_ssh(
+                    channel_id,
                     tcp_id,
                     output_rx,
                     channel_writer,
+                    session_handle.clone(),
                     Arc::clone(&client),
                     bulk_receiver.as_ref().map(Arc::clone),
                 ));
@@ -2315,9 +2317,11 @@ async fn relay_ssh_to_tcp<R>(
 
 /// Drain guest TCP data into the independently writable Russh channel stream.
 async fn relay_tcp_output_to_ssh<W>(
+    channel: ChannelId,
     tcp_id: u32,
     mut output: mpsc::Receiver<TcpOutput>,
     mut writer: W,
+    session: russh::server::Handle,
     client: Arc<AgentClient>,
     bulk_receiver: Option<Arc<Mutex<BulkReceiveState>>>,
 ) where
@@ -2330,7 +2334,7 @@ async fn relay_tcp_output_to_ssh<W>(
                 consumed_offset,
             } => {
                 if writer.write_all(&payload).await.is_err() {
-                    return;
+                    break;
                 }
                 let Some(consumed_offset) = consumed_offset else {
                     continue;
@@ -2359,7 +2363,7 @@ async fn relay_tcp_output_to_ssh<W>(
             }
             TcpOutput::Eof => {
                 if writer.shutdown().await.is_err() {
-                    return;
+                    break;
                 }
             }
             TcpOutput::Close => break,
@@ -2367,6 +2371,9 @@ async fn relay_tcp_output_to_ssh<W>(
     }
 
     let _ = writer.shutdown().await;
+    // EOF closes only the SSH channel's write half. The terminal guest TcpClosed/TcpFailed event
+    // owns the full channel lifecycle and must emit SSH CLOSE so Russh wakes the input half too.
+    let _ = session.close(channel).await;
 }
 
 /// Pump agent frames without waiting on the SSH channel's output window. The bounded output queue
@@ -2867,6 +2874,7 @@ async fn sftp_write_handle(
         offset,
         Some(data.len() as u64),
         None,
+        true,
     )
     .await?;
     for chunk in data.chunks(FS_CHUNK_SIZE) {

@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use microsandbox_protocol::bulk::{
@@ -20,6 +20,7 @@ use microsandbox_protocol::codec;
 use microsandbox_protocol::message::{Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClosed, TcpConnect, TcpConnected, TcpData, TcpEof, TcpFailed};
 
+use crate::agent::AdmittedBulkRecord;
 #[cfg(test)]
 use crate::session::SessionOutputEnvelope;
 use crate::session::{
@@ -65,7 +66,7 @@ pub struct TcpSession {
 enum TcpCommand {
     Data(Vec<u8>),
     Eof,
-    BulkRecord(BulkRecord),
+    BulkRecord(AdmittedBulkRecord),
 }
 
 /// Coalescing lifecycle channels that cannot be starved by a full TCP data queue.
@@ -90,6 +91,7 @@ struct PendingTcpWrite {
     payload: Bytes,
     written: usize,
     bulk_end: Option<u64>,
+    _bulk_input_permit: Option<OwnedSemaphorePermit>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -131,7 +133,7 @@ impl TcpSession {
     }
 
     /// Queue one host-to-guest raw bulk record.
-    pub async fn write_bulk(&self, record: BulkRecord) -> Result<(), String> {
+    pub(crate) async fn write_bulk(&self, record: AdmittedBulkRecord) -> Result<(), String> {
         if !self.bulk {
             return Err("raw bulk record sent to a generation-6 TCP stream".into());
         }
@@ -642,7 +644,11 @@ async fn relay_tcp_session(
                         }
 
                         let completed = pending_write.take().expect("completed TCP write exists");
-                        if let Some(end) = completed.bulk_end {
+                        let bulk_end = completed.bulk_end;
+                        // The destination socket has consumed the full payload. Release aggregate
+                        // input capacity before an outbound credit waits on the opposite lane.
+                        drop(completed._bulk_input_permit);
+                        if let Some(end) = bulk_end {
                             let Some(state) = bulk.as_mut() else {
                                 terminal_sent = send_tcp_failure(
                                     id,
@@ -729,6 +735,7 @@ async fn relay_tcp_session(
                             payload: Bytes::from(data),
                             written: 0,
                             bulk_end: None,
+                            _bulk_input_permit: None,
                         });
                     }
                     Some(TcpCommand::Eof) => {
@@ -770,7 +777,7 @@ async fn relay_tcp_session(
                             .await;
                             break;
                         };
-                        let end = match state.receive.accept_record(&record) {
+                        let end = match state.receive.accept_record(record.record()) {
                             Ok(end) => end,
                             Err(error) => {
                                 terminal_sent = send_tcp_failure(
@@ -782,10 +789,12 @@ async fn relay_tcp_session(
                                 break;
                             }
                         };
+                        let (record, permit) = record.into_parts();
                         pending_write = Some(PendingTcpWrite {
                             payload: record.payload,
                             written: 0,
                             bulk_end: Some(end),
+                            _bulk_input_permit: Some(permit),
                         });
                     }
                 }
@@ -1036,13 +1045,13 @@ mod tests {
 
         let host_payload = Bytes::from_static(b"from-host");
         session
-            .write_bulk(BulkRecord {
+            .write_bulk(AdmittedBulkRecord::for_test(BulkRecord {
                 id: 13,
                 kind: BulkKind::Tcp,
                 flow: BulkFlow::HostToGuest,
                 offset: 0,
                 payload: host_payload.clone(),
-            })
+            }))
             .await
             .unwrap();
         session
@@ -1116,13 +1125,13 @@ mod tests {
         );
 
         session
-            .write_bulk(BulkRecord {
+            .write_bulk(AdmittedBulkRecord::for_test(BulkRecord {
                 id: 17,
                 kind: BulkKind::Tcp,
                 flow: BulkFlow::HostToGuest,
                 offset: 0,
                 payload: host_payload,
-            })
+            }))
             .await
             .unwrap();
 
@@ -1167,13 +1176,13 @@ mod tests {
 
         for index in 0..TCP_COMMAND_CAPACITY {
             session
-                .write_bulk(BulkRecord {
+                .write_bulk(AdmittedBulkRecord::for_test(BulkRecord {
                     id: 29,
                     kind: BulkKind::Tcp,
                     flow: BulkFlow::HostToGuest,
                     offset: (index * MIN_BULK_RECORD_PAYLOAD as usize) as u64,
                     payload: payload.clone(),
-                })
+                }))
                 .await
                 .unwrap();
         }
