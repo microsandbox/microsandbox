@@ -27,6 +27,8 @@ microsandbox-agent-client = { version = "0.6.15", features = ["stream"] }
 
 The high-level `microsandbox` SDK enables `uds` explicitly because local sandboxes are reached through Unix domain sockets.
 
+The `uds` adapter negotiates local shared-memory payload transport automatically when the runtime supports it. Callers continue to use `AgentClient`; arena descriptors, mappings, and releases are an internal connection detail.
+
 ## Protocol Model
 
 The agent protocol uses a stable length-prefixed binary frame header:
