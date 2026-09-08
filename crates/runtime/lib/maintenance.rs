@@ -716,6 +716,15 @@ async fn reconcile_stale_active(
     run_dir: &Path,
     sandbox: &sandbox_entity::Model,
 ) -> RuntimeResult<bool> {
+    let transition_guard = if sandbox.status == sandbox_entity::SandboxStatus::Starting {
+        let Some(guard) = crate::transition::try_acquire_transition_guard(run_dir, &sandbox.name)?
+        else {
+            return Ok(false);
+        };
+        Some(guard)
+    } else {
+        None
+    };
     let Some(_guard) = crate::ipc::try_acquire_lifecycle_guard(run_dir, &sandbox.name)? else {
         return Ok(false);
     };
@@ -741,11 +750,21 @@ async fn reconcile_stale_active(
         .one(db)
         .await?;
 
-    // No active run yet while Starting means the runtime has not inserted a run row. Draining with no active run
-    // means the stop request already reached a terminal run state, so repair
-    // the sandbox status instead of leaving future stop callers polling.
+    // A start with no run is abandoned only when neither launcher nor runtime
+    // owns it. Probe legacy endpoints before changing persisted state.
     let Some(run) = run else {
-        if sandbox.status == sandbox_entity::SandboxStatus::Draining {
+        let abandoned_start =
+            sandbox.status == sandbox_entity::SandboxStatus::Starting && transition_guard.is_some();
+        if abandoned_start
+            && crate::transition::sandbox_runtime_endpoint_is_live(
+                run_dir,
+                &sandboxes_dir.join(&sandbox.name),
+                &sandbox.name,
+            )?
+        {
+            return Ok(false);
+        }
+        if sandbox.status == sandbox_entity::SandboxStatus::Draining || abandoned_start {
             remove_runtime_socket_artifacts(run_dir, sandboxes_dir, &sandbox.name)?;
             let now = chrono::Utc::now().naive_utc();
             let (terminal_status, _) = stale_runtime_terminal_state(sandbox.status);
@@ -761,7 +780,7 @@ async fn reconcile_stale_active(
                 )
                 .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                 .filter(sandbox_entity::Column::Id.eq(sandbox.id))
-                .filter(sandbox_entity::Column::Status.eq(sandbox_entity::SandboxStatus::Draining))
+                .filter(sandbox_entity::Column::Status.eq(sandbox.status))
                 .exec(db)
                 .await?;
             return Ok(result.rows_affected > 0);
@@ -1273,6 +1292,81 @@ mod tests {
                 pid: Some(DEAD_PID),
             }]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn abandoned_start_reconciliation_preserves_boot_owners_and_disk() {
+        for owner in ["none", "launcher", "runtime", "legacy"] {
+            let (dir, db) = test_db().await;
+            let run_dir = dir.path().join("run");
+            let name = "before-pid";
+            let id =
+                insert_sandbox(&db, name, sandbox_entity::SandboxStatus::Starting, false).await;
+            let disk = dir.path().join(name).join("upper.ext4");
+            std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+            std::fs::write(&disk, b"persistent contents").unwrap();
+            let launcher = if owner == "launcher" {
+                Some(
+                    crate::transition::try_acquire_transition_guard(&run_dir, name)
+                        .unwrap()
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let runtime = if owner == "runtime" {
+                Some(
+                    crate::ipc::try_acquire_lifecycle_guard(&run_dir, name)
+                        .unwrap()
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let legacy = if owner == "legacy" {
+                std::fs::create_dir_all(&run_dir).unwrap();
+                let path = crate::ipc::sandbox_socket_paths(&run_dir, name).legacy_agent;
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                Some(std::os::unix::net::UnixListener::bind(path).unwrap())
+            } else {
+                None
+            };
+            let sandbox = sandbox_entity::Entity::find_by_id(id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                reconcile_stale_active(&db, dir.path(), &run_dir, &sandbox)
+                    .await
+                    .unwrap(),
+                owner == "none"
+            );
+            assert_eq!(
+                status_of(&db, id).await,
+                Some(if owner == "none" {
+                    sandbox_entity::SandboxStatus::Crashed
+                } else {
+                    sandbox_entity::SandboxStatus::Starting
+                })
+            );
+            assert_eq!(std::fs::read(&disk).unwrap(), b"persistent contents");
+            if owner == "launcher" {
+                drop(launcher);
+                assert!(
+                    reconcile_stale_active(&db, dir.path(), &run_dir, &sandbox)
+                        .await
+                        .unwrap()
+                );
+                assert_eq!(
+                    status_of(&db, id).await,
+                    Some(sandbox_entity::SandboxStatus::Crashed)
+                );
+                assert_eq!(std::fs::read(&disk).unwrap(), b"persistent contents");
+            }
+            drop((runtime, legacy));
+        }
     }
 
     #[tokio::test]
