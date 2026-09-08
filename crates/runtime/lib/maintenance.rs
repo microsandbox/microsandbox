@@ -708,6 +708,75 @@ async fn seed_install_exclusive_lease(
     }
 }
 
+/// Hold the launcher's existing creation lock while checking a pre-PID start.
+fn try_acquire_start_transition(
+    run_dir: &Path,
+    name: &str,
+) -> std::io::Result<Option<std::fs::File>> {
+    let runtime_path = crate::ipc::lifecycle_lock_path(run_dir, name);
+    let directory = run_dir.join("creation-locks");
+    std::fs::create_dir_all(&directory)?;
+    // Both shipped lock namespaces use the first 16 SHA-256 bytes of the name.
+    let path = directory.join(runtime_path.file_name().expect("lifecycle lock filename"));
+    let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+    if microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+        Ok(Some(file))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Probe every backward-compatible Unix endpoint before recovering an
+/// untracked namespace. A successful connection is direct evidence that an
+/// older runtime (which predates lifecycle locks) still owns the name.
+#[cfg(unix)]
+fn sandbox_runtime_endpoint_is_live(
+    run_dir: &Path,
+    sandbox_dir: &Path,
+    name: &str,
+) -> std::io::Result<bool> {
+    let paths = crate::ipc::sandbox_socket_paths(run_dir, name);
+    let fallback_agent = sandbox_dir.join("runtime").join("agent.sock");
+    let fallback_control = crate::ipc::control_socket_path_for(&fallback_agent);
+    for path in [
+        paths.agent,
+        paths.control,
+        paths.legacy_agent,
+        paths.legacy_control,
+        fallback_agent,
+        fallback_control,
+    ] {
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+        match std::os::unix::net::UnixStream::connect(&path) {
+            Ok(_) => return Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) || matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOTSOCK | libc::EPROTOTYPE)
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
+/// Non-Unix runtimes use the lifecycle ownership guard.
+#[cfg(not(unix))]
+fn sandbox_runtime_endpoint_is_live(
+    _run_dir: &Path,
+    _sandbox_dir: &Path,
+    _name: &str,
+) -> std::io::Result<bool> {
+    Ok(false)
+}
+
 /// Reconcile one active sandbox whose owning runtime may have died. Returns
 /// `true` when the sandbox was marked terminal.
 async fn reconcile_stale_active(
@@ -717,8 +786,7 @@ async fn reconcile_stale_active(
     sandbox: &sandbox_entity::Model,
 ) -> RuntimeResult<bool> {
     let transition_guard = if sandbox.status == sandbox_entity::SandboxStatus::Starting {
-        let Some(guard) = crate::transition::try_acquire_transition_guard(run_dir, &sandbox.name)?
-        else {
+        let Some(guard) = try_acquire_start_transition(run_dir, &sandbox.name)? else {
             return Ok(false);
         };
         Some(guard)
@@ -756,7 +824,7 @@ async fn reconcile_stale_active(
         let abandoned_start =
             sandbox.status == sandbox_entity::SandboxStatus::Starting && transition_guard.is_some();
         if abandoned_start
-            && crate::transition::sandbox_runtime_endpoint_is_live(
+            && sandbox_runtime_endpoint_is_live(
                 run_dir,
                 &sandboxes_dir.join(&sandbox.name),
                 &sandbox.name,
@@ -934,6 +1002,53 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn endpoint_probe_distinguishes_wrong_artifacts_from_live_streams() {
+        use std::os::unix::net::{UnixDatagram, UnixListener};
+
+        let temp = tempfile::Builder::new()
+            .prefix("msb-probe")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let paths = crate::ipc::sandbox_socket_paths(temp.path(), "sandbox");
+        std::fs::create_dir_all(paths.legacy_agent.parent().unwrap()).unwrap();
+        std::fs::write(&paths.legacy_agent, b"stale artifact").unwrap();
+        assert!(!sandbox_runtime_endpoint_is_live(temp.path(), temp.path(), "sandbox").unwrap());
+        std::fs::remove_file(&paths.legacy_agent).unwrap();
+        let datagram = UnixDatagram::bind(&paths.legacy_agent).unwrap();
+        assert!(!sandbox_runtime_endpoint_is_live(temp.path(), temp.path(), "sandbox").unwrap());
+        drop(datagram);
+        std::fs::remove_file(&paths.legacy_agent).unwrap();
+        let listener = UnixListener::bind(&paths.legacy_agent).unwrap();
+        assert!(sandbox_runtime_endpoint_is_live(temp.path(), temp.path(), "sandbox").unwrap());
+        drop(listener);
+        assert!(!sandbox_runtime_endpoint_is_live(temp.path(), temp.path(), "sandbox").unwrap());
+    }
+
+    #[test]
+    fn transition_guard_contends_with_existing_launcher_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        // Exact path produced by the previously shipped SDK, independently of the new helper.
+        let path = temp
+            .path()
+            .join("creation-locks/0e0e827720dff0e9fb6cc08970d370d2.lock");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old_launcher = microsandbox_utils::process_lock::open_lock_file(&path).unwrap();
+        assert!(microsandbox_utils::process_lock::try_lock_exclusive(&old_launcher).unwrap());
+        assert!(
+            try_acquire_start_transition(temp.path(), "before-pid")
+                .unwrap()
+                .is_none()
+        );
+        drop(old_launcher);
+        assert!(
+            try_acquire_start_transition(temp.path(), "before-pid")
+                .unwrap()
+                .is_some()
+        );
+    }
 
     /// A PID that is essentially certain not to map to a live process.
     const DEAD_PID: i32 = 2_000_000_000;
@@ -1308,7 +1423,7 @@ mod tests {
             std::fs::write(&disk, b"persistent contents").unwrap();
             let launcher = if owner == "launcher" {
                 Some(
-                    crate::transition::try_acquire_transition_guard(&run_dir, name)
+                    try_acquire_start_transition(&run_dir, name)
                         .unwrap()
                         .unwrap(),
                 )
