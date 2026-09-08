@@ -27,7 +27,6 @@ pub mod metrics;
 pub mod policy;
 pub mod relay;
 mod startup;
-pub mod transition;
 pub mod vm;
 pub(crate) mod writeback;
 
