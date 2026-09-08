@@ -65,8 +65,10 @@ pub fn sandbox_runtime_endpoint_is_live(
         fallback_agent,
         fallback_control,
     ] {
-        if std::fs::symlink_metadata(&path).is_err() {
-            continue;
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         }
         match std::os::unix::net::UnixStream::connect(&path) {
             Ok(_) => return Ok(true),
@@ -74,6 +76,9 @@ pub fn sandbox_runtime_endpoint_is_live(
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) || matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOTSOCK | libc::EPROTOTYPE)
                 ) => {}
             Err(error) => return Err(error),
         }
@@ -98,6 +103,30 @@ pub fn sandbox_runtime_endpoint_is_live(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn endpoint_probe_distinguishes_wrong_artifacts_from_live_streams() {
+        use std::os::unix::net::{UnixDatagram, UnixListener};
+
+        let temp = tempfile::Builder::new()
+            .prefix("msb-probe")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let paths = crate::ipc::sandbox_socket_paths(temp.path(), "sandbox");
+        std::fs::create_dir_all(paths.legacy_agent.parent().unwrap()).unwrap();
+        std::fs::write(&paths.legacy_agent, b"stale artifact").unwrap();
+        assert!(!sandbox_runtime_endpoint_is_live(temp.path(), temp.path(), "sandbox").unwrap());
+        std::fs::remove_file(&paths.legacy_agent).unwrap();
+        let datagram = UnixDatagram::bind(&paths.legacy_agent).unwrap();
+        assert!(!sandbox_runtime_endpoint_is_live(temp.path(), temp.path(), "sandbox").unwrap());
+        drop(datagram);
+        std::fs::remove_file(&paths.legacy_agent).unwrap();
+        let listener = UnixListener::bind(&paths.legacy_agent).unwrap();
+        assert!(sandbox_runtime_endpoint_is_live(temp.path(), temp.path(), "sandbox").unwrap());
+        drop(listener);
+        assert!(!sandbox_runtime_endpoint_is_live(temp.path(), temp.path(), "sandbox").unwrap());
+    }
 
     #[test]
     fn transition_guard_contends_with_existing_launcher_lock() {

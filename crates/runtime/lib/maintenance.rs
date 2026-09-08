@@ -1297,7 +1297,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn abandoned_start_reconciliation_preserves_boot_owners_and_disk() {
-        for owner in ["none", "launcher", "runtime", "legacy"] {
+        for owner in ["none", "stale", "launcher", "runtime", "legacy"] {
             let (dir, db) = test_db().await;
             let run_dir = dir.path().join("run");
             let name = "before-pid";
@@ -1324,6 +1324,11 @@ mod tests {
             } else {
                 None
             };
+            if owner == "stale" {
+                let path = crate::ipc::sandbox_socket_paths(&run_dir, name).legacy_agent;
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"stale endpoint").unwrap();
+            }
             let legacy = if owner == "legacy" {
                 std::fs::create_dir_all(&run_dir).unwrap();
                 let path = crate::ipc::sandbox_socket_paths(&run_dir, name).legacy_agent;
@@ -1341,11 +1346,11 @@ mod tests {
                 reconcile_stale_active(&db, dir.path(), &run_dir, &sandbox)
                     .await
                     .unwrap(),
-                owner == "none"
+                matches!(owner, "none" | "stale")
             );
             assert_eq!(
                 status_of(&db, id).await,
-                Some(if owner == "none" {
+                Some(if matches!(owner, "none" | "stale") {
                     sandbox_entity::SandboxStatus::Crashed
                 } else {
                     sandbox_entity::SandboxStatus::Starting
