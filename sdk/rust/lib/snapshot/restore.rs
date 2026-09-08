@@ -8,7 +8,7 @@ use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConf
 
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
-use super::create::{copy_checkpoint_file, materialize_checkpoint_closure};
+use super::create::{copy_checkpoint_file, stage_checkpoint_closure};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -44,23 +44,14 @@ pub(crate) async fn materialize_checkpoint_for_child(
     child_stage: &Path,
     root_disk: &SnapshotRootDisk,
 ) -> MicrosandboxResult<CheckpointChildMaterialization> {
-    let expected = ObjectId::new(&source.checkpoint_root)
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let source_closure = CheckpointClosure::open(&source.closure, Some(&expected))
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    if source_closure.checkpoint().checkpoint_id != source.checkpoint_id {
-        return Err(MicrosandboxError::SnapshotIntegrity(
-            "checkpoint restore source has another identity".into(),
-        ));
-    }
-    validate_root_disk_closure(&source_closure, root_disk, false)?;
-
+    // Validate once after obtaining child-owned files. Validating the source first neither
+    // protects against a later source mutation nor substitutes for validation of the child.
     tokio::fs::create_dir_all(child_stage).await?;
     let closure_destination = child_stage.join(CHILD_CHECKPOINT_DIRECTORY);
     let source_path = source.closure.clone();
     let destination_for_copy = closure_destination.clone();
     tokio::task::spawn_blocking(move || {
-        materialize_checkpoint_closure(&source_path, &destination_for_copy)
+        stage_checkpoint_closure(&source_path, &destination_for_copy)
     })
     .await
     .map_err(|error| MicrosandboxError::Custom(format!("checkpoint child copy task: {error}")))??;

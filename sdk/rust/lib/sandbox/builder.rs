@@ -1279,27 +1279,22 @@ impl SandboxBuilder {
                 )
                 .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
                 let closure = snap.path().join(crate::snapshot::CHECKPOINT_DIRECTORY);
-                let opened = match self.config.snapshot_restore_mode {
-                    SnapshotRestoreMode::Full => {
-                        microsandbox_image::checkpoint::CheckpointClosure::open(
-                            &closure,
-                            Some(&expected),
-                        )
-                    }
-                    SnapshotRestoreMode::DiskOnly => {
-                        microsandbox_image::checkpoint::CheckpointClosure::open_portable(
-                            &closure,
-                            Some(&expected),
-                        )
-                    }
-                }
+                let opened = microsandbox_image::checkpoint::CheckpointClosure::inspect_manifest(
+                    &closure,
+                    Some(&expected),
+                )
                 .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-                if opened.checkpoint().checkpoint_id != state.checkpoint_id {
+                if opened.checkpoint_id != state.checkpoint_id {
                     return Err(crate::MicrosandboxError::SnapshotIntegrity(
                         "snapshot and checkpoint closure identities differ".into(),
                     ));
                 }
                 if self.config.snapshot_restore_mode == SnapshotRestoreMode::Full {
+                    if opened.architecture != std::env::consts::ARCH {
+                        return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                            "checkpoint architecture cannot restore on this host".into(),
+                        ));
+                    }
                     let restore_overrides = self.restore_override_intent();
                     apply_checkpoint_restore_constraints(
                         &mut self.config,
@@ -1848,13 +1843,12 @@ fn validate_config_script_name(name: &str) -> Result<(), String> {
 pub(crate) fn apply_checkpoint_restore_constraints(
     config: &mut SandboxConfig,
     state: &crate::snapshot::CheckpointSnapshotState,
-    closure: &microsandbox_image::checkpoint::CheckpointClosure,
+    checkpoint: &microsandbox_image::checkpoint::CheckpointManifest,
     overrides: RestoreOverrideIntent,
 ) -> MicrosandboxResult<()> {
     apply_checkpoint_resources(config, state, overrides)?;
 
-    let mut resources = closure
-        .checkpoint()
+    let mut resources = checkpoint
         .resources
         .iter()
         .filter(|resource| resource.kind == "network");

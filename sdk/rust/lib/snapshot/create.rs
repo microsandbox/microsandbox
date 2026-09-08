@@ -1012,6 +1012,20 @@ pub(crate) fn materialize_checkpoint_closure(
     source: &Path,
     destination: &Path,
 ) -> std::io::Result<()> {
+    materialize_checkpoint_tree(source, destination, true)
+}
+
+/// Construction-only closure: retain independent links, but do not make disposable staging
+/// durable. Persistent disk successors are published separately before guest activation.
+pub(crate) fn stage_checkpoint_closure(source: &Path, destination: &Path) -> std::io::Result<()> {
+    materialize_checkpoint_tree(source, destination, false)
+}
+
+fn materialize_checkpoint_tree(
+    source: &Path,
+    destination: &Path,
+    durable: bool,
+) -> std::io::Result<()> {
     let source_metadata = std::fs::symlink_metadata(source)?;
     if !source_metadata.file_type().is_dir() {
         return Err(std::io::Error::new(
@@ -1025,7 +1039,7 @@ pub(crate) fn materialize_checkpoint_closure(
         let source_member = source.join(member);
         match std::fs::symlink_metadata(&source_member) {
             Ok(metadata) if metadata.file_type().is_dir() => {
-                copy_checkpoint_directory(&source_member, &destination.join(member))?;
+                copy_checkpoint_directory(&source_member, &destination.join(member), durable)?;
             }
             Ok(_) => {
                 return Err(std::io::Error::new(
@@ -1042,10 +1056,17 @@ pub(crate) fn materialize_checkpoint_closure(
         &source.join("checkpoint.json"),
         &destination.join("checkpoint.json"),
     )?;
-    sync_directory(destination)
+    if durable {
+        sync_directory(destination)?;
+    }
+    Ok(())
 }
 
-fn copy_checkpoint_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+fn copy_checkpoint_directory(
+    source: &Path,
+    destination: &Path,
+    durable: bool,
+) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
@@ -1053,7 +1074,7 @@ fn copy_checkpoint_directory(source: &Path, destination: &Path) -> std::io::Resu
         let destination_path = destination.join(entry.file_name());
         let metadata = std::fs::symlink_metadata(&source_path)?;
         if metadata.file_type().is_dir() {
-            copy_checkpoint_directory(&source_path, &destination_path)?;
+            copy_checkpoint_directory(&source_path, &destination_path, durable)?;
         } else if metadata.file_type().is_file() {
             copy_checkpoint_file(&source_path, &destination_path)?;
         } else {
@@ -1066,7 +1087,10 @@ fn copy_checkpoint_directory(source: &Path, destination: &Path) -> std::io::Resu
             ));
         }
     }
-    sync_directory(destination)
+    if durable {
+        sync_directory(destination)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn copy_checkpoint_file(source: &Path, destination: &Path) -> std::io::Result<()> {

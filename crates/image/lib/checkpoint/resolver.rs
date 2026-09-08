@@ -45,6 +45,15 @@ pub struct CheckpointClosure {
 //--------------------------------------------------------------------------------------------------
 
 impl CheckpointClosure {
+    /// Inspect the bounded, identity-verified root for construction planning, not payload admission.
+    /// The child closure must still be fully opened before its contents are consumed.
+    pub fn inspect_manifest(
+        root: &Path,
+        expected_root: Option<&ObjectId>,
+    ) -> ImageResult<CheckpointManifest> {
+        read_checkpoint_root(root, expected_root).map(|(_, manifest)| manifest)
+    }
+
     /// Open and validate a checkpoint closure for restore on this host architecture.
     pub fn open(root: impl Into<PathBuf>, expected_root: Option<&ObjectId>) -> ImageResult<Self> {
         Self::open_inner(root.into(), expected_root, true)
@@ -66,22 +75,7 @@ impl CheckpointClosure {
         expected_root: Option<&ObjectId>,
         require_host_architecture: bool,
     ) -> ImageResult<Self> {
-        let metadata = std::fs::symlink_metadata(&root)?;
-        if !metadata.file_type().is_dir() {
-            return checkpoint_error("checkpoint root is not a directory");
-        }
-
-        let root_bytes =
-            read_regular_bounded(&root.join(CHECKPOINT_ROOT_FILE), MAX_MANIFEST_BYTES)?;
-        let root_id = ObjectId::from_bytes(&root_bytes)?;
-        if expected_root.is_some_and(|expected| expected != &root_id) {
-            return Err(ImageError::DigestMismatch {
-                digest: root_id.to_string(),
-                expected: expected_root.expect("checked Some").to_string(),
-                actual: root_id.to_string(),
-            });
-        }
-        let checkpoint = CheckpointManifest::from_bytes(&root_bytes)?;
+        let (root_id, checkpoint) = read_checkpoint_root(&root, expected_root)?;
         if require_host_architecture && checkpoint.architecture != std::env::consts::ARCH {
             return checkpoint_error(format!(
                 "checkpoint architecture {} cannot restore on {}",
@@ -187,6 +181,25 @@ impl CheckpointClosure {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn read_checkpoint_root(
+    root: &Path,
+    expected_root: Option<&ObjectId>,
+) -> ImageResult<(ObjectId, CheckpointManifest)> {
+    if !std::fs::symlink_metadata(root)?.file_type().is_dir() {
+        return checkpoint_error("checkpoint root is not a directory");
+    }
+    let bytes = read_regular_bounded(&root.join(CHECKPOINT_ROOT_FILE), MAX_MANIFEST_BYTES)?;
+    let id = ObjectId::from_bytes(&bytes)?;
+    if let Some(expected) = expected_root.filter(|expected| *expected != &id) {
+        return Err(ImageError::DigestMismatch {
+            digest: id.to_string(),
+            expected: expected.to_string(),
+            actual: id.to_string(),
+        });
+    }
+    Ok((id, CheckpointManifest::from_bytes(&bytes)?))
+}
 
 fn validate_memory_objects(root: &Path, memory: &MemoryManifest) -> ImageResult<()> {
     let mut verified = BTreeSet::new();
@@ -385,6 +398,21 @@ mod tests {
         let root_id = ObjectId::from_bytes(&root_bytes).unwrap();
         std::fs::write(directory.path().join(CHECKPOINT_ROOT_FILE), root_bytes).unwrap();
         (directory, root_id)
+    }
+
+    #[test]
+    fn manifest_inspection_does_not_substitute_for_payload_admission() {
+        let (directory, root) = fixture();
+        let manifest = CheckpointClosure::inspect_manifest(directory.path(), Some(&root)).unwrap();
+        std::fs::remove_file(super::object_path(
+            directory.path(),
+            &manifest.execution_state,
+        ))
+        .unwrap();
+        assert!(CheckpointClosure::inspect_manifest(directory.path(), Some(&root)).is_ok());
+        assert!(CheckpointClosure::open(directory.path(), Some(&root)).is_err());
+        let wrong = ObjectId::from_bytes(b"wrong root").unwrap();
+        assert!(CheckpointClosure::inspect_manifest(directory.path(), Some(&wrong)).is_err());
     }
 
     #[test]

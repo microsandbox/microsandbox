@@ -208,7 +208,7 @@ impl LocalBackend {
                 crate::sandbox::apply_checkpoint_restore_constraints(
                     &mut config,
                     state,
-                    &closure,
+                    closure.checkpoint(),
                     overrides,
                 )?;
                 config.checkpoint_restore = Some(restore);
@@ -914,6 +914,7 @@ impl LocalBackend {
             pinned_digest,
             pull_policy,
             registry_overrides,
+            materialization,
             progress,
         )
         .await
@@ -926,6 +927,7 @@ impl LocalBackend {
         pinned_digest: &str,
         pull_policy: PullPolicy,
         registry_overrides: RegistryOverrides,
+        materialization: microsandbox_image::RootfsMaterialization,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<ResolvedOciImage> {
         let manifest_digest: Digest = pinned_digest.parse().map_err(|e| {
@@ -936,8 +938,19 @@ impl LocalBackend {
         let pinned_reference = Self::digest_pinned_reference(reference, pinned_digest)?;
         let cache = GlobalCache::new_async(&self.cache_dir()).await?;
 
-        if let Some((pull_result, metadata)) =
-            Registry::pull_cached_by_manifest_digest(&cache, &manifest_digest).await?
+        let pinned_ref: Reference = pinned_reference.parse().map_err(|e| {
+            crate::MicrosandboxError::InvalidConfig(format!("invalid pinned reference: {e}"))
+        })?;
+        let original_ref: Reference = reference.parse().map_err(|e| {
+            crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
+        })?;
+        if let Some((pull_result, metadata)) = Registry::pull_snapshot_cached(
+            &cache,
+            &[pinned_ref.clone(), original_ref],
+            &manifest_digest,
+            materialization,
+        )
+        .await?
         {
             Self::emit_cached_pull_progress(progress.as_ref(), reference, &metadata);
             return Ok(ResolvedOciImage {
@@ -952,6 +965,33 @@ impl LocalBackend {
                 "snapshot base image {pinned_digest} is not cached locally and pull policy is `never`; \
                  this snapshot cannot be restored losslessly"
             )));
+        }
+
+        if materialization == microsandbox_image::RootfsMaterialization::Flat {
+            // The snapshot supplies the complete disk. Fetch its pinned image
+            // defaults, not a second root filesystem that will never be used.
+            let global = self.config();
+            let auth = match registry_overrides.auth {
+                Some(auth) => auth,
+                None => global.resolve_registry_auth(pinned_ref.registry())?,
+            };
+            let mut ca_certs = global.resolve_ca_certs().await?;
+            ca_certs.extend(registry_overrides.ca_certs);
+            let mut insecure = global.insecure_registries();
+            if registry_overrides.insecure {
+                insecure.push(pinned_ref.registry().to_string());
+            }
+            let registry = Registry::builder(microsandbox_image::Platform::host_linux(), cache)
+                .auth(auth)
+                .extra_ca_certs(ca_certs)
+                .add_insecure_registries(insecure)
+                .build()?;
+            let pull_result = registry.pull_snapshot_metadata(&pinned_ref).await?;
+            return Ok(ResolvedOciImage {
+                pull_result,
+                metadata_reference: pinned_reference,
+                cached_metadata: None,
+            });
         }
 
         // Pull by digest, never by the mutable source tag, when the exact

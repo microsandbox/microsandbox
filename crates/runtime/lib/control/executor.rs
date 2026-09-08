@@ -6,9 +6,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-#[cfg(unix)]
-use std::fs::File;
-
 use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -122,7 +119,7 @@ struct DedupEntry {
 //--------------------------------------------------------------------------------------------------
 
 impl RuntimeControlExecutor {
-    /// Construct an executor and durably publish a fresh runtime boot identity.
+    /// Construct an executor and atomically publish a fresh runtime boot identity.
     pub fn new(
         vm: msb_krun::VmControl,
         #[cfg(feature = "net")] secrets: Option<
@@ -625,11 +622,10 @@ fn persist_runtime_boot_id(runtime_dir: &Path, boot_id: &str) -> std::io::Result
         .open(&temporary)?;
     file.write_all(boot_id.as_bytes())?;
     file.write_all(b"\n")?;
-    file.sync_all()?;
+    // This file is diagnostic/live discovery, not a restart journal. Fencing uses the new
+    // in-memory identity on every boot; atomic visibility is sufficient here.
     drop(file);
     crate::checkpoint::replace_file(&temporary, &target)?;
-    #[cfg(unix)]
-    File::open(runtime_dir)?.sync_all()?;
     Ok(())
 }
 

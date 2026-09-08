@@ -1354,40 +1354,43 @@ fn overlay_extents(
     mut base: Vec<MemoryExtent>,
     mut updates: Vec<MemoryExtent>,
 ) -> Result<Vec<MemoryExtent>, String> {
+    base.sort_by_key(|extent| extent.start);
     updates.sort_by_key(|extent| extent.start);
+    validate_non_overlapping(&base)?;
     validate_non_overlapping(&updates)?;
+    // Consume each old range once. A suffix split by an update remains at the
+    // front for the next update; object offsets are retained by slice_extent.
+    let mut pending = std::collections::VecDeque::from(base);
+    let mut output = Vec::with_capacity(pending.len() + updates.len());
     for update in updates {
-        let update_end = update
-            .start
-            .checked_add(update.length)
-            .ok_or_else(|| "memory update overflows".to_string())?;
-        let mut next = Vec::with_capacity(base.len() + 1);
-        for extent in base {
-            let extent_end = extent
-                .start
-                .checked_add(extent.length)
-                .ok_or_else(|| "memory base extent overflows".to_string())?;
-            if extent_end <= update.start || extent.start >= update_end {
-                next.push(extent);
+        let update_end = update.start + update.length;
+        while let Some(extent) = pending.front() {
+            if extent.start >= update_end {
+                break;
+            }
+            let extent = pending.pop_front().expect("front was present");
+            let extent_end = extent.start + extent.length;
+            if extent_end <= update.start {
+                output.push(extent);
                 continue;
             }
             if extent.start < update.start {
-                next.push(slice_extent(
+                output.push(slice_extent(
                     &extent,
                     extent.start,
                     update.start - extent.start,
                 ));
             }
             if extent_end > update_end {
-                next.push(slice_extent(&extent, update_end, extent_end - update_end));
+                pending.push_front(slice_extent(&extent, update_end, extent_end - update_end));
+                break;
             }
         }
-        next.push(update);
-        next.sort_by_key(|extent| extent.start);
-        base = next;
+        output.push(update);
     }
-    validate_non_overlapping(&base)?;
-    Ok(coalesce_extents(base))
+    output.extend(pending);
+    validate_non_overlapping(&output)?;
+    Ok(coalesce_extents(output))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1715,6 +1718,74 @@ mod tests {
             MemoryExtentContent::Object(content)
                 if content.object == original && content.object_offset == 8
         ));
+    }
+
+    #[test]
+    fn incremental_merge_matches_byte_oracle_for_fragmented_ranges() {
+        let original = ObjectId::from_bytes(b"base").unwrap();
+        let changed = ObjectId::from_bytes(b"update").unwrap();
+        // Independent per-byte oracle includes holes, zero ranges, nonzero
+        // object offsets, unsorted input, and updates spanning multiple ranges.
+        let expand = |extents: &[MemoryExtent]| {
+            let mut bytes = vec![None; 256];
+            for extent in extents {
+                for delta in 0..extent.length {
+                    bytes[(extent.start + delta) as usize] = Some(match &extent.content {
+                        MemoryExtentContent::Zero => (None, 0),
+                        MemoryExtentContent::Object(content) => {
+                            (Some(content.object.clone()), content.object_offset + delta)
+                        }
+                    });
+                }
+            }
+            bytes
+        };
+        let mut seed = 7u64;
+        for _ in 0..1000 {
+            let mut make = |object: &ObjectId| {
+                let mut ranges = Vec::new();
+                let mut start = 0;
+                while start < 256 {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let length = (1 + (seed >> 32) % 17).min(256 - start);
+                    if seed % 5 != 0 {
+                        ranges.push(MemoryExtent {
+                            start,
+                            length,
+                            content: if seed % 3 == 0 {
+                                MemoryExtentContent::Zero
+                            } else {
+                                MemoryExtentContent::Object(ContentRef {
+                                    object: object.clone(),
+                                    object_offset: 1024 + start,
+                                })
+                            },
+                        });
+                    }
+                    start += length;
+                }
+                ranges.reverse();
+                ranges
+            };
+            let base = make(&original);
+            let updates = make(&changed);
+            let mut expected = expand(&base);
+            for (slot, update) in expected.iter_mut().zip(expand(&updates)) {
+                if update.is_some() {
+                    *slot = update;
+                }
+            }
+            assert_eq!(expand(&overlay_extents(base, updates).unwrap()), expected);
+        }
+        let zero = |start, length| MemoryExtent {
+            start,
+            length,
+            content: MemoryExtentContent::Zero,
+        };
+        assert!(overlay_extents(vec![zero(0, 8), zero(4, 8)], vec![]).is_err());
+        assert!(overlay_extents(vec![], vec![zero(u64::MAX, 2)]).is_err());
+        assert!(overlay_extents(vec![], vec![zero(0, 0)]).is_err());
+        assert!(overlay_extents(vec![], vec![zero(0, 8), zero(4, 8)]).is_err());
     }
 
     #[test]

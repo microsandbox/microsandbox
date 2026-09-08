@@ -868,11 +868,10 @@ fn persist_restore_activation(
     )
     .map_err(|error| RuntimeError::Custom(format!("encode restore activation: {error}")))?;
     file.write_all(b"\n")?;
-    file.sync_all()?;
+    // Activation ordering is enforced by the live VM barrier. This diagnostic record has no
+    // recovery reader; avoid making guest readiness wait for storage durability.
     drop(file);
     crate::checkpoint::replace_file(&temporary, &target)?;
-    #[cfg(unix)]
-    std::fs::File::open(runtime_dir)?.sync_all()?;
     Ok(())
 }
 

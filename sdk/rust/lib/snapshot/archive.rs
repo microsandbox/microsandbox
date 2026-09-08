@@ -942,7 +942,7 @@ pub(super) async fn load_snapshot_with_base(
     // Stream rather than slurp — archives carry the full upper layer and are
     // routinely multi-GB.
     let file = tokio::fs::File::open(archive).await?;
-    let mut buf = BufReader::new(file);
+    let mut buf = BufReader::with_capacity(1024 * 1024, file);
     let is_zstd = {
         let bytes = buf.fill_buf().await?;
         bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
@@ -1115,7 +1115,7 @@ pub(crate) async fn materialize_archive_for_child_with_base(
         .tempdir_in(&cache_tmp_dir)?;
 
     let file = tokio::fs::File::open(archive).await?;
-    let mut buffered = BufReader::new(file);
+    let mut buffered = BufReader::with_capacity(1024 * 1024, file);
     let is_zstd = buffered
         .fill_buf()
         .await?
@@ -1933,8 +1933,23 @@ where
     let mut header = Header::new_gnu();
     header.set_metadata_in_mode(&meta, HeaderMode::Complete);
     if header.set_path(name).is_err() {
-        // Needs a GNU long-name entry; the dense path emits one.
-        return Ok(None);
+        // GNU long-name records apply to sparse members too. Canonical qcow2
+        // checkpoint paths exceed the fixed name field by one byte.
+        let mut long = Header::new_gnu();
+        // set_path normalizes away the leading dots; use the exact GNU
+        // marker emitted by the existing dense writer and accepted by readers.
+        long.as_gnu_mut().expect("GNU header").name[..13].copy_from_slice(b"././@LongLink");
+        long.set_entry_type(EntryType::GNULongName);
+        long.set_mode(0o644);
+        long.set_size(name.len() as u64 + 1);
+        long.set_cksum();
+        let dst = builder.get_mut();
+        dst.write_all(long.as_bytes()).await?;
+        dst.write_all(name.as_bytes()).await?;
+        dst.write_all(&[0]).await?;
+        let padding = tar_pad(name.len() as u64 + 1) as usize;
+        dst.write_all(&[0u8; TAR_BLOCK as usize][..padding]).await?;
+        header.set_path("sparse-member")?;
     }
     header.set_entry_type(EntryType::GNUSparse);
     header.set_size(map.archived);
@@ -2448,6 +2463,29 @@ fn tar_pad(size: u64) -> u64 {
     (TAR_BLOCK - size % TAR_BLOCK) % TAR_BLOCK
 }
 
+/// Amortize async filesystem dispatch while preserving the caller's bounded
+/// reader and transport hashing. Reuse the same buffer across sparse extents.
+async fn copy_archive_payload<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut [u8],
+) -> std::io::Result<u64>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let mut copied = 0;
+    loop {
+        let read = reader.read(buffer).await?;
+        if read == 0 {
+            return Ok(copied);
+        }
+        writer.write_all(&buffer[..read]).await?;
+        copied += read as u64;
+    }
+}
+
 /// Stream a dense entry's bytes into `target`.
 async fn unpack_dense_entry<R>(
     reader: &mut R,
@@ -2467,7 +2505,8 @@ where
         hasher: archive_transport_hasher(kind, archive_path, size, size, &[]),
         bytes_read: 0,
     };
-    let copied = tokio::io::copy(&mut source, &mut file).await?;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let copied = copy_archive_payload(&mut source, &mut file, &mut buffer).await?;
     if copied != size {
         return Err(MicrosandboxError::Custom(
             "archive truncated mid-entry".into(),
@@ -2587,6 +2626,7 @@ where
     std_file.set_len(realsize)?;
     let mut file = tokio::fs::File::from_std(std_file);
     let mut transport = archive_transport_hasher(kind, archive_path, archived, realsize, &map);
+    let mut buffer = vec![0u8; 1024 * 1024];
 
     for (offset, numbytes) in &map {
         if *numbytes == 0 {
@@ -2598,7 +2638,7 @@ where
             hasher: transport,
             bytes_read: 0,
         };
-        let copied = tokio::io::copy(&mut source, &mut file).await?;
+        let copied = copy_archive_payload(&mut source, &mut file, &mut buffer).await?;
         transport = source.hasher;
         if copied != *numbytes {
             return Err(MicrosandboxError::Custom(
@@ -4341,14 +4381,14 @@ mod tests {
         drop(layer_file);
 
         // The canonical checkpoint qcow member is one byte too long for the
-        // fixed GNU header path field. It therefore exercises dense long-name
-        // fallback even though the source itself has a sparse extent map.
+        // fixed GNU header path field. It must retain sparse encoding even
+        // when a GNU long-name record precedes the sparse header.
         let archive_layer_path =
             format!("checkpoints/snap_00000000000000000000000000000002/layers/{layer_id}.qcow2");
         assert_eq!(archive_layer_path.len(), 101);
         assert!(
             archive_encoded_size(&source_layer).await.unwrap() < 4 * 1024 * 1024,
-            "test source must remain sparse so dense fallback changes the encoded size"
+            "test source must remain sparse"
         );
         let layer_integrity = sparse_file_integrity(&source_layer).unwrap();
         let disk = DiskGenerationManifest {
@@ -4430,6 +4470,21 @@ mod tests {
         )
         .await
         .unwrap();
+        // Inspect the actual transport, not just same-reader roundtrip results.
+        let compressed = tokio::fs::File::open(&archive).await.unwrap();
+        let decoder = ZstdDecoder::new(tokio::io::BufReader::new(compressed));
+        let mut tar = tokio_tar::Archive::new(decoder);
+        let mut entries = tar.entries().unwrap();
+        let mut found_sparse = false;
+        while let Some(entry) = futures::StreamExt::next(&mut entries).await {
+            let entry = entry.unwrap();
+            if entry.path().unwrap() == Path::new(&archive_layer_path) {
+                assert!(entry.header().entry_type().is_gnu_sparse());
+                assert!(entry.header().entry_size().unwrap() < 4 * 1024 * 1024);
+                found_sparse = true;
+            }
+        }
+        assert!(found_sparse);
         std::fs::remove_dir_all(&source).unwrap();
         let restored = materialize_archive_for_child(&local, &archive, &child_stage, false)
             .await

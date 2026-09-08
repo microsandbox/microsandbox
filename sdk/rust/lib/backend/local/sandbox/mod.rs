@@ -405,7 +405,13 @@ impl LocalBackend {
             )));
         }
 
-        if let RootfsSource::Oci(_) = &config.spec.image
+        // Flat roots own their disk and never boot through the OCI VMDK.
+        // Metadata-only snapshot restores deliberately do not populate it.
+        if let RootfsSource::Oci(oci) = &config.spec.image
+            && !matches!(
+                oci.root_disk.as_ref(),
+                Some(crate::sandbox::RootDisk::Flat { .. })
+            )
             && let Some(ref digest_str) = config.manifest_digest
         {
             let cache_dir = self.cache_dir();
@@ -1496,6 +1502,42 @@ mod tests {
         // The key thing is it doesn't panic.
         let backend = LocalBackend::lazy();
         let _ = backend.validate_start_state(&config, &sandbox_dir);
+    }
+
+    #[tokio::test]
+    async fn flat_restart_does_not_require_layered_image_artifacts() {
+        let temp = tempdir().unwrap();
+        let backend = LocalBackend::builder()
+            .home(temp.path())
+            .build()
+            .await
+            .unwrap();
+        let sandbox_dir = temp.path().join("persisted");
+        fs::create_dir(&sandbox_dir).unwrap();
+        let mut config = test_config_with_rootfs(
+            "persisted",
+            RootfsSource::Oci(OciRootfsSource {
+                reference: "alpine".into(),
+                root_disk: Some(crate::sandbox::RootDisk::Flat {
+                    size_mib: Some(512),
+                    fstype: None,
+                    clone: microsandbox_types::FlatClone::Auto,
+                }),
+            }),
+        );
+        config.manifest_digest = Some(format!("sha256:{}", "a".repeat(64)));
+        backend.validate_start_state(&config, &sandbox_dir).unwrap();
+        let RootfsSource::Oci(oci) = &mut config.spec.image else {
+            unreachable!()
+        };
+        oci.root_disk = None;
+        assert!(
+            backend
+                .validate_start_state(&config, &sandbox_dir)
+                .unwrap_err()
+                .to_string()
+                .contains("VMDK missing")
+        );
     }
 
     /// Simulates the reaper sweep: queries all Running/Draining sandboxes and

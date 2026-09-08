@@ -130,6 +130,24 @@ impl MemoryCache {
             });
         }
 
+        // Stable per-identity lock inodes serialize cache misses across processes, without
+        // placing warm hits or unrelated snapshots behind a global cache lock. Never unlink a
+        // build lock: waiters must not acquire different inodes for the same identity.
+        let build_lock =
+            microsandbox_utils::process_lock::open_lock_file(&path.with_extension("build-lock"))?;
+        microsandbox_utils::process_lock::lock_exclusive(&build_lock)?;
+        if let Some(file) = open_pinned(&path, length)? {
+            return Ok(CachedMemory {
+                path,
+                identity: identity.clone(),
+                file,
+                regions,
+                cache_hit: true,
+                reflink: false,
+                prepare_us: started.elapsed().as_micros(),
+            });
+        }
+
         let staging_dir = tempfile::Builder::new()
             .prefix(".memory-")
             .tempdir_in(&self.root)?;
@@ -221,8 +239,8 @@ impl MemoryCache {
             staging.set_permissions(std::fs::Permissions::from_mode(0o400))?;
         }
         staging.sync_all()?;
-        // Publish the inode without replacement. Concurrent builders may do duplicate work, but
-        // no winner can overwrite backing another VM has already pinned or mapped.
+        // Keep no-replacement publication even under the build lock: older builders may not
+        // participate in single-flight, and eviction must never replace a live mapped inode.
         match std::fs::hard_link(&staging_path, &path) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -536,7 +554,7 @@ mod tests {
                 ))
                 .is_err()
         );
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert_eq!(payload_count(directory.path()), 1);
     }
 
     #[test]
@@ -548,9 +566,9 @@ mod tests {
             Err(io::Error::other("injected object read failure"))
         });
         assert!(failure.is_err());
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        assert_eq!(payload_count(directory.path()), 0);
         assert!(cache.materialize(&manifest, &id, |_| Ok(vec![])).is_err());
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        assert_eq!(payload_count(directory.path()), 0);
     }
 
     #[test]
@@ -571,6 +589,23 @@ mod tests {
         assert!(memory_regions(&manifest, 16384).is_err());
     }
 
+    fn payload_count(root: &Path) -> usize {
+        // Build-lock inodes intentionally survive failed builders. Only RAM or staging entries
+        // count as payloads; removing lock files would permit two independent flock owners.
+        std::fs::read_dir(root)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    != Some("build-lock")
+            })
+            .count()
+    }
+
     #[test]
     fn concurrent_builders_publish_one_immutable_inode() {
         use std::os::unix::fs::MetadataExt;
@@ -578,11 +613,13 @@ mod tests {
         let cache = MemoryCache::open(directory.path()).unwrap();
         let (manifest, id, bytes) = fixture(cache.page_size);
         let barrier = std::sync::Barrier::new(2);
+        let reads = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
             let run = || {
+                barrier.wait();
                 cache
                     .materialize(&manifest, &id, |_| {
-                        barrier.wait();
+                        reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         Ok(bytes.clone())
                     })
                     .unwrap()
@@ -596,7 +633,8 @@ mod tests {
                 second.file.metadata().unwrap().ino()
             );
         });
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     #[test]

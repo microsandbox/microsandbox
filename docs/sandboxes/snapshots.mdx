@@ -249,7 +249,7 @@ msb run --name worker --from-snapshot ./after-pip-install.msnap -- python -V
 The same archive path works with the SDK restore methods shown below. The archive is unpacked into child-owned staging, so no intermediate installed snapshot is loaded into `~/.microsandbox/snapshots`.
 
 <Note>
-Direct capture records the pinned image identity, but does not bundle the cached OCI image. The target must already have that image or be able to pull it. For an offline target, create an installed snapshot and use `msb snapshot save --with-image` instead.
+Direct capture records the pinned image identity, but does not bundle the cached OCI image. A flat snapshot already contains the complete disk, so restore only needs the pinned image's configuration from cache or the registry; it does not download the original disk layers again. Layered snapshots still need their base image artifacts. For an offline target, create an installed snapshot and use `msb snapshot save --with-image` instead.
 </Note>
 
 ## Boot from a snapshot
