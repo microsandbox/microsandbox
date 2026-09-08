@@ -5,8 +5,7 @@
 //! impl's `create`/`create_detached` and the pull-progress shims on
 //! [`Sandbox`] and `SandboxBuilder` all dispatch here.
 
-use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use microsandbox_db::DbWriteConnection;
@@ -15,8 +14,12 @@ use microsandbox_image::{
     CachedImageMetadata, Digest, GlobalCache, PullOptions, PullProgress, PullProgressSender,
     PullResult, Reference, Registry, ext4, tree,
 };
+#[cfg(test)]
+use microsandbox_runtime::transition::sandbox_transition_lock_path;
+use microsandbox_runtime::transition::{
+    SandboxTransitionGuard, sandbox_runtime_endpoint_is_live, try_acquire_transition_guard,
+};
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
-use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
 use super::LocalBackend;
@@ -63,14 +66,6 @@ struct ResolvedOciImage {
     pull_result: PullResult,
     metadata_reference: String,
     cached_metadata: Option<CachedImageMetadata>,
-}
-
-/// Short-lived ownership of one sandbox name while persisted state or host resources change.
-///
-/// The file handle owns a process-held lock. Closing it releases the lock on both Unix and
-/// Windows, including when a lifecycle caller exits unexpectedly.
-pub(crate) struct SandboxTransitionGuard {
-    _file: File,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1049,22 +1044,10 @@ impl LocalBackend {
         run_dir: &Path,
         name: &str,
     ) -> MicrosandboxResult<SandboxTransitionGuard> {
-        let path = sandbox_transition_lock_path(run_dir, name);
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("transition lock has no parent: {}", path.display()),
-            )
-        })?;
-        tokio::fs::create_dir_all(parent).await?;
-        let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
-
-        // LockFileEx/flock is process-wide coordination, but the nonblocking form is a short
-        // syscall. Polling it asynchronously avoids pinning one blocking-pool thread per waiter
-        // when many callers converge on the same name.
+        // Poll the process-held lock without blocking a runtime thread.
         loop {
-            if microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
-                return Ok(SandboxTransitionGuard { _file: file });
+            if let Some(guard) = try_acquire_transition_guard(run_dir, name)? {
+                return Ok(guard);
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -1363,64 +1346,6 @@ impl LocalBackend {
 
         overlay_tree
     }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-/// Derive a stable, filesystem-safe transition-lock path for one sandbox name.
-fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
-    let digest = Sha256::digest(name.as_bytes());
-    // Keep the original on-disk namespace so mixed-version processes still contend on one lock.
-    run_dir
-        .join("creation-locks")
-        .join(format!("{}.lock", hex::encode(&digest[..16])))
-}
-
-/// Probe every backward-compatible Unix endpoint before recovering an
-/// untracked namespace. A successful connection is direct evidence that an
-/// older runtime (which predates lifecycle locks) still owns the name.
-#[cfg(unix)]
-fn sandbox_runtime_endpoint_is_live(
-    run_dir: &Path,
-    sandbox_dir: &Path,
-    name: &str,
-) -> std::io::Result<bool> {
-    let paths = microsandbox_runtime::ipc::sandbox_socket_paths(run_dir, name);
-    let fallback_agent = sandbox_dir.join("runtime").join("agent.sock");
-    let fallback_control = microsandbox_runtime::ipc::control_socket_path_for(&fallback_agent);
-    for path in [
-        paths.agent,
-        paths.control,
-        paths.legacy_agent,
-        paths.legacy_control,
-        fallback_agent,
-        fallback_control,
-    ] {
-        if std::fs::symlink_metadata(&path).is_err() {
-            continue;
-        }
-        match std::os::unix::net::UnixStream::connect(&path) {
-            Ok(_) => return Ok(true),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-                ) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(false)
-}
-
-#[cfg(not(unix))]
-fn sandbox_runtime_endpoint_is_live(
-    _run_dir: &Path,
-    _sandbox_dir: &Path,
-    _name: &str,
-) -> std::io::Result<bool> {
-    Ok(false)
 }
 
 //--------------------------------------------------------------------------------------------------

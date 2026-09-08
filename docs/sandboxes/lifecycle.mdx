@@ -540,6 +540,8 @@ Most applications only need to distinguish between `Running` and `Stopped`. The 
 | **Stopped** | The VM is off. Configuration and sandbox state are preserved for a later start. |
 | **Crashed** | The VM exited unexpectedly and can be started again. |
 
+For local sandboxes, status checks and runtime maintenance mark an abandoned startup as `Crashed` once neither the launcher nor the VM owns it. A normal boot stays `Starting`. Persistent disk contents are retained for recovery.
+
 Some backends can also report `Paused`. Resume is not currently exposed through the SDKs, so start and connect operations do not treat a paused sandbox as stopped.
 
 ## Names, handles, and concurrent callers
