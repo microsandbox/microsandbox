@@ -19,7 +19,7 @@ func TestCowResidentCapture(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	name := fmt.Sprintf("cow8-go-%d", os.Getpid())
-	source, err := CreateSandbox(ctx, name, WithImage("alpine"), WithRootDisk(RootDisk.Managed(512)), WithMemory(256), WithMemorySnapshot(MemorySnapshotCow))
+	source, err := CreateSandbox(ctx, name, WithImage("alpine"), WithRootDisk(RootDisk.Managed(512)), WithMemory(256))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,13 +41,30 @@ func TestCowResidentCapture(t *testing.T) {
 	if paused.Status() != SandboxStatusPaused {
 		t.Fatalf("got status %s", paused.Status())
 	}
+	branched, err := paused.Branch(ctx, name+"-paused-branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := branched.Stop(context.Background()); err != nil {
+			t.Error(err)
+		}
+		branched.Close()
+	})
+	branchResult, err := branched.Exec(ctx, "cat", []string{"/dev/shm/sdk-marker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(branchResult.Stdout()) != "source" {
+		t.Fatal("branch lost captured RAM")
+	}
 	if _, err := Snapshot.Create(ctx, SnapshotCreateOptions{Name: name + "-full", FromSandbox: name, Full: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := paused.Resume(ctx); err != nil {
 		t.Fatal(err)
 	}
-	child, err := CreateSandbox(ctx, name+"-child", WithFromSnapshot(name+"-full"), WithMemorySnapshot(MemorySnapshotCow))
+	child, err := CreateSandbox(ctx, name+"-child", WithFromSnapshot(name+"-full"), WithForked())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,5 +92,22 @@ func TestCowResidentCapture(t *testing.T) {
 	}
 	if err := child.Pause(ctx); err != nil {
 		t.Fatal(err)
+	}
+	descendant, err := child.Branch(ctx, name+"-branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := descendant.Stop(context.Background()); err != nil {
+			t.Error(err)
+		}
+		descendant.Close()
+	})
+	branchResult, err = descendant.Exec(ctx, "cat", []string{"/dev/shm/sdk-marker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(branchResult.Stdout()) != "child" {
+		t.Fatal("branch lost private writes")
 	}
 }

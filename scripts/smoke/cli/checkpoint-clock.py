@@ -35,7 +35,6 @@ try:
     run("create", "run", "-d", "-n", source,
         "--root-disk", os.environ.get("CLOCK_LAYOUT", "flat:512M"),
         "--cpus", os.environ.get("CLOCK_CPUS", "2"), "--memory", "256M",
-        "--memory-snapshot", os.environ.get("CLOCK_MEMORY", "standard"),
         "alpine", "--", "sh", "-c",
         "while [ ! -x /clock-probe ]; do sleep 0.05; done; exec /clock-probe")
     run("copy-probe", "copy", os.environ["CLOCK_PROBE"], source + ":/clock-probe")
@@ -58,7 +57,7 @@ try:
     time.sleep(float(os.environ.get("CLOCK_DELAY", "8")))
     (out / "restore-start.ns").write_text(str(time.time_ns()))
     run("restore", "create", "-n", child, "--from-snapshot", snapshot,
-        "--memory-snapshot", os.environ.get("CLOCK_MEMORY", "standard"), "--info")
+        *(["--forked"] if os.environ.get("CLOCK_FORKED") == "1" else []), "--info")
     (out / "restore-end.ns").write_text(str(time.time_ns()))
     time.sleep(6)
     records = run("records", "exec", child, "--", "cat", "/tmp/clock-records.csv")

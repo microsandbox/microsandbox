@@ -292,10 +292,10 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
     /// Build the cloud create body from an SDK config, rejecting the
     /// create-time options the cloud does not accept.
     fn try_from(mut config: SandboxConfig) -> MicrosandboxResult<Self> {
-        if !config.spec.resources.memory_snapshot.is_standard() {
+        if config.forked {
             return Err(MicrosandboxError::unsupported(
                 Operation::SandboxCreate,
-                UnsupportedReason::ConfigField("memory_snapshot"),
+                UnsupportedReason::ConfigField("forked"),
             ));
         }
         if config.replace_existing {

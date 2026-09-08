@@ -832,9 +832,6 @@ pub struct SandboxSpec {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxResources {
-    /// Explicit construction-time memory representation; does not create automatic snapshots.
-    #[serde(default, skip_serializing_if = "MemorySnapshotMode::is_standard")]
-    pub memory_snapshot: MemorySnapshotMode,
     /// Number of virtual CPUs currently presented to the guest at boot.
     pub cpus: u8,
 
@@ -858,19 +855,6 @@ pub struct SandboxResources {
     /// Guest transparent huge-page policy selected at boot.
     #[serde(default, skip_serializing_if = "TransparentHugePagePolicy::is_madvise")]
     pub thp: TransparentHugePagePolicy,
-}
-
-/// Memory representation selected when constructing a sandbox.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub enum MemorySnapshotMode {
-    /// Anonymous memory with eager full restore.
-    #[default]
-    Standard,
-    /// Private file-backed memory, sharing immutable pages between restored children.
-    Cow,
 }
 
 /// Controls how Microsandbox places vCPU threads on host processors.
@@ -1541,17 +1525,9 @@ impl Default for RootfsSource {
     }
 }
 
-impl MemorySnapshotMode {
-    /// Whether the default anonymous representation was selected.
-    pub fn is_standard(&self) -> bool {
-        *self == Self::Standard
-    }
-}
-
 impl Default for SandboxResources {
     fn default() -> Self {
         Self {
-            memory_snapshot: MemorySnapshotMode::Standard,
             cpus: DEFAULT_SANDBOX_CPUS,
             memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
             max_cpus: DEFAULT_SANDBOX_CPUS,
@@ -1582,8 +1558,6 @@ impl<'de> Deserialize<'de> for SandboxResources {
             placement_profile: Option<String>,
             #[serde(default)]
             thp: TransparentHugePagePolicy,
-            #[serde(default)]
-            memory_snapshot: MemorySnapshotMode,
         }
 
         let raw = RawResources::deserialize(deserializer)?;
@@ -1598,7 +1572,6 @@ impl<'de> Deserialize<'de> for SandboxResources {
             cpu_placement: raw.cpu_placement,
             placement_profile: raw.placement_profile,
             thp: raw.thp,
-            memory_snapshot: raw.memory_snapshot,
         })
     }
 }
@@ -2885,20 +2858,6 @@ impl fmt::Display for NetworkRateLimitDirection {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn memory_snapshot_policy_is_explicit_and_old_resources_default_to_standard() {
-        let standard = serde_json::to_value(SandboxResources::default()).unwrap();
-        assert!(standard.get("memory_snapshot").is_none());
-        let decoded: SandboxResources = serde_json::from_value(standard.clone()).unwrap();
-        assert_eq!(decoded.memory_snapshot, MemorySnapshotMode::Standard);
-        let mut cow = standard;
-        cow["memory_snapshot"] = serde_json::json!("cow");
-        let decoded: SandboxResources = serde_json::from_value(cow.clone()).unwrap();
-        assert_eq!(decoded.memory_snapshot, MemorySnapshotMode::Cow);
-        cow["memory_snapshot"] = serde_json::json!("automatic");
-        assert!(serde_json::from_value::<SandboxResources>(cow).is_err());
-    }
 
     fn tmpfs_mount(guest: &str) -> VolumeMount {
         VolumeMount::Tmpfs {

@@ -351,14 +351,9 @@ describe("PatchBuilder", () => {
 });
 
 describe("SandboxBuilder.build", () => {
-  it("makes CoW memory an explicit creation policy", async () => {
-    const config = await Sandbox.builder("cow-policy")
-      .image("alpine")
-      .memorySnapshot("cow")
-      .build();
-    expect((config.resources as { memorySnapshot: string }).memorySnapshot).toBe("cow");
-    const standard = await Sandbox.builder("standard-policy").image("alpine").build();
-    expect((standard.resources as { memorySnapshot?: string }).memorySnapshot).toBeUndefined();
+  it("rejects forked for a fresh boot", async () => {
+    await expect(Sandbox.builder("forked-policy").image("alpine").forked().build())
+      .rejects.toThrow("forked requires a full snapshot");
   });
 
   it("requires .image()", async () => {

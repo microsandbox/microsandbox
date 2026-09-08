@@ -1016,7 +1016,7 @@ struct SandboxCreateOpts {
     cpu_placement: Option<String>,
     placement_profile: Option<String>,
     thp: Option<String>,
-    memory_snapshot: Option<microsandbox::sandbox::MemorySnapshotMode>,
+    forked: Option<bool>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -2227,8 +2227,8 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     .map_err(FfiError::invalid_argument)?;
                 builder = builder.thp(policy);
             }
-            if let Some(mode) = opts.memory_snapshot {
-                builder = builder.memory_snapshot(mode);
+            if opts.forked.unwrap_or(false) {
+                builder = builder.forked();
             }
             if let Some(w) = opts.workdir {
                 builder = builder.workdir(w);
@@ -2929,6 +2929,42 @@ pub unsafe extern "C" fn msb_sandbox_pause(
         Ok(Box::pin(async move {
             sb.pause().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+/// Branch by live handle, or by persisted name when handle is zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_branch(
+    cancel_id: u64,
+    handle: Handle,
+    source: *const c_char,
+    child: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let child = unsafe { cstr(child) }?;
+        let source = unsafe { cstr(source) }?;
+        let live = if handle == 0 {
+            None
+        } else {
+            Some(get(handle)?)
+        };
+        Ok(Box::pin(async move {
+            let sb = if let Some(live) = live {
+                live.branch(child).await.map_err(FfiError::from)?
+            } else {
+                Sandbox::get(&source)
+                    .await
+                    .map_err(FfiError::from)?
+                    .branch(child)
+                    .await
+                    .map_err(FfiError::from)?
+            };
+            let backend_kind = sb.backend_kind().as_str();
+            let handle = register(sb)?;
+            Ok(serde_json::json!({ "handle": handle, "backend_kind": backend_kind }).to_string())
         }))
     })
 }

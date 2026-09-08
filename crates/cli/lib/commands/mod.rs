@@ -8,6 +8,7 @@ use crate::ui;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub mod branch;
 pub mod common;
 pub mod completion;
 pub mod context;

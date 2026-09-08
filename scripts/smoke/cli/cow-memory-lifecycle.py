@@ -10,7 +10,9 @@ binary = os.environ["MSB_PATH"]
 root = Path(os.environ["STACK8_OUT"])
 root.mkdir(parents=True, exist_ok=True)
 prefix = os.environ.get("STACK8_PREFIX", "cow8")
-mode = os.environ.get("STACK8_MODE", "cow")
+mode = os.environ.get("STACK8_MODE", "forked")
+assert mode in ("forked", "eager")
+restore_flags = ["--forked"] if mode == "forked" else []
 layout = os.environ.get("STACK8_LAYOUT", "flat:512M")
 resize = os.environ.get("STACK8_LIVE_RESIZE") == "1"
 rows = []
@@ -44,19 +46,13 @@ def run(label, *args, expected=0, timeout=120):
     return result
 
 try:
-    if os.environ.get("STACK8_CHECK_COW_REJECTION") == "1":
-        refused = prefix + "-cow-refused"
-        names.append(refused)
-        result = run("cow-unsupported", "create", "alpine", "-n", refused,
-                     "--memory", "256M", "--memory-snapshot", "cow", expected=None)
-        assert result.returncode != 0, "unsupported CoW must not silently start eagerly"
-        assert "not qualified" in result.stderr or "not qualified" in result.stdout
-        inspected = run("cow-refused-inspect", "inspect", refused, "--format", "json", expected=None)
-        if inspected.returncode == 0:
-            assert json.loads(inspected.stdout)["status"] not in ("Running", "Paused")
+    refused = prefix + "-forked-boot"
+    result = run("forked-boot-rejected", "create", "alpine", "-n", refused,
+                 "--forked", expected=None)
+    assert result.returncode != 0, "forked must require captured RAM"
     source = prefix + "-source"
     names.append(source)
-    run("fresh-" + mode, "run", "-d", "-n", source, "--memory-snapshot", mode,
+    run("fresh-" + mode, "run", "-d", "-n", source,
         "--root-disk", layout, "--memory", "256M", "--cpus", "2",
         *(["--max-memory", "512M"] if resize else []), "alpine",
         "--", "sh", "-c", "mkdir -p /dev/shm; echo captured > /dev/shm/cow-marker; i=0; while :; do echo $i > /tmp/cow-counter; i=$((i+1)); sleep 0.05; done")
@@ -115,24 +111,45 @@ try:
         child = prefix + "-" + suffix
         names.append(child)
         run("restore-" + suffix, "create", "-n", child, "--from-snapshot", snap,
-            "--memory-snapshot", mode, "--info")
+            *restore_flags, "--info")
         result = run("marker-" + suffix, "exec", child, "--", "cat", "/dev/shm/cow-marker")
         assert result.stdout.strip() == "captured"
     run("mutate-a", "exec", prefix + "-a", "--", "sh", "-c", "echo private-a > /dev/shm/cow-marker")
     assert run("isolation-b", "exec", prefix + "-b", "--", "cat", "/dev/shm/cow-marker").stdout.strip() == "captured"
     assert run("isolation-source", "exec", source, "--", "cat", "/dev/shm/cow-marker").stdout.strip() == "captured"
+    # A restored child remains a normal capture source; no creation-time memory opt-in exists.
+    child_snapshot = prefix + "-child-full"
+    run("capture-restored-child", "snapshot", "create", child_snapshot,
+        "--from", prefix + "-a", "--full", "--info")
+    grandchild = prefix + "-grandchild"
+    names.append(grandchild)
+    run("restore-grandchild", "create", "-n", grandchild, "--from-snapshot", child_snapshot,
+        *restore_flags, "--info")
+    assert run("grandchild-marker", "exec", grandchild, "--", "cat", "/dev/shm/cow-marker").stdout.strip() == "private-a"
     archive = str(root / "direct.msnap")
     run("direct-full", "snapshot", "create", prefix + "-direct", "--from", source,
         "--full", "--archive", archive, "--info")
     child = prefix + "-archive"
     names.append(child)
     run("direct-restore", "create", "-n", child, "--from-snapshot", archive,
-        "--memory-snapshot", mode, "--info")
+        *restore_flags, "--info")
     if os.environ.get("STACK8_KEEP_ARCHIVE") != "1":
         Path(archive).unlink()
     assert run("archive-child-exec", "exec", child, "--", "cat", "/dev/shm/cow-marker").stdout.strip() == "captured"
     run("pause-for-stop", "pause", source)
     run("stop-paused", "stop", source, timeout=20)
+    disk_snapshot = prefix + "-disk"
+    run("stopped-disk-capture", "snapshot", "create", disk_snapshot, "--from", source)
+    disk_archive = str(root / "disk.msnap")
+    run("disk-archive", "snapshot", "save", disk_snapshot, disk_archive)
+    for label, snapshot in (("installed", disk_snapshot), ("archive", disk_archive)):
+        refused_name = prefix + "-refused-" + label
+        names.append(refused_name)
+        result = run("forked-disk-" + label, "create", "-n", refused_name,
+                     "--from-snapshot", snapshot, "--forked", expected=None)
+        assert result.returncode != 0 and "forked requires a full snapshot" in result.stderr
+        inspected = run("refused-inspect-" + label, "inspect", refused_name, "--format", "json", expected=None)
+        assert inspected.returncode != 0, "invalid restore must not publish a sandbox row"
     assert run("child-after-source-stop", "exec", prefix + "-a", "--", "cat", "/dev/shm/cow-marker").stdout.strip() == "private-a"
 finally:
     for name in reversed(names):

@@ -140,7 +140,7 @@ Compatibility-sensitive elements include descriptor numbers, ownership and close
 
 Sources: [`crates/runtime/lib/launch.rs`](crates/runtime/lib/launch.rs), [`crates/runtime/lib/vm.rs`](crates/runtime/lib/vm.rs), [`sdk/rust/lib/runtime/spawn.rs`](sdk/rust/lib/runtime/spawn.rs), and [`crates/cli/lib/sandbox_cmd.rs`](crates/cli/lib/sandbox_cmd.rs).
 
-This protocol has no explicit version envelope. Treat additions as optional and consider adding explicit version or capability negotiation before allowing independently versioned launchers and runtimes.
+Launch JSON requires an explicit `execution` intent (`boot` or `restore`) and rejects unknown fields. Restores also pass the internal `msb sandbox --restore` argument: a runtime predating this contract rejects the unknown argument rather than ignoring a JSON restore source and cold-booting. The argument, intent, and complete strictly validated `checkpoint_restore` source must agree before VM construction. Unsupported restore behavior is an error, never a fresh-boot fallback. These #8 development contracts replace superseded unreleased forms without shims; they do not change portable snapshot bytes.
 
 ## 6. Database, Configuration, and Migration History
 

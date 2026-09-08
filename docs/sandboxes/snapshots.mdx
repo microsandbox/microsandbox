@@ -25,18 +25,32 @@ Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `sta
 
 ## Share restored memory with CoW
 
-On Linux and macOS, request `--memory-snapshot cow` when creating a sandbox to use private file-backed memory. Children restored from the same full snapshot can share clean memory pages; writes stay private to each child. Each child must opt in explicitly. The default, `standard`, keeps eager anonymous memory.
+On Linux and macOS, add `--forked` when restoring a full snapshot to share clean memory pages between children. Writes stay private to each child. Without the flag, restore eagerly copies memory. The source needs no special creation option.
 
 ```bash
-msb create alpine --name baseline --root-disk flat:1G --memory-snapshot cow
+msb create alpine --name baseline --root-disk flat:1G
 msb snapshot create ready --from baseline --full
-msb create --name worker-a --from-snapshot ready --memory-snapshot cow
-msb create --name worker-b --from-snapshot ready --memory-snapshot cow
+msb create --name worker-a --from-snapshot ready --forked
+msb create --name worker-b --from-snapshot ready --forked
 ```
 
-The SDK creation options are Rust `.memory_snapshot(MemorySnapshotMode::Cow)`, Python `memory_snapshot=MemorySnapshotMode.COW`, TypeScript `.memorySnapshot("cow")`, and Go `WithMemorySnapshot(MemorySnapshotCow)`.
+The SDK creation options are Rust `.forked()`, Python `forked=True`, TypeScript `.forked()`, and Go `WithForked()`. The option requires a full snapshot and cannot be combined with `--disk-only` or an image cold boot.
 
-Snapshots are still manual. CoW uses a protected local memory cache; the first uncached restore must build it, while later children reuse it. Repeated captures use filesystem reflinks when available. Removing the input archive does not invalidate a running child's backing. Windows CoW and explicit NUMA placement with CoW are not supported yet; requests fail instead of silently switching modes.
+Snapshots are still manual. CoW uses a protected local memory cache; the first uncached restore must build it, while later children reuse it. Captures from forked children can prepare later restore backing with filesystem reflinks when available. Removing the input archive does not invalidate a running child's backing. Windows CoW and explicit NUMA placement with CoW are not supported yet; requests fail instead of silently switching modes.
+
+## Branch a running sandbox
+
+Use `branch` for an independent local child without first saving a full snapshot:
+
+```bash
+msb branch baseline --name worker
+```
+
+The child resumes the captured processes, memory, and disk state. Its writes do not affect the source. CoW memory is built in—no `--forked` flag is needed. A running source resumes after capture; a user-paused source stays paused. Branches work on supported Linux and macOS hosts, require a new child name, and cannot inherit published host ports.
+
+The SDK methods are Rust `source.branch("worker").await?`, Python `await source.branch("worker")`, TypeScript `await source.branch("worker")`, and Go `source.Branch(ctx, "worker")`. They also work on sandbox handles returned by `get`.
+
+Local branching still writes a consistent memory backing file, but skips portable RAM packaging and snapshot registration. It is not a saved recovery point. Use `snapshot create --full` when you need a durable, exportable snapshot.
 
 ## Quick start
 

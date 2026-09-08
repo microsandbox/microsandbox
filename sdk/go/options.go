@@ -36,7 +36,7 @@ type SandboxConfig struct {
 	CPUPlacement      CPUPlacement
 	PlacementProfile  string
 	THP               THPPolicy
-	MemorySnapshot    MemorySnapshotMode
+	Forked            bool
 	Workdir           string
 	Shell             string
 	SecurityProfile   SecurityProfile
@@ -134,14 +134,13 @@ type persistedInitConfig struct {
 }
 
 type persistedResources struct {
-	MemorySnapshot   MemorySnapshotMode `json:"memory_snapshot"`
-	CPUs             uint8              `json:"cpus"`
-	MemoryMiB        uint32             `json:"memory_mib"`
-	MaxCPUs          uint8              `json:"max_cpus"`
-	MaxMemoryMiB     uint32             `json:"max_memory_mib"`
-	CPUPlacement     CPUPlacement       `json:"cpu_placement"`
-	PlacementProfile string             `json:"placement_profile"`
-	THP              THPPolicy          `json:"thp"`
+	CPUs             uint8        `json:"cpus"`
+	MemoryMiB        uint32       `json:"memory_mib"`
+	MaxCPUs          uint8        `json:"max_cpus"`
+	MaxMemoryMiB     uint32       `json:"max_memory_mib"`
+	CPUPlacement     CPUPlacement `json:"cpu_placement"`
+	PlacementProfile string       `json:"placement_profile"`
+	THP              THPPolicy    `json:"thp"`
 }
 
 type persistedRuntime struct {
@@ -213,7 +212,6 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		OCIUpperSizeMiB:   upperSizeMiB,
 		ociUpperSizeSet:   upperSizeSet,
 		MemoryMiB:         raw.memoryMiB(),
-		MemorySnapshot:    raw.memorySnapshot(),
 		CPUs:              raw.cpus(),
 		MaxMemoryMiB:      raw.maxMemoryMiB(),
 		MaxCPUs:           raw.maxCPUs(),
@@ -268,13 +266,6 @@ func (c persistedSandboxConfig) maxCPUs() uint8 {
 		return c.MaxCPUs
 	}
 	return c.CPUs
-}
-
-func (c persistedSandboxConfig) memorySnapshot() MemorySnapshotMode {
-	if c.Resources != nil && c.Resources.MemorySnapshot != "" {
-		return c.Resources.MemorySnapshot
-	}
-	return MemorySnapshotStandard
 }
 
 func (c persistedSandboxConfig) maxMemoryMiB() uint32 {
@@ -488,17 +479,10 @@ const (
 // THPPolicy selects the guest transparent huge-page policy at boot.
 type THPPolicy string
 
-// MemorySnapshotMode selects anonymous or explicit private file-backed memory.
-type MemorySnapshotMode string
-
-const (
-	MemorySnapshotStandard MemorySnapshotMode = "standard"
-	MemorySnapshotCow      MemorySnapshotMode = "cow"
-)
-
-// WithMemorySnapshot selects memory representation; snapshots remain manual.
-func WithMemorySnapshot(mode MemorySnapshotMode) SandboxOption {
-	return func(o *SandboxConfig) { o.MemorySnapshot = mode }
+// WithForked restores a full snapshot with private copy-on-write memory.
+// It cannot be combined with a fresh boot or disk-only restore.
+func WithForked() SandboxOption {
+	return func(o *SandboxConfig) { o.Forked = true }
 }
 
 const (

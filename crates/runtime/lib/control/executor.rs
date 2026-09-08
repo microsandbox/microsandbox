@@ -269,6 +269,7 @@ impl RuntimeControlExecutor {
                 | ControlRequest::CpuTarget { .. }
                 | ControlRequest::SecretsUpdate { .. }
                 | ControlRequest::CheckpointCreate { .. }
+                | ControlRequest::BranchCreate { .. }
                 | ControlRequest::DiskCompact { dry_run: false, .. }
                 | ControlRequest::Pause
                 | ControlRequest::Resume
@@ -279,6 +280,7 @@ impl RuntimeControlExecutor {
                 ControlRequest::Pause
                     | ControlRequest::Resume
                     | ControlRequest::CheckpointCreate { .. }
+                    | ControlRequest::BranchCreate { .. }
             );
         if mutation && state.lifecycle != RuntimeLifecycle::Running && !resident_operation {
             return control_error(
@@ -361,6 +363,44 @@ impl RuntimeControlExecutor {
                             },
                             error.to_string(),
                         )
+                    }
+                }
+            }
+            ControlRequest::BranchCreate {
+                branch_id,
+                child_name,
+                memory_cache_dir,
+            } => {
+                state.lifecycle = RuntimeLifecycle::Quiescing;
+                match state.checkpoint.branch(
+                    &self.vm,
+                    &branch_id,
+                    &child_name,
+                    &memory_cache_dir,
+                    state.user_pause.as_ref(),
+                ) {
+                    Ok(result) => {
+                        state.lifecycle = if state.user_pause.is_some() {
+                            RuntimeLifecycle::Quiesced
+                        } else {
+                            RuntimeLifecycle::Running
+                        };
+                        ControlResponse {
+                            ok: true,
+                            branch: Some(result.path),
+                            ..Default::default()
+                        }
+                    }
+                    Err(error) => {
+                        if error.keep_paused {
+                            state.user_pause = None;
+                        }
+                        state.lifecycle = if error.keep_paused || state.user_pause.is_some() {
+                            RuntimeLifecycle::Quiesced
+                        } else {
+                            RuntimeLifecycle::Running
+                        };
+                        control_error("branch_failed", error.to_string())
                     }
                 }
             }
@@ -476,6 +516,7 @@ impl RuntimeControlExecutor {
                     memory_resize: self.vm.memory_resize_supported(),
                     secrets_update: self.secrets_update_supported(),
                     checkpoint_create: true,
+                    branch_create: cfg!(unix),
                     disk_compact: true,
                     root_disk_grow: true,
                     pause_resume: self.vm.clock_sync_supported(),
@@ -498,6 +539,7 @@ impl RuntimeControlExecutor {
             ControlRequest::CpuState => cpu(self.vm.cpu_state()),
             ControlRequest::SecretsUpdate { changes } => self.handle_secrets_update(changes),
             ControlRequest::CheckpointCreate { .. }
+            | ControlRequest::BranchCreate { .. }
             | ControlRequest::Pause
             | ControlRequest::Resume
             | ControlRequest::PauseState

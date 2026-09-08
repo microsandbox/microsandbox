@@ -529,6 +529,16 @@ impl Sandbox {
         sb.stop().await.map_err(to_napi_error)
     }
 
+    /// Create an independent local CoW child without a durable full snapshot.
+    #[napi]
+    pub async fn branch(&self, name: String) -> Result<Sandbox> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        Ok(Sandbox::from_rust(
+            sb.branch(name).await.map_err(to_napi_error)?,
+        ))
+    }
+
     /// Explicit resident pause through host control.
     #[napi]
     pub async fn pause(&self) -> Result<()> {

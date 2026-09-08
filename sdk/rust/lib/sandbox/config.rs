@@ -220,6 +220,14 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) checkpoint_restore: Option<CheckpointRestoreConfig>,
 
+    /// Source name for a one-shot direct local branch, consumed under child reservation.
+    #[serde(skip)]
+    pub(crate) branch_source: Option<String>,
+
+    /// Restore captured RAM through private CoW mappings; never a cold-boot policy.
+    #[serde(skip)]
+    pub(crate) forked: bool,
+
     /// Transient checkpoint materialization policy selected by the caller.
     #[serde(skip)]
     pub(crate) snapshot_restore_mode: SnapshotRestoreMode,
@@ -277,6 +285,8 @@ impl SandboxConfig {
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
         config.checkpoint_restore = None;
+        config.branch_source = None;
+        config.forked = false;
         config.snapshot_restore_mode = SnapshotRestoreMode::Full;
         config.resumed_from_full_snapshot = false;
         config.snapshot_root_layer_sources.clear();
@@ -779,7 +789,6 @@ impl Default for SandboxConfig {
         Self {
             spec: SandboxSpec {
                 resources: SandboxResources {
-                    memory_snapshot: Default::default(),
                     cpus: default_cpus(),
                     memory_mib: default_memory_mib(),
                     max_cpus: default_cpus(),
@@ -810,6 +819,8 @@ impl Default for SandboxConfig {
             snapshot_archive_source: None,
             snapshot_base: None,
             checkpoint_restore: None,
+            branch_source: None,
+            forked: false,
             snapshot_restore_mode: SnapshotRestoreMode::Full,
             resumed_from_full_snapshot: false,
             snapshot_upper_layers: Vec::new(),
@@ -1536,7 +1547,6 @@ mod tests {
             resources: SandboxResources {
                 cpus: 2,
                 memory_mib: 1024,
-                memory_snapshot: Default::default(),
                 max_cpus: 2,
                 max_memory_mib: 1024,
                 cpu_placement: Default::default(),
@@ -1788,6 +1798,8 @@ mod tests {
                 },
                 snapshot_restore_mode: restore_mode,
                 checkpoint_restore: Some(CheckpointRestoreConfig {
+                    local_branch: false,
+                    forked: false,
                     closure: PathBuf::from("/tmp/checkpoint"),
                     checkpoint_root:
                         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

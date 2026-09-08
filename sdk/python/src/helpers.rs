@@ -25,7 +25,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "cpu_placement",
     "placement_profile",
     "thp",
-    "memory_snapshot",
+    "forked",
     "workdir",
     "shell",
     "security",
@@ -337,10 +337,8 @@ pub fn sandbox_builder_from_args(
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         builder = builder.thp(policy);
     }
-    if let Some(mode) = extract_opt::<String>(kwargs, "memory_snapshot")? {
-        let mode = serde_json::from_value(serde_json::Value::String(mode))
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        builder = builder.memory_snapshot(mode);
+    if extract_opt::<bool>(kwargs, "forked")?.unwrap_or(false) {
+        builder = builder.forked();
     }
     if let Some(workdir) = extract_opt::<String>(kwargs, "workdir")? {
         builder = builder.workdir(workdir);

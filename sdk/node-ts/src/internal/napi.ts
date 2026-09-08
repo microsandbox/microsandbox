@@ -187,7 +187,7 @@ export interface NapiSandboxBuilderSetters {
   memory(mib: number): this;
   maxMemory(mib: number): this;
   thp(policy: "always" | "madvise" | "never"): this;
-  memorySnapshot(mode: "standard" | "cow"): this;
+  forked(): this;
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
@@ -274,6 +274,7 @@ export interface NapiSandbox {
   attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
   stop(): Promise<void>;
+  branch(name: string): Promise<NapiSandbox>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   requestStop(): Promise<void>;
@@ -306,6 +307,7 @@ export interface NapiSandboxHandle {
   connect(): Promise<NapiSandbox>;
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   stop(): Promise<void>;
+  branch(name: string): Promise<NapiSandbox>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   requestStop(): Promise<void>;

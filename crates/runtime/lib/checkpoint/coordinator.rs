@@ -24,6 +24,7 @@ use msb_krun::{
 };
 
 use super::disk::RuntimeOwnedRootDisk;
+use super::local_memory::{LocalMemoryCapture, LocalMemoryPin};
 use crate::vm::VmConfig;
 
 //--------------------------------------------------------------------------------------------------
@@ -58,6 +59,9 @@ pub(crate) struct CheckpointCoordinator {
     previous_memory: Option<MemoryManifest>,
     memory_cache: Option<super::MemoryCache>,
     cached_baseline: Option<(MemoryManifest, super::CachedMemory)>,
+    local_cache_root: Option<PathBuf>,
+    local_baseline: Option<LocalMemoryPin>,
+    boot_geometry: (u8, u8, u32, u32),
 }
 
 /// Published checkpoint identity returned to the control executor.
@@ -88,7 +92,8 @@ struct AdmittedResources {
 struct PausedCapture {
     result: CheckpointResult,
     memory_plan: MemoryCapturePlan,
-    memory_manifest: MemoryManifest,
+    memory_manifest: Option<MemoryManifest>,
+    local_memory: Option<LocalMemoryPin>,
     timings: PausedCaptureTimings,
 }
 
@@ -330,7 +335,11 @@ impl CheckpointCoordinator {
             fs_resource_bindings,
             network_resource_binding,
             previous_memory: None,
-            memory_cache: if vm.memory_snapshot == microsandbox_types::MemorySnapshotMode::Cow {
+            memory_cache: if vm
+                .checkpoint_restore
+                .as_ref()
+                .is_some_and(|restore| restore.forked)
+            {
                 Some(
                     super::MemoryCache::open(vm.memory_cache_dir.as_ref().ok_or_else(|| {
                         "CoW memory requires its backend-resolved cache directory".to_string()
@@ -341,6 +350,9 @@ impl CheckpointCoordinator {
                 None
             },
             cached_baseline: None,
+            local_cache_root: vm.memory_cache_dir.clone(),
+            local_baseline: None,
+            boot_geometry: (vm.vcpus, vm.max_cpus, vm.memory_mib, vm.max_memory_mib),
         })
     }
 
@@ -351,6 +363,82 @@ impl CheckpointCoordinator {
         checkpoint_id: &str,
         intent: CaptureIntent,
         user_pause: Option<&UserPause>,
+    ) -> Result<CheckpointResult, CheckpointFailure> {
+        self.capture_to(vm, checkpoint_id, intent, user_pause, None)
+    }
+
+    /// Capture a local handoff directly, without publishing a portable RAM closure.
+    pub(crate) fn branch(
+        &mut self,
+        vm: &msb_krun::VmControl,
+        id: &str,
+        child_name: &str,
+        reserved_cache: &Path,
+        user_pause: Option<&UserPause>,
+    ) -> Result<CheckpointResult, CheckpointFailure> {
+        let cache = self.local_cache_root.as_ref().ok_or_else(|| {
+            CheckpointFailure::before_pause("runtime has no backend-resolved memory cache")
+        })?;
+        // Reject unsupported hosts before freezing or rolling over the source disk.
+        super::MemoryCache::open_namespace(cache.clone(), "branches")
+            .map_err(CheckpointFailure::before_pause)?;
+        if std::fs::canonicalize(cache).map_err(CheckpointFailure::before_pause)?
+            != std::fs::canonicalize(reserved_cache).map_err(CheckpointFailure::before_pause)?
+        {
+            return Err(CheckpointFailure::before_pause(
+                "branch handoff cache differs from the source runtime; use the source's original backend cache configuration",
+            ));
+        }
+        validate_checkpoint_id(id).map_err(CheckpointFailure::before_pause)?;
+        microsandbox_types::validate_sandbox_name(child_name)
+            .map_err(CheckpointFailure::before_pause)?;
+        // The SDK reserves a fresh child directory under this same backend. Never accept
+        // caller-selected host paths, symlinked children, or an existing handoff destination.
+        let source = self.root.parent().and_then(Path::parent).ok_or_else(|| {
+            CheckpointFailure::before_pause("source storage has no sandbox parent")
+        })?;
+        let parent = source
+            .parent()
+            .ok_or_else(|| CheckpointFailure::before_pause("missing sandbox storage root"))?;
+        let child = parent.join(child_name);
+        if child == source
+            || !std::fs::symlink_metadata(&child).is_ok_and(|m| m.file_type().is_dir())
+        {
+            return Err(CheckpointFailure::before_pause(
+                "branch requires a reserved child directory",
+            ));
+        }
+        let reservation = child.join(".branch-reservation");
+        if !std::fs::symlink_metadata(&reservation)
+            .is_ok_and(|m| m.file_type().is_file() && m.len() <= 128)
+            || std::fs::read_to_string(&reservation).map_err(CheckpointFailure::before_pause)? != id
+        {
+            return Err(CheckpointFailure::before_pause(
+                "child reservation does not match branch attempt",
+            ));
+        }
+        let destination = child.join(".branch-restore");
+        if std::fs::symlink_metadata(&destination).is_ok() {
+            return Err(CheckpointFailure::before_pause(
+                "child already has a branch handoff",
+            ));
+        }
+        self.capture_to(
+            vm,
+            id,
+            CaptureIntent::FullSnapshot,
+            user_pause,
+            Some(&destination),
+        )
+    }
+
+    fn capture_to(
+        &mut self,
+        vm: &msb_krun::VmControl,
+        checkpoint_id: &str,
+        intent: CaptureIntent,
+        user_pause: Option<&UserPause>,
+        local_destination: Option<&Path>,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         if let Some(paused) = user_pause {
             paused
@@ -382,16 +470,21 @@ impl CheckpointCoordinator {
         .map_err(CheckpointFailure::before_pause)?;
         let admission_us = admission_started.elapsed().as_micros();
         let staging_started = Instant::now();
-        let final_path = self.root.join(checkpoint_id);
+        let final_path = local_destination
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.root.join(checkpoint_id));
         if final_path.exists() {
             return Err(CheckpointFailure::before_pause(
                 "checkpoint identity is already published",
             ));
         }
-        let staging = self.root.join(format!(
-            ".{checkpoint_id}.{}.staging",
-            rand::random::<u64>()
-        ));
+        let staging = final_path
+            .parent()
+            .ok_or_else(|| CheckpointFailure::before_pause("capture destination has no parent"))?
+            .join(format!(
+                ".{checkpoint_id}.{}.staging",
+                rand::random::<u64>()
+            ));
         std::fs::create_dir(&staging).map_err(CheckpointFailure::before_pause)?;
         let staging_us = staging_started.elapsed().as_micros();
 
@@ -447,6 +540,7 @@ impl CheckpointCoordinator {
             pause.get(),
             &staging,
             &final_path,
+            local_destination.is_some(),
         );
         let paused_capture_us = paused_capture_started.elapsed().as_micros();
         let captured = match paused {
@@ -521,18 +615,19 @@ impl CheckpointCoordinator {
         }
         let thaw_us = thaw_started.elapsed().as_micros();
         let workload_unavailable_us = workload_unavailable_started.elapsed().as_micros();
-        if let Some(cache) = &self.memory_cache {
+        if let (Some(cache), Some(memory_manifest)) =
+            (&self.memory_cache, &captured.memory_manifest)
+        {
             // Source execution has resumed (unless explicitly user-paused). Read only the
             // completed immutable capture, never live RAM, while preparing child acceleration.
             let prepared = (|| -> Result<super::CachedMemory, String> {
-                let bytes = captured
-                    .memory_manifest
+                let bytes = memory_manifest
                     .to_canonical_bytes()
                     .map_err(|e| e.to_string())?;
                 let identity = ObjectId::from_bytes(&bytes).map_err(|e| e.to_string())?;
                 cache
                     .materialize_with_baseline(
-                        &captured.memory_manifest,
+                        memory_manifest,
                         &identity,
                         self.cached_baseline
                             .as_ref()
@@ -557,7 +652,7 @@ impl CheckpointCoordinator {
             match prepared {
                 Ok(cached) => {
                     tracing::info!(target: "microsandbox_checkpoint_timing", operation = "memory_cache", prepare_us = cached.prepare_us, cache_hit = cached.cache_hit, reflink = cached.reflink, "prepared immutable capture cache");
-                    self.cached_baseline = Some((captured.memory_manifest.clone(), cached));
+                    self.cached_baseline = Some((memory_manifest.clone(), cached));
                 }
                 Err(error) => {
                     // Publication already succeeded. Losing optional acceleration does not
@@ -567,9 +662,11 @@ impl CheckpointCoordinator {
             }
         }
         if baseline_published {
-            self.previous_memory = Some(captured.memory_manifest);
+            self.previous_memory = captured.memory_manifest;
+            self.local_baseline = captured.local_memory;
         } else {
             self.previous_memory = None;
+            self.local_baseline = None;
         }
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
@@ -706,11 +803,13 @@ impl CheckpointCoordinator {
         pause_generation: u64,
         staging: &Path,
         final_path: &Path,
+        local: bool,
     ) -> Result<PausedCapture, CheckpointFailure> {
         let mut timings = PausedCaptureTimings::default();
         let devices_started = Instant::now();
         let mut pending_devices = Vec::with_capacity(inventory.len());
         let mut disk_roots = Vec::new();
+        let mut local_disks = Vec::new();
         for (device_type, device_id) in inventory {
             let runtime_owned_root = self
                 .root_disk
@@ -732,18 +831,21 @@ impl CheckpointCoordinator {
                         published: None,
                     })?;
                 timings.managed_disk_us += disk_started.elapsed().as_micros();
-                let manifest_bytes = rollover
-                    .manifest
-                    .to_canonical_bytes()
-                    .map_err(CheckpointFailure::resumable)?;
-                let manifest_id = self
-                    .store
-                    .put_bytes(&manifest_bytes)
-                    .map_err(CheckpointFailure::resumable)?;
-                self.store
-                    .link_into(&manifest_id, staging)
-                    .map_err(CheckpointFailure::resumable)?;
-                disk_roots.push(manifest_id);
+                if !local {
+                    let manifest_bytes = rollover
+                        .manifest
+                        .to_canonical_bytes()
+                        .map_err(CheckpointFailure::resumable)?;
+                    let manifest_id = self
+                        .store
+                        .put_bytes(&manifest_bytes)
+                        .map_err(CheckpointFailure::resumable)?;
+                    self.store
+                        .link_into(&manifest_id, staging)
+                        .map_err(CheckpointFailure::resumable)?;
+                    disk_roots.push(manifest_id);
+                }
+                local_disks.push(rollover.manifest);
                 rollover.device_state
             } else if *device_type == TYPE_BLOCK {
                 vm.capture_block_device_state(device_id)
@@ -785,8 +887,21 @@ impl CheckpointCoordinator {
                 bytes,
             });
         }
-        let device_refs = persist_device_states(&self.store, staging, &pending_devices)
-            .map_err(CheckpointFailure::resumable)?;
+        let device_refs = if local {
+            pending_devices
+                .iter()
+                .map(|device| {
+                    Ok(DeviceStateRef {
+                        device_type: device.device_type,
+                        device_id: device.device_id.clone(),
+                        state: put_local_object(staging, &device.bytes)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        } else {
+            persist_device_states(&self.store, staging, &pending_devices)
+        }
+        .map_err(CheckpointFailure::resumable)?;
         timings.devices_us = devices_started.elapsed().as_micros();
 
         // Device capture parks each worker. Capture interrupt-controller state
@@ -804,14 +919,100 @@ impl CheckpointCoordinator {
             ));
         }
         let execution_bytes = execution.encode().map_err(CheckpointFailure::resumable)?;
-        let execution_id = self
-            .store
-            .put_bytes(&execution_bytes)
-            .map_err(CheckpointFailure::resumable)?;
-        self.store
-            .link_into(&execution_id, staging)
-            .map_err(CheckpointFailure::resumable)?;
+        let execution_id = if local {
+            put_local_object(staging, &execution_bytes).map_err(CheckpointFailure::resumable)?
+        } else {
+            let id = self
+                .store
+                .put_bytes(&execution_bytes)
+                .map_err(CheckpointFailure::resumable)?;
+            self.store
+                .link_into(&id, staging)
+                .map_err(CheckpointFailure::resumable)?;
+            id
+        };
         timings.execution_us = execution_started.elapsed().as_micros();
+
+        if local {
+            let (memory_plan, incremental) = self
+                .plan_local_memory(vm)
+                .map_err(CheckpointFailure::resumable)?;
+            let captured = (|| {
+                let started = Instant::now();
+                let mut sink = LocalMemoryCapture::new(
+                    self.local_cache_root
+                        .as_ref()
+                        .expect("validated local cache"),
+                    checkpoint_id,
+                    if incremental {
+                        self.local_baseline.as_ref()
+                    } else {
+                        None
+                    },
+                )
+                .map_err(CheckpointFailure::resumable)?;
+                let reflink = sink.reflink;
+                let stats = vm
+                    .capture_memory(
+                        &memory_plan,
+                        MemoryCaptureOptions::new(MEMORY_SCAN_CHUNK_SIZE, true)
+                            .map_err(CheckpointFailure::resumable)?,
+                        &mut sink,
+                    )
+                    .map_err(CheckpointFailure::resumable)?;
+                let memory = sink
+                    .finish(memory_plan.generation().get(), memory_plan.topology().get())
+                    .map_err(CheckpointFailure::resumable)?;
+                timings.memory_capture_us = started.elapsed().as_micros();
+                let state = super::LocalBranchState {
+                    id: checkpoint_id.into(),
+                    architecture: std::env::consts::ARCH.into(),
+                    pause_generation,
+                    execution_state: execution_id,
+                    devices: device_refs,
+                    resources,
+                    disks: local_disks,
+                    memory: memory.memory.clone(),
+                    vcpus: self.boot_geometry.0,
+                    max_cpus: self.boot_geometry.1,
+                    memory_mib: self.boot_geometry.2,
+                    max_memory_mib: self.boot_geometry.3,
+                };
+                let bytes = serde_json::to_vec(&state).map_err(CheckpointFailure::resumable)?;
+                // This handoff has no snapshot root or RAM object manifest. Child-owned disk
+                // links and bounded metadata are installed before acknowledging the capture.
+                std::fs::write(staging.join("branch.json"), bytes)
+                    .map_err(CheckpointFailure::resumable)?;
+                std::fs::rename(staging, final_path).map_err(CheckpointFailure::resumable)?;
+                tracing::info!(target: "microsandbox_checkpoint_timing", operation = "local_memory_capture", incremental, reflink, capture_us = timings.memory_capture_us);
+                Ok((memory, stats))
+            })();
+            let (memory, stats) = match captured {
+                Ok(captured) => captured,
+                Err(error) => {
+                    let _ = vm.abandon_memory_capture(&memory_plan);
+                    return Err(error);
+                }
+            };
+            return Ok(PausedCapture {
+                result: CheckpointResult {
+                    checkpoint_id: checkpoint_id.into(),
+                    checkpoint_root: String::new(),
+                    path: final_path.into(),
+                    memory_mode: if incremental {
+                        MemoryCaptureMode::Incremental
+                    } else {
+                        MemoryCaptureMode::Full
+                    },
+                    memory_logical_bytes: stats.logical_bytes,
+                    memory_emitted_bytes: stats.emitted_bytes,
+                },
+                memory_plan,
+                memory_manifest: None,
+                local_memory: Some(memory),
+                timings,
+            });
+        }
 
         let memory_plan_started = Instant::now();
         let (memory_plan, memory_mode, base_extents) =
@@ -948,9 +1149,35 @@ impl CheckpointCoordinator {
                 memory_emitted_bytes: stats.emitted_bytes,
             },
             memory_plan,
-            memory_manifest,
+            memory_manifest: Some(memory_manifest),
+            local_memory: None,
             timings,
         })
+    }
+
+    fn plan_local_memory(
+        &self,
+        vm: &msb_krun::VmControl,
+    ) -> Result<(MemoryCapturePlan, bool), String> {
+        if let (Some(baseline), Some(previous)) =
+            (vm.retained_memory_baseline(), self.local_baseline.as_ref())
+            && previous.memory.generation == baseline.generation().get()
+            && previous.memory.topology == baseline.topology().get()
+        {
+            match vm
+                .plan_incremental_memory_capture(baseline)
+                .map_err(|e| e.to_string())?
+            {
+                IncrementalCaptureDecision::Incremental(plan) => return Ok((plan, true)),
+                IncrementalCaptureDecision::Complete { capture, .. } => {
+                    return Ok((capture, false));
+                }
+                IncrementalCaptureDecision::FullRequired(_) => {}
+            }
+        }
+        vm.plan_full_memory_capture()
+            .map(|plan| (plan, false))
+            .map_err(|e| e.to_string())
     }
 
     fn plan_memory(
@@ -1501,6 +1728,18 @@ fn resource_kind(device_type: u32) -> &'static str {
 /// Persist independent device envelopes concurrently after every device has reached the same
 /// paused epoch. Immutable-object publication is thread-safe, and the returned vector retains the
 /// inventory order required by the checkpoint manifest.
+/// Local handoffs reuse the state codecs and object paths, but make no crash-recovery promise.
+/// Only bounded CPU/device state reaches this helper; RAM goes straight to its mmap backing.
+fn put_local_object(staging: &Path, bytes: &[u8]) -> Result<ObjectId, String> {
+    let id = ObjectId::from_bytes(bytes).map_err(|e| e.to_string())?;
+    let store = LocalObjectStore::open(staging).map_err(|e| e.to_string())?;
+    let path = store.object_path(&id);
+    std::fs::create_dir_all(path.parent().expect("confined object parent"))
+        .map_err(|e| e.to_string())?;
+    std::fs::write(path, bytes).map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
 fn persist_device_states(
     store: &LocalObjectStore,
     staging: &Path,

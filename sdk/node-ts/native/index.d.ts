@@ -984,6 +984,8 @@ export declare class Sandbox {
   attachShell(): Promise<number>
   /** Stop the sandbox gracefully and wait for it to exit. */
   stop(): Promise<void>
+  /** Create an independent local CoW child without a durable full snapshot. */
+  branch(name: string): Promise<Sandbox>
   /** Explicit resident pause through host control. */
   pause(): Promise<void>
   /** Explicit resident resume through host control. */
@@ -1090,8 +1092,8 @@ export declare class SandboxBuilder {
   maxMemory(mib: number): this
   /** Guest transparent huge-page policy selected at boot. */
   thp(policy: 'always' | 'madvise' | 'never'): this
-  /** Select explicit private file-backed memory or standard anonymous memory. */
-  memorySnapshot(mode: 'standard' | 'cow'): this
+  /** Restore a full snapshot with private copy-on-write memory. */
+  forked(): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
   logLevel(level: string): this
   /** Suppress sandbox logs. */
@@ -1362,6 +1364,8 @@ export declare class SandboxHandle {
    * override with `stopWithTimeout(timeoutMs)`.
    */
   stop(): Promise<void>
+  /** Create an independent local CoW child without a durable full snapshot. */
+  branch(name: string): Promise<Sandbox>
   /** Explicit resident pause through host control. */
   pause(): Promise<void>
   /** Explicit resident resume through host control. */

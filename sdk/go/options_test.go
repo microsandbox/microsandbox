@@ -15,25 +15,18 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
-func TestMemorySnapshotPolicy(t *testing.T) {
+func TestForkedRestoreOption(t *testing.T) {
 	var config SandboxConfig
-	WithMemorySnapshot(MemorySnapshotCow)(&config)
-	if config.MemorySnapshot != MemorySnapshotCow {
-		t.Fatal("CoW option was lost")
+	WithForked()(&config)
+	if !config.Forked {
+		t.Fatal("forked option was lost")
 	}
-	for _, tc := range []struct {
-		json string
-		want MemorySnapshotMode
-	}{
-		{`{"resources":{"cpus":1,"memory_mib":128}}`, MemorySnapshotStandard},
-		{`{"resources":{"cpus":1,"memory_mib":128,"memory_snapshot":"cow"}}`, MemorySnapshotCow},
-	} {
-		if err := json.Unmarshal([]byte(tc.json), &config); err != nil {
-			t.Fatal(err)
-		}
-		if config.MemorySnapshot != tc.want {
-			t.Fatalf("got %q, want %q", config.MemorySnapshot, tc.want)
-		}
+	// Restore policy is construction-only, not a property of stopped sandbox disks.
+	if err := json.Unmarshal([]byte(`{"resources":{"cpus":1,"memory_mib":128}}`), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Forked {
+		t.Fatal("forked option leaked into persisted configuration")
 	}
 }
 

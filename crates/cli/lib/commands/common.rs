@@ -123,9 +123,9 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
     pub thp: Option<String>,
 
-    /// Memory snapshot representation; CoW is explicit and snapshots remain manual.
-    #[arg(long, value_name = "MODE", value_parser = ["standard", "cow"])]
-    pub memory_snapshot: Option<String>,
+    /// Restore a full snapshot with private copy-on-write memory.
+    #[arg(long, requires = "from_snapshot", conflicts_with = "disk_only")]
+    pub forked: bool,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     /// OPTIONS may include paired `uid=<N>,gid=<N>` for directory-backed mounts.
@@ -617,7 +617,7 @@ impl SandboxOpts {
             || self.memory.is_some()
             || self.max_memory.is_some()
             || self.thp.is_some()
-            || self.memory_snapshot.is_some()
+            || self.forked
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -888,9 +888,8 @@ fn apply_sandbox_opts_inner(
             .map_err(anyhow::Error::msg)?;
         builder = builder.thp(policy);
     }
-    if let Some(ref mode) = opts.memory_snapshot {
-        let mode = serde_json::from_value(serde_json::Value::String(mode.clone()))?;
-        builder = builder.memory_snapshot(mode);
+    if opts.forked {
+        builder = builder.forked();
     }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);

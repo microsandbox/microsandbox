@@ -162,6 +162,14 @@ impl JsSandboxHandle {
         self.inner.stop().await.map_err(to_napi_error)
     }
 
+    /// Create an independent local CoW child without a durable full snapshot.
+    #[napi]
+    pub async fn branch(&self, name: String) -> Result<crate::sandbox::Sandbox> {
+        Ok(crate::sandbox::Sandbox::from_rust(
+            self.inner.branch(name).await.map_err(to_napi_error)?,
+        ))
+    }
+
     /// Explicit resident pause through host control.
     #[napi]
     pub async fn pause(&self) -> Result<()> {

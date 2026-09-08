@@ -360,6 +360,17 @@ impl PySandboxHandle {
         })
     }
 
+    /// Create an independent local CoW child without a durable full snapshot.
+    fn branch<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            Ok(PySandbox::from_rust(
+                guard.branch(name).await.map_err(to_py_err)?,
+            ))
+        })
+    }
+
     /// Suspend this resident VM without releasing RAM.
     fn pause<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();

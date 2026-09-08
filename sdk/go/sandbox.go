@@ -83,7 +83,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		CPUPlacement:      string(o.CPUPlacement),
 		PlacementProfile:  o.PlacementProfile,
 		THP:               string(o.THP),
-		MemorySnapshot:    string(o.MemorySnapshot),
+		Forked:            o.Forked,
 		Workdir:           o.Workdir,
 		Shell:             o.Shell,
 		SecurityProfile:   string(o.SecurityProfile),
@@ -772,6 +772,15 @@ func (h *SandboxHandle) RequestStop(ctx context.Context) error {
 	return wrapFFI(ffi.RequestStopSandboxByName(ctx, h.name))
 }
 
+// Branch creates an independent local CoW child without publishing a durable full snapshot.
+func (h *SandboxHandle) Branch(ctx context.Context, name string) (*Sandbox, error) {
+	inner, err := ffi.BranchSandboxByName(ctx, h.name, name)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+}
+
 // Pause controls resident execution without creating a snapshot.
 func (h *SandboxHandle) Pause(ctx context.Context) error {
 	return wrapFFI(ffi.PauseSandboxByName(ctx, h.name))
@@ -838,6 +847,15 @@ func (s *Sandbox) RequestStop(ctx context.Context) error {
 // Pause controls resident execution without creating a snapshot.
 func (s *Sandbox) Pause(ctx context.Context) error {
 	return wrapFFI(s.inner.Pause(ctx))
+}
+
+// Branch creates an independent local CoW child without publishing a durable full snapshot.
+func (s *Sandbox) Branch(ctx context.Context, name string) (*Sandbox, error) {
+	inner, err := s.inner.Branch(ctx, name)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
 }
 
 // Resume controls resident execution without creating a snapshot.

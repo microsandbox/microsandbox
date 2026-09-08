@@ -160,6 +160,16 @@ char *msb_sandbox_stop(uint64_t cancel_id,
 
 char *msb_sandbox_pause(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
+/**
+ * Branch by live handle, or by persisted name when handle is zero.
+ */
+char *msb_sandbox_branch(uint64_t cancel_id,
+                         Handle handle,
+                         const char *source,
+                         const char *child,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
 char *msb_sandbox_resume(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_request_stop(uint64_t cancel_id,

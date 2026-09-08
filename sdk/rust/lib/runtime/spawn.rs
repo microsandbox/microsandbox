@@ -2492,6 +2492,12 @@ fn sandbox_cli_args(
     // typed `LaunchConfig`, delivered over the config fd. See issue #997.
     let mut visible = vec![OsString::from("sandbox")];
 
+    // An old binary might ignore unknown JSON fields, including the whole restore source.
+    // An explicit argv requirement instead fails in its command parser, before any VM exists.
+    if config.checkpoint_restore.is_some() {
+        visible.push(OsString::from("--restore"));
+    }
+
     if let Some(log_level) = config.spec.runtime.log_level {
         visible.push(OsString::from(sandbox_log_level_cli_flag(log_level)));
     }
@@ -2548,17 +2554,22 @@ fn sandbox_cli_args(
         agent_sock: agent_sock_path.to_path_buf(),
         libkrunfw_path: libkrunfw_path.to_path_buf(),
         thp: config.spec.resources.thp,
-        memory_snapshot: config.spec.resources.memory_snapshot,
-        memory_cache_dir: (config.spec.resources.memory_snapshot
-            == microsandbox_types::MemorySnapshotMode::Cow)
-            .then(|| local.cache_dir().join("memory")),
+        memory_cache_dir: Some(local.cache_dir().join("memory")),
         startup: startup_command(config),
         lifecycle: Lifecycle {
             max_duration_secs: config.spec.lifecycle.max_duration_secs,
             idle_timeout_secs: config.spec.lifecycle.idle_timeout_secs,
         },
         vsock: config.spec.vsock.routes.clone(),
-        checkpoint_restore: config.checkpoint_restore.clone(),
+        execution: if config.checkpoint_restore.is_some() {
+            microsandbox_runtime::launch::ExecutionIntent::Restore
+        } else {
+            microsandbox_runtime::launch::ExecutionIntent::Boot
+        },
+        checkpoint_restore: config.checkpoint_restore.clone().map(|mut restore| {
+            restore.forked = config.forked;
+            restore
+        }),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
         bootstrap: GuestBootstrap {
@@ -3951,6 +3962,8 @@ mod tests {
             },
         ];
         config.checkpoint_restore = Some(CheckpointRestoreConfig {
+            local_branch: false,
+            forked: false,
             closure: PathBuf::from("/tmp/checkpoint"),
             checkpoint_root:
                 "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
@@ -3960,6 +3973,11 @@ mod tests {
         let launch = render_launch(&config);
 
         assert!(launch.rootfs.upper.is_none());
+        assert_eq!(
+            launch.execution,
+            microsandbox_runtime::launch::ExecutionIntent::Restore
+        );
+        assert!(render_args(&config).contains(&"--restore".to_string()));
         assert_eq!(launch.rootfs.upper_layers.len(), 2);
         assert_eq!(launch.rootfs.upper_layers[0].format, "raw");
         assert_eq!(launch.rootfs.upper_layers[1].format, "qcow2");

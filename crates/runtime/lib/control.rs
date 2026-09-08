@@ -42,6 +42,15 @@ pub const CONTROL_SOCKET_EXTENSION: &str = "control.sock";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Capture directly into a reserved child-owned local handoff directory.
+    BranchCreate {
+        /// Unique capture identity matching the child's reservation.
+        branch_id: String,
+        /// Reserved sandbox name in this runtime's backend, never a host path.
+        child_name: String,
+        /// Cache in which the caller holds its handoff lock; must match the source runtime.
+        memory_cache_dir: PathBuf,
+    },
     /// Retain a resident pause until an explicit resume or stop.
     Pause,
     /// Resume a user-owned resident pause.
@@ -151,6 +160,9 @@ pub struct SecretValue(pub String);
 /// The reply to any control request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlResponse {
+    /// Completed local handoff, deliberately not a portable checkpoint identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<PathBuf>,
     /// Resident pause status for lifecycle operations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause: Option<PauseControlState>,
@@ -227,6 +239,9 @@ pub struct RootDiskGrowthResult {
 /// resize-capable and secrets-incapable.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct ControlCapabilities {
+    /// Direct local branch capture is supported on this host.
+    #[serde(default)]
+    pub branch_create: bool,
     /// Resident pause/resume with identity-preserving clock correction.
     #[serde(default)]
     pub pause_resume: bool,
@@ -605,6 +620,7 @@ mod tests {
         let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
+                branch_create: true,
                 pause_resume: true,
                 root_disk_grow: true,
                 disk_compact: true,

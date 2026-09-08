@@ -122,6 +122,7 @@ typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint
 typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_resume_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_pause_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_resume_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -278,6 +279,7 @@ static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
 static msb_sandbox_stop_fn       ptr_msb_sandbox_stop       = NULL;
 static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
 static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
+static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
 static msb_sandbox_resume_fn ptr_msb_sandbox_resume = NULL;
 static msb_sandbox_handle_pause_fn ptr_msb_sandbox_handle_pause = NULL;
 static msb_sandbox_handle_resume_fn ptr_msb_sandbox_handle_resume = NULL;
@@ -460,6 +462,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_stop);
 	RESOLVE(msb_sandbox_request_stop);
 	RESOLVE(msb_sandbox_pause);
+	RESOLVE(msb_sandbox_branch);
 	RESOLVE(msb_sandbox_resume);
 	RESOLVE(msb_sandbox_handle_pause);
 	RESOLVE(msb_sandbox_handle_resume);
@@ -662,6 +665,9 @@ char *call_msb_sandbox_request_stop(uint64_t cancel_id, uint64_t handle, uint8_t
 }
 char *call_msb_sandbox_pause(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_pause ? ptr_msb_sandbox_pause(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_branch(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_branch ? ptr_msb_sandbox_branch(cancel_id, handle, source, child, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_resume(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_resume ? ptr_msb_sandbox_resume(cancel_id, handle, buf, buf_len) : NULL;
@@ -1596,7 +1602,7 @@ type CreateOptions struct {
 	CPUPlacement         string               `json:"cpu_placement,omitempty"`
 	PlacementProfile     string               `json:"placement_profile,omitempty"`
 	THP                  string               `json:"thp,omitempty"`
-	MemorySnapshot       string               `json:"memory_snapshot,omitempty"`
+	Forked               bool                 `json:"forked,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
 	SecurityProfile      string               `json:"security_profile,omitempty"`
@@ -2316,6 +2322,44 @@ func (s *Sandbox) RequestStop(ctx context.Context) error {
 		return C.call_msb_sandbox_request_stop(cancelID, s.h(), buf, bufLen)
 	})
 	return err
+}
+
+// Branch creates an independent local child through the host runtime.
+func (s *Sandbox) Branch(ctx context.Context, name string) (*Sandbox, error) {
+	return branchSandbox(ctx, uint64(s.h()), s.name, name)
+}
+
+// BranchSandboxByName branches execution without an agent connection to the source.
+func BranchSandboxByName(ctx context.Context, source, name string) (*Sandbox, error) {
+	return branchSandbox(ctx, 0, source, name)
+}
+
+func branchSandbox(ctx context.Context, handle uint64, source, name string) (*Sandbox, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cSource, cName := C.CString(source), C.CString(name)
+	defer C.free(unsafe.Pointer(cSource))
+	defer C.free(unsafe.Pointer(cName))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_branch(cancelID, C.uint64_t(handle), cSource, cName, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Handle      uint64 `json:"handle"`
+		BackendKind string `json:"backend_kind"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		if h := salvageHandle(out); h != 0 {
+			releaseHandle(h)
+		}
+		return nil, fmt.Errorf("parse branch response: %w", err)
+	}
+	s := &Sandbox{name: name, backendKind: resp.BackendKind}
+	s.handle.Store(resp.Handle)
+	return s, nil
 }
 
 // Pause controls resident execution through the host runtime.

@@ -491,7 +491,13 @@ export class Sandbox implements AsyncDisposable {
     await withMappedErrors(() => this.inner.stop());
   }
 
-  /** Explicit resident pause; no snapshot is created. */
+  /** Create an independent local CoW child without a durable full snapshot. */
+  async branch(name: string): Promise<Sandbox> {
+    const child = await withMappedErrors(() => this.inner.branch(name));
+    return new Sandbox(child, name, false);
+  }
+
+  /** Suspend this resident VM without creating a snapshot. */
   async pause(): Promise<void> {
     await withMappedErrors(() => this.inner.pause());
   }

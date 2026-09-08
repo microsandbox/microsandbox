@@ -67,7 +67,6 @@ pub enum SandboxImagePatch {
 /// Sparse resource and lifecycle limits.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceConfigPatch {
-    memory_snapshot: Option<super::MemorySnapshotMode>,
     cpus: Option<u8>,
     memory_mib: Option<u32>,
     max_duration_secs: Option<u64>,
@@ -361,12 +360,6 @@ impl ResourceConfigPatch {
         Self::default()
     }
 
-    /// Select memory representation for the next VM construction.
-    pub fn memory_snapshot(mut self, mode: super::MemorySnapshotMode) -> Self {
-        self.memory_snapshot = Some(mode);
-        self
-    }
-
     /// Set the initial vCPU count.
     pub fn cpus(mut self, cpus: u8) -> Self {
         self.cpus = Some(cpus);
@@ -400,7 +393,6 @@ impl ResourceConfigPatch {
     /// Overlay another resource patch.
     pub fn overlay(mut self, higher: Self) -> Self {
         replace(&mut self.cpus, higher.cpus);
-        replace(&mut self.memory_snapshot, higher.memory_snapshot);
         replace(&mut self.memory_mib, higher.memory_mib);
         replace(&mut self.max_duration_secs, higher.max_duration_secs);
         replace(&mut self.idle_timeout_secs, higher.idle_timeout_secs);
@@ -409,9 +401,6 @@ impl ResourceConfigPatch {
     }
 
     fn apply_to(self, mut builder: SandboxBuilder) -> SandboxBuilder {
-        if let Some(mode) = self.memory_snapshot {
-            builder = builder.memory_snapshot(mode);
-        }
         if let Some(cpus) = self.cpus {
             builder = builder.cpus(cpus);
         }

@@ -30,7 +30,8 @@ const MAX_MEMORY_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) struct PreparedCheckpointRestore {
     execution: msb_krun::ExecutionState,
     devices: Vec<PreparedDeviceRestore>,
-    memory: CheckpointMemoryRestore,
+    memory: Option<CheckpointMemoryRestore>,
+    local_memory: Option<msb_krun::PrivateMemoryBacking>,
     agent: RestoredAgentState,
 }
 
@@ -61,6 +62,52 @@ struct CheckpointMemoryRestore {
 //--------------------------------------------------------------------------------------------------
 
 impl PreparedCheckpointRestore {
+    /// Decode a local handoff and pin its RAM before constructing any guest mappings.
+    pub(crate) fn open_local(root: PathBuf, expected_id: &str) -> Result<Self, String> {
+        let state = super::LocalBranchState::open(&root).map_err(|e| e.to_string())?;
+        if state.id != expected_id {
+            return Err("local branch identity differs".into());
+        }
+        let read = |id: &ObjectId, limit| {
+            super::LocalBranchState::read_object(&root, id, limit).map_err(|e| e.to_string())
+        };
+        let execution = msb_krun::ExecutionState::decode(&read(
+            &state.execution_state,
+            MAX_EXECUTION_STATE_BYTES,
+        )?)
+        .map_err(|e| e.to_string())?;
+        if execution.pause_generation() != state.pause_generation {
+            return Err("branch execution epoch differs".into());
+        }
+        let devices = decode_devices(&state.devices, state.pause_generation, read)?;
+        let resource = state
+            .resources
+            .iter()
+            .find(|r| r.id == "guest:agentd")
+            .ok_or("branch has no captured agent identity")?;
+        let agent = parse_restored_agent_resource(resource, &state.id)?;
+        let file = state.memory.pin().map_err(|e| e.to_string())?;
+        let regions = state
+            .memory
+            .regions
+            .into_iter()
+            .map(|region| msb_krun::PrivateMemoryRegion {
+                guest_address: region.guest_address,
+                length: region.length,
+                file_offset: region.file_offset,
+            })
+            .collect();
+        let backing =
+            msb_krun::PrivateMemoryBacking::new(file, regions).map_err(|e| e.to_string())?;
+        Ok(Self {
+            execution,
+            devices,
+            memory: None,
+            local_memory: Some(backing),
+            agent,
+        })
+    }
+
     /// Resolve and decode every construction-time state envelope before building the VM.
     pub(crate) fn open(root: PathBuf, expected_root: &str) -> Result<Self, String> {
         let total_started = Instant::now();
@@ -89,50 +136,11 @@ impl PreparedCheckpointRestore {
         let execution_us = execution_started.elapsed().as_micros();
 
         let devices_started = Instant::now();
-        let mut devices = Vec::with_capacity(closure.checkpoint().devices.len());
-        for device in &closure.checkpoint().devices {
-            let max_state_bytes = if device.device_type == TYPE_FS {
-                MAX_FS_DEVICE_STATE_BYTES
-            } else {
-                MAX_DEVICE_STATE_BYTES
-            };
-            let bytes = closure
-                .read_object(&device.state, max_state_bytes)
-                .map_err(|error| format!("read checkpoint device {}: {error}", device.device_id))?;
-            if device.device_type == 2 {
-                let state = msb_krun::BlockDeviceState::decode(&bytes).map_err(|error| {
-                    format!(
-                        "decode checkpoint block device {}: {error}",
-                        device.device_id
-                    )
-                })?;
-                if state.pause_generation != pause_generation {
-                    return Err(format!(
-                        "block device {} does not belong to the checkpoint epoch",
-                        device.device_id
-                    ));
-                }
-                devices.push(PreparedDeviceRestore::Block {
-                    device_id: device.device_id.clone(),
-                    state,
-                });
-            } else {
-                let state = msb_krun::VirtioDeviceState::decode(&bytes).map_err(|error| {
-                    format!(
-                        "decode checkpoint virtio device {}: {error}",
-                        device.device_id
-                    )
-                })?;
-                if state.pause_generation != pause_generation || state.device_id != device.device_id
-                {
-                    return Err(format!(
-                        "virtio device {} does not belong to the checkpoint binding/epoch",
-                        device.device_id
-                    ));
-                }
-                devices.push(PreparedDeviceRestore::Virtio(state));
-            }
-        }
+        let devices = decode_devices(
+            &closure.checkpoint().devices,
+            pause_generation,
+            |id, limit| closure.read_object(id, limit).map_err(|e| e.to_string()),
+        )?;
         let devices_us = devices_started.elapsed().as_micros();
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
@@ -151,7 +159,8 @@ impl PreparedCheckpointRestore {
         Ok(Self {
             execution,
             devices,
-            memory: CheckpointMemoryRestore { closure },
+            memory: Some(CheckpointMemoryRestore { closure }),
+            local_memory: None,
             agent,
         })
     }
@@ -163,8 +172,14 @@ impl PreparedCheckpointRestore {
         cache_root: Option<PathBuf>,
     ) -> Result<RestoredAgentState, String> {
         vm.set_execution_restore(self.execution);
-        if let Some(root) = cache_root {
-            let closure = &self.memory.closure;
+        if let Some(backing) = self.local_memory {
+            vm.set_private_memory_backing(backing);
+        } else if let Some(root) = cache_root {
+            let closure = &self
+                .memory
+                .as_ref()
+                .expect("durable restore memory")
+                .closure;
             let cache = super::MemoryCache::open(root).map_err(|e| e.to_string())?;
             let cached = cache
                 .materialize(closure.memory(), &closure.checkpoint().memory, |id| {
@@ -191,7 +206,7 @@ impl PreparedCheckpointRestore {
                 .map_err(|e| e.to_string())?;
             vm.set_private_memory_backing(backing);
         } else {
-            vm.set_memory_restore(self.memory);
+            vm.set_memory_restore(self.memory.expect("durable restore memory"));
         }
         for device in self.devices {
             match device {
@@ -300,6 +315,56 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn decode_devices(
+    references: &[microsandbox_image::checkpoint::DeviceStateRef],
+    pause_generation: u64,
+    mut read: impl FnMut(&ObjectId, u64) -> Result<Vec<u8>, String>,
+) -> Result<Vec<PreparedDeviceRestore>, String> {
+    let mut devices = Vec::with_capacity(references.len());
+    for device in references {
+        let max_state_bytes = if device.device_type == TYPE_FS {
+            MAX_FS_DEVICE_STATE_BYTES
+        } else {
+            MAX_DEVICE_STATE_BYTES
+        };
+        let bytes = read(&device.state, max_state_bytes)
+            .map_err(|error| format!("read checkpoint device {}: {error}", device.device_id))?;
+        if device.device_type == 2 {
+            let state = msb_krun::BlockDeviceState::decode(&bytes).map_err(|error| {
+                format!(
+                    "decode checkpoint block device {}: {error}",
+                    device.device_id
+                )
+            })?;
+            if state.pause_generation != pause_generation {
+                return Err(format!(
+                    "block device {} does not belong to the checkpoint epoch",
+                    device.device_id
+                ));
+            }
+            devices.push(PreparedDeviceRestore::Block {
+                device_id: device.device_id.clone(),
+                state,
+            });
+        } else {
+            let state = msb_krun::VirtioDeviceState::decode(&bytes).map_err(|error| {
+                format!(
+                    "decode checkpoint virtio device {}: {error}",
+                    device.device_id
+                )
+            })?;
+            if state.pause_generation != pause_generation || state.device_id != device.device_id {
+                return Err(format!(
+                    "virtio device {} does not belong to the checkpoint binding/epoch",
+                    device.device_id
+                ));
+            }
+            devices.push(PreparedDeviceRestore::Virtio(state));
+        }
+    }
+    Ok(devices)
+}
 
 fn parse_restored_agent(closure: &CheckpointClosure) -> Result<RestoredAgentState, String> {
     let resource = closure

@@ -280,9 +280,6 @@ pub struct VmConfig {
     /// Guest transparent huge-page policy selected at boot.
     pub thp: microsandbox_types::TransparentHugePagePolicy,
 
-    /// Explicit construction-time memory representation.
-    pub memory_snapshot: microsandbox_types::MemorySnapshotMode,
-
     /// Protected memory cache resolved by the sandbox's owning local backend.
     pub memory_cache_dir: Option<PathBuf>,
 
@@ -2088,12 +2085,20 @@ fn build_vm(
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
     let restored_agent = if let Some(restore) = &config.vm.checkpoint_restore {
-        let prepared = crate::checkpoint::PreparedCheckpointRestore::open(
-            restore.closure.clone(),
-            &restore.checkpoint_root,
-        )
+        let prepared = if restore.local_branch {
+            crate::checkpoint::PreparedCheckpointRestore::open_local(
+                restore.closure.clone(),
+                &restore.checkpoint_id,
+            )
+        } else {
+            crate::checkpoint::PreparedCheckpointRestore::open(
+                restore.closure.clone(),
+                &restore.checkpoint_root,
+            )
+        }
         .map_err(|error| RuntimeError::Custom(format!("prepare checkpoint restore: {error}")))?;
-        let cache_root = (config.vm.memory_snapshot == microsandbox_types::MemorySnapshotMode::Cow)
+        let cache_root = restore
+            .forked
             .then(|| {
                 config.vm.memory_cache_dir.clone().ok_or_else(|| {
                     RuntimeError::Custom(
@@ -2112,9 +2117,6 @@ fn build_vm(
     };
 
     let bootstrap_frame = if restored_agent.is_none() {
-        if config.vm.memory_snapshot == microsandbox_types::MemorySnapshotMode::Cow {
-            vm.set_private_memory_boot(true);
-        }
         Some(encode_bootstrap_frame(&bootstrap)?)
     } else {
         None

@@ -110,6 +110,8 @@ pub(crate) async fn materialize_checkpoint_child_state(
 
     Ok(CheckpointChildMaterialization {
         restore: CheckpointRestoreConfig {
+            local_branch: false,
+            forked: false,
             closure: closure_destination.to_path_buf(),
             checkpoint_root: checkpoint_root.to_string(),
             checkpoint_id: checkpoint_id.to_string(),
@@ -447,6 +449,8 @@ mod tests {
         let checkpoint_root = ObjectId::from_bytes(&checkpoint_bytes).unwrap();
         std::fs::write(source.join("checkpoint.json"), checkpoint_bytes).unwrap();
         let restore = CheckpointRestoreConfig {
+            local_branch: false,
+            forked: false,
             closure: source.clone(),
             checkpoint_root: checkpoint_root.to_string(),
             checkpoint_id: checkpoint.checkpoint_id,

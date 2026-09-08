@@ -16,7 +16,8 @@ use microsandbox_image::checkpoint::{MemoryExtentContent, MemoryManifest, Object
 //--------------------------------------------------------------------------------------------------
 
 /// One native-aligned, contiguous guest address span in a flat cache file.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CachedMemoryRegion {
     /// Start of the guest physical span.
     pub guest_address: u64,
@@ -44,8 +45,8 @@ pub struct CachedMemory {
 
 /// Host-local, immutable memory cache. No entry is ever modified in place.
 pub struct MemoryCache {
-    root: PathBuf,
-    page_size: u64,
+    pub(super) root: PathBuf,
+    pub(super) page_size: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -55,17 +56,23 @@ pub struct MemoryCache {
 impl MemoryCache {
     /// Open a dedicated cache directory using this host's native mapping alignment.
     pub fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
+        Self::open_namespace(root.into(), "snapshots")
+    }
+
+    pub(super) fn open_namespace(root: PathBuf, namespace: &str) -> io::Result<Self> {
         #[cfg(unix)]
         {
             let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
             if page_size <= 0 {
                 return Err(io::Error::last_os_error());
             }
-            let root = root.into();
             std::fs::create_dir_all(&root)?;
             // Cache contents are guest RAM, not public image data. Restrict traversal even
             // when the caller's umask permits other local users to read ordinary cache files.
             use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+            let root = root.join(namespace);
+            std::fs::create_dir_all(&root)?;
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
             Ok(Self {
                 root,
@@ -74,7 +81,7 @@ impl MemoryCache {
         }
         #[cfg(not(unix))]
         {
-            let _ = root;
+            let _ = (root, namespace);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "private memory cache is not qualified on this backend",
@@ -271,31 +278,7 @@ impl MemoryCache {
     /// reader that opened the inode immediately before an eviction acquired its exclusive lock.
     pub fn evict(&self, identity: &ObjectId) -> io::Result<bool> {
         let path = self.entry_path(identity);
-        let file = match open_readonly(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        if !microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
-            return Ok(false);
-        }
-        // A competing evictor can have removed this same inode while we waited to acquire it.
-        // Do not unlink a new realization published at the old name in the meantime.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let opened = file.metadata()?;
-            let current = match std::fs::symlink_metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-                Err(error) => return Err(error),
-            };
-            if (opened.dev(), opened.ino()) != (current.dev(), current.ino()) {
-                return Ok(false);
-            }
-        }
-        std::fs::remove_file(path)?;
-        Ok(true)
+        evict_unpinned(&path)
     }
 
     fn entry_path(&self, identity: &ObjectId) -> PathBuf {
@@ -351,6 +334,35 @@ fn memory_regions(
     Ok(regions)
 }
 
+/// Both cache namespaces use the same inode/lock checks and never mutate mapped RAM.
+pub(super) fn evict_unpinned(path: &Path) -> io::Result<bool> {
+    let file = match open_readonly(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+        return Ok(false);
+    }
+    // A competing evictor can have removed this same inode while we waited to acquire it.
+    // Do not unlink a new realization published at the old name in the meantime.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let opened = file.metadata()?;
+        let current = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if (opened.dev(), opened.ino()) != (current.dev(), current.ino()) {
+            return Ok(false);
+        }
+    }
+    std::fs::remove_file(path)?;
+    Ok(true)
+}
+
 fn open_readonly(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -362,7 +374,7 @@ fn open_readonly(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
-fn open_pinned(path: &Path, length: u64) -> io::Result<Option<File>> {
+pub(super) fn open_pinned(path: &Path, length: u64) -> io::Result<Option<File>> {
     let file = match open_readonly(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -592,7 +604,7 @@ mod tests {
     fn payload_count(root: &Path) -> usize {
         // Build-lock inodes intentionally survive failed builders. Only RAM or staging entries
         // count as payloads; removing lock files would permit two independent flock owners.
-        std::fs::read_dir(root)
+        std::fs::read_dir(root.join("snapshots"))
             .unwrap()
             .filter(|entry| {
                 entry
@@ -634,7 +646,12 @@ mod tests {
             );
         });
         assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+        assert_eq!(
+            std::fs::read_dir(directory.path().join("snapshots"))
+                .unwrap()
+                .count(),
+            2
+        );
     }
 
     #[test]

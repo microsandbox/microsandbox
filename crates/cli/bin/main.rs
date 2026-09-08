@@ -110,6 +110,8 @@ enum Commands {
     Stop(stop::StopArgs),
     /// Suspend a resident sandbox without creating a snapshot.
     Pause(microsandbox_cli::commands::pause::PauseArgs),
+    /// Branch running execution into a new local CoW child without a durable full snapshot.
+    Branch(microsandbox_cli::commands::branch::BranchArgs),
     /// Resume a user-paused resident sandbox.
     Resume(microsandbox_cli::commands::pause::PauseArgs),
 
@@ -672,6 +674,7 @@ fn run_async_command_anyhow(
             Commands::Start(args) => start::run(args).await,
             Commands::Stop(args) => stop::run(args).await,
             Commands::Pause(args) => microsandbox_cli::commands::pause::run(args, false).await,
+            Commands::Branch(args) => microsandbox_cli::commands::branch::run(args).await,
             Commands::Resume(args) => microsandbox_cli::commands::pause::run(args, true).await,
             Commands::Restart(args) => restart::run(args).await,
             Commands::Ping(args) => ping::run(args).await,

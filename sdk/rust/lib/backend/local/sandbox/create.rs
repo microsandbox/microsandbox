@@ -153,6 +153,18 @@ impl LocalBackend {
         let db = self.db().await?;
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
         Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
+        // Hold the existing lifecycle lock across reservation, capture and spawn. Recheck
+        // under the lock so two creates cannot both own the same child staging directory.
+        let lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+            &self.config().run_dir(),
+            &config.spec.name,
+            std::time::Duration::from_secs(5),
+        )
+        .await?;
+        let mut reserved_config = config.clone();
+        reserved_config.replace_existing = false;
+        Self::prepare_create_target(db, &reserved_config, &sandbox_dir, &self.config().run_dir())
+            .await?;
         let mut child_stage_guard = None;
         // Preserve only the installed-snapshot source that existed on entry. Direct archive
         // materialization below installs its checkpoint closure directly into child staging, so
@@ -161,6 +173,16 @@ impl LocalBackend {
         let installed_checkpoint_restore = config.checkpoint_restore.take();
         let installed_file_sources = std::mem::take(&mut config.snapshot_root_layer_sources);
         let installed_file_virtual_size = config.snapshot_root_virtual_size.take();
+        let _branch_pin = if let Some(source) = config.branch_source.take() {
+            tokio::fs::create_dir(&sandbox_dir).await?;
+            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+            Some(
+                crate::sandbox::branch::capture_child(self, &mut config, &source, &sandbox_dir)
+                    .await?,
+            )
+        } else {
+            None
+        };
 
         // A direct archive restore streams its layer into the ordinary child
         // staging location before image resolution. The archive supplies the
@@ -259,6 +281,13 @@ impl LocalBackend {
                     config.snapshot_upper_layers = materialized.upper_layers;
                 }
             }
+        }
+        // Archive descriptors are resolved here, after the builder's initial validation.
+        // Do not let a disk archive turn an explicit CoW restore into a fresh boot.
+        if config.forked && config.checkpoint_restore.is_none() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "forked requires a full snapshot restore".into(),
+            ));
         }
         if !installed_file_sources.is_empty() {
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
@@ -598,7 +627,7 @@ impl LocalBackend {
             .as_ref()
             .map(|restore| restore.closure.clone());
         let created = self
-            .create_sandbox_inner(config, sandbox_id, mode, None)
+            .create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard))
             .await;
         if let Some(closure) = restore_closure
             && let Err(error) = remove_dir_if_exists(&closure)
