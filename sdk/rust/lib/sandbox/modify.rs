@@ -5,11 +5,11 @@ use std::sync::Arc;
 use microsandbox_types::{EnvVar, RootDisk, RootfsSource};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
-use crate::MicrosandboxResult;
 use crate::backend::Backend;
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
+use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::{SandboxConfig, SandboxStatus};
 
@@ -902,6 +902,31 @@ pub(crate) async fn control_checkpoint_create(
             .error
             .unwrap_or_else(|| "control response omitted checkpoint state".into())
     )))
+}
+
+/// Request disk-only capture without falling back to full-state capture or a stopped copy.
+pub(crate) async fn control_disk_checkpoint_create(
+    local: &crate::backend::LocalBackend,
+    name: &str,
+    checkpoint_id: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::DiskCheckpointControlState> {
+    let capabilities =
+        control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
+    if !capabilities
+        .capabilities
+        .is_some_and(|c| c.disk_checkpoint_create)
+    {
+        return Err(MicrosandboxError::unsupported(Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable("this runtime does not support live disk-only snapshots; recreate the sandbox with the updated runtime".into())));
+    }
+    let request =
+        microsandbox_runtime::control::ControlRequest::DiskCheckpointCreate { checkpoint_id };
+    let mut line = serde_json::to_string(&request)?;
+    line.push('\n');
+    let response = control_request_for(local, name, line).await?;
+    response.disk_checkpoint.ok_or_else(|| {
+        MicrosandboxError::Runtime("runtime omitted the disk-only capture result".into())
+    })
 }
 
 /// Send the value-bearing live secret batch to the sandbox process. The

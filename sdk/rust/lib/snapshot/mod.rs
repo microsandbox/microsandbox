@@ -95,8 +95,9 @@ impl Snapshot {
 
     /// Create an installed disk or full snapshot artifact.
     ///
-    /// Disk capture requires a stopped or crashed sandbox. A builder configured with
-    /// [`full`](SnapshotBuilder::full) captures a running sandbox's checkpoint closure.
+    /// Disk capture supports resident and stopped sources, briefly quiescing a running root
+    /// without capturing RAM. A user-paused source remains paused. A builder configured with
+    /// [`full`](SnapshotBuilder::full) also captures memory and execution state.
     /// Publication is atomic and the local index remains a rebuildable cache.
     pub async fn create(config: SnapshotConfig) -> MicrosandboxResult<Self> {
         let backend = crate::backend::default_backend();

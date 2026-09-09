@@ -356,7 +356,70 @@ impl CheckpointCoordinator {
         })
     }
 
-    /// Capture a same-epoch checkpoint while preserving the caller's prior execution state.
+    /// Seal the owned disk at a crash-consistent cut without capturing RAM or guest execution.
+    pub(crate) fn capture_disk(
+        &mut self,
+        vm: &msb_krun::VmControl,
+        checkpoint_id: &str,
+        user_pause: Option<&UserPause>,
+    ) -> Result<crate::control::DiskCheckpointControlState, super::disk::RootDiskRolloverError>
+    {
+        use super::disk::RootDiskRolloverError as Failure;
+        let started = Instant::now();
+        validate_checkpoint_id(checkpoint_id).map_err(Failure::pre_rebind)?;
+        if let Some(paused) = user_pause {
+            paused.validate(vm).map_err(Failure::pre_rebind)?;
+        }
+        let disk = self.root_disk.as_mut().ok_or_else(|| {
+            Failure::pre_rebind("disk-only capture requires an owned managed or flat root disk")
+        })?;
+        if disk.growth_pending() {
+            return Err(Failure::pre_rebind(
+                "complete pending root-disk growth before snapshotting",
+            ));
+        }
+        let path = self.root.join(checkpoint_id);
+        std::fs::create_dir(&path).map_err(Failure::pre_rebind)?;
+        let paused_at = Instant::now();
+        let pause = match user_pause
+            .map(|p| Ok(p.generation))
+            .unwrap_or_else(|| vm.pause())
+        {
+            Ok(pause) => pause,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&path);
+                return Err(Failure::pre_rebind(error));
+            }
+        };
+        // Only the root block worker is drained and switched. Rollover inspects its state,
+        // but no full CPU/device payload, RAM scan, guest handshake, or dirty-baseline update
+        // is needed. The result is a crash-consistent disk cut, not an execution checkpoint.
+        let result = disk.rollover(vm, &self.runtime, &path, pause.get());
+        if user_pause.is_none() && !result.as_ref().is_err_and(|e| e.keep_paused) {
+            vm.resume(pause).map_err(Failure::post_journal)?;
+        }
+        let pause_us = paused_at.elapsed().as_micros();
+        match result {
+            Ok(captured) => {
+                tracing::info!(target: "microsandbox_checkpoint_timing", operation = "capture_disk",
+                    checkpoint_id, source_already_paused = user_pause.is_some(), pause_us,
+                    total_us = started.elapsed().as_micros(), "disk-only checkpoint timing");
+                Ok(crate::control::DiskCheckpointControlState {
+                    checkpoint_id: checkpoint_id.into(),
+                    path,
+                    disk: captured.manifest,
+                })
+            }
+            Err(error) => {
+                // The runtime's forward journal owns any committed new head. Only discard the
+                // unreturned immutable closure, never source layers or its recovery journal.
+                let _ = std::fs::remove_dir_all(&path);
+                Err(error)
+            }
+        }
+    }
+
+    /// Capture a same-epoch full checkpoint while preserving prior execution state.
     pub(crate) fn capture(
         &mut self,
         vm: &msb_krun::VmControl,

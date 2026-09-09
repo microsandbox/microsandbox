@@ -817,7 +817,7 @@ func (h *SandboxHandle) Remove(ctx context.Context) error {
 	return RemoveSandbox(ctx, h.name)
 }
 
-// Snapshot captures this stopped sandbox under a bare name in the default
+// Snapshot captures this sandbox's disk under a bare name in the default
 // snapshots directory.
 func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error) {
 	info, err := ffi.SandboxHandleSnapshot(ctx, h.name, name)

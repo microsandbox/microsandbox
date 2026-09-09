@@ -42,6 +42,11 @@ pub const CONTROL_SOCKET_EXTENSION: &str = "control.sock";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Seal only the owned root disk; never capture guest RAM or execution state.
+    DiskCheckpointCreate {
+        /// Caller-selected safe capture identity.
+        checkpoint_id: String,
+    },
     /// Capture directly into a reserved child-owned local handoff directory.
     BranchCreate {
         /// Unique capture identity matching the child's reservation.
@@ -199,6 +204,9 @@ pub struct ControlResponse {
     /// failure such as an unsuccessful source resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<CheckpointControlState>,
+    /// Sealed disk-only capture, with no RAM or execution-state closure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_checkpoint: Option<DiskCheckpointControlState>,
 }
 
 /// Published checkpoint information returned by the runtime control executor.
@@ -216,6 +224,17 @@ pub struct CheckpointControlState {
     pub memory_logical_bytes: u64,
     /// Non-zero memory bytes written during this capture.
     pub memory_emitted_bytes: u64,
+}
+
+/// Immutable disk closure returned after a live root-head rollover.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiskCheckpointControlState {
+    /// Capture identity echoed from the request.
+    pub checkpoint_id: String,
+    /// Runtime-owned closure, independent of the source's new writable head.
+    pub path: PathBuf,
+    /// Complete base-to-head disk generation; contains no memory or device payloads.
+    pub disk: microsandbox_image::checkpoint::DiskGenerationManifest,
 }
 
 /// Verified capacity and measured phases of a completed online root growth.
@@ -263,6 +282,9 @@ pub struct ControlCapabilities {
     /// Same-epoch composite checkpoint capture is available.
     #[serde(default)]
     pub checkpoint_create: bool,
+    /// Disk-only live capture is available without full-state admission.
+    #[serde(default)]
+    pub disk_checkpoint_create: bool,
 }
 
 /// Host-confirmed resident suspension state.
@@ -616,6 +638,24 @@ mod tests {
     }
 
     #[test]
+    fn disk_only_capture_has_a_distinct_wire_operation() {
+        let request = ControlRequest::DiskCheckpointCreate {
+            checkpoint_id: "disk_test".into(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()["op"],
+            "disk_checkpoint_create"
+        );
+        assert!(
+            matches!(serde_json::from_str::<ControlRequest>(&json).unwrap(), ControlRequest::DiskCheckpointCreate { checkpoint_id } if checkpoint_id == "disk_test")
+        );
+        // An older runtime's capability response cannot accidentally opt into this operation.
+        let old: ControlCapabilities = serde_json::from_str(r#"{"cpu_resize":false,"memory_resize":false,"secrets_update":false,"checkpoint_create":true}"#).unwrap();
+        assert!(!old.disk_checkpoint_create);
+    }
+
+    #[test]
     fn capabilities_response_serializes_flags() {
         let response = ControlResponse {
             ok: true,
@@ -628,6 +668,7 @@ mod tests {
                 memory_resize: false,
                 secrets_update: true,
                 checkpoint_create: true,
+                disk_checkpoint_create: true,
             }),
             ..Default::default()
         };

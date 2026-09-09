@@ -132,6 +132,8 @@ Sources: [`crates/runtime/lib/control.rs`](crates/runtime/lib/control.rs) and [`
 
 Add operations and optional fields rather than redefining existing ones. Capability-gate behavior whose absence cannot be interpreted safely by older clients.
 
+Live disk-only snapshots use the distinct `disk_checkpoint_create` operation and capability. An absent capability is false: callers refuse before capture rather than silently capturing RAM or copying a writable disk. The runtime serializes the disk rollover with other control mutations and preserves a user's pause. This does not change the agent protocol or snapshot format; the result uses the existing file-state layer descriptor. Stopped disk capture retains its lifecycle lock and existing behavior.
+
 ## 5. Launcher-to-Runtime Process Protocol
 
 Starting a sandbox crosses a private process boundary. On Unix, launch JSON is passed through inherited descriptor 96, the parent watchdog uses descriptor 97, startup JSON uses descriptor 98, and the lifecycle lock uses descriptor 99. Windows uses a short-lived launch-config file and platform-specific startup plumbing. Detach acknowledgement bytes and graceful-shutdown signals are also part of this contract.

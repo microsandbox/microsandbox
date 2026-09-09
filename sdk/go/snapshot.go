@@ -17,7 +17,7 @@ type SnapshotCreateOptions struct {
 	// Snapshot name, resolved under the default snapshots directory
 	// (or under DestDir when set).
 	Name string
-	// Source sandbox to snapshot. Must be stopped. Required.
+	// Source sandbox to snapshot. Disk capture preserves running/paused state. Required.
 	FromSandbox string
 	// Parent directory to create the artifact in; empty = the default
 	// snapshots directory. The artifact lands at DestDir/<name>.

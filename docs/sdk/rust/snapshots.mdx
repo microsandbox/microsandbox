@@ -5,7 +5,7 @@ description: Rust SDK - Snapshot API reference
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create disk snapshots of stopped sandboxes and full checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+Create disk snapshots of running, paused, stopped, or crashed sandboxes, or full checkpoints of running and paused sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
 ## Disk maintenance and incremental export
 
@@ -69,7 +69,7 @@ let snap = Snapshot::builder("baseline")
 async fn create(config: SnapshotConfig) -> MicrosandboxResult<Snapshot>
 ```
 
-Create an installed snapshot artifact atomically, then best-effort update the rebuildable local index. Disk mode captures a stopped or crashed sandbox; full mode captures a running sandbox's checkpoint closure. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
+Create an installed snapshot artifact atomically, then best-effort update the rebuildable local index. Disk mode supports running, paused, stopped, and crashed sources; full mode includes memory and execution state from a running or paused source. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
 
 <p className="msb-label">Parameters</p>
 
@@ -736,7 +736,7 @@ Cold-boot only the disk state carried by a full snapshot. Chain after [`from_sna
 async fn snapshot(&self, name: &str) -> MicrosandboxResult<Snapshot>
 ```
 
-`SandboxHandle` method. Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). The sandbox must be stopped or crashed; running sandboxes are rejected with `SnapshotSandboxRunning`. Local handles only. To place the artifact elsewhere, use [`Snapshot::save()`](#snapshotsave) / [`Snapshot::load()`](#snapshotload) or move the self-contained artifact directory.
+`SandboxHandle` method. Snapshot this sandbox's disk under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). Live captures are crash-consistent and preserve the source's running/paused state. Local handles only. To place the artifact elsewhere, use [`Snapshot::save()`](#snapshotsave) / [`Snapshot::load()`](#snapshotload) or move the self-contained artifact directory.
 
 <p className="msb-label">Parameters</p>
 
@@ -794,7 +794,7 @@ Set the sandbox to capture. Required; [`build()`](#build) and [`create()`](#crea
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>source_sandbox</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Name of the source sandbox. Must be stopped or crashed, and rooted on an OCI image.</div>
+    <div className="msb-param-desc">Name of the OCI-rooted source sandbox. Disk capture also supports running and paused sources.</div>
   </div>
 </div>
 
@@ -912,7 +912,7 @@ Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via 
 |-------|------|-------------|
 | name | `String` | Bare snapshot name; always the artifact directory's basename |
 | dest_dir | `Option<PathBuf>` | Parent directory for the artifact; `None` = the default snapshots directory |
-| source_sandbox | `String` | Name of the source sandbox; must be stopped |
+| source_sandbox | `String` | Name of the source sandbox; disk capture preserves running/paused state |
 | labels | `Vec<(String, String)>` | User-supplied labels |
 | force | `bool` | Overwrite an existing artifact with the same name |
 | record_integrity | `bool` | Compute and record upper-layer integrity at creation |

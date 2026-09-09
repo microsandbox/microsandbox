@@ -20,7 +20,7 @@ pub struct SnapshotArgs {
 /// Snapshot subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SnapshotCommands {
-    /// Create a disk snapshot from a stopped sandbox or a full snapshot from a running or paused one.
+    /// Create a disk snapshot, or include memory and execution state with --full.
     Create(SnapshotCreateArgs),
 
     /// List indexed snapshots.
@@ -54,7 +54,7 @@ pub struct SnapshotCreateArgs {
     /// (or under `--dest-dir` when given).
     pub name: String,
 
-    /// Source sandbox name. Must be stopped (or crashed).
+    /// Source sandbox name. Disk capture also supports running and user-paused sources.
     #[arg(long, value_name = "SANDBOX")]
     pub from: String,
 

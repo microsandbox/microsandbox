@@ -278,7 +278,7 @@ impl JsSandboxHandle {
         crate::sandbox::spawn_log_stream_from_stream(stream).await
     }
 
-    /// Snapshot this (stopped) sandbox under a bare name.
+    /// Snapshot this sandbox's disk under a bare name, preserving its running/paused state.
     ///
     /// Resolves under `~/.microsandbox/snapshots/<name>/`. Move
     /// artifacts with `Snapshot.save`/`Snapshot.load`.

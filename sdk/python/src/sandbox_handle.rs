@@ -456,7 +456,7 @@ impl PySandboxHandle {
         })
     }
 
-    /// Snapshot this (stopped) sandbox under a bare name. Resolves
+    /// Snapshot this sandbox's disk under a bare name, preserving its running/paused state. Resolves
     /// under `~/.microsandbox/snapshots/<name>/`. Move artifacts with
     /// `Snapshot.save`/`Snapshot.load`.
     fn snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {

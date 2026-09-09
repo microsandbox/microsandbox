@@ -269,6 +269,7 @@ impl RuntimeControlExecutor {
                 | ControlRequest::CpuTarget { .. }
                 | ControlRequest::SecretsUpdate { .. }
                 | ControlRequest::CheckpointCreate { .. }
+                | ControlRequest::DiskCheckpointCreate { .. }
                 | ControlRequest::BranchCreate { .. }
                 | ControlRequest::DiskCompact { dry_run: false, .. }
                 | ControlRequest::Pause
@@ -280,6 +281,7 @@ impl RuntimeControlExecutor {
                 ControlRequest::Pause
                     | ControlRequest::Resume
                     | ControlRequest::CheckpointCreate { .. }
+                    | ControlRequest::DiskCheckpointCreate { .. }
                     | ControlRequest::BranchCreate { .. }
             );
         if mutation && state.lifecycle != RuntimeLifecycle::Running && !resident_operation {
@@ -290,6 +292,38 @@ impl RuntimeControlExecutor {
         }
 
         let response = match request {
+            ControlRequest::DiskCheckpointCreate { checkpoint_id } => {
+                state.lifecycle = RuntimeLifecycle::Quiescing;
+                match state.checkpoint.capture_disk(
+                    &self.vm,
+                    &checkpoint_id,
+                    state.user_pause.as_ref(),
+                ) {
+                    Ok(result) => {
+                        state.lifecycle = if state.user_pause.is_some() {
+                            RuntimeLifecycle::Quiesced
+                        } else {
+                            RuntimeLifecycle::Running
+                        };
+                        ControlResponse {
+                            ok: true,
+                            disk_checkpoint: Some(result),
+                            ..Default::default()
+                        }
+                    }
+                    Err(error) => {
+                        if error.keep_paused {
+                            state.user_pause = None;
+                        }
+                        state.lifecycle = if error.keep_paused || state.user_pause.is_some() {
+                            RuntimeLifecycle::Quiesced
+                        } else {
+                            RuntimeLifecycle::Running
+                        };
+                        control_error("disk_checkpoint_failed", error.to_string())
+                    }
+                }
+            }
             ControlRequest::Pause => {
                 if state.user_pause.is_none() {
                     self.resident_paused
@@ -516,6 +550,7 @@ impl RuntimeControlExecutor {
                     memory_resize: self.vm.memory_resize_supported(),
                     secrets_update: self.secrets_update_supported(),
                     checkpoint_create: true,
+                    disk_checkpoint_create: true,
                     branch_create: cfg!(any(unix, windows)),
                     disk_compact: true,
                     root_disk_grow: true,
@@ -539,6 +574,7 @@ impl RuntimeControlExecutor {
             ControlRequest::CpuState => cpu(self.vm.cpu_state()),
             ControlRequest::SecretsUpdate { changes } => self.handle_secrets_update(changes),
             ControlRequest::CheckpointCreate { .. }
+            | ControlRequest::DiskCheckpointCreate { .. }
             | ControlRequest::BranchCreate { .. }
             | ControlRequest::Pause
             | ControlRequest::Resume

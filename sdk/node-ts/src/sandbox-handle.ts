@@ -244,12 +244,12 @@ export class SandboxHandle {
   }
 
   /**
-   * Snapshot this (stopped) sandbox under a bare name. Resolves under
+   * Snapshot this sandbox's disk under a bare name. Resolves under
    * `~/.microsandbox/snapshots/<name>/`. For an explicit filesystem
    * destination, move the artifact with `Snapshot.save`/`Snapshot.load`.
    *
-   * The sandbox must be stopped (or crashed); running sandboxes are
-   * rejected with a `SnapshotSandboxRunning` error.
+   * Running and paused sources are supported. A live cut is crash-consistent
+   * and preserves the source's running/paused state.
    */
   async snapshot(name: string): Promise<Snapshot> {
     const raw = await withMappedErrors(() => this.inner.snapshot(name));

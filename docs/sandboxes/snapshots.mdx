@@ -9,7 +9,7 @@ icon: "code-branch"
 A snapshot is a portable artifact that can hold either a sandbox's writable disk state or a full checkpoint of a running sandbox. Managed and flat OCI roots are supported; the descriptor preserves the root layout so a flat `rootfs.raw` is never mistaken for a managed OverlayFS upper. Move it with `scp`, archive it as `.msnap`, or create a child sandbox from it.
 
 <Note>
-Disk snapshots capture stopped or crashed sandboxes. Full snapshots use `--full` and capture a running or user-paused sandbox. You do not need to pause it first; if you do, capture leaves it paused.
+Disk snapshots work with running, paused, stopped, or crashed sandboxes. A running disk capture briefly pauses the VM, seals its disk, and resumes it without copying RAM. Full snapshots use `--full` to include memory and execution state. A user-paused source stays paused in either mode.
 </Note>
 
 ## What gets captured
@@ -136,7 +136,7 @@ msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
 
 </CodeGroup>
 
-The default disk mode requires a stopped or crashed sandbox; running sandboxes are rejected. If the sandbox has previously produced a full snapshot, its writable state may already be a raw/qcow2 chain. Disk snapshotting preserves that complete chain, including writes made after the earlier full snapshot, and every restored child receives a fresh private writable head.
+The default disk mode captures only the owned managed or flat root disk. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Direct `--archive ./saved.msnap` capture works in either mode without installing a snapshot directory.
 
 ## Capture a running sandbox
 

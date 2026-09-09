@@ -1,4 +1,4 @@
-//! Snapshot creation from a stopped sandbox.
+//! Disk-only and full snapshot creation with source lifecycle preservation.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,6 +47,22 @@ struct SnapshotDiskSource {
 struct SnapshotDiskClosure {
     sources: Vec<SnapshotDiskSource>,
     virtual_size: u64,
+    /// A live capture owns immutable runtime staging until artifact publication completes.
+    capture_root: Option<PathBuf>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for SnapshotDiskClosure {
+    fn drop(&mut self) {
+        if let Some(path) = &self.capture_root
+            && let Err(error) = std::fs::remove_dir_all(path)
+        {
+            tracing::warn!(%error, "failed to remove consumed disk-only capture staging");
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -99,33 +115,39 @@ pub(super) async fn create_snapshot(
         .await;
     }
 
-    if matches!(
-        model.status,
-        SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
-    ) {
+    if model.status == SandboxStatus::Draining {
         return Err(MicrosandboxError::SnapshotSandboxRunning(
             source_sandbox.clone(),
         ));
     }
 
-    // Reuse the runtime's existing lifecycle ownership lock so start,
-    // replacement, and removal cannot race the upper copy.
-    let _lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
-        &local.config().run_dir(),
-        &source_sandbox,
-        std::time::Duration::from_secs(5),
-    )
-    .await?;
+    // Resident runtimes own the lifecycle lock and serialize the disk cut through control.
+    // Stopped copies acquire it here; the SDK never reads a live writable head.
+    let live = matches!(model.status, SandboxStatus::Running | SandboxStatus::Paused);
+    let _lifecycle_guard = if live {
+        None
+    } else {
+        Some(
+            crate::runtime::acquire_sandbox_lifecycle_guard(
+                &local.config().run_dir(),
+                &source_sandbox,
+                std::time::Duration::from_secs(5),
+            )
+            .await?,
+        )
+    };
     let current = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
         .one(local.db().await?.read())
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
     if current.id != model.id
-        || matches!(
-            current.status,
-            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
-        )
+        || current.status == SandboxStatus::Draining
+        || live
+            != matches!(
+                current.status,
+                SandboxStatus::Running | SandboxStatus::Paused
+            )
     {
         return Err(MicrosandboxError::SnapshotSandboxRunning(
             source_sandbox.clone(),
@@ -152,7 +174,15 @@ pub(super) async fn create_snapshot(
     }
 
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
-    let disk = snapshot_disk_closure(&sandbox_dir, &root_disk)?;
+    let disk = capture_disk_source(
+        local,
+        &sandbox_dir,
+        &source_sandbox,
+        current.id,
+        current.status,
+        &root_disk,
+    )
+    .await?;
 
     // Stage the artifact in a sibling directory, so a failed create never
     // leaves a partial artifact at the destination (which would poison
@@ -206,13 +236,13 @@ pub(super) async fn create_snapshot(
     let index_us = index_started.elapsed().as_micros();
     tracing::info!(
         target: "microsandbox_checkpoint_timing",
-        operation = "snapshot_create_installed_stopped",
+        operation = "snapshot_create_installed_disk",
         source_sandbox,
         total_us = total_started.elapsed().as_micros(),
         artifact_build_us,
         promote_us,
         index_us,
-        "stopped snapshot creation timing"
+        "disk snapshot creation timing"
     );
 
     Ok(Snapshot::from_parts(dest_dir, digest, manifest, labels))
@@ -313,7 +343,7 @@ async fn create_full_snapshot(
     ))
 }
 
-/// Capture directly from a stopped sandbox into an archive without creating
+/// Capture a disk or full snapshot directly into an archive without creating
 /// an installed artifact directory or index row.
 pub(super) async fn create_snapshot_archive(
     local: &LocalBackend,
@@ -380,28 +410,34 @@ pub(super) async fn create_snapshot_archive(
             captured.labels,
         ));
     }
-    if matches!(
-        model.status,
-        SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
-    ) {
+    if model.status == SandboxStatus::Draining {
         return Err(MicrosandboxError::SnapshotSandboxRunning(source_sandbox));
     }
-    let _lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
-        &local.config().run_dir(),
-        &source_sandbox,
-        std::time::Duration::from_secs(5),
-    )
-    .await?;
+    let live = matches!(model.status, SandboxStatus::Running | SandboxStatus::Paused);
+    let _lifecycle_guard = if live {
+        None
+    } else {
+        Some(
+            crate::runtime::acquire_sandbox_lifecycle_guard(
+                &local.config().run_dir(),
+                &source_sandbox,
+                std::time::Duration::from_secs(5),
+            )
+            .await?,
+        )
+    };
     let current = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
         .one(local.db().await?.read())
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
     if current.id != model.id
-        || matches!(
-            current.status,
-            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
-        )
+        || current.status == SandboxStatus::Draining
+        || live
+            != matches!(
+                current.status,
+                SandboxStatus::Running | SandboxStatus::Paused
+            )
     {
         return Err(MicrosandboxError::SnapshotSandboxRunning(source_sandbox));
     }
@@ -420,7 +456,15 @@ pub(super) async fn create_snapshot_archive(
         )));
     }
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
-    let disk = snapshot_disk_closure(&sandbox_dir, &root_disk)?;
+    let disk = capture_disk_source(
+        local,
+        &sandbox_dir,
+        &source_sandbox,
+        current.id,
+        current.status,
+        &root_disk,
+    )
+    .await?;
     let integrity_started = Instant::now();
     let integrities = vec![None; disk.sources.len()];
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
@@ -471,7 +515,7 @@ pub(super) async fn create_snapshot_archive(
     let archive_us = archive_started.elapsed().as_micros();
     tracing::info!(
         target: "microsandbox_checkpoint_timing",
-        operation = "snapshot_create_archive_stopped",
+        operation = "snapshot_create_archive_disk",
         source_sandbox,
         plain_tar,
         record_integrity,
@@ -479,7 +523,7 @@ pub(super) async fn create_snapshot_archive(
         total_us = total_started.elapsed().as_micros(),
         integrity_us,
         archive_us,
-        "direct stopped snapshot archive timing"
+        "direct disk snapshot archive timing"
     );
     Ok(SnapshotArchive::from_parts(
         out.to_path_buf(),
@@ -718,7 +762,7 @@ async fn build_artifact(
         payload_sync_us,
         integrity_us,
         descriptor_us,
-        "stopped snapshot artifact build timing"
+        "disk snapshot artifact build timing"
     );
 
     Ok((digest, manifest))
@@ -863,6 +907,90 @@ fn snapshot_root_disk(
     }
 }
 
+/// Resident runtimes return a sealed closure while retaining their lifecycle lock.
+/// Stopped callers own that lock themselves. Packaging never reads a live writable head.
+async fn capture_disk_source(
+    local: &LocalBackend,
+    sandbox_dir: &Path,
+    source: &str,
+    source_id: i32,
+    status: SandboxStatus,
+    root_disk: &SnapshotRootDisk,
+) -> MicrosandboxResult<SnapshotDiskClosure> {
+    if !matches!(status, SandboxStatus::Running | SandboxStatus::Paused) {
+        return snapshot_disk_closure(sandbox_dir, root_disk);
+    }
+    let id = format!("disk_{:032x}", rand::random::<u128>());
+    let captured =
+        crate::sandbox::control_disk_checkpoint_create(local, source, id.clone()).await?;
+    let expected_path = sandbox_dir.join("runtime").join("checkpoints").join(&id);
+    let expected_device = match root_disk {
+        SnapshotRootDisk::Flat => "vda",
+        SnapshotRootDisk::Managed => "vdb",
+        SnapshotRootDisk::Tmpfs { .. } => {
+            return Err(MicrosandboxError::InvalidConfig(
+                "tmpfs requires a full snapshot".into(),
+            ));
+        }
+    };
+    if captured.checkpoint_id != id
+        || captured.path != expected_path
+        || captured.disk.device_id != expected_device
+    {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "disk capture identity, path, or root device mismatch".into(),
+        ));
+    }
+    captured
+        .disk
+        .validate()
+        .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
+    let sources = captured
+        .disk
+        .layers
+        .iter()
+        .map(|layer| {
+            let format = match layer.format.as_str() {
+                "raw" => SnapshotFormat::Raw,
+                "qcow2" => SnapshotFormat::Qcow2,
+                other => {
+                    return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                        "unsupported live disk format {other}"
+                    )));
+                }
+            };
+            Ok(SnapshotDiskSource {
+                path: captured
+                    .path
+                    .join("layers")
+                    .join(format!("{}.{}", layer.layer_id, layer.format)),
+                format,
+            })
+        })
+        .collect::<MicrosandboxResult<Vec<_>>>()?;
+    let size = captured
+        .disk
+        .layers
+        .last()
+        .ok_or_else(|| MicrosandboxError::SnapshotIntegrity("empty disk capture".into()))?
+        .virtual_size;
+    let mut disk = validate_snapshot_disk_sources(sources, size)?;
+    disk.capture_root = Some(expected_path);
+    // A live runtime owns the lifecycle lock, not this SDK call. If the source was replaced
+    // between lookup and capture, never publish its disk under the original image/config.
+    let current = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(source))
+        .one(local.db().await?.read())
+        .await?;
+    if !current.is_some_and(|model| model.id == source_id) {
+        return Err(MicrosandboxError::Runtime(
+            "snapshot source was replaced during disk capture; retry with the current sandbox"
+                .into(),
+        ));
+    }
+    Ok(disk)
+}
+
 fn snapshot_disk_closure(
     sandbox_dir: &Path,
     root_disk: &SnapshotRootDisk,
@@ -957,6 +1085,7 @@ fn validate_snapshot_disk_sources(
     Ok(SnapshotDiskClosure {
         sources,
         virtual_size,
+        capture_root: None,
     })
 }
 
@@ -1313,6 +1442,7 @@ mod tests {
         let source = temp.path().join("source.ext4");
         std::fs::write(&source, b"snapshot payload").unwrap();
         let disk = SnapshotDiskClosure {
+            capture_root: None,
             sources: vec![SnapshotDiskSource {
                 path: source,
                 format: SnapshotFormat::Raw,
@@ -1370,6 +1500,7 @@ mod tests {
             .await
             .unwrap();
         let disk = SnapshotDiskClosure {
+            capture_root: None,
             sources: vec![
                 SnapshotDiskSource {
                     path: raw,

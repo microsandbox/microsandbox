@@ -42,7 +42,7 @@ pub struct PySnapshotHandle {
 
 #[pymethods]
 impl PySnapshot {
-    /// Create a disk snapshot from a stopped sandbox or a full snapshot from a running one.
+    /// Create a disk snapshot, or include memory and execution state with full=True.
     ///
     /// The artifact is created under `~/.microsandbox/snapshots/<name>/`,
     /// or under `dest_dir=` when given; move artifacts with `save`/`load`.

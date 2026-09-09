@@ -469,9 +469,9 @@ impl SandboxHandle {
     /// Snapshot this sandbox to a bare name under the default snapshots
     /// directory (`~/.microsandbox/snapshots/<name>/`).
     ///
-    /// The sandbox must be stopped (or crashed); running sandboxes are
-    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. **Local
-    /// handles only** — cloud snapshot semantics are deferred.
+    /// Captures disk only, including running and paused sources. A live cut is
+    /// crash-consistent and preserves the source's running/paused state.
+    /// **Local handles only** — cloud snapshot semantics are deferred.
     pub async fn snapshot(
         &self,
         name: &str,
