@@ -1131,6 +1131,10 @@ type NetworkConfig struct {
 	// TLS configures the transparent TLS interception proxy.
 	TLS *TLSConfig
 
+	// Strict requires hostname-based policy allows to use inspectable
+	// application authority.
+	Strict bool
+
 	// Ports makes sandbox TCP services reachable on localhost ports on the host.
 	Ports map[uint16]uint16
 

@@ -47,6 +47,7 @@ pub(crate) struct TlsProxy {
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
     network_policy: Arc<NetworkPolicy>,
+    strict: bool,
     proxy_connect: Arc<ProxyConnectState>,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     /// Pre-connected upstream; when `Some`, skips dialing `connect_target`.
@@ -74,6 +75,7 @@ impl TlsProxy {
         shared: Arc<SharedState>,
         tls_state: Arc<TlsState>,
         network_policy: Arc<NetworkPolicy>,
+        strict: bool,
         proxy_connect: Arc<ProxyConnectState>,
         outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     ) -> Self {
@@ -85,6 +87,7 @@ impl TlsProxy {
             shared,
             tls_state,
             network_policy,
+            strict,
             proxy_connect,
             outbound_proxy,
             upstream_stream: None,
@@ -141,6 +144,7 @@ impl TlsProxy {
             shared,
             tls_state,
             network_policy,
+            strict,
             proxy_connect,
             upstream_stream,
             outbound_proxy,
@@ -195,7 +199,27 @@ impl TlsProxy {
             return Ok(());
         }
 
-        if tls_state.should_bypass(&sni_name) {
+        let should_bypass = tls_state.should_bypass(&sni_name);
+        if strict
+            && should_bypass
+            && network_policy.allows_egress_via_hostname(
+                guest_dst,
+                Protocol::Tcp,
+                &shared,
+                HostnameSource::Sni(&sni_name),
+            )
+        {
+            tracing::debug!(
+                sni = %sni_name,
+                dst = %guest_dst,
+                "TLS bypass denied by strict hostname policy",
+            );
+            proxy_connect.mark_policy_denied();
+            shared.proxy_wake.wake();
+            return Ok(());
+        }
+
+        if should_bypass {
             tracing::debug!(sni = %sni_name, dst = %connect_dst, guest_dst = %guest_dst, "TLS bypass");
             bypass_relay(
                 connect_target,
