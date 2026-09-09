@@ -36,6 +36,7 @@ net = [
     "microsandbox/net",
     "dep:ipnetwork",
     "dep:thiserror",
+    "dep:zeroize",
 ]
 
 [dependencies]
@@ -60,6 +61,7 @@ microsandbox-network = { workspace = true, features = ["engine"], optional = tru
 microsandbox-protocol.workspace = true
 microsandbox-runtime = { workspace = true, features = ["runner"] }
 microsandbox-types.workspace = true
+microsandbox-types-macros.workspace = true
 microsandbox-utils.workspace = true
 rand.workspace = true
 regex = "1"
@@ -74,6 +76,7 @@ tempfile.workspace = true
 thiserror = { workspace = true, optional = true }
 tokio.workspace = true
 tracing.workspace = true
+zeroize = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]

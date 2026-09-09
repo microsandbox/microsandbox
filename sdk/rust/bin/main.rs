@@ -6,7 +6,7 @@ use std::{
 };
 
 use microsandbox::{
-    config::LocalConfig,
+    config::GlobalConfig,
     setup::{InstallOptions, ensure_runtime},
 };
 
@@ -21,7 +21,7 @@ fn main() -> ExitCode {
         .and_then(|runtime| {
             runtime
                 .block_on(ensure_runtime(
-                    &LocalConfig::default(),
+                    &GlobalConfig::default(),
                     InstallOptions::default(),
                 ))
                 .map_err(std::io::Error::other)

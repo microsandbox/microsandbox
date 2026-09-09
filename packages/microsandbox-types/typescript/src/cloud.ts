@@ -394,6 +394,10 @@ export type CloudNetworkSpec = {
    */
   secrets: CloudSecretsConfig | null;
   /**
+   * Require hostname-based policy allows to use inspectable application authority.
+   */
+  strict: boolean;
+  /**
    * Max concurrent guest connections.
    */
   max_connections: number | null;

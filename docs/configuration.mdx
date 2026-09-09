@@ -115,7 +115,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `ssh` | [reference](#ssh) | Host-side SSH session defaults |
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
 | `active_profile` | `null` | Default [backend profile](#profiles) name |
-| `profiles` | [reference](#profiles) | Named [backend profiles](/getting-started/backends) |
+| `profiles` | [reference](#profiles) | Named [backend profiles](/operations/backends#profiles) |
 
 ## `deployment_profile`
 
@@ -148,13 +148,13 @@ The parser also accepts the internal wire spellings `single_tenant` and `multi_t
 
 <Tooltip tip="Configures files used by the local runtime; these paths do not apply to microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-All path fields are optional. When `null`, they resolve relative to `home`.
+All path fields are optional. Runtime pairs resolve from environment overrides, SDK-provided paths, explicit configuration, then the install under `home`. Other unset paths resolve relative to `home`; runtime resolution does not search `PATH` or debug build directories.
 
 On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings can use escaped backslashes such as `"C:\\Users\\you\\.microsandbox\\lib\\libkrunfw.dll"` or forward slashes such as `"C:/Users/you/.microsandbox/lib/libkrunfw.dll"`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `msb` | `{home}/bin/msb` | `msb` binary. Set this together with `libkrunfw`; runtime resolution returns a matched pair or fails closed. |
+| `msb` | `{home}/bin/msb` | `msb` binary. Configure a matching `libkrunfw` path; when omitted, resolution can use a library adjacent to this executable. An incomplete pair fails closed. |
 | `libkrunfw` | `{home}/lib/libkrunfw` | Matching libkrunfw shared library (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows). Set this together with `msb`. |
 | `agentd` | embedded when enabled | Linux guest Agentd executable. Normal release builds embed it in `msb`; custom builds without `embed-binaries` must provide this field or `MSB_AGENTD_PATH`. The environment variable takes precedence, and an explicitly configured missing or invalid file fails closed. |
 | `cache` | `{home}/cache` | Image layer cache |
@@ -207,7 +207,9 @@ Explicit CLI or SDK options override this value. The setting is resolved when a 
 
 Defaults applied to sandboxes unless overridden per-sandbox.
 
-Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. Microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
+Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
+
+`SandboxBuilder::new()` and `Sandbox::builder()` apply this base automatically. Rust applications can use [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) to add sparse per-sandbox values, giving the precedence order built-in defaults < `config.json` < per-sandbox patch.
 
 For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Optimization](/sandboxes/optimization).
 
@@ -218,7 +220,7 @@ For workload effects, host requirements, filesystem expectations, and verificati
 | `cpu_placement` | `"inherit"` | Host vCPU placement: `inherit`, `auto`, `spread`, or `compact` |
 | `placement_profile` | `null` | Name of a host-defined entry in `runtime.placement_profiles` |
 | `thp` | `"madvise"` | Guest transparent huge-page policy: `always`, `madvise`, or `never` |
-| `oci` | [reference](#sandbox_defaultsoci) | Defaults for OCI-rooted sandboxes |
+| `oci` | [reference](#sandbox_defaults-oci) | Defaults for OCI-rooted sandboxes |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
 | `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
@@ -353,7 +355,7 @@ When pulling from a registry, microsandbox resolves credentials in this order:
 
 ## `profiles`
 
-Named backend profiles keyed by profile name; `active_profile` selects the default. How profiles participate in backend selection, including the full resolution order, is documented in [Backends](/getting-started/backends).
+Named backend profiles keyed by profile name; `active_profile` selects the default. How profiles participate in backend selection, including the full resolution order, is documented in [Backends](/operations/backends).
 
 | Field | Default | Description |
 |-------|---------|-------------|

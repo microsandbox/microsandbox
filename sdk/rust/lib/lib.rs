@@ -73,25 +73,25 @@ pub use sandbox::ssh::{
 };
 #[cfg(feature = "local")]
 pub use sandbox::{
-    ChangeKind, ConfigPlannedChange, FilesystemConfigPatch, InitConfigPatch, ModificationConflict,
-    ModificationDisposition, ModificationPolicy, ModificationWarning, PlannedChange,
-    ResourceConfigPatch, ResourceConvergenceState, ResourceKind, ResourceResizeStatus,
-    RuntimeConfigPatch, SandboxConfigPatch, SandboxImagePatch, SandboxMetricsReport,
-    SandboxMetricsState, SandboxModificationBuilder, SandboxModificationPatch,
-    SandboxModificationPlan, ScriptConfigPatch, SecretChangeKind, SecretModificationPatch,
+    ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
+    ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
+    ResourceResizeStatus, SandboxMetricsReport, SandboxMetricsState, SandboxModificationBuilder,
+    SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind, SecretModificationPatch,
     SecretPatchBuilder, SecretPlannedChange, SecretSource, all_sandbox_metrics,
     all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
 };
 #[cfg(feature = "net")]
 pub use sandbox::{
-    DnsConfigPatch, HostPattern, Nameserver, NetworkAction, NetworkConfigPatch, NetworkPolicy,
-    NetworkPolicyConfigPatch, NetworkProfile, NetworkRule, PublishedPort, SecretConfigPatch,
-    SecretEntryConfigPatch, SecretSubstitution, SecretViolationAction, TlsConfigPatch,
+    DnsConfigPatch, HostPattern, InterfaceOverridesPatch, Nameserver, NetworkAction, NetworkPolicy,
+    NetworkProfile, NetworkRateLimiterConfigPatch, NetworkRule, OutboundProxy, PublishedPort,
+    SecretSubstitution, SecretViolationAction, SecretsConfigPatch, Socks5Credentials,
+    TlsConfigPatch,
 };
 pub use sandbox::{
-    ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, Sandbox, SandboxConfig,
-    SandboxListBuilder, SandboxMetrics, SandboxPage, SandboxPingResult, SandboxTouchResult,
-    validate_sandbox_name,
+    ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpecPatch, Sandbox,
+    SandboxConfig, SandboxConfigPatch, SandboxListBuilder, SandboxMetrics, SandboxPage,
+    SandboxPingResult, SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch,
+    SandboxTouchResult, VsockSpecPatch, validate_sandbox_name,
 };
 #[cfg(feature = "local")]
 pub use snapshot::{

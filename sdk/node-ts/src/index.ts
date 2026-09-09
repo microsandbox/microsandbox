@@ -18,6 +18,8 @@ export {
   withDefaultBackend,
 } from "./runtime.js";
 export type { BackendInfo, DefaultBackend } from "./runtime.js";
+export { SecretSource } from "./network-config.js";
+export type { OutboundProxy } from "./network-config.js";
 export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution
@@ -60,7 +62,11 @@ export type {
   SecretModifySpec,
   SecretPlannedChange,
 } from "./modify.js";
-export { SandboxHandle } from "./sandbox-handle.js";
+export {
+  SandboxHandle,
+  type DestroyOptions,
+  type RestartOptions,
+} from "./sandbox-handle.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
 
 // SSH
@@ -354,6 +360,9 @@ export const DnsBuilder = napi.DnsBuilder;
 export const TlsBuilder = napi.TlsBuilder;
 export const SecretBuilder = napi.SecretBuilder;
 export const NetworkBuilder = napi.NetworkBuilder;
+export const OutboundProxyBuilder = napi.OutboundProxyBuilder;
+export const Socks4ProxyBuilder = napi.Socks4ProxyBuilder;
+export const Socks5ProxyBuilder = napi.Socks5ProxyBuilder;
 export const MountBuilder = napi.MountBuilder;
 export const PatchBuilder = napi.PatchBuilder;
 export const RegistryConfigBuilder = napi.RegistryConfigBuilder;
@@ -365,10 +374,16 @@ export const InitOptionsBuilder = napi.InitOptionsBuilder;
 export const AttachOptionsBuilder = napi.AttachOptionsBuilder;
 import type {
   NapiNetworkPolicyBuilder,
+  NapiOutboundProxyBuilder,
   NapiRootDiskBuilder,
   NapiRuleBuilder,
   NapiRuleDestinationBuilder,
+  NapiSocks4ProxyBuilder,
+  NapiSocks5ProxyBuilder,
 } from "./internal/napi.js";
+export type OutboundProxyBuilder = NapiOutboundProxyBuilder;
+export type Socks4ProxyBuilder = NapiSocks4ProxyBuilder;
+export type Socks5ProxyBuilder = NapiSocks5ProxyBuilder;
 export const NetworkPolicyBuilder = napi.NetworkPolicyBuilder;
 export type NetworkPolicyBuilder = NapiNetworkPolicyBuilder;
 export const RuleBuilder = napi.RuleBuilder;
@@ -432,6 +447,8 @@ export {
   SandboxFsOpsError,
   SandboxAlreadyExistsError,
   SandboxNotFoundError,
+  SandboxNotRunningError,
+  SandboxReplacedError,
   SandboxStillRunningError,
   TerminalError,
   UnsupportedOperationError,

@@ -506,6 +506,8 @@ export declare class NetworkBuilder {
   secretViolationAction(action: string): this
   /** Set the maximum number of concurrent connections. */
   maxConnections(max: number): this
+  /** Require hostname-based policy allows to use inspectable application authority. */
+  strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
   ipv4Pool(pool: string): this
   /** Set the IPv6 pool used for per-sandbox /64 guest prefixes. */
@@ -585,6 +587,16 @@ export declare class NetworkRateLimiterBuilder {
   ingress(configure: (arg: RateLimiterBuilder) => RateLimiterBuilder): this
 }
 export type JsNetworkRateLimiterBuilder = NetworkRateLimiterBuilder
+
+/** Selects the protocol for an outbound proxy. */
+export declare class OutboundProxyBuilder {
+  constructor()
+  /** Select a SOCKS4 proxy at `address`. */
+  socks4(address: string): Socks4ProxyBuilder
+  /** Select a SOCKS5 proxy at `address`. */
+  socks5(address: string): Socks5ProxyBuilder
+}
+export type JsOutboundProxyBuilder = OutboundProxyBuilder
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
@@ -908,8 +920,10 @@ export declare class Sandbox {
   get backendKind(): string
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): Promise<string>
+  /** Stable backend-assigned identity for this persisted sandbox. */
+  get id(): string
   /** Whether this handle owns the sandbox lifecycle (attached mode). */
-  get ownsLifecycle(): Promise<boolean>
+  get ownsLifecycle(): boolean
   /**
    * Get the full configuration this sandbox was created with
    * (image, cpus, memory, env, mounts, etc.) as a JSON string.
@@ -998,6 +1012,12 @@ export declare class Sandbox {
   drain(): Promise<void>
   /** Request graceful drain without waiting for observed exit. */
   requestDrain(): Promise<void>
+  /** Wait until this exact sandbox reaches the requested status. */
+  waitForStatus(status: string): Promise<JsSandboxHandle>
+  /** Stop and start this exact sandbox. */
+  restart(options?: SandboxRestartOptions | undefined | null): Promise<Sandbox>
+  /** Stop and remove this exact sandbox. */
+  destroy(options?: SandboxDestroyOptions | undefined | null): Promise<void>
   /** Wait until the sandbox is observed in a terminal non-running state. */
   waitUntilStopped(): Promise<SandboxStopResult>
   /** Wait for the sandbox process to exit. */
@@ -1170,6 +1190,8 @@ export declare class SandboxBuilder {
   disableNetwork(): this
   /** Configure networking via a callback. */
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
+  /** Configure the single proxy used for outbound sandbox connections. */
+  proxy(configure: (arg: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder): this
   /** Publish a TCP port from host -> guest. */
   port(hostPort: number, guestPort: number): this
   /** Publish a TCP port from host -> guest on a specific host bind address. */
@@ -1236,6 +1258,13 @@ export declare class SandboxBuilder {
    */
   create(): Promise<Sandbox>
   /**
+   * Connect to the persisted sandbox with this name, or create it.
+   *
+   * # Safety
+   * Same justification as `create`.
+   */
+  connectOrCreate(): Promise<Sandbox>
+  /**
    * Create the sandbox with image-pull progress reporting. Returns
    * a `PullProgressStream` of per-layer download/materialization
    * events. The actual `Sandbox` is awaited via `.awaitSandbox()`
@@ -1292,7 +1321,9 @@ export type JsSandboxFsOps = SandboxFsOps
 export declare class SandboxHandle {
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): string
-  /** Status at time of query: "running", "stopped", "crashed", or "draining". */
+  /** Stable backend-assigned identity for this persisted sandbox. */
+  get id(): string
+  /** Status at time of query. */
   get status(): string
   /** Backend retained by this handle (`"local"` or `"cloud"`). */
   get backendKind(): string
@@ -1331,6 +1362,8 @@ export declare class SandboxHandle {
   startDetached(): Promise<Sandbox>
   /** Connect to an already-running sandbox (no lifecycle ownership). */
   connect(): Promise<Sandbox>
+  /** Connect when running, or start the same persisted sandbox when stopped. */
+  connectOrStart(detached?: boolean | undefined | null): Promise<Sandbox>
   /**
    * Connect with an explicit timeout in milliseconds.
    *
@@ -1363,6 +1396,12 @@ export declare class SandboxHandle {
   killWithTimeout(timeoutMs: number): Promise<void>
   /** Request graceful drain without waiting for completion. */
   requestDrain(): Promise<void>
+  /** Wait until this exact sandbox reaches the requested status. */
+  waitForStatus(status: string): Promise<SandboxHandle>
+  /** Stop and start this exact sandbox. */
+  restart(options?: SandboxRestartOptions | undefined | null): Promise<Sandbox>
+  /** Stop and remove this exact sandbox. */
+  destroy(options?: SandboxDestroyOptions | undefined | null): Promise<void>
   /** Wait until the sandbox is observed in a terminal non-running state. */
   waitUntilStopped(): Promise<SandboxStopResult>
   /** Remove the sandbox from the database. */
@@ -1567,6 +1606,20 @@ export declare class SnapshotHandle {
   remove(opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
 }
 export type JsSnapshotHandle = SnapshotHandle
+
+/** Builds a SOCKS4 outbound proxy. */
+export declare class Socks4ProxyBuilder {
+  /** Set the optional user ID sent during the SOCKS4 handshake. */
+  userId(userId: string): this
+}
+export type JsSocks4ProxyBuilder = Socks4ProxyBuilder
+
+/** Builds a SOCKS5 outbound proxy. */
+export declare class Socks5ProxyBuilder {
+  /** Set username authentication and a host-side password source. */
+  credentials(username: string, password: SecretSourceInput): this
+}
+export type JsSocks5ProxyBuilder = Socks5ProxyBuilder
 
 /** Native in-process SSH client session. */
 export declare class SshClient {
@@ -1884,7 +1937,10 @@ export declare function imageRemove(reference: string, force?: boolean | undefin
  */
 export declare function imageSave(references: Array<string>, outputPath: string, format?: string | undefined | null): Promise<void>
 
-/** Download and install msb + libkrunfw to ~/.microsandbox/. */
+/**
+ * Download and install msb + libkrunfw under non-empty $MSB_HOME, or
+ * ~/.microsandbox/ when the override is unset or empty.
+ */
 export declare function install(): Promise<void>
 
 /** Check if msb and libkrunfw are installed and available. */
@@ -2137,6 +2193,12 @@ export interface Rlimit {
   hard: number
 }
 
+/** Options for `destroy`. */
+export interface SandboxDestroyOptions {
+  force?: boolean
+  timeoutMs?: number
+}
+
 /** Options for one paginated sandbox list request. */
 export interface SandboxListOptions {
   cursor?: string
@@ -2193,6 +2255,13 @@ export interface SandboxModifyOptions {
 export interface SandboxPingResult {
   name: string
   latencyMs: number
+}
+
+/** Options for `restart`. */
+export interface SandboxRestartOptions {
+  force?: boolean
+  timeoutMs?: number
+  detached?: boolean
 }
 
 /** Result of observing a sandbox in a terminal state. */
@@ -2267,6 +2336,14 @@ export interface SecretModifySpec {
   store?: string
   placeholder?: string
   allowedHosts?: Array<string>
+}
+
+/** Host-side source for secret material. */
+export interface SecretSourceInput {
+  /** Source kind. Currently only `env` is supported for proxy credentials. */
+  kind: string
+  /** Host environment variable name. */
+  var: string
 }
 
 /** Injection sites for a secret value. */

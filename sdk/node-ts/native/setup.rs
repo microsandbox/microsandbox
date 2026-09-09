@@ -60,7 +60,7 @@ impl JsSetup {
 
     #[napi]
     pub async fn install(&self) -> Result<()> {
-        let config = microsandbox::config::LocalConfig {
+        let config = microsandbox::config::GlobalConfig {
             home: self.base_dir.clone(),
             ..Default::default()
         };
@@ -86,14 +86,15 @@ impl JsSetup {
 /// Check if msb and libkrunfw are installed and available.
 #[napi]
 pub fn is_installed() -> bool {
-    microsandbox::setup::is_runtime_installed(&microsandbox::config::LocalConfig::default())
+    microsandbox::setup::is_runtime_installed(&microsandbox::config::GlobalConfig::default())
 }
 
-/// Download and install msb + libkrunfw to ~/.microsandbox/.
+/// Download and install msb + libkrunfw under non-empty $MSB_HOME, or
+/// ~/.microsandbox/ when the override is unset or empty.
 #[napi]
 pub async fn install() -> Result<()> {
     microsandbox::setup::install_runtime(
-        &microsandbox::config::LocalConfig::default(),
+        &microsandbox::config::GlobalConfig::default(),
         Default::default(),
     )
     .await

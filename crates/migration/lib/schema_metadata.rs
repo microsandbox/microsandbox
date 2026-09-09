@@ -45,6 +45,8 @@ pub const SANDBOX_LABEL_REBUILD_MIGRATION_ID: &str = "m20260810_000001_rebuild_s
 
 /// Migration that permits several managed vCPUs to share one host logical processor.
 pub const SHARED_CPU_ALLOCATION_MIGRATION_ID: &str = "m20260813_000001_share_cpu_allocations";
+/// Migration that adds recyclable network address-pool slot leases.
+pub const SANDBOX_NETWORK_SLOT_MIGRATION_ID: &str = "m20260818_000001_sandbox_network_slot";
 
 /// Migration that prevents old binaries from discarding persisted mount ownership.
 pub const MOUNT_OWNER_CONFIG_MIGRATION_ID: &str = "m20260824_000001_mount_owner_config";
@@ -241,6 +243,18 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: false,
         summary: "remove the compatibility marker after confirming no persisted mount ownership",
     },
+    MigrationMetadata {
+        // This backdated migration first shipped in v0.6.16. Keep it after
+        // the v0.6.15 mount-owner marker so released databases stay prefixes.
+        id: SANDBOX_NETWORK_SLOT_MIGRATION_ID,
+        // The column is deliberately left in place on rollback (SQLite has
+        // no DROP COLUMN on every supported version); `up` probes for it so a
+        // re-upgrade after this rollback succeeds.
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "retain the compatible sandbox network slot column",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -328,6 +342,7 @@ mod tests {
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
             MOUNT_OWNER_CONFIG_MIGRATION_ID,
+            SANDBOX_NETWORK_SLOT_MIGRATION_ID,
             SHARED_CPU_ALLOCATION_MIGRATION_ID,
             SANDBOX_LABEL_REBUILD_MIGRATION_ID,
             MEMORY_ALLOCATION_NODES_MIGRATION_ID,
@@ -359,6 +374,16 @@ mod tests {
             .map(|metadata| metadata.id)
             .chain(["m20990101_000001_future"]);
         assert!(canonical_applied_prefix(with_unknown).is_none());
+    }
+
+    #[test]
+    fn released_v0_6_15_migrations_remain_a_prefix() {
+        let applied: Vec<_> = migration_ids()
+            .take_while(|id| *id != SANDBOX_NETWORK_SLOT_MIGRATION_ID)
+            .collect();
+
+        assert_eq!(applied.last(), Some(&MOUNT_OWNER_CONFIG_MIGRATION_ID));
+        assert!(canonical_applied_prefix(applied).is_some());
     }
 
     #[test]

@@ -859,7 +859,7 @@ async fn install_update_release(
     let bin_dir = base_dir.join(microsandbox_utils::BIN_SUBDIR);
     let lib_dir = base_dir.join(microsandbox_utils::LIB_SUBDIR);
     let spinner = ui::Spinner::start("Updating", &format!("to {display_version}"));
-    let config = microsandbox::config::LocalConfig {
+    let config = microsandbox::config::GlobalConfig {
         home: Some(base_dir.to_path_buf()),
         ..Default::default()
     };
@@ -1350,7 +1350,7 @@ async fn prepare_windows_update_recovery(
 
     let result = async {
         let bundle_digest = fetch_release_bundle_digest(target_version).await?;
-        let config = microsandbox::config::LocalConfig {
+        let config = microsandbox::config::GlobalConfig {
             home: Some(staged_dir.clone()),
             ..Default::default()
         };
@@ -2286,7 +2286,7 @@ async fn prepare_downgrade_operation(
     let staged_target = stage_directory.join("target");
 
     let stage_result = async {
-        let config = microsandbox::config::LocalConfig {
+        let config = microsandbox::config::GlobalConfig {
             home: Some(staged_target.clone()),
             ..Default::default()
         };
@@ -3495,9 +3495,42 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // The newest owner-compatibility marker has no schema objects of its
-        // own. With no persisted sandboxes, its preflight permits rollback and
-        // removes only the migration record.
+        // The backdated network-slot migration was released after the
+        // owner-compatibility marker, so it is the first migration rolled back.
+        // It leaves its compatible SQLite column and constraints in place, but
+        // removes the migration record.
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::SANDBOX_NETWORK_SLOT_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "network slot migration should be rolled back"
+        );
+
+        let columns = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "PRAGMA table_info(sandbox)",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            columns
+                .iter()
+                .any(|row| row.try_get_by_index::<String>(1).unwrap() == "network_slot"),
+            "network slot column should remain compatible after rollback"
+        );
+
+        // The owner-compatibility marker has no schema objects of its own. With
+        // no persisted sandboxes, its preflight permits rollback and removes
+        // only the migration record.
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let rows = db

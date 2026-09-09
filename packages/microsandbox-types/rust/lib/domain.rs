@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
+use microsandbox_types_macros::ConfigPatch;
 use serde::{Deserialize, Serialize};
 use typed_path::{Utf8Component, Utf8UnixComponent, Utf8UnixPath};
 use zeroize::Zeroizing;
@@ -543,7 +544,7 @@ pub enum Patch {
 /// Complete network specification for a sandbox.
 ///
 /// Common, backend-visible fields are typed directly. Rich local-engine subdocuments such as policy, DNS, TLS, secrets, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -553,6 +554,7 @@ pub struct NetworkSpec {
 
     /// Guest interface overrides for the local network engine.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[config_patch(nested)]
     pub interface: Option<InterfaceOverrides>,
 
     /// Host-to-guest port mappings.
@@ -564,14 +566,20 @@ pub struct NetworkSpec {
 
     /// DNS interception and filtering subdocument.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[config_patch(nested)]
     pub dns: Option<DnsConfig>,
 
     /// TLS interception subdocument.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[config_patch(nested)]
     pub tls: Option<TlsConfig>,
+
+    /// Require hostname-based policy allows to use inspectable application authority.
+    pub strict: bool,
 
     /// Secret substitution subdocument.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[config_patch(nested)]
     pub secrets: Option<SecretsConfig>,
 
     /// Max concurrent guest connections.
@@ -579,10 +587,57 @@ pub struct NetworkSpec {
 
     /// Local network rate limits. Missing means unlimited in both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[config_patch(nested)]
     pub rate_limiter: Option<NetworkRateLimiterConfig>,
 
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
+
+    /// Proxy used for outbound sandbox connections and supported datagram flows.
+    ///
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbound_proxy: Option<OutboundProxy>,
+}
+
+/// Proxy configuration for outbound sandbox connections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "protocol", rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum OutboundProxy {
+    /// A SOCKS4 proxy at the given `IP:port` address.
+    Socks4 {
+        /// Proxy socket address.
+        address: String,
+        /// Optional user ID sent during the SOCKS4 handshake.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
+    },
+
+    /// A SOCKS5 proxy at the given `IP:port` address.
+    Socks5 {
+        /// Proxy socket address.
+        address: String,
+        /// Optional username/password authentication credentials.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credentials: Option<Socks5Credentials>,
+    },
+}
+
+/// Environment-backed username/password credentials for a SOCKS5 proxy.
+///
+/// This durable configuration contains only the host-side password source.
+/// The resolved password is carried by the private launch contract instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Socks5Credentials {
+    /// SOCKS5 authentication username.
+    pub username: String,
+
+    /// Host-side source for the SOCKS5 authentication password.
+    pub password: SecretSource,
 }
 
 /// A published port mapping between host and guest.
@@ -624,7 +679,7 @@ pub enum PortProtocol {
 //--------------------------------------------------------------------------------------------------
 
 /// Host services exposed to a sandbox through virtio-vsock.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -699,7 +754,7 @@ pub struct HandoffInit {
 //--------------------------------------------------------------------------------------------------
 
 /// Sandbox lifecycle policy.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxPolicy {
@@ -771,7 +826,8 @@ pub struct SnapshotSpec {
 /// Backend-neutral sandbox task description.
 ///
 /// This is the durable contract for fields that are already shared across backends. Local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch stays outside this type.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(name = SandboxConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -784,15 +840,19 @@ pub struct SandboxSpec {
     pub image: RootfsSource,
 
     /// CPU and memory resources.
+    #[config_patch(nested)]
     pub resources: SandboxResources,
 
     /// Guest runtime options.
+    #[config_patch(nested)]
     pub runtime: SandboxRuntimeOptions,
 
     /// Environment variables visible to commands in the sandbox.
+    #[config_patch(merge_with = merge_env_vars)]
     pub env: Vec<EnvVar>,
 
     /// User-defined labels attached to the sandbox.
+    #[config_patch(merge)]
     pub labels: BTreeMap<String, String>,
 
     /// Sandbox-wide resource limits inherited by guest processes.
@@ -805,10 +865,12 @@ pub struct SandboxSpec {
     pub patches: Vec<Patch>,
 
     /// Network specification.
+    #[config_patch(nested)]
     pub network: NetworkSpec,
 
     /// Local host services exposed through virtio-vsock.
     #[serde(default, skip_serializing_if = "VsockSpec::is_empty")]
+    #[config_patch(nested)]
     pub vsock: VsockSpec,
 
     /// Hand off PID 1 to a guest init binary after agentd setup.
@@ -828,11 +890,12 @@ pub struct SandboxSpec {
     pub deployment_profile: DeploymentProfile,
 
     /// Sandbox lifecycle policy.
+    #[config_patch(nested)]
     pub lifecycle: SandboxPolicy,
 }
 
 /// CPU and memory resources for a sandbox.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxResources {
@@ -937,7 +1000,7 @@ pub enum TransparentHugePagePolicy {
 }
 
 /// Guest runtime options for a sandbox.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -949,6 +1012,7 @@ pub struct SandboxRuntimeOptions {
     pub shell: Option<String>,
 
     /// Named scripts available inside the guest.
+    #[config_patch(merge)]
     pub scripts: BTreeMap<String, String>,
 
     /// Image entrypoint override.
@@ -1640,10 +1704,12 @@ impl Default for NetworkSpec {
             policy: None,
             dns: None,
             tls: None,
+            strict: false,
             secrets: None,
             max_connections: None,
             rate_limiter: None,
             trust_host_cas: false,
+            outbound_proxy: None,
         }
     }
 }
@@ -2011,6 +2077,27 @@ fn decode_mount_options(options: Option<MountOptions>, readonly: bool) -> MountO
     })
 }
 
+fn merge_env_vars(base: &mut Vec<EnvVar>, higher: Vec<EnvVar>) {
+    for value in higher {
+        match base.iter_mut().find(|current| current.key == value.key) {
+            Some(current) => *current = value,
+            None => base.push(value),
+        }
+    }
+}
+
+fn merge_secret_entries(base: &mut Vec<SecretEntry>, higher: Vec<SecretEntry>) {
+    for value in higher {
+        match base
+            .iter_mut()
+            .find(|current| current.env_var == value.env_var)
+        {
+            Some(current) => *current = value,
+            None => base.push(value),
+        }
+    }
+}
+
 /// Default stat-virtualization policy (`Strict`) for a deserialized volume mount.
 pub(crate) fn default_strict() -> StatVirtualization {
     StatVirtualization::Strict
@@ -2030,12 +2117,13 @@ pub const MAX_SECRET_PLACEHOLDER_BYTES: usize = 1024;
 /// engine substitutes the real `value` into outbound requests bound for an
 /// allowed host (and blocks/forwards per [`SecretViolationAction`] otherwise). Carried
 /// in [`NetworkSpec::secrets`](NetworkSpec).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SecretsConfig {
     /// List of secrets to inject.
     #[serde(default)]
+    #[config_patch(merge_with = merge_secret_entries)]
     pub secrets: Vec<SecretEntry>,
 
     /// Default action when a placeholder leaks to a disallowed host.
@@ -2379,7 +2467,7 @@ fn validate_placeholder(placeholder: &str, secret_index: usize) -> Result<(), Se
 /// The local network engine terminates TCP at its in-process stack, so TLS MITM
 /// is handled by proxy tasks — these fields configure which ports/domains are
 /// intercepted and how the interception CA is sourced.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TlsConfig {
@@ -2677,7 +2765,7 @@ fn action_deny() -> Action {
 //--------------------------------------------------------------------------------------------------
 
 /// DNS interception and filtering settings. Carried in [`NetworkSpec::dns`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -2704,7 +2792,7 @@ impl Default for DnsConfig {
 /// Optional guest interface overrides. Unset fields are derived from the
 /// sandbox slot by the local network engine. Carried in
 /// [`NetworkSpec::interface`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -2755,7 +2843,7 @@ pub enum NetworkRateLimitDirection {
 }
 
 /// Egress and ingress rate limits for a local sandbox network.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]

@@ -7,12 +7,15 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use httlib_hpack::{Decoder as HpackDecoder, Encoder as HpackEncoder};
 use percent_encoding::percent_decode;
 
+use super::config::SecretsConfigExt;
 use crate::netstack::shared::SharedState;
+use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{
     HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretEntry, SecretSubstitution,
     SecretViolationAction, SecretsConfig,
@@ -97,8 +100,8 @@ pub struct SecretsHandler {
     /// chunk should be parsed as a request start (headers) or treated as a
     /// continuation of the current request's body.
     http_state: HttpState,
-    /// SNI to require in HTTP/1 `Host` headers for DNS-pinned intercepted TLS.
-    http_sni: Option<String>,
+    /// Authority validator for HTTP/1 `Host` and HTTP/2 `:authority` headers.
+    http_authority: Option<HttpAuthorityValidator>,
     /// Current HTTP/1 request metadata while processing body continuations.
     http1_request_summary: Option<RequestSummary>,
     /// Buffered HTTP bytes while waiting for complete headers or a complete
@@ -192,6 +195,22 @@ enum ChunkedPhase {
 struct SecretHostIdentity<'a> {
     guest_ip: IpAddr,
     shared: &'a SharedState,
+}
+
+/// Authority rule applied to inspected HTTP metadata.
+#[derive(Clone)]
+enum HttpAuthorityValidator {
+    /// Require every HTTP authority-bearing field to match this TLS SNI.
+    Sni(String),
+    /// Require every HTTP authority-bearing field to be allowed by egress policy.
+    Policy {
+        guest_dst: SocketAddr,
+        network_policy: Arc<NetworkPolicy>,
+        shared: Arc<SharedState>,
+        /// Secret eligibility and passthrough are connection-scoped. Keep their
+        /// proven host identity even when network policy also permits another host.
+        secret_host: Option<String>,
+    },
 }
 
 /// Parsed HTTP/1 request metadata needed for validation and framing.
@@ -506,7 +525,7 @@ impl SecretsHandler {
     /// `tls_intercepted` indicates whether this is a MITM connection
     /// (true) or a bypass/plain connection (false).
     pub fn new(config: &SecretsConfig, sni: &str, tls_intercepted: bool) -> Self {
-        Self::new_inner(config, sni, tls_intercepted, None, false, false)
+        Self::new_inner(config, sni, tls_intercepted, None, None, false)
     }
 
     /// Create a handler for a TLS-intercepted connection.
@@ -524,7 +543,7 @@ impl SecretsHandler {
             sni,
             true,
             Some(SecretHostIdentity { guest_ip, shared }),
-            true,
+            Some(HttpAuthorityValidator::Sni(sni.to_string())),
             false,
         )
     }
@@ -534,7 +553,14 @@ impl SecretsHandler {
     /// The SNI is authoritative: the proxy already verified it against the
     /// CONNECT authority, so no DNS-cache pin is required.
     pub(crate) fn new_tls_intercepted_via_connect(config: &SecretsConfig, sni: &str) -> Self {
-        Self::new_inner(config, sni, true, None, true, false)
+        Self::new_inner(
+            config,
+            sni,
+            true,
+            None,
+            Some(HttpAuthorityValidator::Sni(sni.to_string())),
+            false,
+        )
     }
 
     /// Create a handler for a plain-HTTP (non-TLS) connection.
@@ -552,7 +578,34 @@ impl SecretsHandler {
             host,
             false,
             Some(SecretHostIdentity { guest_ip, shared }),
-            true,
+            Some(HttpAuthorityValidator::Sni(host.to_string())),
+            false,
+        )
+    }
+
+    /// Create a plain-HTTP handler that enforces egress policy for each HTTP authority.
+    pub(crate) fn new_plain_http_policy(
+        config: &SecretsConfig,
+        host: &str,
+        guest_dst: SocketAddr,
+        network_policy: Arc<NetworkPolicy>,
+        shared: Arc<SharedState>,
+    ) -> Self {
+        let identity = (!host.is_empty()).then_some(SecretHostIdentity {
+            guest_ip: guest_dst.ip(),
+            shared: shared.as_ref(),
+        });
+        Self::new_inner(
+            config,
+            host,
+            false,
+            identity,
+            Some(HttpAuthorityValidator::Policy {
+                guest_dst,
+                network_policy,
+                shared: shared.clone(),
+                secret_host: config.has_host_scoped_secrets().then(|| host.to_string()),
+            }),
             false,
         )
     }
@@ -567,7 +620,7 @@ impl SecretsHandler {
             .iter()
             .any(|secret| secret.allowed_hosts.iter().any(|h| *h != HostPattern::Any));
 
-        Self::new_inner(config, "", false, None, false, host_scoped)
+        Self::new_inner(config, "", false, None, None, host_scoped)
     }
 
     /// Handler for HTTP metadata that must never receive substituted secrets.
@@ -576,7 +629,7 @@ impl SecretsHandler {
     /// treated as violations according to their configured action unless a
     /// passthrough policy explicitly allows forwarding the placeholder.
     pub(crate) fn new_plain_http_untrusted_metadata(config: &SecretsConfig) -> Self {
-        Self::new_inner(config, "", false, None, false, true)
+        Self::new_inner(config, "", false, None, None, true)
     }
 
     fn new_inner(
@@ -584,7 +637,7 @@ impl SecretsHandler {
         sni: &str,
         tls_intercepted: bool,
         identity: Option<SecretHostIdentity<'_>>,
-        enforce_http_authority: bool,
+        http_authority: Option<HttpAuthorityValidator>,
         force_ineligible: bool,
     ) -> Self {
         let mut eligible_for_substitution = Vec::new();
@@ -679,7 +732,7 @@ impl SecretsHandler {
             placeholder_limit_exceeded,
             prev_tail: Vec::new(),
             http_state: HttpState::AwaitingHeaders,
-            http_sni: enforce_http_authority.then(|| sni.to_string()),
+            http_authority,
             http1_request_summary: None,
             http_pending: Vec::new(),
             unsupported_body_tail: Vec::new(),
@@ -825,19 +878,10 @@ impl SecretsHandler {
         let (body_bytes, spillover) = if boundary.is_some() {
             let header_text = String::from_utf8_lossy(header_bytes);
             let request_summary = http1_request_summary(header_text.as_ref());
-            if let Some(sni) = self.http_sni.as_deref()
+            if let Some(validator) = self.http_authority.as_ref()
                 && let Some(metadata) = parse_http_request_metadata(header_bytes)?
-                && (metadata.host_headers.len() != 1
-                    || !metadata
-                        .host_headers
-                        .iter()
-                        .all(|host| authority_matches_sni(host, sni))
-                    || metadata
-                        .target_authority
-                        .as_deref()
-                        .is_some_and(|authority| !authority_matches_sni(authority, sni)))
             {
-                return Err(SecretViolationAction::Block);
+                validate_http1_authority(&metadata, validator)?;
             }
 
             let transfer_encoding = parse_transfer_encoding(header_text.as_ref())?;
@@ -1276,7 +1320,7 @@ impl SecretsHandler {
 
     /// Returns true if this connection needs no secret substitution or violation detection.
     pub fn is_empty(&self) -> bool {
-        self.http_sni.is_none()
+        self.http_authority.is_none()
             && self.http_pending.is_empty()
             && self.unsupported_body_tail.is_empty()
             && self.http1_request_summary.is_none()
@@ -1862,8 +1906,8 @@ impl Http2State {
             return Err(SecretViolationAction::Block);
         }
 
-        if let Some(sni) = handler.http_sni.as_deref() {
-            validate_http2_authority(&headers, sni, is_initial_request)?;
+        if let Some(validator) = handler.http_authority.as_ref() {
+            validate_http2_authority(&headers, validator, is_initial_request)?;
         }
 
         let detection_bytes = http2_header_detection_bytes(&headers);
@@ -2089,9 +2133,28 @@ fn append_http2_frame(
     Ok(())
 }
 
+fn validate_http1_authority(
+    metadata: &HttpRequestMetadata,
+    validator: &HttpAuthorityValidator,
+) -> Result<(), SecretViolationAction> {
+    if metadata.host_headers.len() != 1 {
+        return Err(SecretViolationAction::Block);
+    }
+
+    for authority in metadata
+        .host_headers
+        .iter()
+        .chain(metadata.target_authority.iter())
+    {
+        validate_authority(authority, validator)?;
+    }
+
+    Ok(())
+}
+
 fn validate_http2_authority(
     headers: &[(Vec<u8>, Vec<u8>)],
-    sni: &str,
+    validator: &HttpAuthorityValidator,
     require_authority: bool,
 ) -> Result<(), SecretViolationAction> {
     let mut authority_count = 0usize;
@@ -2100,14 +2163,10 @@ fn validate_http2_authority(
         if name.eq_ignore_ascii_case(b":authority") {
             authority_count += 1;
             let authority = String::from_utf8_lossy(value);
-            if !authority_matches_sni(authority.as_ref(), sni) {
-                return Err(SecretViolationAction::Block);
-            }
+            validate_authority(authority.as_ref(), validator)?;
         } else if name.eq_ignore_ascii_case(b"host") {
             let host = String::from_utf8_lossy(value);
-            if !authority_matches_sni(host.as_ref(), sni) {
-                return Err(SecretViolationAction::Block);
-            }
+            validate_authority(host.as_ref(), validator)?;
         }
     }
 
@@ -2116,6 +2175,48 @@ fn validate_http2_authority(
     }
 
     Ok(())
+}
+
+fn validate_authority(
+    authority: &str,
+    validator: &HttpAuthorityValidator,
+) -> Result<(), SecretViolationAction> {
+    match validator {
+        HttpAuthorityValidator::Sni(sni) => authority_matches_sni(authority, sni)
+            .then_some(())
+            .ok_or(SecretViolationAction::Block),
+        HttpAuthorityValidator::Policy {
+            guest_dst,
+            network_policy,
+            shared,
+            secret_host,
+        } => {
+            // A network allow does not authorize using a secret selected for a
+            // different host (including placeholder passthrough exemptions).
+            if secret_host
+                .as_ref()
+                .is_some_and(|host| !authority_matches_sni(authority, host))
+            {
+                return Err(SecretViolationAction::Block);
+            }
+            let Some(hostname) = authority_hostname(authority) else {
+                return Err(SecretViolationAction::Block);
+            };
+            let hostname = hostname.to_ascii_lowercase();
+            let authority_dst = SocketAddr::new(guest_dst.ip(), guest_dst.port());
+            match network_policy.evaluate_egress_with_source(
+                authority_dst,
+                Protocol::Tcp,
+                shared,
+                HostnameSource::Sni(&hostname),
+            ) {
+                EgressEvaluation::Allow => Ok(()),
+                EgressEvaluation::Deny | EgressEvaluation::DeferUntilHostname => {
+                    Err(SecretViolationAction::Block)
+                }
+            }
+        }
+    }
 }
 
 fn http2_header_detection_bytes(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
@@ -3255,6 +3356,99 @@ mod tests {
             query: false,
             body: false,
         }
+    }
+
+    fn plain_http_policy_handler(config: &SecretsConfig) -> SecretsHandler {
+        let ip = Ipv4Addr::new(203, 0, 113, 10);
+        let shared = Arc::new(SharedState::new(16));
+        cache_host(&shared, "a.example", ip);
+        cache_host(&shared, "b.example", ip);
+        SecretsHandler::new_plain_http_policy(
+            config,
+            "a.example",
+            SocketAddr::new(IpAddr::V4(ip), 80),
+            Arc::new(NetworkPolicy::allow_all()),
+            shared,
+        )
+    }
+
+    #[test]
+    fn plain_http_policy_keeps_secret_identity_across_allowed_host_switch() {
+        let mut secret = make_secret("$KEY", "real-secret", "a.example");
+        secret.require_tls_identity = false;
+        let config = make_config(vec![secret]);
+        let mut handler = plain_http_policy_handler(&config);
+        let first = handler
+            .substitute(b"GET /one HTTP/1.1\r\nHost: a.example\r\nAuth: $KEY\r\n\r\n")
+            .unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("Auth: real-secret"));
+
+        // Both hosts resolve to the same IP and are network-allowed, but only A
+        // is permitted to receive this secret. The second request must not leak it.
+        assert_eq!(
+            handler
+                .substitute(b"GET /two HTTP/1.1\r\nHost: b.example\r\nAuth: $KEY\r\n\r\n",)
+                .unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn plain_http_policy_keeps_passthrough_identity_across_host_switch() {
+        let mut secret = make_secret("$KEY", "real-secret", "secret.example");
+        secret.passthrough_hosts = vec![HostPattern::Exact("a.example".into())];
+        let config = make_config(vec![secret]);
+        let mut handler = plain_http_policy_handler(&config);
+        let first = b"GET /one HTTP/1.1\r\nHost: a.example\r\nAuth: $KEY\r\n\r\n";
+        assert_eq!(handler.substitute(first).unwrap().as_ref(), first);
+        assert_eq!(
+            handler
+                .substitute(b"GET /two HTTP/1.1\r\nHost: b.example\r\nAuth: $KEY\r\n\r\n",)
+                .unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn plain_http_policy_preserves_secret_free_host_switches() {
+        let mut handler = plain_http_policy_handler(&SecretsConfig::default());
+        let pipeline = b"GET /one HTTP/1.1\r\nHost: a.example\r\n\r\nGET /two HTTP/1.1\r\nHost: b.example\r\n\r\n";
+        assert_eq!(handler.substitute(pipeline).unwrap().as_ref(), pipeline);
+    }
+
+    #[test]
+    fn plain_http_policy_preserves_host_agnostic_secret_switches() {
+        let mut secret = make_secret("$KEY", "real-secret", "a.example");
+        secret.allowed_hosts = vec![HostPattern::Any];
+        secret.require_tls_identity = false;
+        let config = make_config(vec![secret]);
+        let mut handler = plain_http_policy_handler(&config);
+        let second = handler
+            .substitute(b"GET / HTTP/1.1\r\nHost: b.example\r\nAuth: $KEY\r\n\r\n")
+            .unwrap();
+        assert!(String::from_utf8_lossy(&second).contains("Auth: real-secret"));
+    }
+
+    #[test]
+    fn plain_http_policy_keeps_secret_identity_for_http2_authority() {
+        let mut secret = make_secret("$KEY", "real-secret", "a.example");
+        secret.require_tls_identity = false;
+        let config = make_config(vec![secret]);
+        let mut handler = plain_http_policy_handler(&config);
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"http"),
+                (b":authority", b"b.example"),
+                (b":path", b"/"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            SecretViolationAction::Block
+        );
     }
 
     fn split_http_body(data: &[u8]) -> (&[u8], &[u8]) {

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use microsandbox_types::TransparentHugePagePolicy;
 
 #[cfg(feature = "net")]
-use microsandbox_network::config::NetworkConfig;
+use microsandbox_network::ResolvedNetworkConfig;
 #[cfg(feature = "net")]
 use microsandbox_types::DeploymentProfile;
 
@@ -147,6 +147,10 @@ pub struct LaunchConfig {
     /// Additional virtio-fs mounts as `tag:host_path[:opts]`.
     pub mounts: Vec<String>,
 
+    /// Isolated host-file mounts handled by the single-file backend.
+    #[serde(default)]
+    pub file_mounts: Vec<FileMountConfig>,
+
     /// Disk-image volume mounts as `id:host_path:format[:ro]`.
     pub disks: Vec<String>,
 
@@ -162,9 +166,9 @@ pub struct LaunchConfig {
     /// Arguments to pass to the executable.
     pub exec_args: Vec<String>,
 
-    /// Network configuration. Present only when the `net` feature is on.
+    /// Network launch configuration. Present only when the `net` feature is on.
     #[cfg(feature = "net")]
-    pub network: Option<NetworkConfig>,
+    pub network: Option<ResolvedNetworkConfig>,
 
     /// Host-runtime isolation profile enforced by backend implementations.
     #[cfg(feature = "net")]
@@ -173,7 +177,7 @@ pub struct LaunchConfig {
 
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
-    pub sandbox_slot: u64,
+    pub sandbox_slot: u16,
 
     /// Host Unix sockets exposed through virtio-vsock.
     #[serde(default)]
@@ -233,4 +237,59 @@ pub struct RootfsConfig {
     /// root disks so the runner attaches with the right format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upper_format: Option<String>,
+}
+
+/// Host-side configuration for one isolated file mount.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileMountConfig {
+    /// `tag:host_path[:opts]` specification parsed by the runtime.
+    pub mount: String,
+
+    /// Filename presented at the root of the synthetic virtio-fs share.
+    pub filename: String,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{FileMountConfig, LaunchConfig};
+
+    #[test]
+    fn isolated_file_mount_survives_the_client_runner_handoff() {
+        let config = LaunchConfig {
+            file_mounts: vec![FileMountConfig {
+                mount: "config:/host/secret.txt:ro,uid=1000,gid=1000".into(),
+                filename: "secret.txt".into(),
+            }],
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&config).unwrap();
+        let decoded: LaunchConfig = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.file_mounts[0].mount, config.file_mounts[0].mount);
+        assert_eq!(decoded.file_mounts[0].filename, "secret.txt");
+        assert!(decoded.mounts.is_empty());
+
+        // An omitted additive field must not turn an ordinary directory into a file mount.
+        let mut without_files = encoded;
+        without_files.as_object_mut().unwrap().remove("file_mounts");
+        let decoded: LaunchConfig = serde_json::from_value(without_files).unwrap();
+        assert!(decoded.file_mounts.is_empty());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_slot_handoff_rejects_out_of_range_values() {
+        let config = LaunchConfig {
+            sandbox_slot: u16::MAX,
+            ..Default::default()
+        };
+        let mut encoded = serde_json::to_value(&config).unwrap();
+        let decoded: LaunchConfig = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.sandbox_slot, u16::MAX);
+        encoded["sandbox_slot"] = serde_json::json!(u32::from(u16::MAX) + 1);
+        assert!(serde_json::from_value::<LaunchConfig>(encoded).is_err());
+    }
 }

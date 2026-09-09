@@ -20,15 +20,19 @@ use microsandbox_db::entity::run as run_entity;
 #[cfg(unix)]
 use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle, DynFileSystem};
 use microsandbox_filesystem::{
-    HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
+    HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs, StatVirtualization,
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
+#[cfg(feature = "net")]
+use microsandbox_network::{ResolvedNetworkConfig, network::SmoltcpNetwork};
 use microsandbox_protocol::{
     bootstrap::{BootstrapBlockRoot, GuestBootstrap},
     codec,
     message::{Message, MessageType},
 };
 use microsandbox_types::CpuPlacement;
+#[cfg(feature = "net")]
+use microsandbox_types::DeploymentProfile;
 #[cfg(windows)]
 use microsandbox_vsock::WindowsNamedPipePortBackend;
 #[cfg(unix)]
@@ -43,6 +47,7 @@ use crate::bootstrap_fs::AgentBootstrapFs;
 use crate::console::AgentConsolePipeBridge;
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
 use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
+use crate::launch::FileMountConfig;
 #[cfg(unix)]
 pub use crate::launch::LIFECYCLE_LOCK_FD;
 pub use crate::launch::{
@@ -332,6 +337,9 @@ pub struct VmConfig {
     /// Additional mounts as `tag:host_path[:opts]` strings.
     pub mounts: Vec<String>,
 
+    /// Isolated host-file mounts backed by synthetic one-entry filesystems.
+    pub file_mounts: Vec<FileMountConfig>,
+
     /// Disk-image volume mounts attached as extra virtio-blk devices.
     pub disks: Vec<DiskMountSpec>,
 
@@ -354,17 +362,17 @@ pub struct VmConfig {
     /// Arguments to the executable.
     pub exec_args: Vec<String>,
 
-    /// Network configuration for the smoltcp in-process stack.
+    /// Fully resolved network configuration for the smoltcp in-process stack.
     #[cfg(feature = "net")]
-    pub network: microsandbox_network::config::NetworkConfig,
+    pub network: ResolvedNetworkConfig,
 
     /// Host-runtime isolation profile enforced by the network backend.
     #[cfg(feature = "net")]
-    pub deployment_profile: microsandbox_types::DeploymentProfile,
+    pub deployment_profile: DeploymentProfile,
 
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
-    pub sandbox_slot: u64,
+    pub sandbox_slot: u16,
 }
 
 /// JSON structure written to stdout on startup.
@@ -817,6 +825,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                     .col_expr(
                         sandbox_entity::Column::ActiveConfig,
                         Expr::value(Option::<String>::None),
+                    )
+                    .col_expr(
+                        sandbox_entity::Column::NetworkSlot,
+                        Expr::value(Option::<u16>::None),
                     )
                     .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                     .filter(sandbox_entity::Column::Id.eq(exit_sandbox_id))
@@ -1634,7 +1646,45 @@ fn build_vm(
         builder = builder.fs(move |fs| fs.tag(&runtime_tag).custom(Box::new(backend)));
     }
 
-    // Additional mounts.
+    // Isolated file mounts. Each backend exposes a synthetic root containing
+    // only the selected file, so remounting the tag cannot reveal host siblings.
+    for file_mount in &vm.file_mounts {
+        let parsed = parse_mount_spec(&file_mount.mount)
+            .map_err(|e| RuntimeError::Custom(format!("file mount {:?}: {e}", file_mount.mount)))?;
+        let tag = parsed.tag;
+        let host_path = PathBuf::from(&parsed.host_path);
+        let override_owner = match (parsed.override_uid, parsed.override_gid) {
+            (Some(uid), Some(gid)) => Some((uid, gid)),
+            _ => None,
+        };
+        #[cfg(unix)]
+        let mount_bind_identity_map = bind_identity_map_for_mount(
+            &mut bind_identity_map,
+            parsed.stat_virtualization,
+            override_owner,
+        );
+        let cfg = PassthroughConfig {
+            stat_virtualization: parsed.stat_virtualization,
+            host_permissions: parsed.host_permissions,
+            readonly: parsed.readonly,
+            quota_bytes: parsed.quota_bytes,
+            #[cfg(unix)]
+            bind_identity_map: mount_bind_identity_map,
+            #[cfg(windows)]
+            default_owner: override_owner,
+            ..Default::default()
+        };
+        let backend = SingleFileFs::new(host_path.clone(), file_mount.filename.clone(), cfg)
+            .map_err(|e| {
+                RuntimeError::Custom(format!(
+                    "file mount {tag}: failed to open host file {}: {e}",
+                    host_path.display()
+                ))
+            })?;
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
+    }
+
+    // Additional directory mounts.
     for mount_spec in &vm.mounts {
         let parsed = parse_mount_spec(mount_spec)
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
@@ -1744,7 +1794,7 @@ fn build_vm(
     #[cfg(unix)]
     if !vm.vsock.is_empty() {
         #[cfg(feature = "net")]
-        if vm.deployment_profile == microsandbox_types::DeploymentProfile::MultiTenant {
+        if vm.deployment_profile == DeploymentProfile::MultiTenant {
             return Err(RuntimeError::Custom(
                 "host vsock routes are disabled for multi-tenant deployments".to_string(),
             ));
@@ -1798,7 +1848,7 @@ fn build_vm(
     #[cfg(windows)]
     if !vm.vsock.is_empty() {
         #[cfg(feature = "net")]
-        if vm.deployment_profile == microsandbox_types::DeploymentProfile::MultiTenant {
+        if vm.deployment_profile == DeploymentProfile::MultiTenant {
             return Err(RuntimeError::Custom(
                 "host vsock routes are disabled for multi-tenant deployments".to_string(),
             ));
@@ -1832,26 +1882,24 @@ fn build_vm(
 
     // Network.
     #[cfg(feature = "net")]
-    if vm.network.enabled {
+    if vm.network.config().enabled {
         let _ = rustls::crypto::ring::default_provider().install_default();
         vm.network
+            .config()
             .secrets
             .validate()
             .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
-        let rate_limiters = to_krun_network_rate_limiters(&vm.network);
+        let rate_limiters = to_krun_network_rate_limiters(vm.network.config());
 
-        let mut network = microsandbox_network::network::SmoltcpNetwork::new_with_profile(
-            vm.network.clone(),
-            vm.sandbox_slot,
-            vm.deployment_profile,
-        )
-        .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
+        let mut network =
+            SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot, vm.deployment_profile)
+                .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
         network_termination_handle = Some(network.termination_handle());
         network_metrics_handle = Some(network.metrics_handle());
         // Only sandboxes that booted with secrets can be live-reconfigured:
         // new placeholders cannot be introduced into a running guest, so a
         // secret-free boot never needs the secrets side of the control socket.
-        if !vm.network.secrets.secrets.is_empty() {
+        if !vm.network.config().secrets.secrets.is_empty() {
             network_secrets_handle = Some(network.secrets_handle());
         }
 

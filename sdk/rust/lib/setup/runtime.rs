@@ -10,7 +10,7 @@ use futures::StreamExt;
 use sha2::{Digest as _, Sha256};
 use tar::Archive;
 
-use crate::{MicrosandboxError, MicrosandboxResult, config::LocalConfig};
+use crate::{MicrosandboxError, MicrosandboxResult, config::GlobalConfig};
 #[cfg(unix)]
 use microsandbox_utils::LIBKRUNFW_ABI;
 use microsandbox_utils::{BIN_SUBDIR, LIB_SUBDIR, PREBUILT_VERSION};
@@ -40,7 +40,7 @@ pub enum RuntimeOrigin {
     Environment,
     /// Paths supplied by a language SDK package.
     SdkPackage,
-    /// Paths from [`LocalConfig`].
+    /// Paths from [`GlobalConfig`].
     Configuration,
     /// The normal `MSB_HOME` installation.
     Home,
@@ -112,7 +112,7 @@ impl Default for InstallOptions {
 ///
 /// This operation never creates directories, extracts archives, or accesses
 /// the network. A partial installation is never repaired implicitly.
-pub fn resolve_runtime(config: &LocalConfig) -> MicrosandboxResult<ResolvedRuntime> {
+pub fn resolve_runtime(config: &GlobalConfig) -> MicrosandboxResult<ResolvedRuntime> {
     if std::env::var_os("MSB_LIBKRUNFW_PATH").is_some() && std::env::var_os("MSB_PATH").is_none() {
         return Err(MicrosandboxError::RuntimeIncomplete(
             "MSB_LIBKRUNFW_PATH requires MSB_PATH so the pair is explicit".into(),
@@ -167,7 +167,7 @@ pub fn resolve_runtime(config: &LocalConfig) -> MicrosandboxResult<ResolvedRunti
 
 /// Install a complete host runtime pair from an explicit source.
 pub async fn install_runtime(
-    config: &LocalConfig,
+    config: &GlobalConfig,
     options: InstallOptions,
 ) -> MicrosandboxResult<ResolvedRuntime> {
     let archive = match &options.source {
@@ -212,7 +212,7 @@ pub async fn install_runtime(
 /// `install_options` is ignored when a complete runtime already resolves. An
 /// incomplete or invalid explicit pair fails closed instead of being repaired.
 pub async fn ensure_runtime(
-    config: &LocalConfig,
+    config: &GlobalConfig,
     install_options: InstallOptions,
 ) -> MicrosandboxResult<ResolvedRuntime> {
     match resolve_runtime(config) {
@@ -225,7 +225,7 @@ pub async fn ensure_runtime(
 }
 
 /// Return whether a complete runtime pair resolves for the supplied config.
-pub fn is_runtime_installed(config: &LocalConfig) -> bool {
+pub fn is_runtime_installed(config: &GlobalConfig) -> bool {
     resolve_runtime(config).is_ok()
 }
 
@@ -271,7 +271,7 @@ fn require_pair(
     }
 }
 
-fn runtime_in_home(config: &LocalConfig) -> ResolvedRuntime {
+fn runtime_in_home(config: &GlobalConfig) -> ResolvedRuntime {
     ResolvedRuntime {
         msb_path: config
             .home()
@@ -298,7 +298,7 @@ fn adjacent_library(msb: &Path) -> Option<PathBuf> {
     .find(|path| path.is_file())
 }
 
-fn install_directory(config: &LocalConfig, source: &Path, force: bool) -> MicrosandboxResult<()> {
+fn install_directory(config: &GlobalConfig, source: &Path, force: bool) -> MicrosandboxResult<()> {
     let msb = source.join(microsandbox_utils::msb_binary_filename(
         std::env::consts::OS,
     ));
@@ -315,7 +315,7 @@ fn install_directory(config: &LocalConfig, source: &Path, force: bool) -> Micros
 }
 
 fn install_archive_bytes(
-    config: &LocalConfig,
+    config: &GlobalConfig,
     bytes: &[u8],
     force: bool,
 ) -> MicrosandboxResult<()> {
@@ -375,7 +375,7 @@ fn install_archive_bytes(
 }
 
 fn publish_pair(
-    config: &LocalConfig,
+    config: &GlobalConfig,
     source_msb: &Path,
     source_library: &Path,
     force: bool,
@@ -460,7 +460,7 @@ fn publish_pair(
 }
 
 fn with_install_lock<T>(
-    config: &LocalConfig,
+    config: &GlobalConfig,
     operation: impl FnOnce() -> MicrosandboxResult<T>,
 ) -> MicrosandboxResult<T> {
     fs::create_dir_all(config.home())?;
@@ -550,14 +550,14 @@ fn verify_archive_digest(bytes: &[u8], expected: &str) -> MicrosandboxResult<()>
     Ok(())
 }
 
-fn verify_home(config: &LocalConfig) -> MicrosandboxResult<()> {
+fn verify_home(config: &GlobalConfig) -> MicrosandboxResult<()> {
     verify_installation(
         &config.home().join(BIN_SUBDIR),
         &config.home().join(LIB_SUBDIR),
     )
 }
 
-fn resolved_installed(config: &LocalConfig) -> MicrosandboxResult<ResolvedRuntime> {
+fn resolved_installed(config: &GlobalConfig) -> MicrosandboxResult<ResolvedRuntime> {
     let runtime = runtime_in_home(config);
     require_pair(
         runtime.msb_path,
@@ -599,7 +599,7 @@ mod tests {
         let library_name = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
         fs::write(source.path().join(&msb_name), b"msb").unwrap();
         fs::write(source.path().join(&library_name), b"libkrunfw").unwrap();
-        let config = LocalConfig {
+        let config = GlobalConfig {
             home: Some(home.path().to_path_buf()),
             ..Default::default()
         };
@@ -640,7 +640,7 @@ mod tests {
         .unwrap();
         fs::write(source.path().join(&msb_name), b"new-msb").unwrap();
         fs::write(source.path().join(&library_name), b"new-library").unwrap();
-        let config = LocalConfig {
+        let config = GlobalConfig {
             home: Some(home.path().to_path_buf()),
             ..Default::default()
         };
@@ -670,7 +670,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let msb = temp.path().join("msb");
         fs::write(&msb, b"msb").unwrap();
-        let config = LocalConfig {
+        let config = GlobalConfig {
             paths: crate::config::PathsConfig {
                 msb: Some(msb),
                 libkrunfw: Some(temp.path().join("missing-libkrunfw")),
@@ -683,13 +683,22 @@ mod tests {
             resolve_runtime(&config),
             Err(MicrosandboxError::RuntimeIncomplete(_))
         ));
+        // Public path helpers must not independently accept the existing half of a broken pair.
+        assert!(matches!(
+            config.resolve_msb_path(),
+            Err(MicrosandboxError::RuntimeIncomplete(_))
+        ));
+        assert!(matches!(
+            config.resolve_libkrunfw_path(),
+            Err(MicrosandboxError::RuntimeIncomplete(_))
+        ));
     }
 
     #[test]
     fn runtime_resolution_is_read_only_when_the_pair_is_absent() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("missing-home");
-        let config = LocalConfig {
+        let config = GlobalConfig {
             home: Some(home.clone()),
             ..Default::default()
         };
@@ -698,13 +707,40 @@ mod tests {
             resolve_runtime(&config),
             Err(MicrosandboxError::RuntimeNotInstalled(_))
         ));
+        assert!(config.resolve_msb_path().is_err());
+        assert!(config.resolve_libkrunfw_path().is_err());
+        assert!(!home.exists());
+    }
+
+    #[tokio::test]
+    async fn archive_digest_mismatch_precedes_installation_mutations() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("uncreated-home");
+        let archive = root.path().join("runtime.tar.gz");
+        fs::write(&archive, b"untrusted archive bytes").unwrap();
+        let config = GlobalConfig {
+            home: Some(home.clone()),
+            ..Default::default()
+        };
+        let error = install_runtime(
+            &config,
+            InstallOptions {
+                source: InstallSource::Archive(archive),
+                expected_archive_sha256: Some("00".repeat(32)),
+                verify: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("SHA-256"), "{error}");
         assert!(!home.exists());
     }
 
     #[test]
     fn runtime_archive_rejects_unexpected_entries() {
         let home = tempfile::tempdir().unwrap();
-        let config = LocalConfig {
+        let config = GlobalConfig {
             home: Some(home.path().to_path_buf()),
             ..Default::default()
         };
@@ -724,7 +760,7 @@ mod tests {
     #[tokio::test]
     async fn embedded_ensure_materializes_into_normal_home_layout() {
         let home = tempfile::tempdir().unwrap();
-        let config = LocalConfig {
+        let config = GlobalConfig {
             home: Some(home.path().to_path_buf()),
             ..Default::default()
         };

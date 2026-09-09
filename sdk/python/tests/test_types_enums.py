@@ -221,6 +221,11 @@ def test_native_config_boundaries_accept_concrete_types() -> None:
     assert str(concrete.value) == str(baseline.value)
 
 
+def test_network_serializes_strict_mode() -> None:
+    assert Network(strict=True)._to_dict()["strict"] is True
+    assert "strict" not in Network()._to_dict()
+
+
 def test_sandbox_create_accepts_documented_container_protocols() -> None:
     # Exercise non-dict Mapping and non-list Sequence implementations so the
     # native parser stays aligned with the public create signature.

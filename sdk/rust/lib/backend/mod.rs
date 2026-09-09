@@ -40,7 +40,8 @@ pub use microsandbox_types::{
 };
 pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
 pub use sandbox::{
-    SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner, SandboxInner,
+    SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
+    SandboxIdentity, SandboxInner,
 };
 pub use sandbox::{SandboxHandleLocalState, SandboxLocalState};
 pub use volume::{

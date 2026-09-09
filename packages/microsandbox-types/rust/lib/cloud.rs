@@ -748,6 +748,9 @@ pub struct CloudNetworkSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets: Option<CloudSecretsConfig>,
 
+    /// Require hostname-based policy allows to use inspectable application authority.
+    pub strict: bool,
+
     /// Max concurrent guest connections.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_connections: Option<usize>,
@@ -759,6 +762,7 @@ impl Default for CloudNetworkSpec {
             enabled: true,
             policy: None,
             secrets: None,
+            strict: false,
             max_connections: None,
         }
     }
@@ -997,10 +1001,12 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             policy: spec.network.policy,
             dns: None,
             tls: None,
+            strict: spec.network.strict,
             secrets: spec.network.secrets.map(Into::into),
             max_connections: spec.network.max_connections,
             rate_limiter: None,
             trust_host_cas: false,
+            outbound_proxy: None,
         };
         let runtime = SandboxRuntimeOptions {
             workdir: spec.runtime.workdir,
@@ -1097,6 +1103,7 @@ impl From<SandboxSpec> for CloudSandboxSpec {
                 enabled: spec.network.enabled,
                 policy: spec.network.policy,
                 secrets: spec.network.secrets.map(Into::into),
+                strict: spec.network.strict,
                 max_connections: spec.network.max_connections,
             },
             init: spec.init,

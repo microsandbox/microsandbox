@@ -17,6 +17,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use super::connection::ProxyConnectState;
+#[cfg(test)]
+use super::connection::ProxyConnectStatus;
 use super::upstream::UpstreamTcpTarget;
 use crate::engine::secrets::config::SecretsConfigExt;
 use crate::engine::tls::proxy::TlsProxy;
@@ -24,6 +26,7 @@ use crate::engine::tls::sni;
 use crate::engine::tls::state::TlsState;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
+use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::config::{SecretViolationAction, SecretsConfig};
 use crate::secrets::handler::{
     SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
@@ -74,7 +77,9 @@ pub(crate) struct TcpProxy {
     network_policy: Arc<NetworkPolicy>,
     secrets: Arc<SecretsConfig>,
     tls_state: Option<Arc<TlsState>>,
+    strict: bool,
     proxy_connect: Arc<ProxyConnectState>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -138,7 +143,9 @@ impl TcpProxy {
         network_policy: Arc<NetworkPolicy>,
         secrets: Arc<SecretsConfig>,
         tls_state: Option<Arc<TlsState>>,
+        strict: bool,
         proxy_connect: Arc<ProxyConnectState>,
+        outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     ) -> Self {
         Self {
             guest_dst,
@@ -149,7 +156,9 @@ impl TcpProxy {
             network_policy,
             secrets,
             tls_state,
+            strict,
             proxy_connect,
+            outbound_proxy,
         }
     }
 
@@ -179,7 +188,9 @@ impl TcpProxy {
             network_policy,
             secrets,
             tls_state,
+            strict,
             proxy_connect,
+            outbound_proxy,
         } = self;
 
         // Pre-connect peek is only for domain policy: the hostname has to be known
@@ -209,7 +220,25 @@ impl TcpProxy {
                 &shared,
                 source,
             ) {
-                EgressEvaluation::Allow => {}
+                EgressEvaluation::Allow => {
+                    if strict_hostname_allow_is_opaque(
+                        strict,
+                        &network_policy,
+                        guest_dst,
+                        &shared,
+                        sni.as_deref(),
+                        &initial_buf,
+                    ) {
+                        tracing::debug!(
+                            sni = sni.as_deref(),
+                            dst = %guest_dst,
+                            "TCP egress denied by strict hostname policy",
+                        );
+                        proxy_connect.mark_policy_denied();
+                        shared.proxy_wake.wake();
+                        return Ok(());
+                    }
+                }
                 EgressEvaluation::Deny => {
                     tracing::debug!(
                         dst = %guest_dst,
@@ -245,7 +274,9 @@ impl TcpProxy {
                     shared,
                     network_policy,
                     tls_state,
+                    strict,
                     proxy_connect,
+                    outbound_proxy,
                     None,
                 )
                 .await;
@@ -256,7 +287,9 @@ impl TcpProxy {
         // server-first protocol (SSH, SMTP, a database) sends nothing until it has
         // seen the server's banner; with the socket already open we can relay that
         // banner while we wait, instead of burning the peek budget pre-connect.
-        let stream = connect_target.connect(&proxy_connect, &shared).await?;
+        let stream = connect_target
+            .connect(&proxy_connect, &shared, outbound_proxy.as_deref())
+            .await?;
         let connect_dst = stream.peer_addr().unwrap_or(connect_target.primary());
         let (mut server_rx, mut server_tx) = stream.into_split();
 
@@ -265,8 +298,11 @@ impl TcpProxy {
         // server→guest direction. When domain rules already peeked, `initial_buf`
         // is reused and this is cheap; with no secrets it is skipped entirely
         // (`is_tls` only matters for deciding whether to build the handler).
-        let want_headers = secrets.has_plain_http_candidates() || secrets.has_host_scoped_secrets();
-        let (initial_buf, is_tls) = if !secrets.secrets.is_empty() {
+        let enforce_http_authority = network_policy.has_domain_rules();
+        let want_headers = enforce_http_authority
+            || secrets.has_plain_http_candidates()
+            || secrets.has_host_scoped_secrets();
+        let (initial_buf, is_tls) = if want_headers {
             classify_first_flight(
                 initial_buf,
                 &mut from_smoltcp,
@@ -301,15 +337,27 @@ impl TcpProxy {
                 shared,
                 network_policy,
                 tls_state,
+                strict,
                 proxy_connect,
+                outbound_proxy,
                 Some(proxy_stream),
             )
             .await;
         }
 
         let mut late_connect_state = tls_state;
-        let mut secrets_handler: Option<SecretsHandler> = if !secrets.secrets.is_empty() && !is_tls
-        {
+        let mut secrets_handler: Option<SecretsHandler> = if is_tls {
+            None
+        } else if enforce_http_authority {
+            let host = extract_http_host(&initial_buf).unwrap_or_default();
+            Some(SecretsHandler::new_plain_http_policy(
+                &secrets,
+                &host,
+                guest_dst,
+                network_policy.clone(),
+                shared.clone(),
+            ))
+        } else if !secrets.secrets.is_empty() {
             Some(match extract_http_host(&initial_buf) {
                 Some(host) => {
                     SecretsHandler::new_plain_http(&secrets, &host, guest_dst.ip(), &shared)
@@ -381,7 +429,9 @@ impl TcpProxy {
                                     shared,
                                     network_policy,
                                     tls_state,
+                                    strict,
                                     proxy_connect,
+                                    outbound_proxy,
                                     Some(proxy_stream),
                                 )
                                 .await;
@@ -479,7 +529,9 @@ pub fn spawn_tcp_proxy(
     network_policy: Arc<NetworkPolicy>,
     secrets: Arc<SecretsConfig>,
     tls_state: Option<Arc<TlsState>>,
+    strict: bool,
     proxy_connect: Arc<ProxyConnectState>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 ) {
     let proxy = TcpProxy::new(
         guest_dst,
@@ -490,10 +542,35 @@ pub fn spawn_tcp_proxy(
         network_policy,
         secrets,
         tls_state,
+        strict,
         proxy_connect,
+        outbound_proxy,
     );
 
     handle.spawn(proxy.run());
+}
+
+fn strict_hostname_allow_is_opaque(
+    strict: bool,
+    network_policy: &NetworkPolicy,
+    guest_dst: SocketAddr,
+    shared: &SharedState,
+    sni: Option<&str>,
+    initial_buf: &[u8],
+) -> bool {
+    if !strict {
+        return false;
+    }
+
+    let source = if let Some(name) = sni {
+        HostnameSource::Sni(name)
+    } else if initial_buf.is_empty() || initial_buf.first() == Some(&0x16) {
+        HostnameSource::CacheOnly
+    } else {
+        return false;
+    };
+
+    network_policy.allows_egress_via_hostname(guest_dst, Protocol::Tcp, shared, source)
 }
 
 /// Forward an HTTP CONNECT tunnel: dial the proxy, splice the handshake,
@@ -511,7 +588,9 @@ async fn handle_connect_tunnel(
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
     tls_state: Arc<TlsState>,
+    strict: bool,
     proxy_connect: Arc<ProxyConnectState>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     preconnected_proxy: Option<TcpStream>,
 ) -> io::Result<()> {
     let proxy_dst = proxy_target.primary();
@@ -535,10 +614,33 @@ async fn handle_connect_tunnel(
     // Dial the proxy and forward the CONNECT request so it opens the tunnel.
     let mut proxy_stream = match preconnected_proxy {
         Some(stream) => stream,
-        None => proxy_target.connect(&proxy_connect, &shared).await?,
+        None => {
+            proxy_target
+                .connect(&proxy_connect, &shared, outbound_proxy.as_deref())
+                .await?
+        }
     };
 
     if !connect_req.target.is_intercepted(&tls_state) {
+        let tunnel_dst = connect_req.target.guest_dst(guest_dst, &shared);
+        if strict
+            && let Some(expected_sni) = connect_req.target.expected_sni.as_deref()
+            && network_policy.allows_egress_via_hostname(
+                tunnel_dst,
+                Protocol::Tcp,
+                &shared,
+                HostnameSource::Sni(expected_sni),
+            )
+        {
+            tracing::debug!(
+                sni = %expected_sni,
+                dst = %tunnel_dst,
+                "CONNECT tunnel denied by strict hostname policy",
+            );
+            proxy_connect.mark_policy_denied();
+            shared.proxy_wake.wake();
+            return Ok(());
+        }
         proxy_stream.write_all(&connect_headers).await?;
         proxy_stream.flush().await?;
         let (proxy_resp, header_end) = read_connect_response_headers(&mut proxy_stream).await?;
@@ -611,7 +713,12 @@ async fn handle_connect_tunnel(
         shared,
         tls_state,
         network_policy,
+        strict,
         proxy_connect,
+        // Unused: `upstream_stream` is already `Some` below, so the
+        // outbound proxy (already applied when dialing `proxy_stream`
+        // above) is never consulted again.
+        None,
     )
     .with_upstream(proxy_stream)
     .with_expected_sni(expected_sni)
@@ -1122,6 +1229,122 @@ mod tests {
         record
     }
 
+    #[tokio::test]
+    async fn connect_upstream_dials_target_directly_without_outbound_proxy() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            sock.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"hello");
+        });
+
+        let shared = SharedState::new(4);
+        let proxy_connect = ProxyConnectState::new();
+        let mut stream = UpstreamTcpTarget::direct(addr)
+            .connect(&proxy_connect, &shared, None)
+            .await
+            .unwrap();
+        stream.write_all(b"hello").await.unwrap();
+
+        accept.await.unwrap();
+        assert!(matches!(
+            proxy_connect.status(),
+            ProxyConnectStatus::Connected
+        ));
+    }
+
+    #[tokio::test]
+    async fn early_http_connect_dials_proxy_through_configured_socks5_proxy() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // This is the HTTP proxy the guest originally dialed. It is never
+        // contacted directly; the SOCKS5 request below must carry this address.
+        let http_proxy_addr: SocketAddr = "93.184.216.34:3128".parse().unwrap();
+        let socks_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let outbound_proxy = ResolvedOutboundProxy::Socks5 {
+            address: socks_listener.local_addr().unwrap(),
+            credentials: None,
+        };
+        let socks_task = tokio::spawn(async move {
+            let (mut client, _) = socks_listener.accept().await.unwrap();
+
+            let mut greeting = [0u8; 3];
+            client.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            client.write_all(&[0x05, 0x00]).await.unwrap();
+
+            let mut socks_request = [0u8; 10];
+            client.read_exact(&mut socks_request).await.unwrap();
+            assert_eq!(socks_request[0..4], [0x05, 0x01, 0x00, 0x01]);
+            assert_eq!(&socks_request[4..8], &[93, 184, 216, 34]);
+            assert_eq!(
+                u16::from_be_bytes([socks_request[8], socks_request[9]]),
+                3128
+            );
+            client
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+
+            let expected_connect =
+                b"CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n";
+            let mut connect_request = vec![0u8; expected_connect.len()];
+            client.read_exact(&mut connect_request).await.unwrap();
+            assert_eq!(&connect_request, expected_connect);
+            client
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let connect_request =
+            b"CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n".to_vec();
+        let (from_tx, from_rx) = mpsc::channel(1);
+        let (to_tx, mut to_rx) = mpsc::channel(1);
+        drop(from_tx);
+
+        let tls_state = Arc::new(
+            TlsState::new(
+                microsandbox_types::TlsConfig::default(),
+                crate::secrets::handle::SecretsHandle::new(SecretsConfig::default()),
+            )
+            .unwrap(),
+        );
+        let proxy_connect = Arc::new(ProxyConnectState::new());
+
+        handle_connect_tunnel(
+            http_proxy_addr,
+            UpstreamTcpTarget::direct(http_proxy_addr),
+            connect_request,
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(4)),
+            Arc::new(NetworkPolicy::default()),
+            tls_state,
+            false,
+            proxy_connect.clone(),
+            Some(Arc::new(outbound_proxy)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let response = to_rx.recv().await.unwrap();
+        assert_eq!(
+            &response[..],
+            b"HTTP/1.1 200 Connection Established\r\n\r\n"
+        );
+        socks_task.await.unwrap();
+        assert!(matches!(
+            proxy_connect.status(),
+            ProxyConnectStatus::Connected
+        ));
+    }
+
     #[test]
     fn could_be_connect_request_matches_split_prefixes_only() {
         assert!(could_be_connect_request(b"C"));
@@ -1313,6 +1536,16 @@ mod tests {
             destination: Destination::Domain(domain.parse().unwrap()),
             protocols: vec![Protocol::Tcp],
             ports: vec![PortRange::single(443)],
+            action: Action::Allow,
+        }
+    }
+
+    fn allow_tcp(domain: &str, port: u16) -> Rule {
+        Rule {
+            direction: crate::policy::Direction::Egress,
+            destination: Destination::Domain(domain.parse().unwrap()),
+            protocols: vec![Protocol::Tcp],
+            ports: vec![PortRange::single(port)],
             action: Action::Allow,
         }
     }
@@ -1681,14 +1914,52 @@ mod tests {
         handle: JoinHandle<Vec<u8>>,
         server_addr: SocketAddr,
     ) -> Vec<u8> {
+        relay_through_proxy_with_policy(
+            request,
+            Arc::new(SharedState::new(4)),
+            Arc::new(NetworkPolicy::default()),
+            secrets,
+            handle,
+            server_addr,
+        )
+        .await
+    }
+
+    async fn relay_through_proxy_with_policy(
+        request: Vec<u8>,
+        shared: Arc<SharedState>,
+        policy: Arc<NetworkPolicy>,
+        secrets: SecretsConfig,
+        handle: JoinHandle<Vec<u8>>,
+        server_addr: SocketAddr,
+    ) -> Vec<u8> {
+        relay_chunks_through_proxy_with_policy(
+            vec![request],
+            shared,
+            policy,
+            secrets,
+            handle,
+            server_addr,
+        )
+        .await
+    }
+
+    async fn relay_chunks_through_proxy_with_policy(
+        chunks: Vec<Vec<u8>>,
+        shared: Arc<SharedState>,
+        policy: Arc<NetworkPolicy>,
+        secrets: SecretsConfig,
+        handle: JoinHandle<Vec<u8>>,
+        server_addr: SocketAddr,
+    ) -> Vec<u8> {
         let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
         let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
-        let shared = SharedState::new(4);
-        let policy = Arc::new(NetworkPolicy::default());
         let secrets = Arc::new(secrets);
         let proxy_connect = Arc::new(ProxyConnectState::new());
 
-        from_tx.send(Bytes::from(request)).await.unwrap();
+        for chunk in chunks {
+            from_tx.send(Bytes::from(chunk)).await.unwrap();
+        }
         drop(from_tx);
 
         TcpProxy::new(
@@ -1696,17 +1967,237 @@ mod tests {
             UpstreamTcpTarget::direct(server_addr),
             from_rx,
             to_tx,
-            Arc::new(shared),
+            shared,
             policy,
             secrets,
             None,
+            false,
             proxy_connect,
+            None,
         )
         .try_run()
         .await
         .unwrap();
 
         handle.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn plain_http_domain_policy_allows_matching_host() {
+        let (addr, sink) = spawn_sink().await;
+        let shared = Arc::new(shared_with("allowed.example", "127.0.0.1"));
+        let policy = Arc::new(NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", addr.port())],
+        });
+
+        let wire = relay_through_proxy_with_policy(
+            b"GET / HTTP/1.1\r\nHost: allowed.example\r\n\r\n".to_vec(),
+            shared,
+            policy,
+            SecretsConfig::default(),
+            sink,
+            addr,
+        )
+        .await;
+
+        assert_eq!(wire, b"GET / HTTP/1.1\r\nHost: allowed.example\r\n\r\n");
+    }
+
+    #[tokio::test]
+    async fn plain_http_domain_policy_blocks_host_switch() {
+        let (addr, sink) = spawn_sink().await;
+        let shared = Arc::new(shared_with("allowed.example", "127.0.0.1"));
+        let policy = Arc::new(NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", addr.port())],
+        });
+
+        let wire = relay_through_proxy_with_policy(
+            b"GET / HTTP/1.1\r\nHost: denied.example\r\n\r\n".to_vec(),
+            shared,
+            policy,
+            SecretsConfig::default(),
+            sink,
+            addr,
+        )
+        .await;
+
+        assert!(
+            wire.is_empty(),
+            "switched HTTP authority must not reach upstream, got: {wire:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_http_domain_policy_blocks_keep_alive_host_switch() {
+        let (addr, sink) = spawn_sink().await;
+        let shared = Arc::new(shared_with("allowed.example", "127.0.0.1"));
+        let policy = Arc::new(NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", addr.port())],
+        });
+
+        let wire = relay_chunks_through_proxy_with_policy(
+            vec![
+                b"GET /one HTTP/1.1\r\nHost: allowed.example\r\n\r\n".to_vec(),
+                b"GET /two HTTP/1.1\r\nHost: denied.example\r\n\r\n".to_vec(),
+            ],
+            shared,
+            policy,
+            SecretsConfig::default(),
+            sink,
+            addr,
+        )
+        .await;
+
+        assert_eq!(wire, b"GET /one HTTP/1.1\r\nHost: allowed.example\r\n\r\n");
+    }
+
+    #[test]
+    fn strict_hostname_allow_blocks_sni_authority_before_tcp_dial() {
+        let dst = SocketAddr::new("127.0.0.1".parse().unwrap(), 443);
+        let shared = shared_with("allowed.example", "127.0.0.1");
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", dst.port())],
+        };
+
+        assert!(strict_hostname_allow_is_opaque(
+            true,
+            &policy,
+            dst,
+            &shared,
+            Some("allowed.example"),
+            &synthetic_client_hello("allowed.example"),
+        ));
+    }
+
+    #[test]
+    fn strict_hostname_allow_blocks_tls_without_sni_before_tcp_dial() {
+        let dst = SocketAddr::new("127.0.0.1".parse().unwrap(), 443);
+        let shared = shared_with("allowed.example", "127.0.0.1");
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", dst.port())],
+        };
+
+        assert!(strict_hostname_allow_is_opaque(
+            true,
+            &policy,
+            dst,
+            &shared,
+            None,
+            &[0x16, 0x03, 0x01],
+        ));
+    }
+
+    #[test]
+    fn strict_hostname_allow_leaves_plain_http_for_authority_validation() {
+        let dst = SocketAddr::new("127.0.0.1".parse().unwrap(), 80);
+        let shared = shared_with("allowed.example", "127.0.0.1");
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", dst.port())],
+        };
+
+        assert!(!strict_hostname_allow_is_opaque(
+            true,
+            &policy,
+            dst,
+            &shared,
+            None,
+            b"GET / HTTP/1.1\r\n",
+        ));
+    }
+
+    #[tokio::test]
+    async fn strict_mode_blocks_hostname_allowed_opaque_tls() {
+        let dst = SocketAddr::new("127.0.0.1".parse().unwrap(), 443);
+        let shared = Arc::new(shared_with("allowed.example", "127.0.0.1"));
+        let policy = Arc::new(NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", dst.port())],
+        });
+        let proxy_connect = Arc::new(ProxyConnectState::new());
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+
+        from_tx
+            .send(Bytes::from(synthetic_client_hello("allowed.example")))
+            .await
+            .unwrap();
+        drop(from_tx);
+
+        TcpProxy::new(
+            dst,
+            UpstreamTcpTarget::direct(dst),
+            from_rx,
+            to_tx,
+            shared,
+            policy,
+            Arc::new(SecretsConfig::default()),
+            None,
+            true,
+            proxy_connect.clone(),
+            None,
+        )
+        .try_run()
+        .await
+        .unwrap();
+
+        assert_eq!(proxy_connect.status(), ProxyConnectStatus::PolicyDenied);
+    }
+
+    #[tokio::test]
+    async fn strict_mode_leaves_default_allowed_opaque_tls_to_policy() {
+        let dst = SocketAddr::new("127.0.0.1".parse().unwrap(), 9);
+        let shared = Arc::new(SharedState::new(4));
+        let policy = Arc::new(NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_egress(Destination::Domain(
+                "blocked.example".parse().unwrap(),
+            ))],
+        });
+        let proxy_connect = Arc::new(ProxyConnectState::new());
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+
+        from_tx
+            .send(Bytes::from(synthetic_client_hello("allowed.example")))
+            .await
+            .unwrap();
+        drop(from_tx);
+
+        let result = TcpProxy::new(
+            dst,
+            UpstreamTcpTarget::direct(dst),
+            from_rx,
+            to_tx,
+            shared,
+            policy,
+            Arc::new(SecretsConfig::default()),
+            None,
+            true,
+            proxy_connect.clone(),
+            None,
+        )
+        .try_run()
+        .await;
+
+        assert!(result.is_err(), "dummy upstream should refuse the dial");
+        assert_eq!(
+            proxy_connect.status(),
+            ProxyConnectStatus::UpstreamConnectFailed
+        );
     }
 
     #[tokio::test]
@@ -1741,7 +2232,9 @@ mod tests {
             Arc::new(NetworkPolicy::default()),
             Arc::new(secrets),
             None,
+            false,
             proxy_connect,
+            None,
         )
         .try_run()
         .await
@@ -1811,7 +2304,9 @@ mod tests {
             Arc::new(NetworkPolicy::default()),
             Arc::new(secrets),
             None,
+            false,
             proxy_connect,
+            None,
         )
         .try_run()
         .await
@@ -1913,7 +2408,9 @@ mod tests {
             Arc::new(NetworkPolicy::default()),
             Arc::new(secrets),
             None,
+            false,
             proxy_connect,
+            None,
         )
         .try_run()
         .await

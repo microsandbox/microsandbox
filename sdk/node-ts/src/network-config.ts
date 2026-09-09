@@ -67,6 +67,20 @@ export interface SecretSubstitution {
   readonly body?: boolean;
 }
 
+/** Host-side source for secret material. */
+export interface SecretSource {
+  readonly kind: "env";
+  readonly var: string;
+}
+
+/** Constructors for host-side secret sources. */
+export const SecretSource = {
+  /** Resolve the secret from this host environment variable at sandbox start. */
+  env(variable: string): SecretSource {
+    return { kind: "env", var: variable };
+  },
+} as const;
+
 /** A single secret entry — built via `SecretBuilder`. */
 export interface SecretEntry {
   readonly envVar: string;
@@ -80,6 +94,22 @@ export interface SecretEntry {
   readonly substitution: SecretSubstitution;
 }
 
+/** Proxy used for outbound sandbox connections. */
+export type OutboundProxy =
+  | {
+      readonly protocol: "socks4";
+      readonly address: string;
+      readonly userId?: string;
+    }
+  | {
+      readonly protocol: "socks5";
+      readonly address: string;
+      readonly credentials?: {
+        readonly username: string;
+        readonly password: SecretSource;
+      };
+    };
+
 /** Built network configuration produced by `NetworkBuilder.build()`. */
 export interface NetworkConfig {
   readonly enabled: boolean;
@@ -90,6 +120,7 @@ export interface NetworkConfig {
   readonly secrets: readonly SecretEntry[];
   readonly secretViolationAction: ViolationAction | null;
   readonly maxConnections: number | null;
+  readonly strict: boolean;
   readonly rateLimiter: NetworkRateLimiterConfig | null;
   readonly interface?: {
     readonly ipv4Pool?: string | null;
@@ -100,4 +131,6 @@ export interface NetworkConfig {
     readonly mtu?: number | null;
   };
   readonly trustHostCAs: boolean;
+  /** Canonical proxy configuration for outbound connections. */
+  readonly outboundProxy: OutboundProxy | null;
 }

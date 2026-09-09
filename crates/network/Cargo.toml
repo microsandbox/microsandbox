@@ -39,6 +39,7 @@ engine = [
     "dep:time",
     "dep:tokio",
     "dep:tokio-rustls",
+    "dep:tokio-socks",
     "dep:windows-sys",
 ]
 
@@ -90,6 +91,7 @@ thiserror = { workspace = true }
 time = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
+tokio-socks = { workspace = true, optional = true }
 tracing.workspace = true
 zeroize = { workspace = true }
 

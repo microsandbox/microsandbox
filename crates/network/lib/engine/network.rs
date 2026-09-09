@@ -1,4 +1,4 @@
-//! `SmoltcpNetwork` — orchestration type that ties [`NetworkConfig`] to the
+//! `SmoltcpNetwork` — orchestration type that ties [`crate::config::NetworkConfig`] to the
 //! smoltcp engine.
 //!
 //! This is the networking analog to `PassthroughFs`/`MemFs` on the filesystem side — the single
@@ -19,7 +19,7 @@ use microsandbox_types::{
 };
 use msb_krun::backends::net::NetBackend;
 
-use crate::config::{MAX_NETWORK_CONNECTIONS, NetworkConfig};
+use crate::config::{MAX_NETWORK_CONNECTIONS, ResolvedNetworkConfig};
 use crate::engine::tls::state::{TlsState, TlsStateError};
 use crate::netstack::{
     backend::SmoltcpBackend,
@@ -33,12 +33,6 @@ use crate::secrets::handle::SecretsHandle;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Maximum sandbox slot value. Limited by MAC/IPv6 encoding (16 bits = 65535).
-/// The default IPv4 pool (172.16.0.0/12 with /30 blocks) supports 262144 slots,
-/// but MAC and IPv6 derivation only encode the low 16 bits, so 65535 is the
-/// effective maximum.
-const MAX_SLOT: u64 = u16::MAX as u64;
-
 /// Hard ceiling for concurrent connections on shared, multi-tenant hosts.
 ///
 /// This matches the network engine's existing default, preventing a tenant
@@ -49,15 +43,17 @@ const MULTI_TENANT_MAX_CONNECTIONS: usize = 256;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// The networking engine. Created from [`NetworkConfig`] by the runtime.
+/// The networking engine. Created from [`crate::config::NetworkConfig`] by the runtime.
 ///
 /// Owns the smoltcp poll thread and provides:
 /// - [`take_backend()`](Self::take_backend) — the `NetBackend` for `VmBuilder::net()`
 /// - [`guest_bootstrap_network()`](Self::guest_bootstrap_network) — typed guest network setup
 /// - [`ca_cert_pem()`](Self::ca_cert_pem) — CA certificate for TLS interception
 pub struct SmoltcpNetwork {
-    config: NetworkConfig,
-    deployment_profile: DeploymentProfile,
+    config: ResolvedNetworkConfig,
+    /// Host-owned policy floor derived from the deployment profile and
+    /// enforced in addition to the sandbox's configured network policy.
+    platform_policy: Option<NetworkPolicy>,
     shared: Arc<SharedState>,
     backend: Option<SmoltcpBackend>,
     poll_handle: Option<JoinHandle<()>>,
@@ -80,6 +76,12 @@ pub struct SmoltcpNetwork {
     secrets: SecretsHandle,
 }
 
+#[derive(Clone, Copy)]
+struct HostRoutes {
+    ipv4: bool,
+    ipv6: bool,
+}
+
 /// Errors that prevent the smoltcp network from being created safely.
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkInitError {
@@ -90,6 +92,24 @@ pub enum NetworkInitError {
         configured: usize,
         /// Hard cap enforced by the network stack.
         limit: usize,
+    },
+
+    /// The configured IPv4 pool cannot provide a `/30` for this slot.
+    #[error("IPv4 pool {pool} cannot assign network slot {slot}")]
+    Ipv4PoolCapacity {
+        /// Configured IPv4 pool.
+        pool: Ipv4Network,
+        /// Requested sandbox slot.
+        slot: u16,
+    },
+
+    /// The configured IPv6 pool cannot provide a `/64` for this slot.
+    #[error("IPv6 pool {pool} cannot assign network slot {slot}")]
+    Ipv6PoolCapacity {
+        /// Configured IPv6 pool.
+        pool: Ipv6Network,
+        /// Requested sandbox slot.
+        slot: u16,
     },
 
     /// TLS interception state failed to initialize.
@@ -127,29 +147,17 @@ pub struct MetricsHandle {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl SmoltcpNetwork {
-    /// Create from user config + sandbox slot (for IP/MAC derivation).
-    ///
-    /// Each address family is enabled when either the user supplied an
-    /// explicit address or the host kernel has a route for that family;
-    /// otherwise the corresponding `guest_*`/`gateway_*` fields stay `None`
-    /// and the family is omitted from the smoltcp interface, env vars, and
-    /// downstream consumers.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when network configuration would allocate unsafe
-    /// resources or TLS interception cannot initialize.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `slot` exceeds the address pool capacity (65535 for MAC/IPv6,
-    /// 524287 for IPv4).
-    pub fn new(config: NetworkConfig, slot: u64) -> Result<Self, NetworkInitError> {
-        Self::new_with_profile(config, slot, DeploymentProfile::SingleTenant)
+impl HostRoutes {
+    fn detect() -> Self {
+        Self {
+            ipv4: host_has_ipv4_route(),
+            ipv6: host_has_ipv6_route(),
+        }
     }
+}
 
-    /// Create the network backend with an explicit host-runtime deployment profile.
+impl SmoltcpNetwork {
+    /// Creates the network backend from a fully resolved runtime configuration.
     ///
     /// `MultiTenant` applies platform-owned configuration floors before any
     /// sockets, resolvers, or TLS state are created. The requested tenant policy
@@ -160,48 +168,25 @@ impl SmoltcpNetwork {
     ///
     /// Returns an error when the effective network configuration would allocate
     /// unsafe resources or TLS interception cannot initialize.
-    pub fn new_with_profile(
-        mut config: NetworkConfig,
-        slot: u64,
+    pub fn new(
+        config: ResolvedNetworkConfig,
+        slot: u16,
         deployment_profile: DeploymentProfile,
+    ) -> Result<Self, NetworkInitError> {
+        Self::build(config, slot, deployment_profile, HostRoutes::detect())
+    }
+
+    fn build(
+        mut config: ResolvedNetworkConfig,
+        slot: u16,
+        deployment_profile: DeploymentProfile,
+        host_routes: HostRoutes,
     ) -> Result<Self, NetworkInitError> {
         enforce_deployment_profile(&mut config, deployment_profile);
-        Self::new_with_profile_and_routes(
-            config,
-            slot,
-            deployment_profile,
-            host_has_ipv4_route(),
-            host_has_ipv6_route(),
-        )
-    }
+        let platform_policy = Self::platform_policy(deployment_profile);
+        let resolved_config = config;
+        let config = resolved_config.config();
 
-    #[cfg(test)]
-    fn new_with_routes(
-        config: NetworkConfig,
-        slot: u64,
-        host_has_ipv4: bool,
-        host_has_ipv6: bool,
-    ) -> Result<Self, NetworkInitError> {
-        Self::new_with_profile_and_routes(
-            config,
-            slot,
-            DeploymentProfile::SingleTenant,
-            host_has_ipv4,
-            host_has_ipv6,
-        )
-    }
-
-    fn new_with_profile_and_routes(
-        config: NetworkConfig,
-        slot: u64,
-        deployment_profile: DeploymentProfile,
-        host_has_ipv4: bool,
-        host_has_ipv6: bool,
-    ) -> Result<Self, NetworkInitError> {
-        assert!(
-            slot <= MAX_SLOT,
-            "sandbox slot {slot} exceeds address pool capacity (max {MAX_SLOT})"
-        );
         if let Some(configured) = config.max_connections
             && configured > MAX_NETWORK_CONNECTIONS
         {
@@ -218,29 +203,29 @@ impl SmoltcpNetwork {
         let gateway_mac = derive_gateway_mac(slot);
         let mtu = config.interface.mtu.unwrap_or(1500);
 
-        let guest_ipv4 = config.interface.ipv4_address.or_else(|| {
-            host_has_ipv4.then(|| {
-                derive_guest_ipv4(
-                    config
-                        .interface
-                        .ipv4_pool
-                        .unwrap_or_else(default_guest_ipv4_pool),
-                    slot,
-                )
-            })
-        });
+        let guest_ipv4 = match config.interface.ipv4_address {
+            Some(address) => Some(address),
+            None if host_routes.ipv4 => Some(derive_guest_ipv4(
+                config
+                    .interface
+                    .ipv4_pool
+                    .unwrap_or_else(default_guest_ipv4_pool),
+                slot,
+            )?),
+            None => None,
+        };
         let gateway_ipv4 = guest_ipv4.map(gateway_from_guest_ipv4);
-        let guest_ipv6 = config.interface.ipv6_address.or_else(|| {
-            host_has_ipv6.then(|| {
-                derive_guest_ipv6(
-                    config
-                        .interface
-                        .ipv6_pool
-                        .unwrap_or_else(default_guest_ipv6_pool),
-                    slot,
-                )
-            })
-        });
+        let guest_ipv6 = match config.interface.ipv6_address {
+            Some(address) => Some(address),
+            None if host_routes.ipv6 => Some(derive_guest_ipv6(
+                config
+                    .interface
+                    .ipv6_pool
+                    .unwrap_or_else(default_guest_ipv6_pool),
+                slot,
+            )?),
+            None => None,
+        };
         let gateway_ipv6 = guest_ipv6.map(gateway_from_guest_ipv6);
 
         let queue_capacity = config
@@ -289,8 +274,8 @@ impl SmoltcpNetwork {
         };
 
         Ok(Self {
-            config,
-            deployment_profile,
+            config: resolved_config,
+            platform_policy,
             shared,
             backend: Some(backend),
             poll_handle: None,
@@ -304,6 +289,15 @@ impl SmoltcpNetwork {
             tls_state,
             secrets,
         })
+    }
+
+    fn platform_policy(deployment_profile: DeploymentProfile) -> Option<NetworkPolicy> {
+        match deployment_profile {
+            DeploymentProfile::SingleTenant => None,
+            DeploymentProfile::MultiTenant => {
+                Some(NetworkPolicy::from_profiles([NetworkProfile::Public]))
+            }
+        }
     }
 
     /// Get the gateway IPs for virtio-net configuration and domain-based policy rules.
@@ -328,18 +322,16 @@ impl SmoltcpNetwork {
             guest_ipv6: self.guest_ipv6,
             mtu: self.mtu as usize,
         };
-        let network_policy = self.config.policy.clone();
-        let platform_policy = match self.deployment_profile {
-            DeploymentProfile::SingleTenant => None,
-            DeploymentProfile::MultiTenant => {
-                Some(NetworkPolicy::from_profiles([NetworkProfile::Public]))
-            }
-        };
-        let dns_config = self.config.dns.clone();
+        let config = self.config.config();
+        let network_policy = config.policy.clone();
+        let platform_policy = self.platform_policy.clone();
+        let dns_config = config.dns.clone();
         let tls_state = self.tls_state.clone();
-        let published_ports = self.config.ports.clone();
-        let max_connections = self.config.max_connections;
+        let published_ports = config.ports.clone();
+        let strict = config.strict;
+        let max_connections = config.max_connections;
         let secrets = self.secrets.clone();
+        let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
 
         self.poll_handle = Some(
             std::thread::Builder::new()
@@ -353,9 +345,11 @@ impl SmoltcpNetwork {
                         dns_config,
                         tls_state,
                         published_ports,
+                        strict,
                         max_connections,
                         tokio_handle,
                         secrets,
+                        outbound_proxy,
                     );
                 })
                 .expect("failed to spawn smoltcp poll thread"),
@@ -404,7 +398,7 @@ impl SmoltcpNetwork {
         }
 
         // Auto-expose secret placeholders as environment variables.
-        for secret in &self.config.secrets.secrets {
+        for secret in &self.config.config().secrets.secrets {
             vars.push((secret.env_var.clone(), secret.placeholder.clone()));
         }
 
@@ -449,6 +443,7 @@ impl SmoltcpNetwork {
     /// enter this payload.
     pub fn guest_secret_env(&self) -> Vec<BootstrapEnvVar> {
         self.config
+            .config()
             .secrets
             .secrets
             .iter()
@@ -467,14 +462,14 @@ impl SmoltcpNetwork {
     }
 
     /// Host-trusted CA bundle to ship into the guest, if
-    /// [`NetworkConfig::trust_host_cas`] is enabled.
+    /// [`crate::config::NetworkConfig::trust_host_cas`] is enabled.
     ///
     /// Returned PEM may concatenate CAs that the Mozilla root bundle in
     /// the guest already trusts; duplicates are harmless and saved the
     /// cost of computing a delta. Returns `None` when the host store is
     /// empty or the feature is disabled.
     pub fn host_cas_cert_pem(&self) -> Option<Vec<u8>> {
-        if !self.config.trust_host_cas {
+        if !self.config.config().trust_host_cas {
             return None;
         }
         crate::engine::tls::host_cas::collect_host_cas()
@@ -531,11 +526,14 @@ impl MetricsHandle {
 /// the platform public-network policy and the tenant policy independently so a
 /// broad tenant allow can never outrank the platform floor, while a tenant deny
 /// still remains effective.
-fn enforce_deployment_profile(config: &mut NetworkConfig, profile: DeploymentProfile) {
+fn enforce_deployment_profile(config: &mut ResolvedNetworkConfig, profile: DeploymentProfile) {
     if profile == DeploymentProfile::SingleTenant {
         return;
     }
 
+    config.clear_outbound_proxy();
+
+    let config = config.config_mut();
     let interface_overridden = config.interface.mac.is_some()
         || config.interface.mtu.is_some()
         || config.interface.ipv4_address.is_some()
@@ -546,6 +544,7 @@ fn enforce_deployment_profile(config: &mut NetworkConfig, profile: DeploymentPro
     let had_custom_nameservers = !config.dns.nameservers.is_empty();
     let disabled_rebind_protection = !config.dns.rebind_protection;
     let trusted_host_cas = config.trust_host_cas;
+    let had_outbound_proxy = config.outbound_proxy.is_some();
     let connection_limit_clamped = config
         .max_connections
         .is_some_and(|limit| limit > MULTI_TENANT_MAX_CONNECTIONS);
@@ -567,6 +566,7 @@ fn enforce_deployment_profile(config: &mut NetworkConfig, profile: DeploymentPro
         || had_custom_nameservers
         || disabled_rebind_protection
         || trusted_host_cas
+        || had_outbound_proxy
         || connection_limit_clamped
     {
         tracing::warn!(
@@ -575,6 +575,7 @@ fn enforce_deployment_profile(config: &mut NetworkConfig, profile: DeploymentPro
             had_custom_nameservers,
             disabled_rebind_protection,
             trusted_host_cas,
+            had_outbound_proxy,
             connection_limit_clamped,
             "multi-tenant deployment profile overrode unsafe network configuration"
         );
@@ -584,38 +585,35 @@ fn enforce_deployment_profile(config: &mut NetworkConfig, profile: DeploymentPro
 /// Derive a guest MAC address from the sandbox slot.
 ///
 /// Format: `02:ms:bx:SS:SS:02` where SS:SS encodes the slot.
-fn derive_guest_mac(slot: u64) -> [u8; 6] {
+fn derive_guest_mac(slot: u16) -> [u8; 6] {
     let s = slot.to_be_bytes();
-    [0x02, 0x6d, 0x73, s[6], s[7], 0x02]
+    [0x02, 0x6d, 0x73, s[0], s[1], 0x02]
 }
 
 /// Derive a gateway MAC address from the sandbox slot.
 ///
 /// Format: `02:ms:bx:SS:SS:01`.
-fn derive_gateway_mac(slot: u64) -> [u8; 6] {
+fn derive_gateway_mac(slot: u16) -> [u8; 6] {
     let s = slot.to_be_bytes();
-    [0x02, 0x6d, 0x73, s[6], s[7], 0x01]
+    [0x02, 0x6d, 0x73, s[0], s[1], 0x01]
 }
 
 /// Derive a guest IPv4 address from the sandbox slot.
 ///
 /// Pool: `172.16.0.0/12` by default. Each slot gets a `/30` block (4 IPs).
 /// Guest is at offset +2 in the block.
-fn derive_guest_ipv4(pool: Ipv4Network, slot: u64) -> Ipv4Addr {
-    assert!(
-        pool.prefix() <= 30,
-        "IPv4 pool {pool} must be large enough to contain at least one /30 block"
-    );
-
-    let capacity = 1u64 << (30 - pool.prefix());
-    assert!(
-        slot < capacity,
-        "sandbox slot {slot} exceeds IPv4 pool {pool} capacity ({capacity} /30 blocks)"
-    );
+fn derive_guest_ipv4(pool: Ipv4Network, slot: u16) -> Result<Ipv4Addr, NetworkInitError> {
+    let capacity = 30_u8
+        .checked_sub(pool.prefix())
+        .map(|host_bits| 1_u32 << host_bits)
+        .ok_or(NetworkInitError::Ipv4PoolCapacity { pool, slot })?;
+    if u32::from(slot) >= capacity {
+        return Err(NetworkInitError::Ipv4PoolCapacity { pool, slot });
+    }
 
     let base = u32::from(pool.network());
-    let offset = (slot as u32) * 4 + 2; // +2 = guest within /30
-    Ipv4Addr::from(base + offset)
+    let offset = u32::from(slot) * 4 + 2; // +2 = guest within /30
+    Ok(Ipv4Addr::from(base + offset))
 }
 
 /// Gateway IPv4 from guest IPv4: guest - 1 (offset +1 in the /30 block).
@@ -632,21 +630,18 @@ fn default_guest_ipv4_pool() -> Ipv4Network {
 ///
 /// Pool: `fd42:6d73:62::/48`. Each slot gets a `/64` prefix.
 /// Guest is `::2` in its prefix.
-fn derive_guest_ipv6(pool: Ipv6Network, slot: u64) -> Ipv6Addr {
-    assert!(
-        pool.prefix() <= 64,
-        "IPv6 pool {pool} must be large enough to contain at least one /64 prefix"
-    );
-
-    let capacity = 1u128 << (64 - pool.prefix());
-    assert!(
-        (slot as u128) < capacity,
-        "sandbox slot {slot} exceeds IPv6 pool {pool} capacity ({capacity} /64 prefixes)"
-    );
+fn derive_guest_ipv6(pool: Ipv6Network, slot: u16) -> Result<Ipv6Addr, NetworkInitError> {
+    let capacity = 64_u8
+        .checked_sub(pool.prefix())
+        .map(|host_bits| 1_u128 << host_bits)
+        .ok_or(NetworkInitError::Ipv6PoolCapacity { pool, slot })?;
+    if u128::from(slot) >= capacity {
+        return Err(NetworkInitError::Ipv6PoolCapacity { pool, slot });
+    }
 
     let base = u128::from(pool.network());
-    let offset = (slot as u128) << 64;
-    Ipv6Addr::from(base + offset + 2)
+    let offset = u128::from(slot) << 64;
+    Ok(Ipv6Addr::from(base + offset + 2))
 }
 
 /// Gateway IPv6 from guest IPv6: `::1` in the same prefix.
@@ -695,15 +690,23 @@ fn host_has_ipv6_route() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PortProtocol, PublishedPort};
+    use crate::config::{EnvNetworkSecretResolver, NetworkConfig, PortProtocol, PublishedPort};
     use crate::dns::Nameserver;
+
+    fn resolved(config: NetworkConfig) -> ResolvedNetworkConfig {
+        config.resolve(&EnvNetworkSecretResolver).unwrap()
+    }
+
+    fn routes(ipv4: bool, ipv6: bool) -> HostRoutes {
+        HostRoutes { ipv4, ipv6 }
+    }
 
     #[test]
     fn derive_addresses_slot_0() {
         assert_eq!(derive_guest_mac(0), [0x02, 0x6d, 0x73, 0x00, 0x00, 0x02]);
         assert_eq!(derive_gateway_mac(0), [0x02, 0x6d, 0x73, 0x00, 0x00, 0x01]);
         assert_eq!(
-            derive_guest_ipv4(default_guest_ipv4_pool(), 0),
+            derive_guest_ipv4(default_guest_ipv4_pool(), 0).unwrap(),
             Ipv4Addr::new(172, 16, 0, 2)
         );
         assert_eq!(
@@ -726,10 +729,16 @@ mod tests {
         config.dns.nameservers = vec!["10.0.0.53".parse::<Nameserver>().unwrap()];
         config.dns.rebind_protection = false;
         config.trust_host_cas = true;
+        config.outbound_proxy = Some(crate::proxy::OutboundProxy::Socks5 {
+            address: "127.0.0.1:1080".parse().unwrap(),
+            credentials: None,
+        });
         config.max_connections = Some(MULTI_TENANT_MAX_CONNECTIONS + 1);
         config.policy = NetworkPolicy::allow_all();
+        let mut resolved = resolved(config);
 
-        enforce_deployment_profile(&mut config, DeploymentProfile::MultiTenant);
+        enforce_deployment_profile(&mut resolved, DeploymentProfile::MultiTenant);
+        let config = resolved.config();
 
         assert!(config.interface.mac.is_none());
         assert!(config.interface.mtu.is_none());
@@ -737,7 +746,10 @@ mod tests {
         assert!(config.dns.nameservers.is_empty());
         assert!(config.dns.rebind_protection);
         assert!(!config.trust_host_cas);
+        assert!(config.outbound_proxy.is_none());
         assert_eq!(config.max_connections, Some(MULTI_TENANT_MAX_CONNECTIONS));
+        assert!(resolved.config().outbound_proxy.is_none());
+        assert!(resolved.outbound_proxy().is_none());
         // Tenant policy stays intact and is intersected with the platform
         // policy at evaluation time instead of being reordered or flattened.
         assert!(config.policy.default_egress.is_allow());
@@ -749,18 +761,25 @@ mod tests {
         config.interface.mtu = Some(9000);
         config.dns.rebind_protection = false;
         config.trust_host_cas = true;
+        config.outbound_proxy = Some(crate::proxy::OutboundProxy::Socks5 {
+            address: "127.0.0.1:1080".parse().unwrap(),
+            credentials: None,
+        });
 
-        enforce_deployment_profile(&mut config, DeploymentProfile::SingleTenant);
+        let mut resolved = resolved(config);
+        enforce_deployment_profile(&mut resolved, DeploymentProfile::SingleTenant);
+        let config = resolved.config();
 
         assert_eq!(config.interface.mtu, Some(9000));
         assert!(!config.dns.rebind_protection);
         assert!(config.trust_host_cas);
+        assert!(config.outbound_proxy.is_some());
     }
 
     #[test]
     fn derive_addresses_slot_1() {
         assert_eq!(
-            derive_guest_ipv4(default_guest_ipv4_pool(), 1),
+            derive_guest_ipv4(default_guest_ipv4_pool(), 1).unwrap(),
             Ipv4Addr::new(172, 16, 0, 6)
         );
         assert_eq!(
@@ -770,23 +789,57 @@ mod tests {
     }
 
     #[test]
+    fn derive_addresses_max_slot() {
+        assert_eq!(
+            derive_guest_mac(u16::MAX),
+            [0x02, 0x6d, 0x73, 0xff, 0xff, 0x02]
+        );
+        assert_eq!(
+            derive_guest_ipv4(default_guest_ipv4_pool(), u16::MAX).unwrap(),
+            Ipv4Addr::new(172, 19, 255, 254)
+        );
+        assert_eq!(
+            derive_guest_ipv6(default_guest_ipv6_pool(), u16::MAX).unwrap(),
+            "fd42:6d73:62:ffff::2".parse::<Ipv6Addr>().unwrap()
+        );
+    }
+
+    #[test]
     fn derive_addresses_custom_ipv4_pool() {
         let pool = "172.31.240.0/24".parse::<Ipv4Network>().unwrap();
-        assert_eq!(derive_guest_ipv4(pool, 0), Ipv4Addr::new(172, 31, 240, 2));
         assert_eq!(
-            derive_guest_ipv4(pool, 63),
+            derive_guest_ipv4(pool, 0).unwrap(),
+            Ipv4Addr::new(172, 31, 240, 2)
+        );
+        assert_eq!(
+            derive_guest_ipv4(pool, 63).unwrap(),
             Ipv4Addr::new(172, 31, 240, 254)
         );
     }
 
     #[test]
+    fn custom_ipv4_pool_capacity_is_a_typed_error() {
+        let pool = "172.31.240.0/24".parse::<Ipv4Network>().unwrap();
+        assert!(matches!(
+            derive_guest_ipv4(pool, 64),
+            Err(NetworkInitError::Ipv4PoolCapacity { slot: 64, .. })
+        ));
+
+        let pool = "172.31.240.0/31".parse::<Ipv4Network>().unwrap();
+        assert!(matches!(
+            derive_guest_ipv4(pool, 0),
+            Err(NetworkInitError::Ipv4PoolCapacity { slot: 0, .. })
+        ));
+    }
+
+    #[test]
     fn derive_ipv6_slot_0() {
         assert_eq!(
-            derive_guest_ipv6(default_guest_ipv6_pool(), 0),
+            derive_guest_ipv6(default_guest_ipv6_pool(), 0).unwrap(),
             "fd42:6d73:62:0::2".parse::<Ipv6Addr>().unwrap()
         );
         assert_eq!(
-            gateway_from_guest_ipv6(derive_guest_ipv6(default_guest_ipv6_pool(), 0)),
+            gateway_from_guest_ipv6(derive_guest_ipv6(default_guest_ipv6_pool(), 0).unwrap()),
             "fd42:6d73:62:0::1".parse::<Ipv6Addr>().unwrap()
         );
     }
@@ -795,13 +848,28 @@ mod tests {
     fn derive_addresses_custom_ipv6_pool() {
         let pool = "fd7a:115c:a1e0:100::/56".parse::<Ipv6Network>().unwrap();
         assert_eq!(
-            derive_guest_ipv6(pool, 0),
+            derive_guest_ipv6(pool, 0).unwrap(),
             "fd7a:115c:a1e0:100::2".parse::<Ipv6Addr>().unwrap()
         );
         assert_eq!(
-            derive_guest_ipv6(pool, 3),
+            derive_guest_ipv6(pool, 3).unwrap(),
             "fd7a:115c:a1e0:103::2".parse::<Ipv6Addr>().unwrap()
         );
+    }
+
+    #[test]
+    fn custom_ipv6_pool_capacity_is_a_typed_error() {
+        let pool = "fd7a:115c:a1e0:100::/62".parse::<Ipv6Network>().unwrap();
+        assert!(matches!(
+            derive_guest_ipv6(pool, 4),
+            Err(NetworkInitError::Ipv6PoolCapacity { slot: 4, .. })
+        ));
+
+        let pool = "fd7a:115c:a1e0:100::/65".parse::<Ipv6Network>().unwrap();
+        assert!(matches!(
+            derive_guest_ipv6(pool, 0),
+            Err(NetworkInitError::Ipv6PoolCapacity { slot: 0, .. })
+        ));
     }
 
     #[test]
@@ -814,8 +882,13 @@ mod tests {
 
     #[test]
     fn guest_env_vars_includes_ipv4_when_host_has_v4_route() {
-        let net =
-            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, false).unwrap();
+        let net = SmoltcpNetwork::build(
+            resolved(NetworkConfig::default()),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(true, false),
+        )
+        .unwrap();
         let vars = net.guest_env_vars();
 
         assert_eq!(vars.len(), 3);
@@ -829,7 +902,13 @@ mod tests {
 
     #[test]
     fn guest_env_vars_includes_ipv6_when_host_has_v6_route() {
-        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, true).unwrap();
+        let net = SmoltcpNetwork::build(
+            resolved(NetworkConfig::default()),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(true, true),
+        )
+        .unwrap();
         let vars = net.guest_env_vars();
 
         assert_eq!(vars.len(), 4);
@@ -842,8 +921,13 @@ mod tests {
 
     #[test]
     fn guest_env_vars_omit_ipv6_without_host_route() {
-        let net =
-            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, false).unwrap();
+        let net = SmoltcpNetwork::build(
+            resolved(NetworkConfig::default()),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(true, false),
+        )
+        .unwrap();
         let vars = net.guest_env_vars();
 
         assert!(!vars.iter().any(|(k, _)| k == ENV_NET_IPV6));
@@ -851,8 +935,13 @@ mod tests {
 
     #[test]
     fn guest_env_vars_omit_ipv4_without_host_route() {
-        let net =
-            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, false, true).unwrap();
+        let net = SmoltcpNetwork::build(
+            resolved(NetworkConfig::default()),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(false, true),
+        )
+        .unwrap();
         let vars = net.guest_env_vars();
 
         assert_eq!(vars.len(), 3);
@@ -865,7 +954,13 @@ mod tests {
     fn explicit_ipv6_address_overrides_missing_host_v6_route() {
         let mut config = NetworkConfig::default();
         config.interface.ipv6_address = Some("fd42:6d73:62:99::2".parse().unwrap());
-        let net = SmoltcpNetwork::new_with_routes(config, 0, true, false).unwrap();
+        let net = SmoltcpNetwork::build(
+            resolved(config),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(true, false),
+        )
+        .unwrap();
         let vars = net.guest_env_vars();
 
         let v6 = vars
@@ -877,8 +972,13 @@ mod tests {
 
     #[test]
     fn neither_family_active_emits_only_base_env_vars() {
-        let net =
-            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, false, false).unwrap();
+        let net = SmoltcpNetwork::build(
+            resolved(NetworkConfig::default()),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(false, false),
+        )
+        .unwrap();
         let vars = net.guest_env_vars();
 
         assert_eq!(vars.len(), 2);
@@ -888,7 +988,13 @@ mod tests {
 
     #[test]
     fn guest_bootstrap_network_preserves_active_address_families() {
-        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 7, true, true).unwrap();
+        let net = SmoltcpNetwork::build(
+            resolved(NetworkConfig::default()),
+            7,
+            DeploymentProfile::SingleTenant,
+            routes(true, true),
+        )
+        .unwrap();
 
         let bootstrap = net.guest_bootstrap_network();
 
@@ -902,8 +1008,13 @@ mod tests {
 
     #[test]
     fn guest_bootstrap_network_allows_no_active_address_family() {
-        let net =
-            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, false, false).unwrap();
+        let net = SmoltcpNetwork::build(
+            resolved(NetworkConfig::default()),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(false, false),
+        )
+        .unwrap();
 
         let bootstrap = net.guest_bootstrap_network();
 
@@ -912,14 +1023,19 @@ mod tests {
     }
 
     #[test]
-    fn new_with_routes_rejects_excessive_max_connections() {
+    fn build_rejects_excessive_max_connections() {
         let mut config = NetworkConfig {
             max_connections: Some(MAX_NETWORK_CONNECTIONS + 1),
             ..NetworkConfig::default()
         };
         config.tls.enabled = false;
 
-        let err = match SmoltcpNetwork::new_with_routes(config, 0, true, false) {
+        let err = match SmoltcpNetwork::build(
+            resolved(config),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(true, false),
+        ) {
             Ok(_) => panic!("excessive max_connections should fail"),
             Err(err) => err,
         };
@@ -936,7 +1052,7 @@ mod tests {
     /// A stored config bypasses the builder's validation, so an invalid
     /// limiter must fail startup cleanly instead of panicking.
     #[test]
-    fn new_with_routes_rejects_invalid_rate_limiter() {
+    fn build_rejects_invalid_rate_limiter() {
         let mut config = NetworkConfig {
             rate_limiter: Some(microsandbox_types::NetworkRateLimiterConfig {
                 egress: None,
@@ -949,7 +1065,12 @@ mod tests {
         };
         config.tls.enabled = false;
 
-        let err = match SmoltcpNetwork::new_with_routes(config, 0, true, false) {
+        let err = match SmoltcpNetwork::build(
+            resolved(config),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(true, false),
+        ) {
             Ok(_) => panic!("empty rate limiter should fail"),
             Err(err) => err,
         };

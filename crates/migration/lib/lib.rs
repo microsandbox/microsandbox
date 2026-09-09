@@ -23,6 +23,7 @@ mod m20260803_000001_create_writeback_allocations;
 mod m20260808_000001_create_memory_allocation_nodes;
 mod m20260810_000001_rebuild_sandbox_labels;
 mod m20260813_000001_share_cpu_allocations;
+mod m20260818_000001_sandbox_network_slot;
 mod m20260824_000001_mount_owner_config;
 pub mod schema_metadata;
 
@@ -73,6 +74,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20260810_000001_rebuild_sandbox_labels::Migration),
             Box::new(m20260813_000001_share_cpu_allocations::Migration),
             Box::new(m20260824_000001_mount_owner_config::Migration),
+            // This backdated migration first shipped in v0.6.16, after the
+            // v0.6.15 mount-owner marker. Keep release order here even though
+            // the identifiers sort differently.
+            Box::new(m20260818_000001_sandbox_network_slot::Migration),
         ]
     }
 }

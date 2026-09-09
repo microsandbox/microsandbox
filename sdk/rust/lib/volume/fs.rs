@@ -35,6 +35,7 @@ use crate::{
 //--------------------------------------------------------------------------------------------------
 
 /// Chunk size for streaming volume reads (64 KiB).
+#[cfg(feature = "local")]
 const STREAM_CHUNK_SIZE: usize = 64 * 1024;
 
 //--------------------------------------------------------------------------------------------------
@@ -264,6 +265,11 @@ impl VolumeFsReadStream {
     ///
     /// Returns `None` at EOF.
     pub async fn recv(&mut self) -> MicrosandboxResult<Option<Bytes>> {
+        // With neither backend enabled the private enum has no constructors. Match the value,
+        // not its reference: references are considered inhabited even for an empty enum.
+        #[cfg(not(any(feature = "local", feature = "cloud")))]
+        match self.inner {}
+        #[cfg(any(feature = "local", feature = "cloud"))]
         match &mut self.inner {
             #[cfg(feature = "local")]
             VolumeFsReadStreamInner::Local { file, buf } => {
@@ -296,6 +302,12 @@ impl VolumeFsReadStream {
 impl VolumeFsWriteSink {
     /// Write a chunk of data to the file.
     pub async fn write(&mut self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
+        #[cfg(not(any(feature = "local", feature = "cloud")))]
+        {
+            let _ = data;
+            match self.inner {}
+        }
+        #[cfg(any(feature = "local", feature = "cloud"))]
         match &mut self.inner {
             #[cfg(feature = "local")]
             VolumeFsWriteSinkInner::Local(file) => {

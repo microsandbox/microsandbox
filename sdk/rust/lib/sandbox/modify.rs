@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use microsandbox_types::{EnvVar, RootDisk, RootfsSource};
+use microsandbox_types::{
+    EnvVar, RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction,
+};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
 use crate::MicrosandboxResult;
@@ -10,9 +12,6 @@ use crate::backend::Backend;
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
-
-#[cfg(feature = "net")]
-use microsandbox_types::{SecretSubstitution, SecretViolationAction};
 
 use super::{SandboxConfig, SandboxStatus};
 
