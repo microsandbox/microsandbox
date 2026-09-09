@@ -62,6 +62,11 @@ struct CheckpointMemoryRestore {
 //--------------------------------------------------------------------------------------------------
 
 impl PreparedCheckpointRestore {
+    /// Borrow disk admission while the prepared durable restore owns its validated closure.
+    pub(crate) fn disk_closure(&self) -> Option<&CheckpointClosure> {
+        self.memory.as_ref().map(|memory| &memory.closure)
+    }
+
     /// Decode a local handoff and pin its RAM before constructing any guest mappings.
     pub(crate) fn open_local(root: PathBuf, expected_id: &str) -> Result<Self, String> {
         let state = super::LocalBranchState::open(&root).map_err(|e| e.to_string())?;
@@ -182,11 +187,15 @@ impl PreparedCheckpointRestore {
                 .closure;
             let cache = super::MemoryCache::open(root).map_err(|e| e.to_string())?;
             let cached = cache
-                .materialize(closure.memory(), &closure.checkpoint().memory, |id| {
-                    closure
-                        .read_object(id, MAX_MEMORY_OBJECT_BYTES)
-                        .map_err(io::Error::other)
-                })
+                .materialize_parallel(
+                    closure.memory(),
+                    &closure.checkpoint().memory,
+                    |id, bytes| {
+                        closure
+                            .read_object_into(id, MAX_MEMORY_OBJECT_BYTES, bytes)
+                            .map_err(io::Error::other)
+                    },
+                )
                 .map_err(|e| e.to_string())?;
             tracing::info!(
                 cache_hit = cached.cache_hit,
@@ -230,9 +239,7 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
         let total_started = Instant::now();
         let mut zero_write_us = 0u128;
         let mut zero_bytes = 0u64;
-        let mut object_read_us = 0u128;
         let mut guest_write_us = 0u128;
-        let mut object_bytes = 0u64;
         let mut guest_object_bytes = 0u64;
         let mut object_extent_count = 0usize;
         let mut objects: BTreeMap<ObjectId, Vec<(msb_krun::GuestMemoryRange, u64)>> =
@@ -257,53 +264,58 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
             }
         }
 
-        // Read and identity-check each packed object exactly once, write all of its referenced
-        // guest ranges, then release the small object buffer. This fuses integrity with the
-        // unavoidable restore pass without retaining a RAM-sized cache.
+        // Read and identity-check each packed object exactly once with bounded read-ahead.
+        // Guest ranges are disjoint and only this construction thread writes them; workers
+        // never obtain guest-memory access or permit activation before verification completes.
         let object_count = objects.len();
-        for (id, extents) in objects {
-            let read_started = Instant::now();
-            let bytes = self
-                .closure
-                .read_object(&id, MAX_MEMORY_OBJECT_BYTES)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-            object_read_us += read_started.elapsed().as_micros();
-            object_bytes = object_bytes.saturating_add(bytes.len() as u64);
-            for (range, offset) in extents {
-                let start = usize::try_from(offset).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "memory object offset is too large",
-                    )
-                })?;
-                let length = usize::try_from(range.length()).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "memory extent is too large")
-                })?;
-                let end = start.checked_add(length).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "memory object slice overflows")
-                })?;
-                let slice = bytes.get(start..end).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "memory object slice exceeds verified bytes",
-                    )
-                })?;
-                let write_started = Instant::now();
-                target.write_bytes(range, slice)?;
-                guest_write_us += write_started.elapsed().as_micros();
-                guest_object_bytes = guest_object_bytes.saturating_add(range.length());
-            }
-        }
+        let pipeline = super::object_pipeline::consume_verified_objects(
+            objects,
+            |id, bytes| {
+                self.closure
+                    .read_object_into(id, MAX_MEMORY_OBJECT_BYTES, bytes)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+            },
+            |extents, bytes| {
+                for (range, offset) in extents {
+                    let start = usize::try_from(offset).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "memory object offset is too large",
+                        )
+                    })?;
+                    let length = usize::try_from(range.length()).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "memory extent is too large")
+                    })?;
+                    let end = start.checked_add(length).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "memory object slice overflows")
+                    })?;
+                    let slice = bytes.get(start..end).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "memory object slice exceeds verified bytes",
+                        )
+                    })?;
+                    let write_started = Instant::now();
+                    target.write_bytes(range, slice)?;
+                    guest_write_us += write_started.elapsed().as_micros();
+                    guest_object_bytes = guest_object_bytes.saturating_add(range.length());
+                }
+                Ok(())
+            },
+        )?;
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
             operation = "restore_memory",
             total_us = total_started.elapsed().as_micros(),
-            object_read_us,
+            object_read_us = pipeline.read_us + pipeline.hash_us,
+            object_io_worker_us = pipeline.read_us,
+            object_hash_worker_us = pipeline.hash_us,
+            object_pipeline_us = pipeline.elapsed_us,
             guest_write_us,
             zero_write_us,
             object_count,
             object_extent_count,
-            object_bytes,
+            object_bytes = pipeline.object_bytes,
             guest_object_bytes,
             zero_bytes,
             "checkpoint memory restore timing"

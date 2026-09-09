@@ -11,9 +11,11 @@ use std::time::Instant;
 use std::fs::File;
 
 use microsandbox_image::checkpoint::{
+    CheckpointClosure, DiskGenerationManifest, DiskLayerRef, sparse_file_integrity,
+};
+use microsandbox_image::checkpoint::{
     CompactLayer, DiskCompactionPlan, compact_layer_capacity, materialize_compact_prefix,
 };
-use microsandbox_image::checkpoint::{DiskGenerationManifest, DiskLayerRef, sparse_file_integrity};
 use serde::{Deserialize, Serialize};
 
 use crate::vm::{UpperLayerSpec, UpperSpec, VmConfig};
@@ -194,6 +196,14 @@ impl RuntimeOwnedRootDisk {
 
     /// Open the authoritative chain journal or initialize it from a sandbox-owned root disk.
     pub(crate) fn open(runtime_dir: &Path, vm: &VmConfig) -> Result<Option<Self>, String> {
+        Self::open_with_admitted(runtime_dir, vm, None)
+    }
+
+    fn open_with_admitted(
+        runtime_dir: &Path,
+        vm: &VmConfig,
+        admitted: Option<&CheckpointClosure>,
+    ) -> Result<Option<Self>, String> {
         let Some(layout) = configured_layout(vm) else {
             return Ok(None);
         };
@@ -225,13 +235,28 @@ impl RuntimeOwnedRootDisk {
                     .collect(),
             };
             let last = state.layers.len() - 1;
+            let mut reused_layers = 0_u64;
+            let mut hashed_layers = 0_u64;
+            let started = Instant::now();
             for layer in state.layers.iter_mut().take(last) {
-                layer.integrity_root = Some(
+                let reused = admitted
+                    .map(|closure| closure.reused_disk_integrity(&layer.path))
+                    .transpose()
+                    .map_err(|error| format!("reuse admitted root ancestor: {error}"))?
+                    .flatten();
+                layer.integrity_root = Some(if let Some(root) = reused {
+                    reused_layers += 1;
+                    root
+                } else {
+                    // Copies and relocated qcow headers are different physical artifacts.
+                    // Never reuse their predecessor's root merely because sizes match.
+                    hashed_layers += 1;
                     sparse_file_integrity(&layer.path)
                         .map_err(|error| format!("hash sealed root ancestor: {error}"))?
-                        .root,
-                );
+                        .root
+                });
             }
+            tracing::info!(target: "microsandbox_checkpoint_timing", operation = "root_journal_admission", reused_layers, hashed_layers, total_us = started.elapsed().as_micros(), "root journal admission timing");
             write_state(&state_path, &state)?;
             state
         };
@@ -622,6 +647,18 @@ impl std::error::Error for RootDiskRolloverError {}
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Seed a new child's journal from disk admission already completed in this runtime process.
+/// The existing journal, when present, remains authoritative; transformed or copied files are
+/// hashed instead of inheriting an identity belonging to their source representation.
+pub(crate) fn seed_restored_root_disk(
+    runtime_dir: &Path,
+    vm: &VmConfig,
+    admitted: &CheckpointClosure,
+) -> Result<(), String> {
+    RuntimeOwnedRootDisk::open_with_admitted(runtime_dir, vm, Some(admitted))?;
+    Ok(())
+}
 
 /// Apply the durable forward chain before VM construction after a runtime restart.
 pub(crate) fn recover_runtime_owned_root(
@@ -1015,6 +1052,291 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn admitted_fixture(
+        root: &std::path::Path,
+        sources: &[super::UpperLayerSpec],
+    ) -> microsandbox_image::checkpoint::CheckpointClosure {
+        use microsandbox_image::checkpoint::{
+            CaptureIntent, CheckpointClosure, CheckpointManifest, DiskGenerationManifest,
+            DiskLayerRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
+            MemoryManifest, ObjectId, sparse_file_integrity,
+        };
+
+        let store = LocalObjectStore::open(root).unwrap();
+        std::fs::create_dir(root.join("layers")).unwrap();
+        let memory = MemoryManifest {
+            schema: "microsandbox.memory/1".into(),
+            architecture: std::env::consts::ARCH.into(),
+            guest_page_size: 4096,
+            topology_generation: 1,
+            generation: 1,
+            capture_mode: MemoryCaptureMode::Full,
+            pause_generation: 7,
+            extents: vec![MemoryExtent {
+                start: 0,
+                length: 4096,
+                content: MemoryExtentContent::Zero,
+            }],
+        };
+        let layers: Vec<_> = sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let layer_id = format!("sealed_{index}");
+                let format = match source.format {
+                    msb_krun::DiskImageFormat::Raw => "raw",
+                    msb_krun::DiskImageFormat::Qcow2 => "qcow2",
+                    _ => panic!("unsupported fixture format"),
+                };
+                let target = root.join("layers").join(format!("{layer_id}.{format}"));
+                std::fs::hard_link(&source.path, &target).unwrap();
+                DiskLayerRef {
+                    layer_id,
+                    format: format.into(),
+                    virtual_size: 131072,
+                    predecessor: index
+                        .checked_sub(1)
+                        .map(|previous| format!("sealed_{previous}")),
+                    integrity_root: sparse_file_integrity(&target).unwrap().root,
+                }
+            })
+            .collect();
+        let disk = DiskGenerationManifest {
+            schema: "microsandbox.disk-generation/1".into(),
+            volume_id: "root".into(),
+            device_id: "vda".into(),
+            generation: 1,
+            head: layers.last().unwrap().layer_id.clone(),
+            layers,
+            pause_generation: 7,
+        };
+        // The closure checks opaque execution bytes; only live restore decodes their codec.
+        let checkpoint = CheckpointManifest {
+            schema: "microsandbox.checkpoint/1".into(),
+            checkpoint_id: "journal-fixture".into(),
+            capture_intent: CaptureIntent::FullSnapshot,
+            architecture: std::env::consts::ARCH.into(),
+            pause_generation: 7,
+            execution_state: store.put_bytes(b"execution fixture").unwrap(),
+            memory: store
+                .put_bytes(&memory.to_canonical_bytes().unwrap())
+                .unwrap(),
+            disks: vec![
+                store
+                    .put_bytes(&disk.to_canonical_bytes().unwrap())
+                    .unwrap(),
+            ],
+            devices: Vec::new(),
+            resources: Vec::new(),
+            requires: Vec::new(),
+        };
+        let bytes = checkpoint.to_canonical_bytes().unwrap();
+        let id = ObjectId::from_bytes(&bytes).unwrap();
+        std::fs::write(root.join("checkpoint.json"), bytes).unwrap();
+        CheckpointClosure::open(root, Some(&id)).unwrap()
+    }
+
+    fn root_vm(
+        layout: super::RootDiskLayout,
+        layers: Vec<super::UpperLayerSpec>,
+    ) -> super::VmConfig {
+        let spec = super::UpperSpec {
+            layers,
+            read_only: false,
+        };
+        let mut vm = super::VmConfig {
+            libkrunfw_path: Default::default(),
+            thp: Default::default(),
+            memory_cache_dir: None,
+            vcpus: 1,
+            memory_mib: 256,
+            max_cpus: 1,
+            max_memory_mib: 256,
+            cpu_placement: Default::default(),
+            placement_profile_name: None,
+            placement_profile: None,
+            block_writeback_limit_bytes: None,
+            rootfs_path: None,
+            rootfs_follow_root_symlinks: false,
+            rootfs_disk: None,
+            rootfs_disk_format: None,
+            rootfs_disk_readonly: false,
+            rootfs_disk_spec: None,
+            rootfs_disk_runtime_owned: false,
+            rootfs_vmdk: None,
+            rootfs_upper: None,
+            rootfs_upper_spec: None,
+            mounts: Vec::new(),
+            disks: Vec::new(),
+            vsock: Vec::new(),
+            #[cfg(unix)]
+            backends: Vec::new(),
+            init_path: None,
+            bootstrap: Default::default(),
+            exec_path: None,
+            exec_args: Vec::new(),
+            #[cfg(feature = "net")]
+            network: Default::default(),
+            #[cfg(feature = "net")]
+            deployment_profile: Default::default(),
+            #[cfg(feature = "net")]
+            sandbox_slot: 1,
+            checkpoint_restore: None,
+        };
+        match layout {
+            super::RootDiskLayout::ManagedUpper => {
+                vm.rootfs_vmdk = Some("fixture.vmdk".into());
+                vm.rootfs_upper_spec = Some(spec);
+            }
+            super::RootDiskLayout::FlatRoot => {
+                vm.rootfs_disk_runtime_owned = true;
+                vm.rootfs_disk_spec = Some(spec);
+            }
+        }
+        vm
+    }
+
+    #[tokio::test]
+    async fn admitted_raw_hardlink_seeds_once_and_reopens_without_the_snapshot() {
+        use super::*;
+        for layout in [RootDiskLayout::ManagedUpper, RootDiskLayout::FlatRoot] {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("source.raw");
+            std::fs::write(&source, vec![17; 131072]).unwrap();
+            let admitted = admitted_fixture(
+                &directory.path().join("snapshot"),
+                &[UpperLayerSpec {
+                    path: source.clone(),
+                    format: msb_krun::DiskImageFormat::Raw,
+                }],
+            );
+            let child_base = directory.path().join("child.raw");
+            std::fs::hard_link(&source, &child_base).unwrap();
+            let expected = admitted.disks()[0].layers[0].integrity_root.clone();
+            assert_eq!(
+                admitted.reused_disk_integrity(&child_base).unwrap(),
+                Some(expected.clone())
+            );
+            let runtime = directory.path().join("runtime");
+            std::fs::create_dir(&runtime).unwrap();
+            let head = runtime.join("head.qcow2");
+            microsandbox_image::checkpoint::create_qcow2_overlay(&head, 131072, &child_base, "raw")
+                .await
+                .unwrap();
+            let vm = root_vm(
+                layout,
+                vec![
+                    UpperLayerSpec {
+                        path: child_base.clone(),
+                        format: msb_krun::DiskImageFormat::Raw,
+                    },
+                    UpperLayerSpec {
+                        path: head,
+                        format: msb_krun::DiskImageFormat::Qcow2,
+                    },
+                ],
+            );
+            seed_restored_root_disk(&runtime, &vm, &admitted).unwrap();
+            let journal = runtime.join(ROOT_DISK_STATE_FILE);
+            let first = std::fs::read(&journal).unwrap();
+            let state = read_state(&journal).unwrap();
+            assert_eq!(state.layers[0].integrity_root.as_ref(), Some(&expected));
+            assert!(
+                state.layers[1].integrity_root.is_none(),
+                "writable head must not be sealed"
+            );
+            assert_eq!(state.layout, layout);
+            seed_restored_root_disk(&runtime, &vm, &admitted).unwrap();
+            assert_eq!(std::fs::read(&journal).unwrap(), first);
+            let snapshot_layer = admitted.disk_layer_path(&admitted.disks()[0].layers[0]);
+            drop(admitted);
+            std::fs::remove_file(source).unwrap();
+            std::fs::remove_file(snapshot_layer).unwrap();
+            RuntimeOwnedRootDisk::open(&runtime, &vm).unwrap().unwrap();
+            assert_eq!(std::fs::read(&journal).unwrap(), first);
+            assert_eq!(std::fs::read(child_base).unwrap(), vec![17; 131072]);
+        }
+    }
+
+    #[tokio::test]
+    async fn copied_raw_and_relocated_qcow_seed_their_own_physical_integrities() {
+        use super::*;
+        use microsandbox_image::checkpoint::{create_qcow2_overlay, relocate_qcow2_backing};
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.raw");
+        let overlay = directory.path().join("source.qcow2");
+        std::fs::write(&source, vec![31; 131072]).unwrap();
+        create_qcow2_overlay(&overlay, 131072, &source, "raw")
+            .await
+            .unwrap();
+        let original_overlay = std::fs::read(&overlay).unwrap();
+        let admitted = admitted_fixture(
+            &directory.path().join("snapshot"),
+            &[
+                UpperLayerSpec {
+                    path: source.clone(),
+                    format: msb_krun::DiskImageFormat::Raw,
+                },
+                UpperLayerSpec {
+                    path: overlay.clone(),
+                    format: msb_krun::DiskImageFormat::Qcow2,
+                },
+            ],
+        );
+        let base_copy = directory.path().join("copied-base.raw");
+        let overlay_copy = directory.path().join("copied-overlay.qcow2");
+        std::fs::copy(&source, &base_copy).unwrap();
+        std::fs::copy(&overlay, &overlay_copy).unwrap();
+        relocate_qcow2_backing(&overlay_copy, &base_copy).unwrap();
+        assert!(
+            admitted
+                .reused_disk_integrity(&base_copy)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            admitted
+                .reused_disk_integrity(&overlay_copy)
+                .unwrap()
+                .is_none()
+        );
+        let expected_raw = sparse_file_integrity(&base_copy).unwrap().root;
+        let expected_qcow = sparse_file_integrity(&overlay_copy).unwrap().root;
+        assert_ne!(expected_qcow, admitted.disks()[0].layers[1].integrity_root);
+        let runtime = directory.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let head = runtime.join("head.qcow2");
+        create_qcow2_overlay(&head, 131072, &overlay_copy, "qcow2")
+            .await
+            .unwrap();
+        let vm = root_vm(
+            RootDiskLayout::FlatRoot,
+            vec![
+                UpperLayerSpec {
+                    path: base_copy,
+                    format: msb_krun::DiskImageFormat::Raw,
+                },
+                UpperLayerSpec {
+                    path: overlay_copy,
+                    format: msb_krun::DiskImageFormat::Qcow2,
+                },
+                UpperLayerSpec {
+                    path: head,
+                    format: msb_krun::DiskImageFormat::Qcow2,
+                },
+            ],
+        );
+        seed_restored_root_disk(&runtime, &vm, &admitted).unwrap();
+        let state = read_state(&runtime.join(ROOT_DISK_STATE_FILE)).unwrap();
+        assert_eq!(state.layers[0].integrity_root.as_ref(), Some(&expected_raw));
+        assert_eq!(
+            state.layers[1].integrity_root.as_ref(),
+            Some(&expected_qcow)
+        );
+        assert!(state.layers[2].integrity_root.is_none());
+        assert_eq!(std::fs::read(overlay).unwrap(), original_overlay);
+    }
+
     #[test]
     fn stopped_growth_preserves_ancestors_and_recovers_pending_target() {
         use super::*;

@@ -25,7 +25,7 @@ pub struct PauseArgs {
 
 /// Change resident execution state through host control, without opening the guest agent.
 pub async fn run(args: PauseArgs, resume: bool) -> anyhow::Result<()> {
-    let sandbox = Sandbox::get(&args.name).await?;
+    let sandbox = Sandbox::get_for_control(&args.name).await?;
     if resume {
         sandbox.resume().await?;
     } else {

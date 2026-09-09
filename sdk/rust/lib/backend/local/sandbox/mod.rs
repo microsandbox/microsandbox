@@ -312,7 +312,7 @@ impl LocalBackend {
     }
 
     /// Load the local DB row + active PID for a sandbox handle.
-    async fn sandbox_handle_state(
+    pub(crate) async fn sandbox_handle_state(
         &self,
         name: &str,
     ) -> MicrosandboxResult<(sandbox_entity::Model, Option<i32>)> {
@@ -1188,6 +1188,71 @@ mod tests {
             pid += 1;
         }
         pid
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_lookup_skips_observation_but_get_and_list_still_project_pause() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let backend = Arc::new(
+            LocalBackend::builder()
+                .home(home.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let pools = backend.db().await.unwrap();
+        let name = "resident";
+        let id = LocalBackend::insert_sandbox_record(pools.write(), &test_config(name))
+            .await
+            .unwrap();
+        run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(id),
+            pid: Set(Some(std::process::id() as i32)),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+        let agent =
+            crate::runtime::sandbox_agent_socket_path_candidates_for(&backend, name).remove(0);
+        let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        let server = tokio::spawn(async move {
+            // The mutation arrives first. Ordinary observational APIs retain their projection.
+            for operation in ["pause", "pause_state", "pause_state"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(line, format!("{{\"op\":\"{operation}\"}}\n"));
+                stream
+                    .get_mut()
+                    .write_all(
+                        b"{\"ok\":true,\"pause\":{\"paused\":true,\"recovery_required\":false}}\n",
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let backend_dyn: Arc<dyn Backend> = backend;
+        crate::backend::with_backend(backend_dyn, async {
+            let handle = crate::Sandbox::get_for_control(name).await.unwrap();
+            handle.pause().await.unwrap();
+            assert_eq!(
+                crate::Sandbox::get(name).await.unwrap().status_snapshot(),
+                SandboxStatus::Paused
+            );
+            let page = crate::Sandbox::list().await.unwrap();
+            assert_eq!(page.sandboxes.len(), 1);
+            assert_eq!(page.sandboxes[0].status_snapshot(), SandboxStatus::Paused);
+        })
+        .await;
+        server.await.unwrap();
     }
 
     #[tokio::test]

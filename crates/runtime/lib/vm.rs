@@ -2097,6 +2097,12 @@ fn build_vm(
             )
         }
         .map_err(|error| RuntimeError::Custom(format!("prepare checkpoint restore: {error}")))?;
+        if let Some(admitted) = prepared.disk_closure() {
+            // Reuse this process's exact admitted file bindings before the closure is moved
+            // into RAM restoration. The later coordinator opens the completed journal.
+            crate::checkpoint::seed_restored_root_disk(&config.runtime_dir, &config.vm, admitted)
+                .map_err(RuntimeError::Custom)?;
+        }
         let cache_root = restore
             .forked
             .then(|| {

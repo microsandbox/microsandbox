@@ -9,7 +9,11 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use microsandbox_image::checkpoint::{MemoryExtentContent, MemoryManifest, ObjectId};
+use microsandbox_image::checkpoint::{
+    CheckpointObjectReadTiming, MemoryExtentContent, MemoryManifest, ObjectId,
+};
+
+use super::object_pipeline::{ObjectPipelineTiming, consume_verified_objects};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -48,6 +52,8 @@ pub struct MemoryCache {
     pub(super) root: PathBuf,
     pub(super) page_size: u64,
 }
+
+type ObjectSlices = BTreeMap<ObjectId, Vec<(u64, u64, u64)>>;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -120,6 +126,32 @@ impl MemoryCache {
         self.materialize_with_baseline(manifest, identity, None, read_object)
     }
 
+    /// Prepare a durable restore backing with bounded parallel verification and reusable buffers.
+    /// Readers must enforce the 32 MiB portable memory-object bound and return verified bytes.
+    pub fn materialize_parallel(
+        &self,
+        manifest: &MemoryManifest,
+        identity: &ObjectId,
+        read_object: impl Fn(&ObjectId, &mut Vec<u8>) -> io::Result<CheckpointObjectReadTiming> + Sync,
+    ) -> io::Result<CachedMemory> {
+        self.materialize_with_baseline_inner(manifest, identity, None, |objects, staging| {
+            let timings = consume_verified_objects(objects, read_object, |slices, bytes| {
+                write_object_slices(staging, slices, bytes)
+            })?;
+            tracing::info!(
+                target: "microsandbox_checkpoint_timing",
+                operation = "memory_cache_objects",
+                object_io_worker_us = timings.read_us,
+                object_hash_worker_us = timings.hash_us,
+                object_write_us = timings.consume_us,
+                object_pipeline_us = timings.elapsed_us,
+                object_bytes = timings.object_bytes,
+                "parallel memory cache object timing"
+            );
+            Ok(timings)
+        })
+    }
+
     /// Reuse a pinned complete baseline before overlaying immutable changed object slices.
     /// The source VM is never read or remapped here; both inputs are completed captures.
     pub fn materialize_with_baseline(
@@ -128,6 +160,30 @@ impl MemoryCache {
         identity: &ObjectId,
         baseline: Option<(&MemoryManifest, &CachedMemory)>,
         mut read_object: impl FnMut(&ObjectId) -> io::Result<Vec<u8>>,
+    ) -> io::Result<CachedMemory> {
+        self.materialize_with_baseline_inner(manifest, identity, baseline, |objects, staging| {
+            let started = Instant::now();
+            let mut timings = ObjectPipelineTiming::default();
+            for (id, slices) in objects {
+                let reading = Instant::now();
+                let bytes = read_object(&id)?;
+                timings.read_us += reading.elapsed().as_micros();
+                timings.object_bytes += bytes.len() as u64;
+                let writing = Instant::now();
+                write_object_slices(staging, slices, &bytes)?;
+                timings.consume_us += writing.elapsed().as_micros();
+            }
+            timings.elapsed_us = started.elapsed().as_micros();
+            Ok(timings)
+        })
+    }
+
+    fn materialize_with_baseline_inner(
+        &self,
+        manifest: &MemoryManifest,
+        identity: &ObjectId,
+        baseline: Option<(&MemoryManifest, &CachedMemory)>,
+        consume_objects: impl FnOnce(ObjectSlices, &mut File) -> io::Result<ObjectPipelineTiming>,
     ) -> io::Result<CachedMemory> {
         let started = Instant::now();
         let canonical = manifest.to_canonical_bytes().map_err(io::Error::other)?;
@@ -240,29 +296,15 @@ impl MemoryCache {
                 }
             }
         }
-        for (id, slices) in objects {
-            let bytes = read_object(&id)?;
-            for (target, offset, count) in slices {
-                let start = usize::try_from(offset)
-                    .map_err(|_| invalid("memory object offset overflows"))?;
-                let count = usize::try_from(count)
-                    .map_err(|_| invalid("memory object length overflows"))?;
-                let end = start
-                    .checked_add(count)
-                    .ok_or_else(|| invalid("memory object slice overflows"))?;
-                let bytes = bytes
-                    .get(start..end)
-                    .ok_or_else(|| invalid("memory object slice exceeds verified bytes"))?;
-                staging.seek(SeekFrom::Start(target))?;
-                staging.write_all(bytes)?;
-            }
-        }
+        let objects = consume_objects(objects, &mut staging)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             staging.set_permissions(std::fs::Permissions::from_mode(0o400))?;
         }
+        let syncing = Instant::now();
         staging.sync_all()?;
+        let file_sync_us = syncing.elapsed().as_micros();
         // Windows readers deliberately deny write sharing. Close the completed writer before
         // publishing/opening its immutable view; keeping it open would cause a sharing violation.
         drop(staging);
@@ -273,14 +315,27 @@ impl MemoryCache {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
+        let syncing = Instant::now();
         #[cfg(unix)]
         File::open(&self.root)?.sync_all()?;
+        let directory_sync_us = syncing.elapsed().as_micros();
         let file = open_pinned(&path, length)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "memory cache was evicted before it could be pinned; retry restore",
             )
         })?;
+        tracing::info!(
+            target: "microsandbox_checkpoint_timing",
+            operation = "memory_cache_materialize",
+            total_us = started.elapsed().as_micros(),
+            object_pipeline_us = objects.elapsed_us,
+            object_write_us = objects.consume_us,
+            object_bytes = objects.object_bytes,
+            file_sync_us,
+            directory_sync_us,
+            "memory cache construction timing"
+        );
         Ok(CachedMemory {
             path,
             identity: identity.clone(),
@@ -315,6 +370,28 @@ impl MemoryCache {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn write_object_slices(
+    staging: &mut File,
+    slices: Vec<(u64, u64, u64)>,
+    bytes: &[u8],
+) -> io::Result<()> {
+    for (target, offset, count) in slices {
+        let start =
+            usize::try_from(offset).map_err(|_| invalid("memory object offset overflows"))?;
+        let count =
+            usize::try_from(count).map_err(|_| invalid("memory object length overflows"))?;
+        let end = start
+            .checked_add(count)
+            .ok_or_else(|| invalid("memory object slice overflows"))?;
+        let bytes = bytes
+            .get(start..end)
+            .ok_or_else(|| invalid("memory object slice exceeds verified bytes"))?;
+        staging.seek(SeekFrom::Start(target))?;
+        staging.write_all(bytes)?;
+    }
+    Ok(())
+}
 
 fn memory_regions(
     manifest: &MemoryManifest,
@@ -590,6 +667,67 @@ mod tests {
         drop(second);
         assert!(cache.evict(&id).unwrap());
         assert!(!cache.evict(&id).unwrap());
+    }
+
+    #[test]
+    fn parallel_materialization_preserves_holes_zeroes_and_warm_pins() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let directory = tempfile::tempdir().unwrap();
+        let cache = MemoryCache::open(directory.path()).unwrap();
+        let (manifest, id, bytes) = fixture(cache.page_size);
+        let reads = AtomicUsize::new(0);
+        let first = cache
+            .materialize_parallel(&manifest, &id, |_, buffer| {
+                reads.fetch_add(1, Ordering::Relaxed);
+                buffer.resize(bytes.len(), 0);
+                buffer.copy_from_slice(&bytes);
+                Ok(CheckpointObjectReadTiming::default())
+            })
+            .unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        let mut actual = vec![0xff; cache.page_size as usize * 3];
+        first.file.read_exact_at(&mut actual, 0).unwrap();
+        assert_eq!(&actual[..bytes.len()], bytes);
+        assert!(
+            actual[bytes.len()..bytes.len() * 2]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        assert_eq!(&actual[bytes.len() * 2..], bytes);
+        let second = cache
+            .materialize_parallel(&manifest, &id, |_, _| panic!("warm restore reread objects"))
+            .unwrap();
+        assert!(second.cache_hit);
+        assert!(!cache.evict(&id).unwrap());
+        drop(first);
+        assert!(!cache.evict(&id).unwrap());
+        drop(second);
+        assert!(cache.evict(&id).unwrap());
+    }
+
+    #[test]
+    fn failed_parallel_read_or_slice_never_publishes_a_cache_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = MemoryCache::open(directory.path()).unwrap();
+        let (manifest, id, _) = fixture(cache.page_size);
+        assert!(
+            cache
+                .materialize_parallel(&manifest, &id, |_, _| {
+                    Err(io::Error::other("injected verification failure"))
+                })
+                .is_err()
+        );
+        assert_eq!(payload_count(directory.path()), 0);
+        assert!(
+            cache
+                .materialize_parallel(&manifest, &id, |_, buffer| {
+                    buffer.resize(1, 0);
+                    Ok(CheckpointObjectReadTiming::default())
+                })
+                .is_err()
+        );
+        assert_eq!(payload_count(directory.path()), 0);
     }
 
     #[test]

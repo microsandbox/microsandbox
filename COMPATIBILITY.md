@@ -134,6 +134,8 @@ Add operations and optional fields rather than redefining existing ones. Capabil
 
 Live disk-only snapshots use the distinct `disk_checkpoint_create` operation and capability. An absent capability is false: callers refuse before capture rather than silently capturing RAM or copying a writable disk. The runtime serializes the disk rollover with other control mutations and preserves a user's pause. This does not change the agent protocol or snapshot format; the result uses the existing file-state layer descriptor. Stopped disk capture retains its lifecycle lock and existing behavior.
 
+Resident pause/resume sends one authoritative mutation rather than first observing pause state and querying capabilities. The runtime checks support before mutation, including idempotent requests, and the client requires the expected state in the response; unknown operations and incomplete replies fail. Ordinary get/list pause projection remains unchanged. Guest freezing retains one `cgroup.events` descriptor and waits for notifications with a fixed deadline; each poll timeout is capped at 1 ms so rate-limited kernel notifications cannot delay the next authoritative state check. Clock correction still precedes workload thaw, and no control or agent wire format changes.
+
 ## 5. Launcher-to-Runtime Process Protocol
 
 Starting a sandbox crosses a private process boundary. On Unix, launch JSON is passed through inherited descriptor 96, the parent watchdog uses descriptor 97, startup JSON uses descriptor 98, and the lifecycle lock uses descriptor 99. Windows uses a short-lived launch-config file and platform-specific startup plumbing. Detach acknowledgement bytes and graceful-shutdown signals are also part of this contract.
@@ -197,6 +199,10 @@ Evolution rules:
 - Keep downgrade refusal until durable reverse artifact migration is complete.
 
 Sources: [`crates/image/lib/snapshot/manifest.rs`](crates/image/lib/snapshot/manifest.rs), [`crates/image/lib/snapshot/migration.rs`](crates/image/lib/snapshot/migration.rs), and [`sdk/rust/lib/snapshot/archive.rs`](sdk/rust/lib/snapshot/archive.rs).
+
+Runtime restore admits disk payloads before activation. Journal creation may reuse the verified root only for that same unchanged immutable file. Its in-process cache retains at most 32 file handles, preferring larger physical files; every layer still receives full admission, and uncached, copied or rewritten layers receive a fresh hash. Detected mutation of a retained admitted file fails. Candidates are opened once per lookup, with comparisons bounded by the cache size. This reuse is not a persistent "verified" flag or a path-only cache, and the cache bound does not reduce supported chain depth.
+
+Incremental capture retains immutable object receipts only within the owning runtime's store lifetime. Reopened stores and unadmitted objects still verify bytes. Receipts retain no file descriptors; active operations open, check and temporarily pin the exact file. Capture uses two writers and three recycled 32 MiB packs, then synchronizes new directory entries before the existing root-last publication. Eager restore and cold memory-cache construction use at most four reusable 32 MiB read/hash buffers. Errors join workers before cleanup. These changes preserve the snapshot format and restored bytes, dirty-baseline rollover, pause/publication ordering and durability barriers; summed worker timings must not be interpreted as additive wall time.
 
 ## 10. OCI Cache and Materializer ABI
 

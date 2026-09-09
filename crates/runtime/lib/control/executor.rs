@@ -262,6 +262,14 @@ impl RuntimeControlExecutor {
         state: &mut ExecutorState,
         request: ControlRequest,
     ) -> ControlResponse {
+        // Gate the authoritative operation, including idempotent Resume on a running VM.
+        // Clients need no separate capability exchange, and refusal never changes ownership.
+        if matches!(request, ControlRequest::Pause | ControlRequest::Resume)
+            && let Some(response) =
+                unsupported_lifecycle_request(&request, self.vm.clock_sync_supported())
+        {
+            return response;
+        }
         let mutation = matches!(
             request,
             ControlRequest::MemoryTarget { .. }
@@ -641,6 +649,18 @@ impl RuntimeControlExecutor {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn unsupported_lifecycle_request(
+    request: &ControlRequest,
+    clock_sync: bool,
+) -> Option<ControlResponse> {
+    (!clock_sync && matches!(request, ControlRequest::Pause | ControlRequest::Resume)).then(|| {
+        control_error(
+            "pause_resume_unavailable",
+            "resident pause/resume requires a runtime and guest kernel with clock-only resume support",
+        )
+    })
+}
+
 fn new_runtime_boot_id() -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
@@ -784,6 +804,23 @@ fn control_error(code: &str, message: impl Into<String>) -> ControlResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_pause_and_resume_refuse_before_idempotent_mutation() {
+        for request in [ControlRequest::Pause, ControlRequest::Resume] {
+            let refused = unsupported_lifecycle_request(&request, false).unwrap();
+            assert!(!refused.ok);
+            assert_eq!(
+                refused.error_code.as_deref(),
+                Some("pause_resume_unavailable")
+            );
+            assert!(refused.pause.is_none());
+            assert!(unsupported_lifecycle_request(&request, true).is_none());
+        }
+        // Observation remains safe without a kernel clock callback.
+        assert!(unsupported_lifecycle_request(&ControlRequest::PauseState, false).is_none());
+        assert!(unsupported_lifecycle_request(&ControlRequest::Capabilities, false).is_none());
+    }
 
     #[test]
     fn control_ids_are_bounded_and_printable() {

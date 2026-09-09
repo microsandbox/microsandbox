@@ -4,13 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use microsandbox_agent_client::AgentClient;
 use microsandbox_image::checkpoint::{
-    CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, LocalObjectStore,
-    MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest, ObjectId,
-    ResourceDescriptor, ResourceTreatment,
+    AdmittedObject, CaptureIntent, CaptureObjectBatch, CheckpointManifest, ContentRef,
+    DeviceStateRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
+    MemoryManifest, ObjectId, ResourceDescriptor, ResourceTreatment,
 };
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::core::{
@@ -18,11 +19,9 @@ use microsandbox_protocol::core::{
     WorkloadThaw, WorkloadThawed,
 };
 use microsandbox_protocol::message::{Message, MessageType};
-use msb_krun::{
-    GuestMemoryRange, IncrementalCaptureDecision, MemoryCaptureOptions, MemoryCapturePlan,
-    MemoryCaptureSink,
-};
+use msb_krun::{IncrementalCaptureDecision, MemoryCaptureOptions, MemoryCapturePlan};
 
+use super::capture_pipeline::{MEMORY_OBJECT_PACK_SIZE, MemoryObjectSink};
 use super::disk::RuntimeOwnedRootDisk;
 use super::local_memory::{LocalMemoryCapture, LocalMemoryPin};
 use crate::vm::VmConfig;
@@ -40,7 +39,6 @@ pub(super) const TYPE_FS: u32 = 26;
 // object store. Independently pack non-zero ranges into larger immutable objects to amortize
 // hashing, fsync, directory publication, and restore-time object opens.
 const MEMORY_SCAN_CHUNK_SIZE: usize = 2 * 1024 * 1024;
-const MEMORY_OBJECT_PACK_SIZE: usize = 32 * 1024 * 1024;
 const WORKLOAD_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 //--------------------------------------------------------------------------------------------------
@@ -57,6 +55,7 @@ pub(crate) struct CheckpointCoordinator {
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
     network_resource_binding: Option<String>,
     previous_memory: Option<MemoryManifest>,
+    previous_memory_objects: Vec<AdmittedObject>,
     memory_cache: Option<super::MemoryCache>,
     cached_baseline: Option<(MemoryManifest, super::CachedMemory)>,
     local_cache_root: Option<PathBuf>,
@@ -93,6 +92,7 @@ struct PausedCapture {
     result: CheckpointResult,
     memory_plan: MemoryCapturePlan,
     memory_manifest: Option<MemoryManifest>,
+    memory_objects: Vec<AdmittedObject>,
     local_memory: Option<LocalMemoryPin>,
     timings: PausedCaptureTimings,
 }
@@ -107,6 +107,14 @@ struct PausedCaptureTimings {
     extent_overlay_us: u128,
     memory_manifest_us: u128,
     checkpoint_publish_us: u128,
+    pipeline_wait_us: u128,
+    object_persist_worker_us: u128,
+    object_packs: u64,
+    peak_in_flight_bytes: usize,
+    object_hashed_bytes: u64,
+    object_linked_bytes: u64,
+    object_copied_bytes: u64,
+    object_directory_syncs: u64,
 }
 
 struct FrozenWorkload {
@@ -121,19 +129,6 @@ pub(crate) struct UserPause {
     generation: msb_krun::VmPauseGeneration,
     workload: Option<FrozenWorkload>,
     pub(crate) capture_unavailable: Option<String>,
-}
-
-struct MemoryObjectSink<'a> {
-    store: &'a LocalObjectStore,
-    updates: Vec<MemoryExtent>,
-    pending_bytes: Vec<u8>,
-    pending_extents: Vec<PendingMemoryExtent>,
-}
-
-struct PendingMemoryExtent {
-    start: u64,
-    length: u64,
-    object_offset: u64,
 }
 
 struct PendingDeviceState {
@@ -335,6 +330,7 @@ impl CheckpointCoordinator {
             fs_resource_bindings,
             network_resource_binding,
             previous_memory: None,
+            previous_memory_objects: Vec::new(),
             memory_cache: if vm
                 .checkpoint_restore
                 .as_ref()
@@ -726,9 +722,11 @@ impl CheckpointCoordinator {
         }
         if baseline_published {
             self.previous_memory = captured.memory_manifest;
+            self.previous_memory_objects = captured.memory_objects;
             self.local_baseline = captured.local_memory;
         } else {
             self.previous_memory = None;
+            self.previous_memory_objects.clear();
             self.local_baseline = None;
         }
         tracing::info!(
@@ -753,6 +751,14 @@ impl CheckpointCoordinator {
             extent_overlay_us = captured.timings.extent_overlay_us,
             memory_manifest_us = captured.timings.memory_manifest_us,
             checkpoint_publish_us = captured.timings.checkpoint_publish_us,
+            pipeline_wait_us = captured.timings.pipeline_wait_us,
+            object_persist_worker_us = captured.timings.object_persist_worker_us,
+            object_packs = captured.timings.object_packs,
+            peak_in_flight_bytes = captured.timings.peak_in_flight_bytes,
+            object_hashed_bytes = captured.timings.object_hashed_bytes,
+            object_linked_bytes = captured.timings.object_linked_bytes,
+            object_copied_bytes = captured.timings.object_copied_bytes,
+            object_directory_syncs = captured.timings.object_directory_syncs,
             baseline_publish_us,
             resume_us,
             thaw_us,
@@ -869,6 +875,14 @@ impl CheckpointCoordinator {
         local: bool,
     ) -> Result<PausedCapture, CheckpointFailure> {
         let mut timings = PausedCaptureTimings::default();
+        let batch = Arc::new(CaptureObjectBatch::new(
+            self.store.clone(),
+            if local {
+                &[]
+            } else {
+                &self.previous_memory_objects
+            },
+        ));
         let devices_started = Instant::now();
         let mut pending_devices = Vec::with_capacity(inventory.len());
         let mut disk_roots = Vec::new();
@@ -899,11 +913,10 @@ impl CheckpointCoordinator {
                         .manifest
                         .to_canonical_bytes()
                         .map_err(CheckpointFailure::resumable)?;
-                    let manifest_id = self
-                        .store
+                    let manifest_id = batch
                         .put_bytes(&manifest_bytes)
                         .map_err(CheckpointFailure::resumable)?;
-                    self.store
+                    batch
                         .link_into(&manifest_id, staging)
                         .map_err(CheckpointFailure::resumable)?;
                     disk_roots.push(manifest_id);
@@ -962,7 +975,7 @@ impl CheckpointCoordinator {
                 })
                 .collect::<Result<Vec<_>, String>>()
         } else {
-            persist_device_states(&self.store, staging, &pending_devices)
+            persist_device_states(&batch, staging, &pending_devices)
         }
         .map_err(CheckpointFailure::resumable)?;
         timings.devices_us = devices_started.elapsed().as_micros();
@@ -985,11 +998,10 @@ impl CheckpointCoordinator {
         let execution_id = if local {
             put_local_object(staging, &execution_bytes).map_err(CheckpointFailure::resumable)?
         } else {
-            let id = self
-                .store
+            let id = batch
                 .put_bytes(&execution_bytes)
                 .map_err(CheckpointFailure::resumable)?;
-            self.store
+            batch
                 .link_into(&id, staging)
                 .map_err(CheckpointFailure::resumable)?;
             id
@@ -1072,6 +1084,7 @@ impl CheckpointCoordinator {
                 },
                 memory_plan,
                 memory_manifest: None,
+                memory_objects: Vec::new(),
                 local_memory: Some(memory),
                 timings,
             });
@@ -1081,11 +1094,12 @@ impl CheckpointCoordinator {
         let (memory_plan, memory_mode, base_extents) =
             self.plan_memory(vm).map_err(CheckpointFailure::resumable)?;
         timings.memory_plan_us = memory_plan_started.elapsed().as_micros();
-        let mut sink = MemoryObjectSink {
-            store: &self.store,
-            updates: Vec::new(),
-            pending_bytes: Vec::with_capacity(MEMORY_OBJECT_PACK_SIZE),
-            pending_extents: Vec::new(),
+        let mut sink = match MemoryObjectSink::new(Arc::clone(&batch)) {
+            Ok(sink) => sink,
+            Err(error) => {
+                let _ = vm.abandon_memory_capture(&memory_plan);
+                return Err(CheckpointFailure::resumable(error));
+            }
         };
         let memory_capture_started = Instant::now();
         let stats = match vm.capture_memory(
@@ -1096,18 +1110,24 @@ impl CheckpointCoordinator {
         ) {
             Ok(stats) => stats,
             Err(error) => {
+                // Stop/join queued writers before the caller can remove this capture's staging.
+                drop(sink);
                 let _ = vm.abandon_memory_capture(&memory_plan);
                 return Err(CheckpointFailure::resumable(error));
             }
         };
-        let updates = match sink.finish() {
-            Ok(updates) => updates,
+        let (updates, pipeline_stats) = match sink.finish() {
+            Ok(result) => result,
             Err(error) => {
                 let _ = vm.abandon_memory_capture(&memory_plan);
                 return Err(CheckpointFailure::resumable(error));
             }
         };
         timings.memory_capture_us = memory_capture_started.elapsed().as_micros();
+        timings.pipeline_wait_us = pipeline_stats.wait_us;
+        timings.object_persist_worker_us = pipeline_stats.persist_us;
+        timings.object_packs = pipeline_stats.packs;
+        timings.peak_in_flight_bytes = pipeline_stats.peak_in_flight_bytes;
         let extent_overlay_started = Instant::now();
         let extents = match overlay_extents(base_extents, updates) {
             Ok(extents) => extents,
@@ -1143,22 +1163,19 @@ impl CheckpointCoordinator {
                 linked_memory_objects.insert(content.object.clone());
             }
         }
-        if let Err(error) = parallel_link_objects(
-            &self.store,
-            staging,
-            &linked_memory_objects.into_iter().collect::<Vec<_>>(),
-        ) {
+        let linked_memory_objects = linked_memory_objects.into_iter().collect::<Vec<_>>();
+        if let Err(error) = parallel_link_objects(&batch, staging, &linked_memory_objects) {
             let _ = vm.abandon_memory_capture(&memory_plan);
             return Err(CheckpointFailure::resumable(error));
         }
-        let memory_id = match self.store.put_bytes(&memory_bytes) {
+        let memory_id = match batch.put_bytes(&memory_bytes) {
             Ok(id) => id,
             Err(error) => {
                 let _ = vm.abandon_memory_capture(&memory_plan);
                 return Err(CheckpointFailure::resumable(error));
             }
         };
-        if let Err(error) = self.store.link_into(&memory_id, staging) {
+        if let Err(error) = batch.link_into(&memory_id, staging) {
             let _ = vm.abandon_memory_capture(&memory_plan);
             return Err(CheckpointFailure::resumable(error));
         }
@@ -1185,17 +1202,32 @@ impl CheckpointCoordinator {
                 return Err(CheckpointFailure::resumable(error));
             }
         };
-        let checkpoint_root = match self.store.put_bytes(&checkpoint_bytes) {
+        let checkpoint_root = match batch.put_bytes(&checkpoint_bytes) {
             Ok(id) => id,
             Err(error) => {
                 let _ = vm.abandon_memory_capture(&memory_plan);
                 return Err(CheckpointFailure::resumable(error));
             }
         };
-        if let Err(error) = self.store.link_into(&checkpoint_root, staging) {
+        if let Err(error) = batch.link_into(&checkpoint_root, staging) {
             let _ = vm.abandon_memory_capture(&memory_plan);
             return Err(CheckpointFailure::resumable(error));
         }
+        let memory_objects = match batch
+            .retained_objects(&linked_memory_objects)
+            .and_then(|objects| batch.finish().map(|_| objects))
+        {
+            Ok(objects) => objects,
+            Err(error) => {
+                let _ = vm.abandon_memory_capture(&memory_plan);
+                return Err(CheckpointFailure::resumable(error));
+            }
+        };
+        let object_stats = batch.stats();
+        timings.object_hashed_bytes = object_stats.hashed_bytes;
+        timings.object_linked_bytes = object_stats.linked_bytes;
+        timings.object_copied_bytes = object_stats.copied_bytes;
+        timings.object_directory_syncs = object_stats.directory_syncs;
         if let Err(error) = publish_root_last(staging, final_path, &checkpoint_bytes) {
             let _ = vm.abandon_memory_capture(&memory_plan);
             return Err(CheckpointFailure::resumable(error));
@@ -1213,6 +1245,7 @@ impl CheckpointCoordinator {
             },
             memory_plan,
             memory_manifest: Some(memory_manifest),
+            memory_objects,
             local_memory: None,
             timings,
         })
@@ -1339,37 +1372,6 @@ impl FrozenWorkload {
     }
 }
 
-impl MemoryObjectSink<'_> {
-    /// Publish the final partial content pack and return its exact guest-address projection.
-    fn finish(mut self) -> io::Result<Vec<MemoryExtent>> {
-        self.flush_pending()?;
-        Ok(self.updates)
-    }
-
-    /// Store up to one bounded chunk containing bytes from multiple sparse guest ranges.
-    fn flush_pending(&mut self) -> io::Result<()> {
-        if self.pending_bytes.is_empty() {
-            return Ok(());
-        }
-        let bytes = std::mem::take(&mut self.pending_bytes);
-        let object = self
-            .store
-            .put_bytes(&bytes)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        self.updates
-            .extend(self.pending_extents.drain(..).map(|extent| MemoryExtent {
-                start: extent.start,
-                length: extent.length,
-                content: MemoryExtentContent::Object(ContentRef {
-                    object: object.clone(),
-                    object_offset: extent.object_offset,
-                }),
-            }));
-        self.pending_bytes = Vec::with_capacity(MEMORY_OBJECT_PACK_SIZE);
-        Ok(())
-    }
-}
-
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -1381,56 +1383,6 @@ impl fmt::Display for CheckpointFailure {
 }
 
 impl std::error::Error for CheckpointFailure {}
-
-impl MemoryCaptureSink for MemoryObjectSink<'_> {
-    fn write_bytes(&mut self, range: GuestMemoryRange, bytes: &[u8]) -> io::Result<()> {
-        if bytes.len() as u64 != range.length() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "memory sink range length does not match bytes",
-            ));
-        }
-
-        if !self.pending_bytes.is_empty()
-            && self.pending_bytes.len().saturating_add(bytes.len()) > MEMORY_OBJECT_PACK_SIZE
-        {
-            self.flush_pending()?;
-        }
-        if bytes.len() > MEMORY_OBJECT_PACK_SIZE {
-            let object = self
-                .store
-                .put_bytes(bytes)
-                .map_err(|error| io::Error::other(error.to_string()))?;
-            self.updates.push(MemoryExtent {
-                start: range.start(),
-                length: range.length(),
-                content: MemoryExtentContent::Object(ContentRef {
-                    object,
-                    object_offset: 0,
-                }),
-            });
-            return Ok(());
-        }
-
-        let object_offset = self.pending_bytes.len() as u64;
-        self.pending_bytes.extend_from_slice(bytes);
-        self.pending_extents.push(PendingMemoryExtent {
-            start: range.start(),
-            length: range.length(),
-            object_offset,
-        });
-        Ok(())
-    }
-
-    fn write_zero(&mut self, range: GuestMemoryRange) -> io::Result<()> {
-        self.updates.push(MemoryExtent {
-            start: range.start(),
-            length: range.length(),
-            content: MemoryExtentContent::Zero,
-        });
-        Ok(())
-    }
-}
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -1804,7 +1756,7 @@ fn put_local_object(staging: &Path, bytes: &[u8]) -> Result<ObjectId, String> {
 }
 
 fn persist_device_states(
-    store: &LocalObjectStore,
+    store: &CaptureObjectBatch,
     staging: &Path,
     pending: &[PendingDeviceState],
 ) -> Result<Vec<DeviceStateRef>, String> {
@@ -1849,10 +1801,9 @@ fn persist_device_states(
     })
 }
 
-/// Link independent immutable memory objects concurrently. Each object remains fully verified by
-/// `LocalObjectStore::link_into`; this only overlaps hashing and filesystem durability waits.
+/// Link independent immutable memory objects concurrently, reusing this batch's inode ownership.
 fn parallel_link_objects(
-    store: &LocalObjectStore,
+    store: &CaptureObjectBatch,
     staging: &Path,
     objects: &[ObjectId],
 ) -> Result<(), String> {
@@ -1913,11 +1864,13 @@ mod tests {
     };
 
     use microsandbox_image::checkpoint::{
-        ContentRef, LocalObjectStore, MemoryExtent, MemoryExtentContent, ObjectId,
+        CaptureObjectBatch, ContentRef, LocalObjectStore, MemoryExtent, MemoryExtentContent,
+        ObjectId,
     };
     use microsandbox_protocol::core::{CoreError, CoreErrorKind, WorkloadFrozen};
     use microsandbox_protocol::message::{Message, MessageType};
     use msb_krun::{GuestMemoryRange, MemoryCaptureSink};
+    use std::sync::Arc;
 
     #[test]
     fn unavailable_freezer_requires_explicit_matching_evidence() {
@@ -2176,12 +2129,8 @@ mod tests {
     fn sparse_memory_ranges_share_one_bounded_content_object() {
         let temp = tempfile::tempdir().unwrap();
         let store = LocalObjectStore::open(temp.path()).unwrap();
-        let mut sink = MemoryObjectSink {
-            store: &store,
-            updates: Vec::new(),
-            pending_bytes: Vec::new(),
-            pending_extents: Vec::new(),
-        };
+        let batch = Arc::new(CaptureObjectBatch::new(store.clone(), &[]));
+        let mut sink = MemoryObjectSink::new(Arc::clone(&batch)).unwrap();
 
         sink.write_bytes(GuestMemoryRange::new(0x1000, 3).unwrap(), b"abc")
             .unwrap();
@@ -2189,7 +2138,8 @@ mod tests {
             .unwrap();
         sink.write_bytes(GuestMemoryRange::new(0x3000, 2).unwrap(), b"de")
             .unwrap();
-        let mut extents = sink.finish().unwrap();
+        let (mut extents, _) = sink.finish().unwrap();
+        batch.finish().unwrap();
         extents.sort_by_key(|extent| extent.start);
 
         assert_eq!(extents.len(), 3);
@@ -2223,7 +2173,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let persisted = persist_device_states(&store, &staging, &pending).unwrap();
+        let batch = CaptureObjectBatch::new(store.clone(), &[]);
+        let persisted = persist_device_states(&batch, &staging, &pending).unwrap();
+        batch.finish().unwrap();
 
         assert_eq!(persisted.len(), pending.len());
         for (index, state) in persisted.iter().enumerate() {

@@ -13,6 +13,20 @@ use super::{Sandbox, SandboxHandle, SandboxPauseState, modify};
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
+    /// Internal CLI lookup for an immediately following authoritative control mutation.
+    ///
+    /// Keep database/runtime reconciliation, but skip the pause observation used by ordinary
+    /// `get`/`list`: that observation is already stale by the time the mutation executes.
+    #[doc(hidden)]
+    pub async fn get_for_control(name: &str) -> MicrosandboxResult<SandboxHandle> {
+        let backend = crate::backend::default_backend();
+        if let Some(local) = backend.as_local() {
+            let (model, pid) = local.sandbox_handle_state(name).await?;
+            return Ok(SandboxHandle::from_local_model(backend, model, pid));
+        }
+        backend.sandboxes().get(backend.clone(), name).await
+    }
+
     /// Suspend this resident VM without creating a snapshot or releasing RAM.
     pub async fn pause(&self) -> MicrosandboxResult<()> {
         lifecycle(self.name(), self.backend().as_ref(), ControlRequest::Pause)
@@ -106,20 +120,26 @@ async fn lifecycle(
     let local = backend
         .as_local()
         .ok_or_else(|| MicrosandboxError::local_only(operation))?;
-    // Do not send a new operation to an old runtime that cannot implement its semantics.
-    let capabilities =
-        modify::control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
-    if !capabilities
-        .capabilities
-        .is_some_and(|caps| caps.pause_resume)
-    {
-        return Err(MicrosandboxError::Runtime("resident pause/resume requires a runtime and guest kernel with clock-only resume support".into()));
-    }
+    // The mutation itself is authoritative. Unknown operations fail on older runtimes, and
+    // successful replies must carry pause state; neither case can silently become a no-op.
     let line = format!("{}\n", serde_json::to_string(&request)?);
     let response = modify::control_request_for(local, name, line).await?;
-    response
+    let state = response
         .pause
-        .ok_or_else(|| MicrosandboxError::Runtime("control response omitted pause state".into()))
+        .ok_or_else(|| MicrosandboxError::Runtime("control response omitted pause state".into()))?;
+    // An acknowledgement must confirm the requested transition, not just contain some
+    // observation. State inspection itself must still be able to report recovery required.
+    let expected = match request {
+        ControlRequest::Pause => Some(true),
+        ControlRequest::Resume => Some(false),
+        _ => None,
+    };
+    if expected.is_some_and(|paused| state.paused != paused || state.recovery_required) {
+        return Err(MicrosandboxError::Runtime(
+            "control response did not confirm the requested pause transition".into(),
+        ));
+    }
+    Ok(state)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -158,17 +178,14 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
         let server = tokio::spawn(async move {
-            // One observation plus the capability-gated public lifecycle exchange.
-            for _ in 0..3 {
+            // Each observation is one exchange; it needs no capabilities preflight.
+            for _ in 0..2 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut stream = BufReader::new(stream);
                 let mut line = String::new();
                 stream.read_line(&mut line).await.unwrap();
-                let response = if line.contains("capabilities") {
-                    "{\"ok\":true,\"capabilities\":{\"pause_resume\":true,\"cpu_resize\":false,\"memory_resize\":false,\"secrets_update\":false}}\n"
-                } else {
-                    "{\"ok\":true,\"pause\":{\"paused\":true,\"recovery_required\":false,\"capture_unavailable\":null}}\n"
-                };
+                assert_eq!(line, "{\"op\":\"pause_state\"}\n");
+                let response = "{\"ok\":true,\"pause\":{\"paused\":true,\"recovery_required\":false,\"capture_unavailable\":null}}\n";
                 stream
                     .get_mut()
                     .write_all(response.as_bytes())
@@ -190,5 +207,86 @@ mod tests {
         })
         .await;
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lifecycle_sends_one_mutation_and_requires_an_authoritative_reply() {
+        for (operation, response, accepted) in [
+            (
+                "pause",
+                "{\"ok\":true,\"pause\":{\"paused\":true,\"recovery_required\":false}}\n",
+                true,
+            ),
+            (
+                "resume",
+                "{\"ok\":true,\"pause\":{\"paused\":false,\"recovery_required\":false}}\n",
+                true,
+            ),
+            // Old runtime unknown-operation errors and unsupported current kernels must fail.
+            (
+                "pause",
+                "{\"ok\":false,\"error\":\"unknown variant pause\"}\n",
+                false,
+            ),
+            (
+                "resume",
+                "{\"ok\":false,\"error\":\"pause/resume unavailable\"}\n",
+                false,
+            ),
+            ("resume", "{\"ok\":true}\n", false),
+            (
+                "pause",
+                "{\"ok\":true,\"pause\":{\"paused\":false,\"recovery_required\":false}}\n",
+                false,
+            ),
+            (
+                "resume",
+                "{\"ok\":true,\"pause\":{\"paused\":true,\"recovery_required\":false}}\n",
+                false,
+            ),
+            (
+                "pause",
+                "{\"ok\":true,\"pause\":{\"paused\":true,\"recovery_required\":true}}\n",
+                false,
+            ),
+        ] {
+            let home = tempfile::tempdir_in("/tmp").unwrap();
+            let backend = LocalBackend::builder()
+                .home(home.path())
+                .build()
+                .await
+                .unwrap();
+            let agent =
+                crate::runtime::sandbox_agent_socket_path_candidates_for(&backend, "source")
+                    .remove(0);
+            let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let listener = tokio::net::UnixListener::bind(path).unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(line, format!("{{\"op\":\"{operation}\"}}\n"));
+                stream
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+            });
+            let request = if operation == "pause" {
+                ControlRequest::Pause
+            } else {
+                ControlRequest::Resume
+            };
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                lifecycle("source", &backend, request),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.is_ok(), accepted, "{operation}: {response}");
+            server.await.unwrap();
+        }
     }
 }
