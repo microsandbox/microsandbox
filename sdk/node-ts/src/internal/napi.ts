@@ -993,6 +993,7 @@ export interface NapiNetworkBuilder {
     configure: (b: NapiViolationActionBuilder) => NapiViolationActionBuilder,
   ): this;
   maxConnections(max: number): this;
+  strict(enabled: boolean): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;

@@ -328,6 +328,7 @@ impl SmoltcpNetwork {
         let dns_config = config.dns.clone();
         let tls_state = self.tls_state.clone();
         let published_ports = config.ports.clone();
+        let strict = config.strict;
         let max_connections = config.max_connections;
         let secrets = self.secrets.clone();
         let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
@@ -344,6 +345,7 @@ impl SmoltcpNetwork {
                         dns_config,
                         tls_state,
                         published_ports,
+                        strict,
                         max_connections,
                         tokio_handle,
                         secrets,

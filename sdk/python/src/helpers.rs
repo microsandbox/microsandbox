@@ -1332,6 +1332,11 @@ fn apply_network(
         builder = builder.network(|n| n.max_connections(max));
     }
 
+    // Strict hostname policy.
+    if let Some(strict) = extract_opt::<bool>(net, "strict")? {
+        builder = builder.network(move |n| n.strict(strict));
+    }
+
     // Rate limiters (egress = guest -> runtime, ingress = runtime -> guest).
     if let Some(rate_limiter) = net.get_item("rate_limiter")?
         && !rate_limiter.is_none()

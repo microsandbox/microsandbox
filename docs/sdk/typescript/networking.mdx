@@ -575,6 +575,23 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
   </div>
 </div>
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">strict()</span>
+
+```typescript
+strict(enabled: boolean): this
+```
+
+Require hostname-based policy allows to use an inspectable request authority. Default: `false`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>enabled</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Enable strict hostname policy mode.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">maxConnections()</span>
 
 ```typescript
@@ -1919,6 +1936,7 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | secrets | `readonly SecretEntry[]` | Secret entries |
 | secretViolation | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
 | maxConnections | `number \| null` | Maximum concurrent connections |
+| strict | `boolean` | Strict hostname policy mode |
 | rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |

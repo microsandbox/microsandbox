@@ -611,6 +611,13 @@ describe("InterfaceOverridesBuilder", () => {
     expect(cfg.interface.ipv4Pool).toBe("172.31.240.0/24");
     expect(cfg.interface.ipv6Pool).toBe("fd7a:115c:a1e0:100::/56");
   });
+
+  it("sets strict hostname policy mode", () => {
+    const cfg = new NetworkBuilder().strict(true).build() as {
+      strict: boolean;
+    };
+    expect(cfg.strict).toBe(true);
+  });
 });
 
 describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {

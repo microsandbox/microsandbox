@@ -120,6 +120,7 @@ export interface NetworkConfig {
   readonly secrets: readonly SecretEntry[];
   readonly secretViolation: ViolationAction | null;
   readonly maxConnections: number | null;
+  readonly strict: boolean;
   readonly rateLimiter: NetworkRateLimiterConfig | null;
   readonly interface?: {
     readonly ipv4Pool?: string | null;

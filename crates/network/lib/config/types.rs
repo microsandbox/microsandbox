@@ -61,6 +61,10 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
+    /// Require hostname-based policy allows to use inspectable application authority.
+    #[serde(default)]
+    pub strict: bool,
+
     /// Secret injection settings.
     #[serde(default)]
     pub secrets: SecretsConfig,
@@ -238,6 +242,7 @@ impl Default for NetworkConfig {
             policy: NetworkPolicy::default(),
             dns: DnsConfig::default(),
             tls: TlsConfig::default(),
+            strict: false,
             secrets: SecretsConfig::default(),
             max_connections: None,
             rate_limiter: None,
@@ -310,6 +315,7 @@ mod tests {
         config.interface.ipv4_address = Some("172.16.0.2".parse().unwrap());
         config.interface.ipv4_pool = Some("172.16.0.0/12".parse().unwrap());
         config.interface.mac = Some([0x02, 0, 0, 0, 0, 0x01]);
+        config.strict = true;
 
         // The engine's real serialization of each subdocument.
         let policy_json = serde_json::to_value(&config.policy).unwrap();
@@ -332,6 +338,9 @@ mod tests {
         let back: InterfaceOverrides =
             serde_json::from_value(serde_json::to_value(&wire_iface).unwrap()).unwrap();
         assert_eq!(iface_json, serde_json::to_value(&back).unwrap());
+        let wire_config: microsandbox_types::NetworkSpec =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert!(wire_config.strict);
 
         // Snake_case is the canonical serialized form.
         assert_eq!(

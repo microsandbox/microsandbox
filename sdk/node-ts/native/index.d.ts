@@ -506,6 +506,8 @@ export declare class NetworkBuilder {
   onSecretViolation(configure: (arg: JsViolationActionBuilder) => JsViolationActionBuilder): this
   /** Set the maximum number of concurrent connections. */
   maxConnections(max: number): this
+  /** Require hostname-based policy allows to use inspectable application authority. */
+  strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
   ipv4Pool(pool: string): this
   /** Set the IPv6 pool used for per-sandbox /64 guest prefixes. */

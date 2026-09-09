@@ -232,6 +232,7 @@ pub fn smoltcp_poll_loop(
     dns_config: DnsConfig,
     tls_state: Option<Arc<TlsState>>,
     published_ports: Vec<PublishedPort>,
+    strict: bool,
     max_connections: Option<usize>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
@@ -540,6 +541,7 @@ pub fn smoltcp_poll_loop(
                     shared.clone(),
                     tls_state.clone(),
                     network_policy.clone(),
+                    strict,
                     conn.proxy_connect,
                     connection_outbound_proxy,
                 );
@@ -614,6 +616,7 @@ pub fn smoltcp_poll_loop(
                 // updates apply to traffic the guest starts afterwards.
                 secrets.load(),
                 tls_state.clone(),
+                strict,
                 conn.proxy_connect,
                 connection_outbound_proxy,
             );

@@ -248,6 +248,14 @@ impl JsNetworkBuilder {
         self
     }
 
+    /// Require hostname-based policy allows to use inspectable application authority.
+    #[napi]
+    pub fn strict(&mut self, enabled: bool) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.strict(enabled));
+        self
+    }
+
     /// Set the IPv4 pool used for per-sandbox /30 guest subnets.
     #[napi(js_name = "ipv4Pool")]
     pub fn ipv4_pool(&mut self, pool: String) -> Result<&Self> {
