@@ -274,6 +274,9 @@ impl SandboxModificationBuilder {
             .await?;
         let status = handle.status_snapshot();
         let mut config = handle.config()?;
+        // A failed restore can still own staged immutable lower layers. Do not let
+        // offline disk growth or a restart-backed modification bypass its launch gate.
+        crate::LocalBackend::validate_completed_restore(&config)?;
         let mut active = handle.active_config().ok().flatten();
         let live = live_control(&self.name, status).await;
         let mut plan = build_plan(

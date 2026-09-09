@@ -40,7 +40,8 @@ try:
     run("offline", "exec", source, "--", "sh", "-c", "echo 0 > /sys/devices/system/cpu/cpu1/online")
     assert run("offline-before", "exec", source, "--", "cat", "/sys/devices/system/cpu/cpu1/online") == b"0"
     run("capture", "snapshot", "create", prefix + "-full", "--from", source, "--full", "--info")
-    run("restore", "create", "-n", child, "--from-snapshot", prefix + "-full", "--info")
+    run("restore", "create", "-n", child, "--from-snapshot", prefix + "-full",
+        *(["--forked"] if os.environ.get("CPU_FORKED") == "1" else []), "--info")
     assert run("offline-after", "exec", child, "--", "cat", "/sys/devices/system/cpu/cpu1/online") == b"0"
     run("cpu0-restored", "exec", child, "--", "/cpu-probe", "0")
     run("online", "exec", child, "--", "sh", "-c", "echo 1 > /sys/devices/system/cpu/cpu1/online")

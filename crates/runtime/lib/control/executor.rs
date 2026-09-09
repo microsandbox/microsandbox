@@ -516,7 +516,7 @@ impl RuntimeControlExecutor {
                     memory_resize: self.vm.memory_resize_supported(),
                     secrets_update: self.secrets_update_supported(),
                     checkpoint_create: true,
-                    branch_create: cfg!(unix),
+                    branch_create: cfg!(any(unix, windows)),
                     disk_compact: true,
                     root_disk_grow: true,
                     pause_resume: self.vm.clock_sync_supported(),

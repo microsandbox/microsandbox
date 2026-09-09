@@ -268,9 +268,10 @@ impl MemoryCaptureSink for LocalMemoryCapture {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use std::io::Read;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
@@ -292,6 +293,7 @@ mod tests {
         let captured = sink.finish(1, 1).unwrap();
         assert_eq!(captured.memory.regions.len(), 2);
         assert_eq!(captured.memory.regions[1].file_offset, 2 * page);
+        #[cfg(unix)]
         assert_eq!(
             captured._file.metadata().unwrap().permissions().mode() & 0o777,
             0o400

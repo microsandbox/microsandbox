@@ -213,11 +213,13 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_base: Option<String>,
 
-    /// Child-owned checkpoint closure used only for this process construction.
+    /// Child-owned checkpoint closure for an unfinished restore construction.
     ///
     /// The builder initially points this at an installed snapshot. The local create path copies
-    /// the closure into child staging and rewrites the path before spawning the runtime.
-    #[serde(skip)]
+    /// the closure into child staging and rewrites the path before spawning the runtime. Local
+    /// creation persists this intent until activation succeeds; an interrupted restore must not
+    /// subsequently be interpreted as an ordinary cold boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) checkpoint_restore: Option<CheckpointRestoreConfig>,
 
     /// Source name for a one-shot direct local branch, consumed under child reservation.

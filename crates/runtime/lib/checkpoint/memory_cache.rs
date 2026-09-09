@@ -79,7 +79,24 @@ impl MemoryCache {
                 page_size: page_size as u64,
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+            let mut info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
+            unsafe {
+                GetSystemInfo(&mut info);
+            }
+            std::fs::create_dir_all(&root)?;
+            restrict_cache_directory(&root)?;
+            let root = root.join(namespace);
+            std::fs::create_dir_all(&root)?;
+            restrict_cache_directory(&root)?;
+            Ok(Self {
+                root,
+                page_size: u64::from(info.dwPageSize),
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (root, namespace);
             Err(io::Error::new(
@@ -246,6 +263,9 @@ impl MemoryCache {
             staging.set_permissions(std::fs::Permissions::from_mode(0o400))?;
         }
         staging.sync_all()?;
+        // Windows readers deliberately deny write sharing. Close the completed writer before
+        // publishing/opening its immutable view; keeping it open would cause a sharing violation.
+        drop(staging);
         // Keep no-replacement publication even under the build lock: older builders may not
         // participate in single-flight, and eviction must never replace a live mapped inode.
         match std::fs::hard_link(&staging_path, &path) {
@@ -359,6 +379,17 @@ pub(super) fn evict_unpinned(path: &Path) -> io::Result<bool> {
             return Ok(false);
         }
     }
+    #[cfg(windows)]
+    {
+        let current = match open_readonly(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if windows_file_identity(&file)? != windows_file_identity(&current)? {
+            return Ok(false);
+        }
+    }
     std::fs::remove_file(path)?;
     Ok(true)
 }
@@ -370,6 +401,12 @@ fn open_readonly(path: &Path) -> io::Result<File> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
     }
     options.open(path)
 }
@@ -386,20 +423,70 @@ pub(super) fn open_pinned(path: &Path, length: u64) -> io::Result<Option<File>> 
             "memory cache entry has invalid type or length; evict and rebuild it",
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        loop {
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } == 0 {
-                break;
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
-        }
-    }
+    microsandbox_utils::process_lock::lock_shared(&file)?;
     Ok(Some(file))
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &File) -> io::Result<(u32, u32, u32)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((
+        info.dwVolumeSerialNumber,
+        info.nFileIndexHigh,
+        info.nFileIndexLow,
+    ))
+}
+
+/// Guest RAM must not inherit broad read permissions from a custom cache parent.
+#[cfg(windows)]
+fn restrict_cache_directory(path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
+    };
+    // OWNER RIGHTS follows the actual owner; SYSTEM is retained for OS maintenance. Children
+    // inherit these ACEs. This is local-user confidentiality, not an adversarial-host boundary.
+    let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)\0"
+        .encode_utf16()
+        .collect();
+    let mut descriptor = std::ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let success = unsafe {
+        SetFileSecurityW(
+            path.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    };
+    let result = if success == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    };
+    unsafe {
+        LocalFree(descriptor);
+    }
+    result
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -410,11 +497,25 @@ fn invalid(message: &str) -> io::Error {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use microsandbox_image::checkpoint::{ContentRef, MemoryCaptureMode, MemoryExtent};
+    #[cfg(unix)]
     use std::os::unix::fs::FileExt;
+    #[cfg(windows)]
+    trait ReadAt {
+        fn read_exact_at(&self, bytes: &mut [u8], offset: u64) -> io::Result<()>;
+    }
+    #[cfg(windows)]
+    impl ReadAt for File {
+        fn read_exact_at(&self, bytes: &mut [u8], offset: u64) -> io::Result<()> {
+            use std::io::Read;
+            let mut file = self.try_clone()?;
+            file.seek(SeekFrom::Start(offset))?;
+            file.read_exact(bytes)
+        }
+    }
 
     fn fixture(page: u64) -> (MemoryManifest, ObjectId, Vec<u8>) {
         let bytes = vec![0x5a; page as usize];
@@ -620,6 +721,7 @@ mod tests {
 
     #[test]
     fn concurrent_builders_publish_one_immutable_inode() {
+        #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
         let directory = tempfile::tempdir().unwrap();
         let cache = MemoryCache::open(directory.path()).unwrap();
@@ -640,9 +742,15 @@ mod tests {
             let second = scope.spawn(run);
             let first = first.join().unwrap();
             let second = second.join().unwrap();
+            #[cfg(unix)]
             assert_eq!(
                 first.file.metadata().unwrap().ino(),
                 second.file.metadata().unwrap().ino()
+            );
+            #[cfg(windows)]
+            assert_eq!(
+                windows_file_identity(&first.file).unwrap(),
+                windows_file_identity(&second.file).unwrap()
             );
         });
         assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Live Unix pin lifetime and same-name reservation checks for direct branching."""
+"""Live pin lifetime and same-name reservation checks for direct branching."""
 
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -23,6 +22,31 @@ def call(*args, expected=0):
 def evictable(path):
     # Same OS primitive used by production eviction. Never unlink or modify live backing.
     with path.open("rb") as file:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            import msvcrt
+
+            class Overlapped(ctypes.Structure):
+                _fields_ = [("internal", ctypes.c_size_t), ("internal_high", ctypes.c_size_t),
+                            ("offset", wintypes.DWORD), ("offset_high", wintypes.DWORD),
+                            ("event", wintypes.HANDLE)]
+
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.LockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                                         wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
+            kernel.UnlockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                                           wintypes.DWORD, ctypes.POINTER(Overlapped)]
+            handle = msvcrt.get_osfhandle(file.fileno())
+            overlap = Overlapped()
+            # Fail-immediately + exclusive, over the same whole-file range as production.
+            if not kernel.LockFileEx(handle, 3, 0, 0xffffffff, 0xffffffff, ctypes.byref(overlap)):
+                error = ctypes.get_last_error()
+                assert error == 33, ctypes.WinError(error)
+                return False
+            assert kernel.UnlockFileEx(handle, 0, 0xffffffff, 0xffffffff, ctypes.byref(overlap))
+            return True
+        import fcntl
         try:
             fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -38,7 +62,8 @@ try:
     paths = set(cache.glob("*.ram")) - before
     assert len(paths) == 1
     backing = paths.pop()
-    assert backing.stat().st_mode & 0o777 == 0o400
+    if os.name != "nt":
+        assert backing.stat().st_mode & 0o777 == 0o400
     assert not evictable(backing), "source/child pins disappeared"
     assert not (home / "sandboxes" / names[1] / ".branch-restore").exists()
     attempts = [subprocess.Popen([binary, "branch", prefix, "--name", names[2]], stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(2)]

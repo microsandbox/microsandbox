@@ -142,6 +142,8 @@ Sources: [`crates/runtime/lib/launch.rs`](crates/runtime/lib/launch.rs), [`crate
 
 Launch JSON requires an explicit `execution` intent (`boot` or `restore`) and rejects unknown fields. Restores also pass the internal `msb sandbox --restore` argument: a runtime predating this contract rejects the unknown argument rather than ignoring a JSON restore source and cold-booting. The argument, intent, and complete strictly validated `checkpoint_restore` source must agree before VM construction. Unsupported restore behavior is an error, never a fresh-boot fallback. These #8 development contracts replace superseded unreleased forms without shims; they do not change portable snapshot bytes.
 
+The child database config retains `checkpoint_restore` while construction is incomplete. Only successful restore activation and creation finalization remove it. A failed or interrupted attempt retains its child-owned staging and rejects start, auto-start through exec, modification, compaction, and snapshot creation; remove and recreate it from the intact input snapshot. This replaces the earlier unreleased #8 behavior that discarded restore intent before success. Do not reopen these development rows with older #8 binaries that skip that field. Successful restores retain the ordinary later stop/start lifecycle; no portable snapshot format or schema version changes.
+
 ## 6. Database, Configuration, and Migration History
 
 The SQLite database under `MSB_HOME` is a durable protocol between releases. Host and runtime processes must also agree on WAL, busy timeout, foreign-key, synchronous, and writer settings.

@@ -208,14 +208,15 @@ russh-sftp = "2.3.0"
 
 # #8 construction-time private memory and identity-preserving resume support.
 [patch.crates-io]
-msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
-msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
-msb_krun_vmm = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
-msb_krun_devices = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
-msb_krun_arch = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
-msb_krun_arch_gen = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
-msb_krun_cpuid = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
-msb_krun_hvf = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
-msb_krun_kernel = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
-msb_krun_polly = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
-msb_krun_smbios = { git = "https://github.com/superradcompany/libkrun", rev = "51c1ed3b83dc826c02800fb297995538e4eac55d" }
+msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb_krun_vmm = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb_krun_devices = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb_krun_arch = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb_krun_arch_gen = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb_krun_cpuid = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb_krun_hvf = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb_krun_kernel = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb_krun_polly = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb_krun_smbios = { git = "https://github.com/superradcompany/libkrun", rev = "862d68422b40ac7c26c731b3577025a5b1f64b89" }
+msb-vm-memory = { git = "https://github.com/superradcompany/rust-vmm", rev = "f798d4f274db22a3c458ba756900db2cd03e6fe9" }

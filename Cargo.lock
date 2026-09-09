@@ -4342,8 +4342,7 @@ dependencies = [
 [[package]]
 name = "msb-vm-memory"
 version = "0.18.0-msb.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c31dfbf17e640f6d661ae17e098b87c019821fe3eb4aba0e9eeada4ba678096"
+source = "git+https://github.com/superradcompany/rust-vmm?rev=f798d4f274db22a3c458ba756900db2cd03e6fe9#f798d4f274db22a3c458ba756900db2cd03e6fe9"
 dependencies = [
  "libc",
  "thiserror",
@@ -4353,7 +4352,7 @@ dependencies = [
 [[package]]
 name = "msb_krun"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 dependencies = [
  "crossbeam-channel",
  "kvm-bindings",
@@ -4372,7 +4371,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_arch"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -4386,12 +4385,12 @@ dependencies = [
 [[package]]
 name = "msb_krun_arch_gen"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 
 [[package]]
 name = "msb_krun_cpuid"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -4401,7 +4400,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_devices"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 dependencies = [
  "bincode",
  "bitflags 1.3.2",
@@ -4432,7 +4431,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_hvf"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 dependencies = [
  "crossbeam-channel",
  "libloading 0.8.9",
@@ -4444,7 +4443,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_kernel"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 dependencies = [
  "msb-vm-memory",
  "msb_krun_utils",
@@ -4453,7 +4452,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_polly"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 dependencies = [
  "libc",
  "msb_krun_utils",
@@ -4462,7 +4461,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_smbios"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 dependencies = [
  "msb-vm-memory",
 ]
@@ -4470,7 +4469,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_utils"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -4485,7 +4484,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_vmm"
 version = "0.1.33"
-source = "git+https://github.com/superradcompany/libkrun?rev=51c1ed3b83dc826c02800fb297995538e4eac55d#51c1ed3b83dc826c02800fb297995538e4eac55d"
+source = "git+https://github.com/superradcompany/libkrun?rev=862d68422b40ac7c26c731b3577025a5b1f64b89#862d68422b40ac7c26c731b3577025a5b1f64b89"
 dependencies = [
  "bincode",
  "bzip2",

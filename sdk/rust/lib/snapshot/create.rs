@@ -133,6 +133,7 @@ pub(super) async fn create_snapshot(
     }
 
     let sandbox_config: SandboxConfig = serde_json::from_str(&current.config)?;
+    LocalBackend::validate_completed_restore(&sandbox_config)?;
 
     // Only OCI-rooted sandboxes can be snapshotted today; non-OCI
     // rootfs (passthrough, disk-image-rootfs) are out of scope.
@@ -405,6 +406,7 @@ pub(super) async fn create_snapshot_archive(
         return Err(MicrosandboxError::SnapshotSandboxRunning(source_sandbox));
     }
     let sandbox_config: SandboxConfig = serde_json::from_str(&current.config)?;
+    LocalBackend::validate_completed_restore(&sandbox_config)?;
     let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(
             "only OCI-rooted sandboxes with a pinned image can be snapshotted".into(),
@@ -503,6 +505,7 @@ async fn capture_full_snapshot(
         ));
     }
     let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
+    LocalBackend::validate_completed_restore(&sandbox_config)?;
     let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(format!(
             "sandbox '{source_sandbox}' has no OCI image pinned; full snapshots require an OCI root"

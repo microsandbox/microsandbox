@@ -1,5 +1,7 @@
 # Execution-state fixes — 2026-09-07
 
+Follow-up: [CoW platform fixes and qualification](cow-platform-fixes-2026-09-09.md) covers Windows private memory, failed-restore lifecycle protection, and the later ARM64 pending-interrupt regression. The backend revision and observations below remain historical.
+
 The Windows ARM64 post-restore command hang is fixed in the tested cases. Linux ARM64 now has working full execution-state capture/restore with VGICv3. Windows x86-64 has a new implementation with successful cross-compilation and executable userspace tests, but no native x86 WHP live qualification. This report does not mark all of #8 complete.
 
 Backend revision: libkrun `51c1ed3b83dc826c02800fb297995538e4eac55d`. Firmware remains `6cca413ac248f63e65d4ea4748b3bc36cd1b22f3`, using matching ARM64 kernel and agentd builds. Microsandbox additionally captures device state before interrupt-controller state, and captures RAM afterward. Public CLI/SDK signatures and disk-only snapshot formats are unchanged. Old Windows ARM64 development full snapshots require recapture because the internal execution-state ABI now includes CPU activity and clock-frequency state.

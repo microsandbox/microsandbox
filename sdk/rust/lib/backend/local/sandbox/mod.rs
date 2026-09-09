@@ -137,6 +137,9 @@ impl LocalBackend {
         }
 
         let mut config: SandboxConfig = serde_json::from_str(&model.config)?;
+        // A failed or interrupted first restore is not a stopped ordinary VM. In particular,
+        // its sealed base may be hard-linked to a snapshot and must never become a boot disk.
+        Self::validate_completed_restore(&config)?;
         self.apply_deployment_profile(&mut config);
         config.apply_runtime_defaults();
         validate_hostname(config.spec.runtime.hostname.as_deref())?;

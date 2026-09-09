@@ -605,7 +605,10 @@ impl LocalBackend {
 
         // Insert the sandbox record and keep its stable database ID.
         let write_db = db.write();
-        let persisted_config = config.clone_for_persistence();
+        let mut persisted_config = config.clone_for_persistence();
+        // Persist pending restore intent before a row can be discovered by start/exec. Only
+        // successful creation clears it; process errors and client death leave a safe refusal.
+        persisted_config.checkpoint_restore = config.checkpoint_restore.clone();
         let sandbox_id = match Self::insert_sandbox_record(write_db, &persisted_config).await {
             Ok(sandbox_id) => sandbox_id,
             Err(err) => {
@@ -629,15 +632,6 @@ impl LocalBackend {
         let created = self
             .create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard))
             .await;
-        if let Some(closure) = restore_closure
-            && let Err(error) = remove_dir_if_exists(&closure)
-        {
-            tracing::warn!(
-                error = %error,
-                path = %closure.display(),
-                "failed to remove consumed eager checkpoint closure"
-            );
-        }
         let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
             Err(e) => {
@@ -726,7 +720,44 @@ impl LocalBackend {
             }
         }
 
+        if let Some(closure) = restore_closure {
+            // Do not lose the recovery discriminator if any preceding creation check failed.
+            // RAM/device state has been consumed and the runtime owns its disk chain and pins.
+            if let Err(error) = Self::complete_sandbox_restore(write_db, sandbox_id).await {
+                let _ = sandbox.stop().await;
+                return Err(error);
+            }
+            if let Err(error) = remove_dir_if_exists(&closure) {
+                tracing::warn!(error = %error, path = %closure.display(), "failed to remove consumed checkpoint closure");
+            }
+        }
         Ok(sandbox)
+    }
+
+    /// Clear only the pending construction intent, preserving any concurrent desired edits.
+    async fn complete_sandbox_restore(
+        db: &DbWriteConnection,
+        sandbox_id: i32,
+    ) -> MicrosandboxResult<()> {
+        sandbox_entity::Entity::update_many()
+            .col_expr(
+                sandbox_entity::Column::Config,
+                Expr::cust("json_remove(config, '$.checkpoint_restore')"),
+            )
+            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+            .exec(db)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_completed_restore(config: &SandboxConfig) -> MicrosandboxResult<()> {
+        if config.checkpoint_restore.is_some() {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "sandbox {:?} has an incomplete restore; remove and recreate it from the snapshot; refusing a cold boot",
+                config.spec.name
+            )));
+        }
+        Ok(())
     }
 
     /// Inner local create logic separated for error-cleanup wrapper. Returns
@@ -1909,6 +1940,54 @@ mod tests {
         LocalBackend::validate_rootfs_source(&bind_rootfs(path.clone())).unwrap();
 
         fs::remove_dir(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn incomplete_restore_survives_failure_until_explicit_completion() {
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("test.db")).await;
+        let mut config = test_config_with_rootfs("pending", bind_rootfs(temp.path().to_path_buf()));
+        config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            local_branch: false,
+            forked: true,
+            closure: temp.path().join("checkpoint"),
+            checkpoint_root: "blake3:pending".into(),
+            checkpoint_id: "pending".into(),
+        });
+        let id = LocalBackend::insert_sandbox_record(pools.write(), &config)
+            .await
+            .unwrap();
+        LocalBackend::update_sandbox_status(pools.write(), id, SandboxStatus::Stopped)
+            .await
+            .unwrap();
+        let model = sandbox_entity::Entity::find_by_id(id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let pending: SandboxConfig = serde_json::from_str(&model.config).unwrap();
+        assert!(
+            LocalBackend::validate_completed_restore(&pending)
+                .unwrap_err()
+                .to_string()
+                .contains("refusing a cold boot")
+        );
+        assert!(pending.checkpoint_restore.as_ref().unwrap().forked);
+
+        // Ordinary post-success/snapshot projections must not perpetuate one-shot restore input.
+        assert!(pending.clone_for_persistence().checkpoint_restore.is_none());
+        LocalBackend::complete_sandbox_restore(pools.write(), id)
+            .await
+            .unwrap();
+        let model = sandbox_entity::Entity::find_by_id(id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let completed: SandboxConfig = serde_json::from_str(&model.config).unwrap();
+        assert!(completed.checkpoint_restore.is_none());
+        assert_eq!(completed.spec.name, "pending");
+        LocalBackend::validate_completed_restore(&completed).unwrap();
     }
 
     #[tokio::test]
