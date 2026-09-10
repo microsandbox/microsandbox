@@ -537,6 +537,11 @@ export class Sandbox implements AsyncDisposable {
     );
   }
 
+  /**
+   * Consume this handle without stopping the sandbox. New guest and filesystem
+   * operations on this handle are rejected; already admitted operations retain
+   * their connection. Await operations first when their completion matters.
+   */
   async detach(): Promise<void> {
     await withMappedErrors(() => this.inner.detach());
   }

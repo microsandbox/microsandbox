@@ -31,6 +31,7 @@ mod sandbox_builder;
 mod sandbox_handle;
 mod secret_builder;
 mod setup;
+mod shared_handle;
 mod snapshot;
 mod snapshot_builder;
 mod ssh;

@@ -551,9 +551,10 @@ impl FsReadStream {
                         return Ok(Some(Bytes::from(chunk.data)));
                     }
                 }
-                MessageType::FsResponse => {
-                    let resp: FsResponse = msg.payload()?;
+                MessageType::FsResponse | MessageType::CoreError => {
+                    let response = filesystem_response(msg);
                     let close_result = self.close_owned_handle().await;
+                    let resp = response?;
                     if !resp.ok {
                         return Err(MicrosandboxError::SandboxFsOps(
                             resp.error.unwrap_or_else(|| "unknown error".into()),
@@ -685,9 +686,22 @@ fn entry_info_to_metadata(info: &FsEntryInfo) -> FsMetadata {
     }
 }
 
+/// Check the envelope before decoding: a paused runtime rejects new work with
+/// `core.error`, which has no filesystem `ok` field. Do not hide that diagnostic
+/// behind a CBOR decoding error (or silently discard it on a stream).
+fn filesystem_response(msg: Message) -> MicrosandboxResult<FsResponse> {
+    if msg.t != MessageType::FsResponse {
+        return Err(super::unexpected_agent_response(
+            "filesystem operation",
+            &msg,
+        ));
+    }
+    Ok(msg.payload()?)
+}
+
 /// Deserialize and check a simple ok/error `FsResponse`.
 fn check_response(msg: Message) -> MicrosandboxResult<()> {
-    let resp: FsResponse = msg.payload()?;
+    let resp = filesystem_response(msg)?;
     if resp.ok {
         Ok(())
     } else {
@@ -700,7 +714,7 @@ fn check_response(msg: Message) -> MicrosandboxResult<()> {
 /// Wait for and check a terminal `FsResponse` from a subscription channel.
 async fn wait_for_ok_response(rx: &mut mpsc::Receiver<Message>) -> MicrosandboxResult<()> {
     while let Some(msg) = rx.recv().await {
-        if msg.t == MessageType::FsResponse {
+        if matches!(msg.t, MessageType::FsResponse | MessageType::CoreError) {
             return check_response(msg);
         }
     }
@@ -742,10 +756,7 @@ pub(crate) mod agent {
 
     use bytes::Bytes;
     use microsandbox_protocol::{
-        fs::{
-            FS_CHUNK_SIZE, FsData, FsOp, FsOpenOptions, FsRequest, FsResponse, FsResponseData,
-            FsSetAttrs,
-        },
+        fs::{FS_CHUNK_SIZE, FsData, FsOp, FsOpenOptions, FsRequest, FsResponseData, FsSetAttrs},
         message::MessageType,
     };
     use tokio::io::AsyncReadExt;
@@ -754,7 +765,7 @@ pub(crate) mod agent {
 
     use super::{
         FsEntry, FsHandle, FsMetadata, FsReadStream, FsWriteSink, check_response,
-        entry_info_to_fs_entry, entry_info_to_metadata, wait_for_ok_response,
+        entry_info_to_fs_entry, entry_info_to_metadata, filesystem_response, wait_for_ok_response,
     };
 
     /// Open a fresh agent connection for the named sandbox.
@@ -785,7 +796,7 @@ pub(crate) mod agent {
             },
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
                 resp.error.unwrap_or_else(|| "unknown error".into()),
@@ -806,7 +817,7 @@ pub(crate) mod agent {
             },
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
                 resp.error.unwrap_or_else(|| "unknown error".into()),
@@ -909,7 +920,7 @@ pub(crate) mod agent {
             op: FsOp::ReadDir { handle, limit },
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -933,7 +944,7 @@ pub(crate) mod agent {
             op: FsOp::FStat { handle },
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -985,8 +996,8 @@ pub(crate) mod agent {
                     let chunk: FsData = msg.payload()?;
                     data.extend_from_slice(&chunk.data);
                 }
-                MessageType::FsResponse => {
-                    let resp: FsResponse = msg.payload()?;
+                MessageType::FsResponse | MessageType::CoreError => {
+                    let resp = filesystem_response(msg)?;
                     if !resp.ok {
                         return Err(MicrosandboxError::SandboxFsOps(
                             resp.error.unwrap_or_else(|| "unknown error".into()),
@@ -1094,7 +1105,7 @@ pub(crate) mod agent {
             },
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -1219,7 +1230,7 @@ pub(crate) mod agent {
             },
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -1266,7 +1277,7 @@ pub(crate) mod agent {
             },
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -1311,7 +1322,7 @@ pub(crate) mod agent {
             },
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -1367,6 +1378,102 @@ pub(crate) mod agent {
         let data = read(backend, name, guest_path).await?;
         tokio::fs::write(host_path, &data).await?;
         Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use microsandbox_protocol::core::{CoreError, CoreErrorKind};
+
+    use super::*;
+
+    fn paused_response() -> Message {
+        Message::with_payload(
+            MessageType::CoreError,
+            1,
+            &CoreError {
+                kind: CoreErrorKind::InvalidSession,
+                message: "sandbox is paused; resume it before starting guest work".into(),
+                offending_type: None,
+                workload_failure: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn filesystem_error_preserves_paused_diagnostic() {
+        let error = filesystem_response(paused_response()).unwrap_err();
+        assert!(matches!(error, MicrosandboxError::Runtime(_)));
+        assert!(error.to_string().contains("sandbox is paused"));
+    }
+
+    #[test]
+    fn filesystem_response_rejects_unexpected_envelope() {
+        let mut message = paused_response();
+        message.t = MessageType::Pong;
+        let error = filesystem_response(message).unwrap_err();
+        assert!(error.to_string().contains("agent returned"));
+    }
+
+    #[test]
+    fn filesystem_response_retains_normal_success_and_failure() {
+        for ok in [true, false] {
+            let response = FsResponse {
+                ok,
+                error: (!ok).then(|| "permission denied".to_string()),
+                data: None,
+            };
+            let message = Message::with_payload(MessageType::FsResponse, 1, &response).unwrap();
+            let result = check_response(message);
+            if ok {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(MicrosandboxError::SandboxFsOps(_))));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn filesystem_read_stream_preserves_rejection_instead_of_eof() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(paused_response()).await.unwrap();
+        let mut stream = FsReadStream {
+            rx,
+            client: None,
+            close_handle: None,
+        };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), stream.recv())
+            .await
+            .expect("a read rejection must not be discarded");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sandbox is paused")
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_stream_rejection_does_not_wait_for_channel_close() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(paused_response()).await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_ok_response(&mut rx),
+        )
+        .await
+        .expect("core.error must terminate the stream even with its sender alive");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sandbox is paused")
+        );
     }
 }
 

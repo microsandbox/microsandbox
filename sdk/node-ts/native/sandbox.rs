@@ -13,6 +13,7 @@ use crate::exec::{ExecOutput, JsExecHandle};
 use crate::exec_options_builder::JsExecOptionsBuilder;
 use crate::fs::JsSandboxFs;
 use crate::sandbox_handle::JsSandboxHandle;
+use crate::shared_handle::SharedHandle;
 use crate::ssh::{JsSshClient, JsSshServer, apply_client_options, apply_server_options};
 use crate::types::*;
 
@@ -26,7 +27,7 @@ use crate::types::*;
 /// to the guest VM and can execute commands, access the filesystem, and query metrics.
 #[napi]
 pub struct Sandbox {
-    inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+    inner: Arc<SharedHandle<microsandbox::sandbox::Sandbox>>,
     backend_kind: &'static str,
 }
 
@@ -73,7 +74,7 @@ impl Sandbox {
     pub fn from_rust(inner: microsandbox::sandbox::Sandbox) -> Self {
         let backend_kind = inner.backend_kind().as_str();
         Sandbox {
-            inner: Arc::new(Mutex::new(Some(inner))),
+            inner: Arc::new(SharedHandle::new(inner)),
             backend_kind,
         }
     }
@@ -175,16 +176,14 @@ impl Sandbox {
     /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[napi(getter)]
     pub async fn name(&self) -> Result<String> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         Ok(sb.name().to_string())
     }
 
     /// Whether this handle owns the sandbox lifecycle (attached mode).
     #[napi(getter)]
     pub async fn owns_lifecycle(&self) -> Result<bool> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         Ok(sb.owns_lifecycle())
     }
 
@@ -193,8 +192,7 @@ impl Sandbox {
     /// The TS layer parses + camelCase-remaps this into a plain object.
     #[napi(js_name = "configJson")]
     pub async fn config_json(&self) -> Result<String> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         serde_json::to_string(sb.config())
             .map_err(|e| napi::Error::from_reason(format!("failed to serialize config: {e}")))
     }
@@ -206,8 +204,7 @@ impl Sandbox {
     /// Execute the sandbox's effective OCI entrypoint and CMD.
     #[napi]
     pub async fn exec_default(&self) -> Result<ExecOutput> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let output = sb.exec_default().await.map_err(to_napi_error)?;
         Ok(ExecOutput::from_rust(output))
     }
@@ -219,8 +216,7 @@ impl Sandbox {
         builder: &mut JsExecOptionsBuilder,
     ) -> Result<ExecOutput> {
         let opts_builder = builder.take_inner_builder()?;
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let output = sb
             .exec_default_with(|_default| opts_builder)
             .await
@@ -231,8 +227,7 @@ impl Sandbox {
     /// Execute the sandbox's effective OCI entrypoint and CMD with streaming I/O.
     #[napi]
     pub async fn exec_default_stream(&self) -> Result<JsExecHandle> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let handle = sb.exec_default_stream().await.map_err(to_napi_error)?;
         Ok(JsExecHandle::from_rust(handle))
     }
@@ -244,8 +239,7 @@ impl Sandbox {
         builder: &mut JsExecOptionsBuilder,
     ) -> Result<JsExecHandle> {
         let opts_builder = builder.take_inner_builder()?;
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let handle = sb
             .exec_default_stream_with(|_default| opts_builder)
             .await
@@ -256,8 +250,7 @@ impl Sandbox {
     /// Execute a command and wait for completion.
     #[napi]
     pub async fn exec(&self, cmd: String, args: Option<Vec<String>>) -> Result<ExecOutput> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let args_owned = args.unwrap_or_default();
         let output = sb.exec(&cmd, args_owned).await.map_err(to_napi_error)?;
         Ok(ExecOutput::from_rust(output))
@@ -272,8 +265,7 @@ impl Sandbox {
         builder: &mut JsExecOptionsBuilder,
     ) -> Result<ExecOutput> {
         let opts_builder = builder.take_inner_builder()?;
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let output = sb
             .exec_with(&cmd, |_default| opts_builder)
             .await
@@ -288,8 +280,7 @@ impl Sandbox {
         cmd: String,
         args: Option<Vec<String>>,
     ) -> Result<JsExecHandle> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let args_owned = args.unwrap_or_default();
         let handle = sb
             .exec_stream(&cmd, args_owned)
@@ -309,8 +300,7 @@ impl Sandbox {
         builder: &mut JsExecOptionsBuilder,
     ) -> Result<JsExecHandle> {
         let opts_builder = builder.take_inner_builder()?;
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let handle = sb
             .exec_stream_with(&cmd, |_default| opts_builder)
             .await
@@ -321,8 +311,7 @@ impl Sandbox {
     /// Execute a shell command using the sandbox's configured shell.
     #[napi]
     pub async fn shell(&self, script: String) -> Result<ExecOutput> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let output = sb.shell(&script).await.map_err(to_napi_error)?;
         Ok(ExecOutput::from_rust(output))
     }
@@ -330,8 +319,7 @@ impl Sandbox {
     /// Execute a shell command with streaming I/O.
     #[napi]
     pub async fn shell_stream(&self, script: String) -> Result<JsExecHandle> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let handle = sb.shell_stream(&script).await.map_err(to_napi_error)?;
         Ok(JsExecHandle::from_rust(handle))
     }
@@ -353,8 +341,7 @@ impl Sandbox {
     /// Connect a native in-process SSH client to this sandbox.
     #[napi(js_name = "sshConnect")]
     pub async fn ssh_connect(&self, options: Option<SshClientOptions>) -> Result<JsSshClient> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let client = sb
             .ssh()
             .connect_with(|builder| apply_client_options(options, builder))
@@ -366,8 +353,7 @@ impl Sandbox {
     /// Prepare a reusable SSH server endpoint for this sandbox.
     #[napi(js_name = "sshServer")]
     pub async fn ssh_server(&self, options: Option<SshServerOptions>) -> Result<JsSshServer> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let server = sb
             .ssh()
             .server_with(|builder| apply_server_options(options, builder))
@@ -383,8 +369,7 @@ impl Sandbox {
     /// Get point-in-time resource metrics.
     #[napi]
     pub async fn metrics(&self) -> Result<SandboxMetrics> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let m = sb.metrics().await.map_err(to_napi_error)?;
         Ok(metrics_to_js(&m))
     }
@@ -396,8 +381,7 @@ impl Sandbox {
     /// Check whether agentd is reachable without refreshing idle activity.
     #[napi]
     pub async fn ping(&self) -> Result<SandboxPingResult> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let result = sb.ping().await.map_err(to_napi_error)?;
         Ok(sandbox_ping_result_to_js(result))
     }
@@ -405,8 +389,7 @@ impl Sandbox {
     /// Explicitly refresh this sandbox's idle activity timer.
     #[napi]
     pub async fn touch(&self) -> Result<SandboxTouchResult> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let result = sb.touch().await.map_err(to_napi_error)?;
         Ok(sandbox_touch_result_to_js(result))
     }
@@ -416,8 +399,7 @@ impl Sandbox {
     #[napi]
     pub async fn modify(&self, options: Option<SandboxModifyOptions>) -> Result<String> {
         let builder = {
-            let guard = self.inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(consumed_error)?;
+            let sb = self.inner.get().await.ok_or_else(consumed_error)?;
             configure_modify(sb.modify(), options.as_ref())?
         };
         run_modify(builder, modify_dry_run(options.as_ref())).await
@@ -426,18 +408,15 @@ impl Sandbox {
     /// Compact the immutable disk prefix; the count includes the base, not the writable head.
     #[napi]
     pub async fn compact(&self, layers: Option<f64>, dry_run: Option<bool>) -> Result<String> {
-        let builder = {
-            let guard = self.inner.lock().await;
-            guard.as_ref().ok_or_else(consumed_error)?.compact()
-        };
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        let builder = sb.compact();
         run_compact(builder, layers, dry_run.unwrap_or(false)).await
     }
 
     /// Stream metrics snapshots at the requested interval (in milliseconds).
     #[napi]
     pub async fn metrics_stream(&self, interval_ms: f64) -> Result<JsMetricsStream> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let interval = Duration::from_millis(interval_ms as u64);
         let mut stream = Box::pin(sb.metrics_stream(interval));
 
@@ -463,8 +442,7 @@ impl Sandbox {
     /// Attach to the sandbox's effective OCI entrypoint and CMD.
     #[napi]
     pub async fn attach_default(&self) -> Result<i32> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.attach_default().await.map_err(to_napi_error)
     }
 
@@ -475,8 +453,7 @@ impl Sandbox {
         builder: &mut JsAttachOptionsBuilder,
     ) -> Result<i32> {
         let opts_builder = builder.take_inner_builder()?;
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.attach_default_with(|_default| opts_builder)
             .await
             .map_err(to_napi_error)
@@ -487,8 +464,7 @@ impl Sandbox {
     /// Bridges the host terminal to the guest process. Returns the exit code.
     #[napi]
     pub async fn attach(&self, cmd: String, args: Option<Vec<String>>) -> Result<i32> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let args_owned = args.unwrap_or_default();
         sb.attach(&cmd, args_owned).await.map_err(to_napi_error)
     }
@@ -502,8 +478,7 @@ impl Sandbox {
         builder: &mut JsAttachOptionsBuilder,
     ) -> Result<i32> {
         let opts_builder = builder.take_inner_builder()?;
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.attach_with(&cmd, |_default| opts_builder)
             .await
             .map_err(to_napi_error)
@@ -512,8 +487,7 @@ impl Sandbox {
     /// Attach to the sandbox's default shell.
     #[napi]
     pub async fn attach_shell(&self) -> Result<i32> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.attach_shell().await.map_err(to_napi_error)
     }
 
@@ -524,16 +498,14 @@ impl Sandbox {
     /// Stop the sandbox gracefully and wait for it to exit.
     #[napi]
     pub async fn stop(&self) -> Result<()> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.stop().await.map_err(to_napi_error)
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
     #[napi]
     pub async fn branch(&self, name: String) -> Result<Sandbox> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         Ok(Sandbox::from_rust(
             sb.branch(name).await.map_err(to_napi_error)?,
         ))
@@ -542,24 +514,21 @@ impl Sandbox {
     /// Explicit resident pause through host control.
     #[napi]
     pub async fn pause(&self) -> Result<()> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.pause().await.map_err(to_napi_error)
     }
 
     /// Explicit resident resume through host control.
     #[napi]
     pub async fn resume(&self) -> Result<()> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.resume().await.map_err(to_napi_error)
     }
 
     /// Stop and wait for exit, returning the exit status.
     #[napi]
     pub async fn stop_and_wait(&self) -> Result<ExitStatus> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let status = sb.stop_and_wait().await.map_err(to_napi_error)?;
         Ok(exit_status_to_js(status))
     }
@@ -567,16 +536,14 @@ impl Sandbox {
     /// Request graceful shutdown without waiting for observed exit.
     #[napi]
     pub async fn request_stop(&self) -> Result<()> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.request_stop().await.map_err(to_napi_error)
     }
 
     /// Stop gracefully with an explicit timeout before escalating to SIGKILL.
     #[napi]
     pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let timeout = Duration::from_millis(timeout_ms.into());
         sb.stop_with_timeout(timeout).await.map_err(to_napi_error)
     }
@@ -584,24 +551,21 @@ impl Sandbox {
     /// Kill the sandbox immediately and wait for observed exit.
     #[napi]
     pub async fn kill(&self) -> Result<()> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.kill().await.map_err(to_napi_error)
     }
 
     /// Request force termination without waiting for observed exit.
     #[napi]
     pub async fn request_kill(&self) -> Result<()> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.request_kill().await.map_err(to_napi_error)
     }
 
     /// Force-kill the sandbox with an explicit observation timeout.
     #[napi]
     pub async fn kill_with_timeout(&self, timeout_ms: u32) -> Result<()> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let timeout = Duration::from_millis(timeout_ms.into());
         sb.kill_with_timeout(timeout).await.map_err(to_napi_error)
     }
@@ -609,24 +573,21 @@ impl Sandbox {
     /// Graceful drain (SIGUSR1 — for load balancing).
     #[napi]
     pub async fn drain(&self) -> Result<()> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.drain().await.map_err(to_napi_error)
     }
 
     /// Request graceful drain without waiting for observed exit.
     #[napi]
     pub async fn request_drain(&self) -> Result<()> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.request_drain().await.map_err(to_napi_error)
     }
 
     /// Wait until the sandbox is observed in a terminal non-running state.
     #[napi]
     pub async fn wait_until_stopped(&self) -> Result<SandboxStopResult> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let result = sb.wait_until_stopped().await.map_err(to_napi_error)?;
         Ok(sandbox_stop_result_to_js(result))
     }
@@ -634,27 +595,29 @@ impl Sandbox {
     /// Wait for the sandbox process to exit.
     #[napi(js_name = "wait")]
     pub async fn wait_for_exit(&self) -> Result<ExitStatus> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let status = sb.wait().await.map_err(to_napi_error)?;
         Ok(exit_status_to_js(status))
     }
 
     /// Detach from the sandbox — it will continue running after this handle is dropped.
+    /// New operations are rejected; already admitted operations retain their connection.
     #[napi]
     pub async fn detach(&self) -> Result<()> {
-        let mut guard = self.inner.lock().await;
-        if let Some(sb) = guard.take() {
-            sb.detach().await;
+        if let Some(sb) = self.inner.take().await {
+            // Only detach consumes the Rust value. Ordinary operations clone the Arc,
+            // not the sandbox configuration; admitted operations keep their reference.
+            Arc::unwrap_or_clone(sb).detach().await;
         }
         Ok(())
     }
 
     /// Remove the persisted database record after stopping.
+    /// Consumes this wrapper even on failure. Already admitted operations may finish or
+    /// fail at the runtime boundary; removal does not wait for guest operations to drain.
     #[napi]
     pub async fn remove_persisted(&self) -> Result<()> {
-        let mut guard = self.inner.lock().await;
-        let sb = guard.take().ok_or_else(consumed_error)?;
+        let sb = self.inner.take().await.ok_or_else(consumed_error)?;
         sb.remove_persisted().await.map_err(to_napi_error)
     }
 
@@ -665,8 +628,7 @@ impl Sandbox {
     /// protocol traffic.
     #[napi]
     pub async fn logs(&self, opts: Option<LogOptions>) -> Result<Vec<LogEntry>> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let rust_opts = log_options_from_js(opts).map_err(napi::Error::from_reason)?;
         let entries = sb.logs(&rust_opts).await.map_err(to_napi_error)?;
         Ok(entries.into_iter().map(log_entry_to_js).collect())
@@ -680,8 +642,7 @@ impl Sandbox {
     /// entry.
     #[napi]
     pub async fn log_stream(&self, opts: Option<LogStreamOptions>) -> Result<JsLogStream> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let rust_opts = log_stream_options_from_js(opts).map_err(napi::Error::from_reason)?;
         let stream = sb.log_stream(&rust_opts).await.map_err(to_napi_error)?;
         spawn_log_stream_from_stream(stream).await
