@@ -207,15 +207,32 @@ impl EnsuredNamedVolumes {
 
 #[cfg(windows)]
 impl StdioInheritGuard {
-    fn new() -> MicrosandboxResult<Self> {
-        let mut states = Vec::new();
+    fn new() -> std::io::Result<Self> {
+        let handles = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+            .map(|std_handle| unsafe { GetStdHandle(std_handle) });
+        Self::from_handles(handles, |handle| {
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        })
+    }
 
-        for std_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-            let handle = unsafe { GetStdHandle(std_handle) };
+    fn from_handles(
+        handles: impl IntoIterator<Item = HANDLE>,
+        mut clear_inherit: impl FnMut(HANDLE) -> std::io::Result<()>,
+    ) -> std::io::Result<Self> {
+        // Own each successful change immediately so an error on a later handle
+        // restores the earlier handles through Drop before returning.
+        let mut guard = Self { states: Vec::new() };
+
+        for handle in handles {
             if handle.is_null() || handle == INVALID_HANDLE_VALUE {
                 continue;
             }
-            if states
+            if guard
+                .states
                 .iter()
                 .any(|state: &HandleInheritState| state.handle == handle)
             {
@@ -233,13 +250,11 @@ impl StdioInheritGuard {
             // A redirected `msb create` can receive inheritable stdout/stderr
             // pipe handles from its own parent. Detached sandbox children must
             // not keep those pipes alive after the launcher exits.
-            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-            states.push(HandleInheritState { handle, flags });
+            clear_inherit(handle)?;
+            guard.states.push(HandleInheritState { handle, flags });
         }
 
-        Ok(Self { states })
+        Ok(guard)
     }
 }
 
@@ -2881,6 +2896,106 @@ mod tests {
         },
         volume::VolumeKind,
     };
+
+    #[cfg(windows)]
+    fn windows_handle_flags(handle: super::HANDLE) -> u32 {
+        let mut flags = 0;
+        assert_ne!(
+            unsafe { super::GetHandleInformation(handle, &mut flags) },
+            0
+        );
+        flags
+    }
+
+    #[cfg(windows)]
+    fn windows_set_handle_inherit(handle: super::HANDLE, inherit: bool) {
+        assert_ne!(
+            unsafe {
+                super::SetHandleInformation(
+                    handle,
+                    super::HANDLE_FLAG_INHERIT,
+                    if inherit {
+                        super::HANDLE_FLAG_INHERIT
+                    } else {
+                        0
+                    },
+                )
+            },
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_stdio_guard_deduplicates_and_restores_handles() {
+        use std::os::windows::io::AsRawHandle;
+
+        // Use private file handles; never change the test runner's process-wide stdio.
+        let file = tempfile::tempfile().unwrap();
+        let untouched = tempfile::tempfile().unwrap();
+        let handle = file.as_raw_handle();
+        let untouched_handle = untouched.as_raw_handle();
+        windows_set_handle_inherit(handle, true);
+        windows_set_handle_inherit(untouched_handle, false);
+        let original = windows_handle_flags(handle);
+        let mut calls = 0;
+        let guard = super::StdioInheritGuard::from_handles(
+            [
+                std::ptr::null_mut(),
+                super::INVALID_HANDLE_VALUE,
+                handle,
+                handle,
+                untouched_handle,
+            ],
+            |handle| {
+                calls += 1;
+                windows_set_handle_inherit(handle, false);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(windows_handle_flags(handle) & super::HANDLE_FLAG_INHERIT, 0);
+        assert_eq!(
+            windows_handle_flags(untouched_handle) & super::HANDLE_FLAG_INHERIT,
+            0
+        );
+        drop(guard);
+        assert_eq!(windows_handle_flags(handle), original);
+        assert_eq!(
+            windows_handle_flags(untouched_handle) & super::HANDLE_FLAG_INHERIT,
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_stdio_guard_rolls_back_partial_failure() {
+        use std::os::windows::io::AsRawHandle;
+
+        let first = tempfile::tempfile().unwrap();
+        let second = tempfile::tempfile().unwrap();
+        let handles = [first.as_raw_handle(), second.as_raw_handle()];
+        for handle in handles {
+            windows_set_handle_inherit(handle, true);
+        }
+        let original = handles.map(windows_handle_flags);
+        let mut calls = 0;
+        let result = super::StdioInheritGuard::from_handles(handles, |handle| {
+            calls += 1;
+            if calls == 2 {
+                return Err(std::io::Error::from_raw_os_error(5));
+            }
+            windows_set_handle_inherit(handle, false);
+            Ok(())
+        });
+        let error = match result {
+            Ok(_) => panic!("expected the second handle update to fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.raw_os_error(), Some(5));
+        assert_eq!(handles.map(windows_handle_flags), original);
+    }
 
     #[test]
     #[cfg(unix)]
