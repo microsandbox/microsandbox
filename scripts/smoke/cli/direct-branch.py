@@ -52,7 +52,7 @@ def benchmark(source):
     saved = prefix + "-warm"
     if os.environ.get("STACK8_BENCH_COMPACT") == "1":
         run("setup-compact-snapshot", "modify", source, "--compact", "--format", "json")
-    run("capture-warm-source", "snapshot", "create", saved, "--from", source, "--full")
+    run("capture-warm-source", "snapshot", "create", saved, "--from-sandbox", source, "--full")
     for mode in ("forked", "eager"):
         for i in range(8):
             child = prefix + f"-{mode}-{i}"
@@ -67,7 +67,7 @@ def benchmark(source):
         saved = prefix + f"-full-{i}"
         child = prefix + f"-durable-{i}"
         names.append(child)
-        run(f"pipeline-capture-{i}", "snapshot", "create", saved, "--from", source, "--full")
+        run(f"pipeline-capture-{i}", "snapshot", "create", saved, "--from-sandbox", source, "--full")
         run(f"pipeline-restore-{i}", "create", "--name", child, "--from-snapshot", saved, "--forked")
         assert exec_guest(child, "cat /dev/shm/branch-marker", f"pipeline-ready-{i}") == "source"
         run(f"stop-pipeline-{i}", "stop", child)
@@ -113,7 +113,7 @@ try:
     # Compare durable capture+forked-child against the same source and readiness endpoint.
     for i in range(3):
         snap = prefix + f"-saved-{i}"
-        run(f"full-capture-{i}", "snapshot", "create", snap, "--from", source, "--full")
+        run(f"full-capture-{i}", "snapshot", "create", snap, "--from-sandbox", source, "--full")
         name = prefix + f"-restored-{i}"
         names.append(name)
         run(f"forked-restore-{i}", "create", "--name", name, "--from-snapshot", snap, "--forked")

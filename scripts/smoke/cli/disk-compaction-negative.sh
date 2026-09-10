@@ -8,7 +8,7 @@ trap cleanup EXIT
 refuse() { if "$@"; then echo 'unexpected success' >&2; exit 1; fi; }
 msb create -n compact-neg-tmpfs --root-disk tmpfs:128M -m 256M --max-duration 5m alpine
 refuse msb modify compact-neg-tmpfs --compact
-msb snapshot create compact-neg-tmpfs-snap --from compact-neg-tmpfs --full
+msb snapshot create compact-neg-tmpfs-snap --from-sandbox compact-neg-tmpfs --full
 refuse msb snapshot save compact-neg-tmpfs-snap "$QUAL_ROOT/tmpfs.tar" --last-layers 1
 msb stop compact-neg-tmpfs
 cp "$MSB_HOME/sandboxes/$QUAL_SOURCE/upper.ext4" "$QUAL_ROOT/owned.ext4"

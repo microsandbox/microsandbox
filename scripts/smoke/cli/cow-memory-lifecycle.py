@@ -87,15 +87,15 @@ try:
                 time.sleep(0.1)
             assert run(f"memory-marker-{step}", "exec", source, "--", "cat", "/dev/shm/cow-marker").stdout.strip() == "captured"
     snap = prefix + "-full"
-    run("first-full", "snapshot", "create", snap, "--from", source, "--full", "--info")
+    run("first-full", "snapshot", "create", snap, "--from-sandbox", source, "--full", "--info")
     run("pause", "pause", source)
     run("pause-idempotent", "pause", source)
     inspected = run("paused-inspect", "inspect", source, "--format", "json")
     assert json.loads(inspected.stdout)["status"] == "Paused"
     refusal = run("paused-exec", "exec", source, "--", "true", expected=None, timeout=10)
     assert refusal.returncode != 0, "paused exec must fail promptly"
-    run("paused-full-1", "snapshot", "create", prefix + "-paused1", "--from", source, "--full", "--info")
-    run("paused-full-2", "snapshot", "create", prefix + "-paused2", "--from", source, "--full", "--info")
+    run("paused-full-1", "snapshot", "create", prefix + "-paused1", "--from-sandbox", source, "--full", "--info")
+    run("paused-full-2", "snapshot", "create", prefix + "-paused2", "--from-sandbox", source, "--full", "--info")
     time.sleep(float(os.environ.get("STACK8_PAUSE_SECONDS", "5")))
     run("resume", "resume", source)
     run("resume-idempotent", "resume", source)
@@ -120,14 +120,14 @@ try:
     # A restored child remains a normal capture source; no creation-time memory opt-in exists.
     child_snapshot = prefix + "-child-full"
     run("capture-restored-child", "snapshot", "create", child_snapshot,
-        "--from", prefix + "-a", "--full", "--info")
+        "--from-sandbox", prefix + "-a", "--full", "--info")
     grandchild = prefix + "-grandchild"
     names.append(grandchild)
     run("restore-grandchild", "create", "-n", grandchild, "--from-snapshot", child_snapshot,
         *restore_flags, "--info")
     assert run("grandchild-marker", "exec", grandchild, "--", "cat", "/dev/shm/cow-marker").stdout.strip() == "private-a"
     archive = str(root / "direct.msb")
-    run("direct-full", "snapshot", "create", prefix + "-direct", "--from", source,
+    run("direct-full", "snapshot", "create", prefix + "-direct", "--from-sandbox", source,
         "--full", "--archive", archive, "--info")
     child = prefix + "-archive"
     names.append(child)
@@ -139,7 +139,7 @@ try:
     run("pause-for-stop", "pause", source)
     run("stop-paused", "stop", source, timeout=20)
     disk_snapshot = prefix + "-disk"
-    run("stopped-disk-capture", "snapshot", "create", disk_snapshot, "--from", source)
+    run("stopped-disk-capture", "snapshot", "create", disk_snapshot, "--from-sandbox", source)
     disk_archive = str(root / "disk.msb")
     run("disk-archive", "snapshot", "save", disk_snapshot, disk_archive)
     for label, snapshot in (("installed", disk_snapshot), ("archive", disk_archive)):

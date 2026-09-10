@@ -8,11 +8,11 @@ Implemented on the #8 branch above Microsandbox `f68c1329`, using existing pinne
 
 ```sh
 # Source stays running. No RAM checkpoint or --full workaround.
-msb snapshot create saved --from source
+msb snapshot create saved --from-sandbox source
 msb create --name child --from-snapshot saved
 
 # Direct archive: no installed snapshot directory or index row.
-msb snapshot create exported --from source --archive ./exported.msb
+msb snapshot create exported --from-sandbox source --archive ./exported.msb
 msb create --name archive-child --from-snapshot ./exported.msb
 ```
 

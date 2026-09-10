@@ -87,7 +87,7 @@ msb run --name ffmpeg-base --replace `
 Capture the prepared toolchain:
 
 ```sh
-msb snapshot create ffmpeg-tools --from ffmpeg-base --integrity --force
+msb snapshot create ffmpeg-tools --from-sandbox ffmpeg-base --integrity --force
 ```
 
 Verify the snapshot before using it:

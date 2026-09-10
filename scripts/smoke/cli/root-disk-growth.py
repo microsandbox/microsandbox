@@ -76,7 +76,7 @@ try:
         guest(f"{layout}-seed", name, "dd if=/dev/urandom of=/payload bs=1048576 count=8 2>/dev/null; sha256sum /payload >/expected; echo ram >/dev/shm/grow-marker; sync")
         phase_grow(f"{layout}-raw-live", name, 768)
         guest(f"{layout}-new-space", name, "dd if=/dev/zero of=/space bs=1048576 count=600 conv=fsync && test $(stat -c %s /space) = 629145600 && rm /space && sha256sum -c /expected")
-        run(f"{layout}-old-snapshot", "snapshot", "create", f"{name}-old", "--from", name, "--full")
+        run(f"{layout}-old-snapshot", "snapshot", "create", f"{name}-old", "--from-sandbox", name, "--full")
         before = journal(name)
         ancestor = Path(before["layers"][0]["path"])
         ancestor_before = file_hash(ancestor)
@@ -85,7 +85,7 @@ try:
         assert len(journal(name)["layers"]) == len(before["layers"])
         assert file_hash(ancestor) == ancestor_before
         run(f"{layout}-shrink-refused", "modify", name, "--root-disk", "512M", refuse=True)
-        run(f"{layout}-new-snapshot", "snapshot", "create", f"{name}-new", "--from", name, "--full")
+        run(f"{layout}-new-snapshot", "snapshot", "create", f"{name}-new", "--from-sandbox", name, "--full")
         run(f"{layout}-compact", "modify", name, "--compact", "--format", "json")
         phase_grow(f"{layout}-compacted-live", name, 1536)
         phase_grow(f"{layout}-partial-group-live", name, 1700)
@@ -98,7 +98,7 @@ try:
         run(f"{layout}-defer-start", "start", name)
         guest(f"{layout}-defer-space", name, "dd if=/dev/zero of=/space bs=1048576 count=1800 conv=fsync && rm /space && sha256sum -c /expected")
         run(f"{layout}-final-stop", "stop", name)
-        run(f"{layout}-stopped-snapshot", "snapshot", "create", f"{name}-stopped", "--from", name, "--integrity")
+        run(f"{layout}-stopped-snapshot", "snapshot", "create", f"{name}-stopped", "--from-sandbox", name, "--integrity")
         run(f"{layout}-verify", "snapshot", "verify", f"{name}-stopped")
         for suffix, capacity in (("old", 768), ("new", 1280)):
             child = f"{name}-{suffix}-child"

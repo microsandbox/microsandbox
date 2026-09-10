@@ -69,7 +69,7 @@ try:
             run("reset-" + snap, "exec", source, "--", "sh", "-c", "echo before > /disk-marker; sync")
             if mode == "paused":
                 run("pause-" + layout, "pause", source)
-            args = ["snapshot", "create", snap, "--from", source]
+            args = ["snapshot", "create", snap, "--from-sandbox", source]
             archive = out / (snap + (".tar" if mode == "plain" else ".msb"))
             installed_before = set((home / "snapshots").glob("*"))
             if mode in ("archive", "plain"):
@@ -124,7 +124,7 @@ try:
             "for i in $(seq 1 100); do [ -s /counter ] && exit 0; sleep 0.02; done; exit 1")
         start_counter = int(run("counter-before-" + layout, "exec", source, "--", "cat", "/counter").stdout.strip())
         run("counter-baseline-sync-" + layout, "exec", source, "--", "sync")
-        run("busy-capture-" + layout, "snapshot", "create", source + "-busy", "--from", source)
+        run("busy-capture-" + layout, "snapshot", "create", source + "-busy", "--from-sandbox", source)
         run("counter-progress-" + layout, "exec", source, "--", "sh", "-c",
             f"for i in $(seq 1 100); do [ $(cat /counter) -gt {start_counter} ] && exit 0; sleep 0.02; done; exit 1")
         run("stop-writer-" + layout, "exec", source, "--", "touch", "/stop-counter")
@@ -137,31 +137,31 @@ try:
         run("stop-busy-child-" + layout, "stop", busy_child)
         # A later full checkpoint must still work after disk-only generations.
         full = source + "-full"
-        run("full-after-disk-" + layout, "snapshot", "create", full, "--from", source, "--full")
+        run("full-after-disk-" + layout, "snapshot", "create", full, "--from-sandbox", source, "--full")
         full_child = source + "-full-child"
         names.append(full_child)
         run("full-restore-" + layout, "create", "--name", full_child, "--from-snapshot", full)
         assert run("full-ram-" + layout, "exec", full_child, "--", "cat", "/dev/shm/ram-marker").stdout.strip() == "ram-only"
         # A disk-only cut between full captures must not consume/advance the RAM baseline.
         memory_before = files(runtime / "checkpoint-store")
-        run("disk-between-full-" + layout, "snapshot", "create", source + "-between", "--from", source)
+        run("disk-between-full-" + layout, "snapshot", "create", source + "-between", "--from-sandbox", source)
         assert files(runtime / "checkpoint-store") == memory_before
         run("change-ram-" + layout, "exec", source, "--", "sh", "-c", "echo updated > /dev/shm/ram-marker")
-        run("second-full-" + layout, "snapshot", "create", full + "-next", "--from", source, "--full")
+        run("second-full-" + layout, "snapshot", "create", full + "-next", "--from-sandbox", source, "--full")
         next_child = source + "-next-child"
         names.append(next_child)
         run("second-full-restore-" + layout, "create", "--name", next_child, "--from-snapshot", full + "-next")
         assert run("second-full-ram-" + layout, "exec", next_child, "--", "cat", "/dev/shm/ram-marker").stdout.strip() == "updated"
         # A name collision must fail before publication and leave both the source and snapshot usable.
-        refused = run("duplicate-refused-" + layout, "snapshot", "create", source + "-between", "--from", source, ok=False)
+        refused = run("duplicate-refused-" + layout, "snapshot", "create", source + "-between", "--from-sandbox", source, ok=False)
         assert refused.returncode != 0
         run("source-after-refusal-" + layout, "exec", source, "--", "true")
         run("stop-source-" + layout, "stop", source)
-        run("stopped-after-live-" + layout, "snapshot", "create", source + "-stopped", "--from", source)
+        run("stopped-after-live-" + layout, "snapshot", "create", source + "-stopped", "--from-sandbox", source)
     tmpfs = prefix + "-tmpfs"
     names.append(tmpfs)
     run("tmpfs-create", "create", "alpine", "--name", tmpfs, "--root-disk", "tmpfs:128M", "--memory", "256M")
-    refused = run("tmpfs-refused", "snapshot", "create", tmpfs + "-bad", "--from", tmpfs, ok=False)
+    refused = run("tmpfs-refused", "snapshot", "create", tmpfs + "-bad", "--from-sandbox", tmpfs, ok=False)
     assert refused.returncode != 0 and "tmpfs" in refused.stderr
     run("tmpfs-still-running", "exec", tmpfs, "--", "true")
     print(json.dumps({"result": "pass", "layouts": ["flat", "managed"], "modes": ["installed", "integrity", "archive", "plain", "paused"]}))

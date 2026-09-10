@@ -109,7 +109,7 @@ def main():
                     run("write-file-" + member, "exec", "batch-capture", "--", "sh", "-ec",
                         "echo " + marker + " > /disk-marker; sync")
                     output = run("capture-file-" + member, "snapshot", "create", member,
-                                 "--from", "batch-capture", "--group", "fresh")
+                                 "--from-sandbox", "batch-capture", "--group", "fresh")
                     artifact = Path(output.splitlines()[-1])
                     fixtures[member] = (artifact, json.loads((artifact / "snapshot.json").read_text()))
                 run("stop-file-source", "stop", "batch-capture")

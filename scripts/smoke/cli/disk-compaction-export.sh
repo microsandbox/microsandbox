@@ -36,7 +36,7 @@ for layout in managed flat; do
     measure "$layout-seed" guest "$name" 'dd if=/dev/urandom of=/payload bs=1048576 count=8 2>/dev/null; sha256sum /payload >/expected; printf 1 >/version; mkdir -p /dev/shm; echo volatile >/dev/shm/ram-marker; sync'
     for generation in 1 2 3 4; do
         measure "$layout-write-$generation" guest "$name" "printf $generation >/version; sync"
-        measure "$layout-checkpoint-$generation" msb snapshot create "$name-$generation" --from "$name" --full
+        measure "$layout-checkpoint-$generation" msb snapshot create "$name-$generation" --from-sandbox "$name" --full
     done
     measure "$layout-dry-run" msb modify "$name" --compact --layers 3 --dry-run --format json
     measure "$layout-dry-run-counts" jq -e '.dry_run and .input_layers == 5 and .selected_layers == 3 and .output_layers == 3' "$QUAL_ROOT/logs/$layout-dry-run.out"
@@ -61,11 +61,11 @@ for layout in managed flat; do
     measure "$layout-online-counts" jq -e '.input_layers == 5 and .output_layers == 3 and .selected_layers == 3' "$QUAL_ROOT/logs/$layout-online-compact.out"
     measure "$layout-stop" msb stop "$name"
     measure "$layout-offline-compact" msb modify "$name" --compact --format json
-    measure "$layout-stopped-snapshot" msb snapshot create "$name-stopped" --from "$name" --integrity
+    measure "$layout-stopped-snapshot" msb snapshot create "$name-stopped" --from-sandbox "$name" --integrity
     measure "$layout-stopped-verify" msb snapshot verify "$name-stopped"
     measure "$layout-restart" msb start "$name"
     measure "$layout-restarted-data" guest "$name" 'sha256sum -c /expected && test "$(cat /version)" = 4'
-    measure "$layout-post-compact-checkpoint" msb snapshot create "$name-new" --from "$name" --full
+    measure "$layout-post-compact-checkpoint" msb snapshot create "$name-new" --from-sandbox "$name" --full
     measure "$layout-old-prefix-rejected" refuse msb snapshot save "$name-new" "$QUAL_ROOT/invalid.tar" --since "$name-4"
     measure "$layout-stop-source" msb stop "$name"
 

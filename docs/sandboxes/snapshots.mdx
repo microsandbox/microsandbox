@@ -29,7 +29,7 @@ On supported Linux, macOS, and Windows hosts, add `--forked` when restoring a fu
 
 ```bash
 msb create alpine --name baseline --root-disk flat:1G
-msb snapshot create ready --from baseline --full
+msb snapshot create ready --from-sandbox baseline --full
 msb create --name worker-a --from-snapshot baseline:ready --forked
 msb create --name worker-b --from-snapshot baseline:ready --forked
 ```
@@ -65,7 +65,7 @@ msb exec baseline -- pip install requests
 msb stop baseline
 
 # 2. Snapshot the stopped sandbox
-msb snapshot create after-pip-install --from baseline
+msb snapshot create after-pip-install --from-sandbox baseline
 
 # 3. Boot a fresh sandbox from the snapshot
 msb run --name worker --from-snapshot baseline:after-pip-install \
@@ -85,8 +85,8 @@ Each capture is an immutable member of a snapshot group. The group defaults to t
 Use a bare group to restore its selected head, or `group:member` for an exact checkpoint:
 
 ```bash
-msb snapshot create cp01 --from baseline --group work
-msb snapshot create cp02 --from baseline --group work
+msb snapshot create cp01 --from-sandbox baseline --group work
+msb snapshot create cp02 --from-sandbox baseline --group work
 msb create --name latest --from-snapshot work
 msb create --name earlier --from-snapshot work:cp01
 
@@ -177,11 +177,11 @@ fmt.Println(snap.Digest()) // sha256:...
 ```
 
 ```bash CLI
-msb snapshot create after-pip-install --from baseline
-msb snapshot create ready-with-label --from baseline --label stage=ready
+msb snapshot create after-pip-install --from-sandbox baseline
+msb snapshot create ready-with-label --from-sandbox baseline --label stage=ready
 
 # Use another group-store root: /mnt/big/baseline/snap_<id>/
-msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
+msb snapshot create after-pip-install --from-sandbox baseline --dest-dir /mnt/big
 ```
 
 </CodeGroup>
@@ -225,7 +225,7 @@ snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
 ```
 
 ```bash CLI
-msb snapshot create worker-checkpoint --from worker --full
+msb snapshot create worker-checkpoint --from-sandbox worker --full
 ```
 </CodeGroup>
 
@@ -238,7 +238,7 @@ Creating a sandbox from the resulting snapshot restores into a child-owned disk 
 Repeated full checkpoints add disk layers. You choose when to export changes and when to compact; neither happens automatically.
 
 ```bash
-msb snapshot create checkpoint-b --from worker --full
+msb snapshot create checkpoint-b --from-sandbox worker --full
 msb snapshot save worker:checkpoint-b changes.msb --since worker:checkpoint-a
 msb modify worker --compact --layers 3 --dry-run
 msb modify worker --compact --layers 3
@@ -301,7 +301,7 @@ archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
 
 ```bash CLI
 msb snapshot create after-pip-install \
-    --from baseline \
+    --from-sandbox baseline \
     --archive /tmp/after-pip-install.msb
 ```
 </CodeGroup>
@@ -573,7 +573,7 @@ report, err := snap.Verify(ctx)
 
 ```bash CLI
 # Compute and record an integrity hash at create time
-msb snapshot create after-pip-install --from baseline --integrity
+msb snapshot create after-pip-install --from-sandbox baseline --integrity
 
 # Verify a snapshot's recorded integrity on demand
 msb snapshot verify baseline:after-pip-install

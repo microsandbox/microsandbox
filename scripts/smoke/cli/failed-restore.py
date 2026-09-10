@@ -48,7 +48,7 @@ blocked = False
 try:
     call("source", "create", "alpine", "--name", source, "--root-disk", os.environ.get("STACK8_LAYOUT", "flat:512M"), "--memory", "256M")
     call("marker", "exec", source, "--", "sh", "-c", "echo preserved > /dev/shm/restore-marker; echo disk-preserved > /restore-disk-marker")
-    call("capture", "snapshot", "create", snapshot, "--from", source, "--full")
+    call("capture", "snapshot", "create", snapshot, "--from-sandbox", source, "--full")
     before = layers()
     # Trigger a real host I/O error during memory installation, after child staging
     # and DB insertion. No production test-only failure hook is necessary.
@@ -67,7 +67,7 @@ try:
     for label, args in [("start", ["start", child]), ("exec", ["exec", child, "--", "true"]),
                         ("modify", ["modify", child, "--root-disk", "8G"]),
                         ("compact", ["modify", child, "--compact"]),
-                        ("snapshot", ["snapshot", "create", prefix+'-invalid', "--from", child])]:
+                        ("snapshot", ["snapshot", "create", prefix+'-invalid', "--from-sandbox", child])]:
         refused = call(label + "-refused", *args, expected=None)
         assert refused.returncode != 0 and "incomplete restore" in refused.stderr, rows[-1]
     assert layers() == before, "failed restore or later lifecycle mutated sealed disk bytes"

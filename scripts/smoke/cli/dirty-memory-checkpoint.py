@@ -113,7 +113,7 @@ def main():
                 time.sleep(.1)
         assert initial['dirty_kib'] >= 32 * 1024, initial
         report['initial'] = initial
-        run('full-dirty', 'snapshot', 'create', 'dirty-full', '--from', source, '--full')
+        run('full-dirty', 'snapshot', 'create', 'dirty-full', '--from-sandbox', source, '--full')
         matches(initial)
         names.append('running-branch')
         run('branch-dirty', 'branch', source, '--name', 'running-branch')
@@ -130,7 +130,7 @@ def main():
         stop('running-branch'); matches(initial)
         run('pause', 'pause', source)
         for suffix in ('one', 'two'):
-            run('capture-paused-' + suffix, 'snapshot', 'create', 'paused-' + suffix, '--from', source, '--full')
+            run('capture-paused-' + suffix, 'snapshot', 'create', 'paused-' + suffix, '--from-sandbox', source, '--full')
             assert json.loads(run('inspect-paused-' + suffix, 'inspect', source, '--format', 'json'))['status'] == 'Paused'
         names.append('paused-branch')
         run('branch-paused-dirty', 'branch', source, '--name', 'paused-branch')
@@ -150,10 +150,10 @@ def main():
             if mode == 'forked':
                 # A restored child starts a fresh dirty-tracking baseline while retaining
                 # snapshot ancestry. Capture before mutating, then verify an incremental cut.
-                run('child-baseline', 'snapshot', 'create', 'child-baseline', '--from', child, '--full')
+                run('child-baseline', 'snapshot', 'create', 'child-baseline', '--from-sandbox', child, '--full')
                 changed = state('/mutate')
                 assert changed['private'] == 'private1'
-                captured = run('incremental-dirty', 'snapshot', 'create', 'dirty-incremental', '--from', child, '--full')
+                captured = run('incremental-dirty', 'snapshot', 'create', 'dirty-incremental', '--from-sandbox', child, '--full')
                 # Capture returns the exact installed member path, independent of its alias.
                 checkpoint = Path(captured.strip().splitlines()[-1]) / 'checkpoint'
                 descriptor = json.loads((checkpoint / 'checkpoint.json').read_text())

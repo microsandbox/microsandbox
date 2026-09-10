@@ -87,7 +87,7 @@ try:
         if n == 6:
             run("pause-source", source_home, "pause", source)
         name = f"cp{n:02}"
-        run(f"capture-{n}", source_home, "snapshot", "create", name, "--from", source, "--full")
+        run(f"capture-{n}", source_home, "snapshot", "create", name, "--from-sandbox", source, "--full")
         if n == 6:
             run("resume-source", source_home, "resume", source)
         artifact = source_home / "snapshots" / name

@@ -315,7 +315,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >
 > ```sh
 > # Save now, resume later
-> msb snapshot create saved --from app --full
+> msb snapshot create saved --from-sandbox app --full
 > msb create --name restored --from-snapshot app:saved
 > ```
 >

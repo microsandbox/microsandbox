@@ -55,7 +55,7 @@ def create(name, snapshot=None, forked=False):
 
 
 def capture(label, source, member, group="work", full=False, fail=False):
-    args = ["snapshot", "create", member, "--from", source, "--group", group]
+    args = ["snapshot", "create", member, "--from-sandbox", source, "--group", group]
     if full or full_only:
         args.append("--full")
     output = run(label, *args, fail=fail)
@@ -171,7 +171,7 @@ try:
     # Direct archive capture records ancestry but never creates an installed member.
     before_members = sorted(str(p) for p in (home / "snapshots").rglob("snapshot.json"))
     direct = root / "direct.msb"
-    run("direct-capture", "snapshot", "create", "direct", "--from", "source", "--full", "--archive", direct)
+    run("direct-capture", "snapshot", "create", "direct", "--from-sandbox", "source", "--full", "--archive", direct)
     assert sorted(str(p) for p in (home / "snapshots").rglob("snapshot.json")) == before_members
     create("direct-restored", str(direct), forked=True)
     assert guest("direct-restored-state", "direct-restored", "cat /dev/shm/marker") == "ram-three"

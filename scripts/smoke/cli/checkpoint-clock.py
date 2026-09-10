@@ -45,10 +45,10 @@ try:
         time.sleep(0.05)
     else:
         raise RuntimeError("guest clock fixture did not start")
-    run("capture", "snapshot", "create", snapshot, "--from", source, "--full", "--info")
+    run("capture", "snapshot", "create", snapshot, "--from-sandbox", source, "--full", "--info")
     if os.environ.get("CLOCK_INCREMENTAL") == "1":
         snapshot = prefix + "-next"
-        run("capture-next", "snapshot", "create", snapshot, "--from", source, "--full", "--info")
+        run("capture-next", "snapshot", "create", snapshot, "--from-sandbox", source, "--full", "--info")
     if os.environ.get("CLOCK_ARCHIVE") == "1":
         archive = str(out / "clock.msb")
         run("archive", "snapshot", "save", snapshot, archive)

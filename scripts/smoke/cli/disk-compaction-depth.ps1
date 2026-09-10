@@ -27,7 +27,7 @@ try {
    M @('exec',$name,'--','sh','-c','dd if=/dev/urandom of=/payload bs=1048576 count=4 2>/dev/null; sha256sum /payload >/expected; sync')
    foreach ($generation in 1..64) {
     M @('exec',$name,'--','sh','-c',"echo $generation >/version; sync")
-    M @('snapshot','create',"$name-$generation",'--from',$name,'--full') *> "$output\$layout-$generation.log"
+    M @('snapshot','create',"$name-$generation",'--from-sandbox',$name,'--full') *> "$output\$layout-$generation.log"
     if ($generation -in @(1,4,16,64)) { M @('modify',$name,'--compact','--dry-run','--format','json') > "$output\$layout-depth-$generation.json" }
    }
   }

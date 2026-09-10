@@ -99,7 +99,7 @@ Pause keeps the local VM and its RAM allocated without creating a snapshot. Resu
 <CodeGroup>
 ```bash CLI
 msb pause worker
-msb snapshot create paused-state --from worker --full
+msb snapshot create paused-state --from-sandbox worker --full
 msb resume worker
 ```
 
