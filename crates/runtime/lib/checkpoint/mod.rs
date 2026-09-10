@@ -16,7 +16,7 @@ pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult};
 pub(crate) use disk::recover_runtime_owned_root;
 pub use disk::{
     DiskCompactionResult, RuntimeOwnedRootChain, RuntimeOwnedRootLayer, compact_stopped_root,
-    load_runtime_owned_root_chain,
+    grow_stopped_root, load_runtime_owned_root_chain, recover_stopped_root_growth,
 };
 #[cfg(feature = "runner")]
 pub(crate) use restore::{PreparedCheckpointRestore, RestoredAgentState};

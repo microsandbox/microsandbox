@@ -2161,6 +2161,37 @@ async fn handle_message(
     // queued output after a disconnect instead of relabelling it with a recycled correlation ID.
     let session_tx = root_session_tx.with_incarnation(client_incarnation_for_id(state, msg.id));
     match msg.t {
+        MessageType::RootDiskPrepare | MessageType::RootDiskGrow => {
+            let Some(request) = decode_payload_or_core_error::<
+                microsandbox_protocol::core::RootDiskGrow,
+            >(&msg, out_buf)?
+            else {
+                return Ok(());
+            };
+            let apply = msg.t == MessageType::RootDiskGrow;
+            let result = tokio::task::spawn_blocking(move || {
+                crate::root_disk::resize(request.size_bytes, apply)
+            })
+            .await
+            .map_err(|e| AgentdError::ExecSession(format!("root grow worker: {e}")))?;
+            let reply = match result {
+                Ok(state) => Message::with_payload(MessageType::RootDiskState, msg.id, &state),
+                Err(message) => Message::with_payload(
+                    MessageType::CoreError,
+                    msg.id,
+                    &CoreError {
+                        kind: CoreErrorKind::CapabilityUnavailable,
+                        message,
+                        offending_type: Some(msg.t.as_str().into()),
+                    },
+                ),
+            }
+            .map_err(|e| AgentdError::ExecSession(format!("encode root capacity: {e}")))?;
+            codec::encode_to_buf(&reply, out_buf).map_err(|e| {
+                AgentdError::ExecSession(format!("encode root capacity frame: {e}"))
+            })?;
+        }
+
         MessageType::Ping => {
             let Some(_) = decode_payload_or_core_error::<Ping>(&msg, out_buf)? else {
                 return Ok(());

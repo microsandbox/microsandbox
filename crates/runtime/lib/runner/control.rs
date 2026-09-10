@@ -323,6 +323,7 @@ mod tests {
         let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
+                root_disk_grow: true,
                 disk_compact: true,
                 cpu_resize: true,
                 memory_resize: false,

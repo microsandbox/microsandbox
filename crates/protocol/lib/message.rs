@@ -153,6 +153,18 @@ pub enum MessageType {
     #[strum(serialize = "core.workload.thawed")]
     WorkloadThawed,
 
+    /// Host checks mounted root-filesystem growth before changing block capacity.
+    #[strum(serialize = "core.root_disk.prepare")]
+    RootDiskPrepare,
+
+    /// Host requests mounted root-filesystem expansion after block capacity changed.
+    #[strum(serialize = "core.root_disk.grow")]
+    RootDiskGrow,
+
+    /// Guest reports the root filesystem and device capacities.
+    #[strum(serialize = "core.root_disk.state")]
+    RootDiskState,
+
     /// Peer reports a recoverable protocol-level error.
     #[strum(serialize = "core.error")]
     CoreError,
@@ -312,6 +324,7 @@ impl MessageType {
             | Self::Touched
             | Self::WorkloadFrozen
             | Self::WorkloadThawed
+            | Self::RootDiskState
             | Self::CoreError
             | Self::ExecExited
             | Self::ExecFailed
@@ -370,6 +383,7 @@ impl MessageType {
             | Self::WorkloadFrozen
             | Self::WorkloadThaw
             | Self::WorkloadThawed => 9,
+            Self::RootDiskPrepare | Self::RootDiskGrow | Self::RootDiskState => 9,
             Self::BulkAccepted | Self::BulkCredit | Self::BulkFinish | Self::BulkCancel => 8,
             Self::TcpConnect
             | Self::TcpConnected

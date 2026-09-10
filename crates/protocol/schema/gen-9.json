@@ -75,6 +75,18 @@
       "wire": "core.workload.thawed"
     },
     {
+      "introduced_in": 9,
+      "wire": "core.root_disk.prepare"
+    },
+    {
+      "introduced_in": 9,
+      "wire": "core.root_disk.grow"
+    },
+    {
+      "introduced_in": 9,
+      "wire": "core.root_disk.state"
+    },
+    {
       "introduced_in": 5,
       "wire": "core.error"
     },

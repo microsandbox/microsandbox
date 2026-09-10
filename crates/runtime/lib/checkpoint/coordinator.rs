@@ -137,12 +137,89 @@ impl CheckpointCoordinator {
         layers: Option<usize>,
         dry_run: bool,
     ) -> Result<super::DiskCompactionResult, super::disk::RootDiskRolloverError> {
+        if self
+            .root_disk
+            .as_ref()
+            .is_some_and(|disk| disk.growth_pending())
+        {
+            return Err(super::disk::RootDiskRolloverError::pre_rebind(
+                "complete pending root-disk growth before compaction",
+            ));
+        }
         match self.root_disk.as_mut() {
             Some(disk) => disk.compact(Some(vm), &self.runtime, layers, dry_run),
             None => Err(super::disk::RootDiskRolloverError::pre_rebind(
                 "this root has no runtime-owned disk chain",
             )),
         }
+    }
+
+    pub(crate) fn grow_root(
+        &mut self,
+        vm: &msb_krun::VmControl,
+        size_bytes: u64,
+    ) -> Result<crate::control::RootDiskGrowthResult, super::disk::RootDiskRolloverError> {
+        use super::disk::RootDiskRolloverError as Failure;
+        let started = Instant::now();
+        let disk = self
+            .root_disk
+            .as_mut()
+            .ok_or_else(|| Failure::pre_rebind("root is not runtime-owned"))?;
+        let client = self
+            .runtime
+            .block_on(AgentClient::connect_with_timeout(
+                &self.agent_sock,
+                WORKLOAD_CONTROL_TIMEOUT,
+            ))
+            .map_err(Failure::pre_rebind)?;
+        // Gate the protocol and validate ext4 before mutating either disk or recovery state.
+        let request = microsandbox_protocol::core::RootDiskGrow { size_bytes };
+        self.runtime
+            .block_on(root_growth_request(
+                &client,
+                MessageType::RootDiskPrepare,
+                &request,
+            ))
+            .map_err(Failure::pre_rebind)?;
+        disk.begin_growth(size_bytes).map_err(Failure::pre_rebind)?;
+        let paused_at = Instant::now();
+        let pause = vm.pause().map_err(Failure::pre_rebind)?;
+        if let Err(error) = vm.grow_block_capacity(disk.device_id(), size_bytes) {
+            // The image may already be larger. Fence execution until restart reopens actual
+            // capacity; retrying this target then completes the filesystem phase.
+            return Err(Failure::post_journal(format!(
+                "root block growth requires forward recovery: {error}"
+            )));
+        }
+        vm.resume(pause).map_err(Failure::post_journal)?;
+        let pause_us = paused_at.elapsed().as_micros() as u64;
+        let guest_started = Instant::now();
+        let state = self
+            .runtime
+            .block_on(root_growth_request(
+                &client,
+                MessageType::RootDiskGrow,
+                &request,
+            ))
+            .map_err(|e| {
+                Failure::pre_rebind(format!(
+                    "block device grew; filesystem completion is pending, retry this target: {e}"
+                ))
+            })?;
+        if state.filesystem_bytes != size_bytes || state.device_bytes < size_bytes {
+            return Err(Failure::pre_rebind(
+                "guest did not acknowledge the requested root capacity; retry to finish growth",
+            ));
+        }
+        let guest_us = guest_started.elapsed().as_micros() as u64;
+        disk.finish_growth().map_err(Failure::pre_rebind)?;
+        Ok(crate::control::RootDiskGrowthResult {
+            filesystem_bytes: state.filesystem_bytes,
+            device_bytes: state.device_bytes,
+            total_us: started.elapsed().as_micros() as u64,
+            pause_us,
+            guest_us,
+        })
     }
 
     /// Open the per-runtime object store and managed root-disk state.
@@ -186,6 +263,15 @@ impl CheckpointCoordinator {
         checkpoint_id: &str,
         intent: CaptureIntent,
     ) -> Result<CheckpointResult, CheckpointFailure> {
+        if self
+            .root_disk
+            .as_ref()
+            .is_some_and(|disk| disk.growth_pending())
+        {
+            return Err(CheckpointFailure::before_pause(
+                "complete pending root-disk growth before checkpointing",
+            ));
+        }
         let total_started = Instant::now();
         validate_checkpoint_id(checkpoint_id).map_err(CheckpointFailure::before_pause)?;
         validate_vm_generation_state(vm.vm_generation_state())
@@ -852,6 +938,30 @@ impl MemoryCaptureSink for MemoryObjectSink<'_> {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+async fn root_growth_request(
+    client: &AgentClient,
+    message_type: MessageType,
+    request: &microsandbox_protocol::core::RootDiskGrow,
+) -> Result<microsandbox_protocol::core::RootDiskState, String> {
+    let reply = tokio::time::timeout(
+        Duration::from_secs(120),
+        client.request(message_type, request),
+    )
+    .await
+    .map_err(|_| "guest root growth timed out".to_string())?
+    .map_err(|e| e.to_string())?;
+    if reply.t == MessageType::CoreError {
+        return Err(reply
+            .payload::<CoreError>()
+            .map_err(|e| e.to_string())?
+            .message);
+    }
+    if reply.t != MessageType::RootDiskState {
+        return Err("unexpected root growth response".into());
+    }
+    reply.payload().map_err(|e| e.to_string())
+}
 
 fn validate_workload_reply<T>(
     reply: Message,

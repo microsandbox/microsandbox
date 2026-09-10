@@ -183,6 +183,7 @@ impl RuntimeControlExecutor {
         let mutation = matches!(
             request,
             ControlRequest::MemoryTarget { .. }
+                | ControlRequest::RootDiskGrow { .. }
                 | ControlRequest::CpuTarget { .. }
                 | ControlRequest::SecretsUpdate { .. }
                 | ControlRequest::CheckpointCreate { .. }
@@ -196,6 +197,21 @@ impl RuntimeControlExecutor {
         }
 
         let response = match request {
+            ControlRequest::RootDiskGrow { size_bytes } => {
+                match state.checkpoint.grow_root(&self.vm, size_bytes) {
+                    Ok(root_disk) => ControlResponse {
+                        ok: true,
+                        root_disk: Some(root_disk),
+                        ..Default::default()
+                    },
+                    Err(error) => {
+                        if error.keep_paused {
+                            state.lifecycle = RuntimeLifecycle::Quiesced;
+                        }
+                        control_error("root_disk_growth_incomplete", error.to_string())
+                    }
+                }
+            }
             ControlRequest::DiskCompact { layers, dry_run } => {
                 match state.checkpoint.compact(&self.vm, layers, dry_run) {
                     Ok(result) => ControlResponse {
@@ -317,6 +333,7 @@ impl RuntimeControlExecutor {
                     secrets_update: self.secrets_update_supported(),
                     checkpoint_create: true,
                     disk_compact: true,
+                    root_disk_grow: true,
                 }),
                 ..Default::default()
             },
@@ -335,7 +352,9 @@ impl RuntimeControlExecutor {
             }
             ControlRequest::CpuState => cpu(self.vm.cpu_state()),
             ControlRequest::SecretsUpdate { changes } => self.handle_secrets_update(changes),
-            ControlRequest::CheckpointCreate { .. } | ControlRequest::DiskCompact { .. } => {
+            ControlRequest::CheckpointCreate { .. }
+            | ControlRequest::DiskCompact { .. }
+            | ControlRequest::RootDiskGrow { .. } => {
                 unreachable!("checkpoint requests are handled by the executor lifecycle path")
             }
         }

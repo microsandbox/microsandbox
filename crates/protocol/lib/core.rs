@@ -134,6 +134,22 @@ pub struct WorkloadThawed {
     pub attempt_id: String,
 }
 
+/// Root disk growth target, in bytes, used for preflight and apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootDiskGrow {
+    /// Desired ext4 size; must be an aligned, nondecreasing target.
+    pub size_bytes: u64,
+}
+
+/// Observed capacities of the guest root filesystem and its block device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootDiskState {
+    /// ext4 superblock size, including filesystem metadata.
+    pub filesystem_bytes: u64,
+    /// Capacity observed by the guest block driver.
+    pub device_bytes: u64,
+}
+
 /// Payload for `core.error` messages.
 ///
 /// Sent when a peer can identify a recoverable protocol error for a specific

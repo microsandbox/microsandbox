@@ -47,7 +47,7 @@ pub(crate) struct RuntimeOwnedRootDisk {
 pub struct RuntimeOwnedRootChain {
     /// Guest-visible block device backed by this chain.
     pub device_id: String,
-    /// Guest-visible capacity shared by every layer in the chain.
+    /// Guest-visible capacity of the writable head; sealed ancestors may be smaller.
     pub virtual_size: u64,
     /// Complete oldest-to-head physical closure.
     pub layers: Vec<RuntimeOwnedRootLayer>,
@@ -89,6 +89,10 @@ struct RootDiskState {
     /// Original launch configuration binding, retained across representation-only compaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     launch_base: Option<PathBuf>,
+    /// Unfinished forward-only growth. Older runtime readers refuse this field rather than
+    /// accepting a chain whose filesystem expansion has not been acknowledged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    growth_target: Option<u64>,
     layers: Vec<RootDiskLayer>,
 }
 
@@ -121,6 +125,60 @@ struct RootDiskLayer {
 //--------------------------------------------------------------------------------------------------
 
 impl RuntimeOwnedRootDisk {
+    pub(crate) fn growth_pending(&self) -> bool {
+        self.state.growth_target.is_some()
+    }
+
+    pub(crate) fn begin_growth(&mut self, target: u64) -> Result<(), String> {
+        let capacities = microsandbox_image::checkpoint::layer_capacities(
+            self.state
+                .layers
+                .iter()
+                .map(|layer| CompactLayer {
+                    path: layer.path.clone(),
+                    qcow2: layer.format == RootDiskFormat::Qcow2,
+                })
+                .collect(),
+        )
+        .map_err(|e| e.to_string())?;
+        let current = *capacities.last().expect("validated nonempty chain");
+        if target < current
+            || target == 0
+            || !target.is_multiple_of(4096)
+            || capacities.iter().any(|size| *size > current)
+        {
+            return Err("root growth requires an aligned nondecreasing capacity with no larger backing ancestor".into());
+        }
+        if self
+            .state
+            .growth_target
+            .is_some_and(|pending| pending != target)
+        {
+            return Err(
+                "complete the pending root-disk growth target before requesting another size"
+                    .into(),
+            );
+        }
+        let mut next = self.state.clone();
+        next.growth_target = Some(target);
+        // A failed earlier capture may have cached a head hash. Growth changes its bytes;
+        // no future snapshot may reuse that cached identity after mutation starts.
+        if let Some(head) = next.layers.last_mut() {
+            head.integrity_root = None;
+        }
+        write_state(&self.state_path, &next)?;
+        self.state = next;
+        Ok(())
+    }
+
+    pub(crate) fn finish_growth(&mut self) -> Result<(), String> {
+        let mut next = self.state.clone();
+        next.growth_target = None;
+        write_state(&self.state_path, &next)?;
+        self.state = next;
+        Ok(())
+    }
+
     /// Open the authoritative chain journal or initialize it from a sandbox-owned root disk.
     #[cfg(feature = "runner")]
     pub(crate) fn open(runtime_dir: &Path, vm: &VmConfig) -> Result<Option<Self>, String> {
@@ -142,6 +200,7 @@ impl RuntimeOwnedRootDisk {
                 layout,
                 published_generation: 0,
                 launch_base: None,
+                growth_target: None,
                 layers: layers
                     .into_iter()
                     .map(|layer| RootDiskLayer {
@@ -181,6 +240,11 @@ impl RuntimeOwnedRootDisk {
         layers: Option<usize>,
         dry_run: bool,
     ) -> Result<DiskCompactionResult, RootDiskRolloverError> {
+        if self.growth_pending() {
+            return Err(RootDiskRolloverError::pre_rebind(
+                "complete pending root-disk growth before compaction",
+            ));
+        }
         let started = Instant::now();
         let plan = DiskCompactionPlan::new(self.state.layers.len(), layers)
             .map_err(RootDiskRolloverError::pre_rebind)?;
@@ -370,6 +434,17 @@ impl RuntimeOwnedRootDisk {
             .published_generation
             .checked_add(1)
             .ok_or_else(|| RootDiskRolloverError::pre_rebind("disk generation is exhausted"))?;
+        let capacities = microsandbox_image::checkpoint::layer_capacities(
+            self.state
+                .layers
+                .iter()
+                .map(|layer| microsandbox_image::checkpoint::CompactLayer {
+                    path: layer.path.clone(),
+                    qcow2: layer.format == RootDiskFormat::Qcow2,
+                })
+                .collect(),
+        )
+        .map_err(RootDiskRolloverError::pre_rebind)?;
         let sealed_layers = self
             .state
             .layers
@@ -378,7 +453,7 @@ impl RuntimeOwnedRootDisk {
             .map(|(index, layer)| DiskLayerRef {
                 layer_id: layer.layer_id.clone(),
                 format: layer.format.as_str().into(),
-                virtual_size,
+                virtual_size: capacities[index],
                 predecessor: index
                     .checked_sub(1)
                     .map(|previous| self.state.layers[previous].layer_id.clone()),
@@ -449,6 +524,9 @@ impl RootDiskState {
             || self.device_id != self.layout.device_id()
             || self.layers.is_empty()
             || self.layers.len() > 256
+            || self
+                .growth_target
+                .is_some_and(|target| target == 0 || !target.is_multiple_of(4096))
         {
             return Err("runtime-owned root-disk state has invalid identity or bounds".into());
         }
@@ -546,7 +624,7 @@ impl RootDiskRolloverError {
         }
     }
 
-    fn post_journal(error: impl fmt::Display) -> Self {
+    pub(crate) fn post_journal(error: impl fmt::Display) -> Self {
         Self {
             message: error.to_string(),
             #[cfg(feature = "runner")]
@@ -616,6 +694,9 @@ pub fn load_runtime_owned_root_chain(
         return Ok(None);
     }
     let state = read_state(&state_path)?;
+    if state.growth_target.is_some() {
+        return Err("complete pending root-disk growth before snapshotting".into());
+    }
     let head = state
         .layers
         .last()
@@ -650,6 +731,94 @@ pub fn load_runtime_owned_root_chain(
             })
             .collect(),
     }))
+}
+
+/// Grow a stopped journal-backed root using a private staging head. Returns false without a journal.
+/// The caller must hold the sandbox lifecycle lock and prove all VM writers have stopped.
+pub fn grow_stopped_root(runtime_dir: &Path, target: u64) -> Result<bool, String> {
+    let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+    if !state_path.exists() {
+        return Ok(false);
+    }
+    let state = read_state(&state_path)?;
+    if state.growth_target.is_some_and(|pending| pending != target) {
+        return Err(format!(
+            "complete pending root-disk growth to {} bytes first",
+            state.growth_target.unwrap()
+        ));
+    }
+    let capacities = microsandbox_image::checkpoint::layer_capacities(
+        state
+            .layers
+            .iter()
+            .map(|layer| CompactLayer {
+                path: layer.path.clone(),
+                qcow2: layer.format == RootDiskFormat::Qcow2,
+            })
+            .collect(),
+    )
+    .map_err(|e| e.to_string())?;
+    let current = *capacities.last().expect("validated nonempty chain");
+    if target < current && state.growth_target.is_none() {
+        return Ok(true);
+    }
+    if target == current && state.growth_target.is_none() {
+        return Ok(true);
+    }
+    if capacities.iter().any(|size| *size > current) {
+        return Err("cannot grow a chain with a backing layer larger than its head".into());
+    }
+    let stage = tempfile::Builder::new()
+        .prefix(".grow-")
+        .tempdir_in(runtime_dir)
+        .map_err(|e| e.to_string())?;
+    let mut next = state.clone();
+    if next.launch_base.is_none() {
+        next.launch_base = state.layers.first().map(|layer| layer.path.clone());
+    }
+    let last = state.layers.len() - 1;
+    for (index, layer) in next.layers.iter_mut().enumerate() {
+        let path = stage
+            .path()
+            .join(layer.path.file_name().ok_or("invalid root layer name")?);
+        if index == last {
+            microsandbox_utils::copy::fast_copy(&layer.path, &path).map_err(|e| e.to_string())?;
+            layer.layer_id = new_id("layer");
+            layer.integrity_root = None;
+        } else {
+            // Preserve qcow2's relative backing bindings for independent inspection as well as
+            // the runtime's explicit closure. Ancestor inodes are never opened writable.
+            std::fs::hard_link(&layer.path, &path).map_err(|e| e.to_string())?;
+        }
+        layer.path = path;
+    }
+    let closure = next
+        .layers
+        .iter()
+        .map(|layer| CompactLayer {
+            path: layer.path.clone(),
+            qcow2: layer.format == RootDiskFormat::Qcow2,
+        })
+        .collect::<Vec<_>>();
+    microsandbox_image::ext4::grow_chain(&closure, target).map_err(|e| e.to_string())?;
+    next.growth_target = None;
+    sync_directory(stage.path()).map_err(|e| e.to_string())?;
+    // Preserve staging across an uncertain journal rename/fsync. Recovery can then follow
+    // whichever durable journal won, without ever opening a partially rewritten filesystem.
+    let _published = stage.keep();
+    write_state(&state_path, &next)?;
+    Ok(true)
+}
+
+/// Finish a previously recorded online growth before cold boot, under the stopped lifecycle lock.
+pub fn recover_stopped_root_growth(runtime_dir: &Path) -> Result<(), String> {
+    let path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+    if path.exists()
+        && let Some(target) = read_state(&path)?.growth_target
+    {
+        grow_stopped_root(runtime_dir, target)?;
+    }
+    Ok(())
 }
 
 /// Compact a stopped runtime-owned root after the caller acquires the sandbox lifecycle lock.
@@ -882,6 +1051,83 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn stopped_growth_preserves_ancestors_and_recovers_pending_target() {
+        use super::*;
+        use microsandbox_image::ext4::{Ext4FormatOptions, format_ext4};
+        for layout in [RootDiskLayout::ManagedUpper, RootDiskLayout::FlatRoot] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("runtime");
+            std::fs::create_dir(&root).unwrap();
+            let base = dir.path().join("base.raw");
+            let mib = 1024 * 1024;
+            format_ext4(
+                &base,
+                &Ext4FormatOptions {
+                    size_bytes: 256 * mib,
+                    journal_blocks: 4096,
+                },
+            )
+            .unwrap();
+            let original = sparse_file_integrity(&base).unwrap().root;
+            let head = root.join("head.qcow2");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(microsandbox_image::checkpoint::create_qcow2_overlay(
+                &head,
+                256 * mib,
+                &base,
+                "raw",
+            ))
+            .unwrap();
+            let mut state = RootDiskState {
+                schema: ROOT_DISK_STATE_SCHEMA.into(),
+                volume_id: new_id("vol"),
+                device_id: layout.device_id().into(),
+                layout,
+                published_generation: 1,
+                launch_base: None,
+                growth_target: Some(512 * mib),
+                layers: vec![
+                    RootDiskLayer {
+                        layer_id: new_id("layer"),
+                        path: base.clone(),
+                        format: RootDiskFormat::Raw,
+                        integrity_root: Some(original.clone()),
+                    },
+                    RootDiskLayer {
+                        layer_id: new_id("layer"),
+                        path: head,
+                        format: RootDiskFormat::Qcow2,
+                        integrity_root: None,
+                    },
+                ],
+            };
+            let journal = root.join(ROOT_DISK_STATE_FILE);
+            write_state(&journal, &state).unwrap();
+            assert!(load_runtime_owned_root_chain(&root).is_err());
+            assert!(compact_stopped_root(&root, None, false).is_err());
+            assert!(grow_stopped_root(&root, 768 * mib).is_err());
+            recover_stopped_root_growth(&root).unwrap();
+            let chain = load_runtime_owned_root_chain(&root).unwrap().unwrap();
+            assert_eq!(chain.virtual_size, 512 * mib);
+            assert_eq!(chain.layers.len(), 2);
+            assert_eq!(sparse_file_integrity(&base).unwrap().root, original);
+            // Simulate loss of the final acknowledgment after the filesystem already grew.
+            state = read_state(&journal).unwrap();
+            state.growth_target = Some(512 * mib);
+            write_state(&journal, &state).unwrap();
+            recover_stopped_root_growth(&root).unwrap();
+            assert!(read_state(&journal).unwrap().growth_target.is_none());
+            let before = std::fs::read(&journal).unwrap();
+            assert!(grow_stopped_root(&root, 512 * mib + 1).is_err());
+            assert_eq!(std::fs::read(&journal).unwrap(), before);
+            assert_eq!(sparse_file_integrity(&base).unwrap().root, original);
+        }
+    }
+
+    #[test]
     fn stopped_compaction_preserves_head_and_recovers_both_layouts() {
         use super::*;
         for layout in [RootDiskLayout::ManagedUpper, RootDiskLayout::FlatRoot] {
@@ -937,6 +1183,7 @@ mod tests {
                     layout,
                     published_generation: 3,
                     launch_base: None,
+                    growth_target: None,
                     layers,
                 },
             )
@@ -1012,6 +1259,7 @@ mod tests {
             layout: RootDiskLayout::ManagedUpper,
             published_generation: 1,
             launch_base: None,
+            growth_target: None,
             layers: vec![
                 RootDiskLayer {
                     layer_id: new_id("layer"),
@@ -1059,6 +1307,7 @@ mod tests {
             layout: RootDiskLayout::FlatRoot,
             published_generation: 0,
             launch_base: None,
+            growth_target: None,
             layers: vec![RootDiskLayer {
                 layer_id: new_id("layer"),
                 path: base.clone(),
@@ -1099,6 +1348,7 @@ mod tests {
             layout: RootDiskLayout::ManagedUpper,
             published_generation: 0,
             launch_base: None,
+            growth_target: None,
             layers: vec![RootDiskLayer {
                 layer_id: new_id("layer"),
                 path: "upper.ext4".into(),
