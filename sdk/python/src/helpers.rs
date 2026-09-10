@@ -230,10 +230,10 @@ pub fn sandbox_builder_from_args(
         // Resolve through the shared async builder: a group/member or snapshot identity is not
         // a directory name. A Python-only existence check would reject these valid selectors.
         builder = builder.from_snapshot(snap_str);
-        if let Some(base) = kwargs.get_item("snapshot_base")? {
-            if !base.is_none() {
-                builder = builder.snapshot_base(base.extract::<String>()?);
-            }
+        if let Some(base) = kwargs.get_item("snapshot_base")?
+            && !base.is_none()
+        {
+            builder = builder.snapshot_base(base.extract::<String>()?);
         }
         if disk_only {
             builder = builder.disk_only();

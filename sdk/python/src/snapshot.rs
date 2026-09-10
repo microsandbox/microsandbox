@@ -244,6 +244,8 @@ impl PySnapshot {
     ///
     /// The recorded manifest is archived as-is, so create the snapshot
     /// with `record_integrity=True` if receivers must verify content.
+    // PyO3 kwargs map one-to-one onto function parameters; preserve the public keyword contract.
+    #[allow(clippy::too_many_arguments)]
     #[staticmethod]
     #[pyo3(signature = (
         name_or_path,
