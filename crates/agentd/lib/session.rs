@@ -611,7 +611,7 @@ impl ExecSession {
     ///
     /// If `req.tty` is true, uses a PTY. Otherwise, uses piped stdin/stdout/stderr.
     /// A background task is spawned to read output and send events via `tx`.
-    pub fn spawn(
+    pub(crate) fn spawn(
         id: u32,
         req: &ExecRequest,
         tx: SessionOutputSender,

@@ -110,19 +110,19 @@ The default disk mode requires a stopped or crashed sandbox; running sandboxes a
 Use full mode when the child must continue the captured processes and memory instead of cold-booting from disk state:
 
 <CodeGroup>
+```typescript TypeScript
+const snap = await Snapshot.builder("worker-checkpoint")
+  .fromSandbox("worker")
+  .full()
+  .create();
+```
+
 ```rust Rust
 let snap = Snapshot::builder("worker-checkpoint")
     .from_sandbox("worker")
     .full()
     .create()
     .await?;
-```
-
-```typescript TypeScript
-const snap = await Snapshot.builder("worker-checkpoint")
-  .fromSandbox("worker")
-  .full()
-  .create();
 ```
 
 ```python Python
@@ -285,19 +285,19 @@ A full restore does not also run the image CMD: the processes in memory are alre
 To discard the captured execution and cold-boot only its filesystem state, select disk-only restore:
 
 <CodeGroup>
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+  .fromSnapshot("worker-checkpoint")
+  .diskOnly()
+  .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .from_snapshot("worker-checkpoint")
     .disk_only()
     .create()
     .await?;
-```
-
-```typescript TypeScript
-const sb = await Sandbox.builder("worker")
-  .fromSnapshot("worker-checkpoint")
-  .diskOnly()
-  .create();
 ```
 
 ```python Python

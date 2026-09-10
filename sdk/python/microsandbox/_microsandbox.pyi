@@ -134,6 +134,8 @@ class Sandbox:
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
         from_snapshot: str | os.PathLike[str] | None = None,
+        disk_only: bool = False,
+        snapshot_base: str | None = None,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,

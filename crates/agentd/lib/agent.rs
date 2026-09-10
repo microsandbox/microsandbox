@@ -2144,6 +2144,9 @@ fn discard_inherited_output(
     true
 }
 
+// Keep the loop-owned latch and output generation explicit at this dispatch boundary; merging
+// them into AgentState would obscure the ownership needed by restore and background producers.
+#[allow(clippy::too_many_arguments)]
 async fn handle_message(
     msg: Message,
     state: &mut AgentState,
