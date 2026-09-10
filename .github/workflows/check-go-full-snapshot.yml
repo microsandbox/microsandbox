@@ -22,11 +22,17 @@ env:
 jobs:
   snapshot-project:
     name: Full snapshot project (Go / Linux amd64)
-    runs-on: self-hosted-ubuntu-2404-x64
+    runs-on: ${{ inputs.sdk_revision != '' && 'ubuntu-latest' || 'self-hosted-ubuntu-2404-x64' }}
     timeout-minutes: 30
     outputs:
       commit: ${{ steps.source.outputs.commit }}
     steps:
+      - name: Enable KVM access on the ephemeral hosted runner
+        if: inputs.sdk_revision != ''
+        run: |
+          test -e /dev/kvm
+          sudo chmod a+rw /dev/kvm
+
       - name: Validate Go build provenance
         id: source
         env:
