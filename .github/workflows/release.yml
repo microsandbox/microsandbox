@@ -15,6 +15,8 @@ on:
       - scripts/ci/publish-crates.py
       - scripts/ci/validate-release-artifacts.py
       - scripts/ci/test_validate_release_artifacts.py
+      - sdk/node-ts/scripts/cloud-release-smoke.mts
+      - sdk/node-ts/scripts/cloud-release-smoke.test.mts
       - scripts/ci/validate_linux_glibc.py
       - scripts/ci/test_validate_linux_glibc.py
       - scripts/ci/wait-for-npm-packages.mjs
@@ -969,6 +971,71 @@ jobs:
 
       - name: Validate crates.io publication graph and package manifests
         run: python3 scripts/ci/publish-crates.py --validate-only
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # Exercise the same packaging path as npm-publish, including the candidate
+      # native binding. No already-published microsandbox package is installed.
+      - name: Build and check TypeScript smoke test
+        working-directory: sdk/node-ts
+        run: |
+          npm ci --omit=optional
+          npm run build:ts
+          npx --no-install tsc --noEmit --strict --skipLibCheck --target ES2023 --module nodenext --allowImportingTsExtensions scripts/cloud-release-smoke.mts scripts/cloud-release-smoke.test.mts
+          node --experimental-strip-types --test scripts/cloud-release-smoke.test.mts
+
+      # Never expose production credentials to PR code. Manual dry-runs run the
+      # live gate only on main; every publishing tag must pass it.
+      - name: Install candidate SDK for production smoke test
+        id: smoke-install
+        if: >-
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        run: |
+          platform=sdk/node-ts/npm/linux-x64-gnu
+          artifact=node-artifacts/node-sdk-linux-x64-gnu
+          mkdir -p "$platform/bin" "$platform/lib"
+          cp "$artifact/npm/linux-x64-gnu/"*.node "$platform/"
+          cp "$artifact/npm/linux-x64-gnu/bin/"* "$platform/bin/"
+          cp "$artifact/npm/linux-x64-gnu/lib/"* "$platform/lib/"
+          chmod +x "$platform/bin/msb"
+          cp "$artifact/native/index.cjs" sdk/node-ts/native/index.cjs
+          cp "$artifact/native/index.d.ts" sdk/node-ts/native/index.d.cts
+          pack_dir="$RUNNER_TEMP/cloud-smoke-packs"
+          consumer_dir="$RUNNER_TEMP/cloud-smoke-consumer"
+          mkdir -p "$pack_dir" "$consumer_dir"
+          main_tarball=$(cd sdk/node-ts && npm pack --silent --pack-destination "$pack_dir")
+          platform_tarball=$(cd "$platform" && npm pack --silent --pack-destination "$pack_dir")
+          cp sdk/node-ts/scripts/cloud-release-smoke.mts "$consumer_dir/"
+          cd "$consumer_dir"
+          npm init --yes >/dev/null
+          npm install --ignore-scripts --omit=optional "$pack_dir/$main_tarball" "$pack_dir/$platform_tarball"
+          node --input-type=module -e 'await import("microsandbox")'
+
+      - name: Smoke test candidate SDK against production
+        id: cloud-smoke
+        if: steps.smoke-install.outcome == 'success'
+        timeout-minutes: 6
+        env:
+          MSB_API_KEY: ${{ secrets.MSB_API_KEY }}
+          MSB_BACKEND: cloud
+          MSB_API_URL: https://api.microsandbox.dev
+          MSB_HOME: ${{ runner.temp }}/cloud-smoke-home
+          MSB_SMOKE_SANDBOX_NAME: release-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node --experimental-strip-types "$RUNNER_TEMP/cloud-smoke-consumer/cloud-release-smoke.mts" run
+
+      - name: Clean up production smoke sandbox
+        if: ${{ always() && steps.cloud-smoke.outcome != 'skipped' && steps.smoke-install.outcome == 'success' }}
+        timeout-minutes: 4
+        env:
+          MSB_API_KEY: ${{ secrets.MSB_API_KEY }}
+          MSB_BACKEND: cloud
+          MSB_API_URL: https://api.microsandbox.dev
+          MSB_HOME: ${{ runner.temp }}/cloud-smoke-home
+          MSB_SMOKE_SANDBOX_NAME: release-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node --experimental-strip-types "$RUNNER_TEMP/cloud-smoke-consumer/cloud-release-smoke.mts" cleanup
 
       - name: Upload validation manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

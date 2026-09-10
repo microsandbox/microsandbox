@@ -264,6 +264,29 @@ The release workflow (`.github/workflows/release.yml`) will:
 10. Update the Homebrew tap and winget manifests
 11. Sync docs to Mintlify and refresh the npm lockfile on `main`
 
+### Production SDK smoke gate
+
+Add the repository Actions secret `MSB_API_KEY` in
+`superradcompany/microsandbox`. Its value must be a production Microsandbox API
+key for a dedicated test organization with permission and quota to create, run,
+stop, and delete a sandbox. CI sets `MSB_API_KEY`, `MSB_BACKEND=cloud`, and
+`MSB_API_URL=https://api.microsandbox.dev` so the SDK uses its normal environment
+configuration to select production.
+
+Before any publisher runs, `release-ready` installs the candidate TypeScript SDK and Linux x86_64 native
+npm tarballs built from that same workflow, creates a 1-vCPU/512-MiB Alpine sandbox, checks exact
+command output, and confirms removal. The sandbox name includes the run ID and
+attempt. Cleanup runs even when the smoke step fails; an ephemeral lifecycle,
+10-minute maximum duration, and 2-minute idle timeout bound running resources if
+the runner disappears. Missing credentials or smoke/cleanup failure blocks
+publishing. Production outages can therefore block a release.
+
+The live gate runs on release tag pushes and manual Release runs on `main`.
+Pull requests and manual runs on other branches run the credential-free checks
+without accessing production. No published microsandbox package is fetched from npm in place of the
+candidate tarballs. This is a shared SDK-to-Cloud path check, not exhaustive testing
+of every language binding or new Cloud feature.
+
 ## Additional Resources
 
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — How to contribute
