@@ -1,5 +1,7 @@
 # CoW memory and resident lifecycle — 2026-09-07
 
+Archive names in this report use the current `.msb` convention. Retained raw logs preserve the filenames used in the original runs.
+
 Follow-up: [execution-state fixes and qualification](execution-state-2026-09-07.md) supersedes the Windows post-restore failure status below and adds Linux ARM64 coverage. The observations below describe the earlier backend revision.
 
 Status: development integration and live smoke coverage, not full platform or performance qualification. Microsandbox #8 remains stacked directly on #7 `ce04099b`, with libkrun `94d680b21bf7ea7c2bed5262ed211833bd4379bd` and firmware `6cca413ac248f63e65d4ea4748b3bc36cd1b22f3`. The kernel and agentd used below were built from matching development sources on the authorized OVH host, including the ARM64 guest artifacts used on macOS and Windows.
@@ -14,7 +16,7 @@ The opt-in language SDK tests are `sdk/python/tests/test_cow_lifecycle.py`, `sdk
 
 ## Observed coverage
 
-Linux/KVM x86-64 passed CoW flat, managed, and tmpfs roots, plus a standard-memory flat-root baseline. macOS/HVF ARM64 passed the same root/memory variants. The checks exercise fresh construction, running full capture, idempotent pause/resume, host-observed Paused status, prompt rejection of new guest exec while paused, two successive full captures while retaining pause, installed-snapshot restore into two children, private child writes, direct full `.msnap` capture/restore, survival after input-archive unlink, and stop from paused. Completed runs stopped their test VMs; retained snapshot/cache artifacts remain in the isolated test homes for inspection.
+Linux/KVM x86-64 passed CoW flat, managed, and tmpfs roots, plus a standard-memory flat-root baseline. macOS/HVF ARM64 passed the same root/memory variants. The checks exercise fresh construction, running full capture, idempotent pause/resume, host-observed Paused status, prompt rejection of new guest exec while paused, two successive full captures while retaining pause, installed-snapshot restore into two children, private child writes, direct full `.msb` capture/restore, survival after input-archive unlink, and stop from paused. Completed runs stopped their test VMs; retained snapshot/cache artifacts remain in the isolated test homes for inspection.
 
 The later Linux flat/managed/tmpfs/standard runs and macOS tmpfs run additionally assert unchanged Linux boot ID across ordinary pause/resume, resumed progress of the original counter workload, and guest wall clock within three seconds of the host after a ten-second pause. These checks do not constitute host-suspend, every clock-failure, or VM Generation ID notification testing.
 

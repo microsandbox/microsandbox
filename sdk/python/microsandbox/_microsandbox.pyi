@@ -885,6 +885,15 @@ class Snapshot:
         set_head: bool = False,
     ) -> SnapshotHandle: ...
     @staticmethod
+    async def load_many(
+        archives: Sequence[str | os.PathLike[str]],
+        *,
+        dest: str | os.PathLike[str] | None = None,
+        base: str | None = None,
+        group: str | None = None,
+        set_head: bool = False,
+    ) -> list[SnapshotHandle]: ...
+    @staticmethod
     async def group_head(selector: str) -> dict[str, str | bool | None]: ...
     @property
     def head_update(self) -> dict[str, str | bool | None] | None: ...

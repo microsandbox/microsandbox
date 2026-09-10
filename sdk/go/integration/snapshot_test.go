@@ -276,6 +276,21 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 	if _, err := microsandbox.Snapshot.Open(loadCtx, snapshotDir); err != nil {
 		t.Fatalf("removing an import affected the original snapshot: %v", err)
 	}
+
+	// A repeated archive still yields one result per input, but one batch group
+	// installs the identical snapshot only once.
+	batch, err := microsandbox.Snapshot.LoadMany(loadCtx,
+		[]string{archivePath, archivePath}, microsandbox.SnapshotLoadOptions{Dest: importDir})
+	if err != nil {
+		t.Fatalf("Snapshot.LoadMany: %v", err)
+	}
+	if len(batch) != 2 || batch[0].ID() != artifact.ID() || batch[1].ID() != artifact.ID() {
+		t.Fatalf("Snapshot.LoadMany returned unexpected handles: %#v", batch)
+	}
+	t.Cleanup(func() { removeSnapshotBestEffort(batch[0].Path()) })
+	if batch[0].Path() != batch[1].Path() || batch[0].Group() == nil {
+		t.Fatal("batch should reuse one installed copy in one generated group")
+	}
 }
 
 func logSnapshotPhase(t *testing.T, phase string, started time.Time) {

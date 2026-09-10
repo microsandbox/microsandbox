@@ -40,7 +40,7 @@ pub enum SnapshotCommands {
     /// Rebuild the local index from artifacts on disk.
     Reindex(SnapshotReindexArgs),
 
-    /// Save a snapshot into a `.msnap` archive (tar + zstd).
+    /// Save a snapshot into a `.msb` archive (tar + zstd).
     Save(SnapshotSaveArgs),
 
     /// Load a snapshot archive into the snapshots directory.
@@ -157,7 +157,7 @@ pub struct SnapshotSaveArgs {
     /// Snapshot to save (path, name, or digest).
     pub snapshot: String,
 
-    /// Output archive path (`.msnap` recommended; explicit filenames are preserved).
+    /// Output archive path (`.msb` recommended; explicit filenames are preserved).
     pub out: std::path::PathBuf,
 
     /// Walk the parent chain and include each ancestor in the archive.
@@ -184,12 +184,14 @@ pub struct SnapshotSaveArgs {
 /// Arguments for `msb snapshot load`.
 #[derive(Debug, Args)]
 pub struct SnapshotLoadArgs {
-    /// Archive to unpack.
-    pub archive: std::path::PathBuf,
+    /// Archives to import together; dependencies are resolved regardless of argument order.
+    #[arg(required = true, num_args = 1.., value_name = "ARCHIVE")]
+    pub archives: Vec<std::path::PathBuf>,
 
     /// Destination directory (defaults to `~/.microsandbox/snapshots/`).
+    #[arg(long, value_name = "DIR")]
     pub dest: Option<std::path::PathBuf>,
-    /// Exact base snapshot or standalone base archive for a dependent archive.
+    /// External base snapshot or standalone archive if batch/group members cannot supply dependencies.
     #[arg(long)]
     pub base: Option<String>,
 
@@ -197,7 +199,7 @@ pub struct SnapshotLoadArgs {
     #[arg(long, value_name = "GROUP")]
     pub group: Option<String>,
 
-    /// Select the imported member as head even if it is not a fast-forward.
+    /// Select the batch's unique tip as head even if it is not a fast-forward.
     #[arg(long)]
     pub set_head: bool,
 }
@@ -503,8 +505,8 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
 }
 
 async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
-    let handle = Snapshot::load_with_options(
-        &args.archive,
+    let handles = Snapshot::load_many(
+        &args.archives,
         microsandbox::snapshot::LoadOpts {
             dest: args.dest,
             base: args.base,
@@ -513,12 +515,25 @@ async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
         },
     )
     .await?;
-    if let Some(update) = handle.head_update() {
+    // Every imported member belongs to one batch; report its single head decision once.
+    if let Some(update) = handles.iter().find_map(|handle| handle.head_update()) {
         report_head_update(update);
+    } else if let Some(group) = handles.first().and_then(|handle| handle.group()) {
+        eprintln!(
+            "group {group}: imported members without selecting a head; choose a member explicitly"
+        );
     }
-    println!("{}", handle.digest());
-    // Keep the installed path as the final stdout line for shell consumers.
-    println!("{}", handle.path().display());
+    for (index, handle) in handles.iter().enumerate() {
+        if handles.len() > 1 {
+            if index > 0 {
+                println!();
+            }
+            println!("Snapshot: {}", handle.id());
+        }
+        println!("{}", handle.digest());
+        // Preserve the single-archive digest/path output consumed by shell scripts.
+        println!("{}", handle.path().display());
+    }
     Ok(())
 }
 
@@ -707,15 +722,48 @@ mod tests {
 
     #[test]
     fn load_parses_args() {
-        let parsed = parse_snapshot_args(&["load", "bundle.tar", "/tmp/snaps"]);
+        let parsed = parse_snapshot_args(&["load", "bundle.tar", "--dest", "/tmp/snaps"]);
         let SnapshotCommands::Load(args) = parsed.command else {
             panic!("expected load command");
         };
-        assert_eq!(args.archive, std::path::PathBuf::from("bundle.tar"));
+        assert_eq!(args.archives, vec![std::path::PathBuf::from("bundle.tar")]);
         assert_eq!(
             args.dest.as_deref(),
             Some(std::path::Path::new("/tmp/snaps"))
         );
+    }
+
+    #[test]
+    fn load_parses_multiple_archives_and_a_named_destination() {
+        let parsed = parse_snapshot_args(&[
+            "load",
+            "changes.msb",
+            "base.msb",
+            "--dest",
+            "/tmp/snaps",
+            "--group",
+            "received",
+        ]);
+        let SnapshotCommands::Load(args) = parsed.command else {
+            panic!("expected load command");
+        };
+        assert_eq!(
+            args.archives,
+            vec![
+                std::path::PathBuf::from("changes.msb"),
+                std::path::PathBuf::from("base.msb"),
+            ]
+        );
+        assert_eq!(
+            args.dest.as_deref(),
+            Some(std::path::Path::new("/tmp/snaps"))
+        );
+        assert_eq!(args.group.as_deref(), Some("received"));
+    }
+
+    #[test]
+    fn load_requires_at_least_one_archive() {
+        assert!(TestCli::try_parse_from(["msb", "load", "--group", "received"]).is_err());
     }
 
     #[test]
@@ -733,7 +781,7 @@ mod tests {
     fn load_accepts_group_and_explicit_head_selection() {
         let parsed = parse_snapshot_args(&[
             "load",
-            "changes.msnap",
+            "changes.msb",
             "--base",
             "work:base",
             "--group",

@@ -133,8 +133,8 @@ try:
     full3, f3 = capture("capture-after-conflict", "source", "full3", full=True)
     assert f3["parent"] == f2["snapshot_id"]
 
-    base_archive = root / "base.msnap"
-    delta_archive = root / "delta.msnap"
+    base_archive = root / "base.msb"
+    delta_archive = root / "delta.msb"
     run("export-base", "snapshot", "save", full1, base_archive)
     run("export-delta", "snapshot", "save", full2, delta_archive, "--since", full1)
     inventory = json.loads(subprocess.check_output(["tar", "-xOf", str(delta_archive), "archive.json"]))
@@ -170,7 +170,7 @@ try:
 
     # Direct archive capture records ancestry but never creates an installed member.
     before_members = sorted(str(p) for p in (home / "snapshots").rglob("snapshot.json"))
-    direct = root / "direct.msnap"
+    direct = root / "direct.msb"
     run("direct-capture", "snapshot", "create", "direct", "--from", "source", "--full", "--archive", direct)
     assert sorted(str(p) for p in (home / "snapshots").rglob("snapshot.json")) == before_members
     create("direct-restored", str(direct), forked=True)

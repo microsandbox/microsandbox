@@ -4,7 +4,7 @@
 //! member's optional local alias need metadata; immutable descriptors remain authoritative for
 //! ancestry. All group operations share one process-held lock, acquired off the async executor.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -66,6 +66,8 @@ pub enum HeadUpdateReason {
     Diverged,
     /// Missing history prevents proving that the candidate descends from the head.
     UnknownAncestry,
+    /// Supplied archive heads have multiple tips that known ancestry cannot order.
+    AmbiguousCandidates,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -169,10 +171,35 @@ pub(super) async fn publish(
     candidate: &SnapshotId,
     set_head: bool,
 ) -> MicrosandboxResult<HeadUpdate> {
+    publish_batch(
+        group_dir,
+        staged,
+        aliases,
+        std::slice::from_ref(candidate),
+        set_head,
+    )
+    .await?
+    .ok_or_else(|| integrity("single snapshot publication did not choose a head".into()))
+}
+
+/// Publish a validated batch under one lock, selecting a head only when supplied candidates
+/// have one tip that is a known descendant of every other candidate.
+pub(super) async fn publish_batch(
+    group_dir: &Path,
+    staged: &Path,
+    aliases: &BTreeMap<String, String>,
+    candidates: &[SnapshotId],
+    set_head: bool,
+) -> MicrosandboxResult<Option<HeadUpdate>> {
+    if candidates.is_empty() {
+        return Err(MicrosandboxError::InvalidConfig(
+            "snapshot batch must contain at least one candidate head".into(),
+        ));
+    }
     let group_dir = group_dir.to_path_buf();
     let staged = staged.to_path_buf();
     let aliases = aliases.clone();
-    let candidate = candidate.to_string();
+    let candidates: BTreeSet<String> = candidates.iter().map(ToString::to_string).collect();
     blocking(move || {
         require_directory(&staged)?;
         if fs::canonicalize(&group_dir)?.starts_with(fs::canonicalize(&staged)?) {
@@ -212,15 +239,17 @@ pub(super) async fn publish(
                 );
             }
         }
-        if !members.contains_key(&candidate) {
-            return Err(MicrosandboxError::SnapshotNotFound(candidate));
+        for candidate in &candidates {
+            if !members.contains_key(candidate) {
+                return Err(MicrosandboxError::SnapshotNotFound(candidate.clone()));
+            }
         }
         apply_aliases(&mut members, &aliases)?;
         validate_ancestry(&members)?;
-        let update = head_update(
+        let update = batch_head_update(
             &group_dir,
             state.head.as_deref(),
-            &candidate,
+            &candidates,
             &members,
             set_head,
         )?;
@@ -239,10 +268,44 @@ pub(super) async fn publish(
             write_member_name(&group_dir.join(id), members[id].name.as_deref())?;
         }
         sync_directory(&group_dir)?;
-        if update.changed {
+        if let Some(update) = &update
+            && update.changed
+        {
             write_group(&group_dir, Some(update.head.clone()))?;
         }
         Ok(update)
+    })
+    .await
+}
+
+/// List installed members available as dependency sources without creating a destination group.
+/// Callers must still validate the physical payloads they borrow from these artifact paths.
+pub(super) async fn dependency_members(
+    root: &Path,
+    name: &str,
+) -> MicrosandboxResult<Vec<PathBuf>> {
+    let root = root.to_path_buf();
+    let name = name.to_owned();
+    blocking(move || {
+        validate_group_name(&name)?;
+        if !path_exists(&root)? {
+            return Ok(Vec::new());
+        }
+        require_directory(&root)?;
+        let directory = root.join(name);
+        if !path_exists(&directory)? {
+            return Ok(Vec::new());
+        }
+        require_directory(&directory)?;
+        read_group(&directory)?;
+        // Preflight must not create even a lock file in an existing malformed namespace.
+        let lock = process_lock::open_existing_lock_file(&directory.join(".group.lock"))?;
+        process_lock::lock_exclusive(&lock)?;
+        let state = read_group(&directory)?;
+        let members = read_members(&directory, true)?;
+        validate_head(&state, &members)?;
+        validate_ancestry(&members)?;
+        Ok(members.into_values().map(|member| member.path).collect())
     })
     .await
 }
@@ -547,8 +610,9 @@ fn resolve_selected(
     let selected_id = match selected {
         None => Some(state.head.clone().ok_or_else(|| {
             MicrosandboxError::SnapshotNotFound(format!(
-                "snapshot group {} has no head",
-                directory.display()
+                "snapshot group {} has no head selected; choose an installed member with 'msb snapshot head {}:<snapshot>'",
+                directory.display(),
+                directory.file_name().unwrap_or_default().to_string_lossy()
             ))
         })?),
         Some(selected) if SnapshotId::new(selected).is_ok() => Some(selected.to_owned()),
@@ -644,6 +708,55 @@ fn head_update(
         reason,
         changed,
     })
+}
+
+fn batch_head_update(
+    directory: &Path,
+    previous: Option<&str>,
+    candidates: &BTreeSet<String>,
+    members: &BTreeMap<String, Member>,
+    explicit: bool,
+) -> MicrosandboxResult<Option<HeadUpdate>> {
+    // Remove supplied heads that are proven ancestors of another supplied head. Shared paths
+    // need be traversed only once: their candidate ancestors were already marked on first visit.
+    let mut ancestors = HashSet::new();
+    let mut visited = HashSet::new();
+    for candidate in candidates {
+        let mut current = members[candidate].parent.as_deref();
+        while let Some(parent) = current {
+            if !visited.insert(parent) {
+                break;
+            }
+            if candidates.contains(parent) {
+                ancestors.insert(parent);
+            }
+            current = members
+                .get(parent)
+                .and_then(|member| member.parent.as_deref());
+        }
+    }
+    let mut tips = candidates
+        .iter()
+        .filter(|candidate| !ancestors.contains(candidate.as_str()));
+    let candidate = tips
+        .next()
+        .ok_or_else(|| integrity("snapshot batch has no candidate tip".into()))?;
+    if tips.next().is_none() {
+        return head_update(directory, previous, candidate, members, explicit).map(Some);
+    }
+    if explicit {
+        return Err(MicrosandboxError::InvalidConfig(
+            "--set-head cannot choose between multiple snapshot archive heads with incomparable or unknown ancestry; load without --set-head, then use 'msb snapshot head <group>:<snapshot>'".into(),
+        ));
+    }
+    // A fresh group may contain several branches without claiming that one is current.
+    previous
+        .map(|head| {
+            let mut update = head_update(directory, Some(head), head, members, false)?;
+            update.reason = HeadUpdateReason::AmbiguousCandidates;
+            Ok(update)
+        })
+        .transpose()
 }
 
 fn ancestry_reason(

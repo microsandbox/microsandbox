@@ -90,6 +90,331 @@ async fn add(group: &Path, value: u128, parent: Option<u128>) -> HeadUpdate {
 //--------------------------------------------------------------------------------------------------
 
 #[tokio::test]
+async fn batch_head_is_independent_of_archive_and_staging_order() {
+    let root = tempfile::tempdir().unwrap();
+    for (index, order) in [
+        [1, 2, 3],
+        [1, 3, 2],
+        [2, 1, 3],
+        [2, 3, 1],
+        [3, 1, 2],
+        [3, 2, 1],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let group = ensure(root.path(), Some(&format!("order-{index}")))
+            .await
+            .unwrap();
+        let manifests = order
+            .iter()
+            .map(|value| descriptor(*value, (*value > 1).then_some(*value - 1)))
+            .collect::<Vec<_>>();
+        let staged = stage(root.path(), &manifests);
+        let candidates = order.into_iter().map(id).collect::<Vec<_>>();
+        let update = publish_batch(&group, staged.path(), &BTreeMap::new(), &candidates, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.head, id(3).as_str());
+        assert_eq!(update.reason, HeadUpdateReason::Initialized);
+        assert_eq!(read_members(&group, true).unwrap().len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn batch_uses_known_destination_intermediates_to_prove_one_tip() {
+    let root = tempfile::tempdir().unwrap();
+    let group = ensure(root.path(), Some("intermediate")).await.unwrap();
+    add(&group, 1, None).await;
+    add(&group, 2, Some(1)).await;
+    let staged = stage(root.path(), &[descriptor(3, Some(2))]);
+    let update = publish_batch(
+        &group,
+        staged.path(),
+        &BTreeMap::new(),
+        &[id(3), id(1), id(3)],
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(update.reason, HeadUpdateReason::FastForwarded);
+    assert_eq!(update.previous.as_deref(), Some(id(2).as_str()));
+    assert_eq!(update.head, id(3).as_str());
+}
+
+#[tokio::test]
+async fn batch_unique_tip_still_respects_existing_head_ancestry() {
+    let root = tempfile::tempdir().unwrap();
+    let group = ensure(root.path(), Some("retained-head")).await.unwrap();
+    add(&group, 1, None).await;
+    for (parent, reason) in [
+        (None, HeadUpdateReason::Diverged),
+        (Some(9), HeadUpdateReason::UnknownAncestry),
+    ] {
+        let first = if parent.is_none() { 2 } else { 4 };
+        let staged = stage(
+            root.path(),
+            &[
+                descriptor(first, parent),
+                descriptor(first + 1, Some(first)),
+            ],
+        );
+        let update = publish_batch(
+            &group,
+            staged.path(),
+            &BTreeMap::new(),
+            &[id(first), id(first + 1)],
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(update.reason, reason);
+        assert!(!update.changed);
+        assert_eq!(update.head, id(1).as_str());
+        assert!(group.join(id(first + 1).as_str()).is_dir());
+    }
+}
+
+#[tokio::test]
+async fn batch_branches_preserve_existing_head_or_leave_new_group_unselected() {
+    let root = tempfile::tempdir().unwrap();
+    for existing in [false, true] {
+        for order in [[2, 3], [3, 2]] {
+            let name = format!("branches-{existing}-{}", order[0]);
+            let group = ensure(root.path(), Some(&name)).await.unwrap();
+            if existing {
+                add(&group, 1, None).await;
+            }
+            let staged = stage(
+                root.path(),
+                &[
+                    descriptor(1, None),
+                    descriptor(2, Some(1)),
+                    descriptor(3, Some(1)),
+                ],
+            );
+            let candidates = order.map(id);
+            let update = publish_batch(&group, staged.path(), &BTreeMap::new(), &candidates, false)
+                .await
+                .unwrap();
+            if existing {
+                let update = update.unwrap();
+                assert_eq!(update.reason, HeadUpdateReason::AmbiguousCandidates);
+                assert!(!update.changed);
+                assert_eq!(update.head, id(1).as_str());
+            } else {
+                assert_eq!(update, None);
+                assert_eq!(read_group(&group).unwrap().head, None);
+                let error = resolve(root.path(), &name).await.unwrap_err().to_string();
+                assert!(error.contains("no head selected"));
+                assert!(error.contains("msb snapshot head"));
+                assert_eq!(
+                    resolve(root.path(), &format!("{name}:{}", id(3)))
+                        .await
+                        .unwrap(),
+                    group.join(id(3).as_str())
+                );
+            }
+            assert_eq!(read_members(&group, true).unwrap().len(), 3);
+        }
+    }
+}
+
+#[tokio::test]
+async fn batch_unknown_history_does_not_guess_a_candidate_order() {
+    let root = tempfile::tempdir().unwrap();
+    let group = ensure(root.path(), Some("holes")).await.unwrap();
+    add(&group, 1, None).await;
+    // Snapshot 3 may descend from 1, but absent snapshot 2 prevents proving the relationship.
+    let staged = stage(root.path(), &[descriptor(3, Some(2))]);
+    let update = publish_batch(
+        &group,
+        staged.path(),
+        &BTreeMap::new(),
+        &[id(3), id(1)],
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(update.reason, HeadUpdateReason::AmbiguousCandidates);
+    assert_eq!(update.head, id(1).as_str());
+    let staged = stage(root.path(), &[descriptor(2, Some(1))]);
+    // Repeating the same candidates is now conclusive, even though their intermediate is not
+    // itself a supplied archive head.
+    let update = publish_batch(
+        &group,
+        staged.path(),
+        &BTreeMap::new(),
+        &[id(1), id(3)],
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(update.reason, HeadUpdateReason::FastForwarded);
+    assert_eq!(update.head, id(3).as_str());
+}
+
+#[tokio::test]
+async fn batch_set_head_requires_one_candidate_tip_before_any_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let group = ensure(root.path(), Some("explicit-batch")).await.unwrap();
+    add(&group, 1, None).await;
+    let staged = stage(
+        root.path(),
+        &[descriptor(2, Some(1)), descriptor(3, Some(1))],
+    );
+    let error = publish_batch(
+        &group,
+        staged.path(),
+        &BTreeMap::new(),
+        &[id(2), id(3)],
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("--set-head cannot choose"));
+    assert!(error.to_string().contains("msb snapshot head"));
+    for candidate in [2, 3] {
+        assert!(!group.join(id(candidate).as_str()).exists());
+        assert!(staged.path().join(id(candidate).as_str()).is_dir());
+    }
+    assert_eq!(
+        read_group(&group).unwrap().head.as_deref(),
+        Some(id(1).as_str())
+    );
+    let staged = stage(root.path(), &[descriptor(4, None), descriptor(5, Some(4))]);
+    let update = publish_batch(
+        &group,
+        staged.path(),
+        &BTreeMap::new(),
+        &[id(5), id(4)],
+        true,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(update.reason, HeadUpdateReason::Selected);
+    assert_eq!(update.head, id(5).as_str());
+}
+
+#[tokio::test]
+async fn batch_descriptor_and_alias_conflicts_do_not_partly_publish() {
+    let root = tempfile::tempdir().unwrap();
+    let group = ensure(root.path(), Some("batch-conflicts")).await.unwrap();
+    let staged = stage(root.path(), &[descriptor(1, None)]);
+    publish(
+        &group,
+        staged.path(),
+        &BTreeMap::from([(id(1).to_string(), "base".into())]),
+        &id(1),
+        false,
+    )
+    .await
+    .unwrap();
+    let mut conflict = descriptor(1, None);
+    conflict.capture.source_lineage = Some("different-source".into());
+    let staged = stage(root.path(), &[descriptor(2, Some(1)), conflict]);
+    assert!(
+        publish_batch(
+            &group,
+            staged.path(),
+            &BTreeMap::new(),
+            &[id(2), id(1)],
+            false
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("different descriptor")
+    );
+    assert!(!group.join(id(2).as_str()).exists());
+    assert!(staged.path().join(id(2).as_str()).is_dir());
+    let staged = stage(
+        root.path(),
+        &[descriptor(2, Some(1)), descriptor(3, Some(2))],
+    );
+    let aliases = BTreeMap::from([
+        (id(2).to_string(), "other".into()),
+        (id(3).to_string(), "base".into()),
+    ]);
+    assert!(
+        publish_batch(&group, staged.path(), &aliases, &[id(2), id(3)], false)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts")
+    );
+    for candidate in [2, 3] {
+        assert!(!group.join(id(candidate).as_str()).exists());
+        assert!(staged.path().join(id(candidate).as_str()).is_dir());
+    }
+    assert_eq!(
+        read_group(&group).unwrap().head.as_deref(),
+        Some(id(1).as_str())
+    );
+}
+
+#[tokio::test]
+async fn dependency_lookup_reads_only_existing_installed_group_members() {
+    let root = tempfile::tempdir().unwrap();
+    let missing_root = root.path().join("missing-root");
+    assert!(
+        dependency_members(&missing_root, "work")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!missing_root.exists());
+    assert!(
+        dependency_members(root.path(), "work")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!root.path().join("work").exists());
+    assert!(!root.path().join(".groups.lock").exists());
+    assert!(
+        dependency_members(&missing_root, "../escape")
+            .await
+            .is_err()
+    );
+    let group = ensure(root.path(), Some("work")).await.unwrap();
+    add(&group, 1, None).await;
+    let _incomplete = stage(&group, &[descriptor(2, Some(1))]);
+    assert_eq!(
+        dependency_members(root.path(), "work").await.unwrap(),
+        vec![group.join(id(1).as_str())]
+    );
+    let malformed = root.path().join("malformed");
+    fs::create_dir(&malformed).unwrap();
+    write_group(&malformed, None).unwrap();
+    assert!(dependency_members(root.path(), "malformed").await.is_err());
+    assert!(!malformed.join(".group.lock").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dependency_lookup_rejects_symlinked_roots_and_groups() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let group = ensure(root.path(), Some("work")).await.unwrap();
+    symlink(&group, root.path().join("redirect")).unwrap();
+    assert!(dependency_members(root.path(), "redirect").await.is_err());
+    symlink(root.path(), root.path().join("root-link")).unwrap();
+    assert!(
+        dependency_members(&root.path().join("root-link"), "work")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn initializes_and_fast_forwards_through_multiple_imported_ancestors() {
     let root = tempfile::tempdir().unwrap();
     let group = ensure(root.path(), Some("work")).await.unwrap();

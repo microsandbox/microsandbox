@@ -1,5 +1,7 @@
 # Live disk-only snapshots — 2026-09-09
 
+Archive names in this report use the current `.msb` convention. Retained raw logs preserve the filenames used in the original runs.
+
 Implemented on the #8 branch above Microsandbox `f68c1329`, using existing pinned libkrun `862d6842`, rust-vmm `f798d4f2`, and matching firmware. No companion changes, dependency overrides, schema change, or new public flags were required.
 
 ## Behavior
@@ -10,8 +12,8 @@ msb snapshot create saved --from source
 msb create --name child --from-snapshot saved
 
 # Direct archive: no installed snapshot directory or index row.
-msb snapshot create exported --from source --archive ./exported.msnap
-msb create --name archive-child --from-snapshot ./exported.msnap
+msb snapshot create exported --from source --archive ./exported.msb
+msb create --name archive-child --from-snapshot ./exported.msb
 ```
 
 Running and user-paused managed/flat OCI roots use the serialized runtime control executor and a distinct capability-gated `disk_checkpoint_create` operation. Rollover seals the disk and selects a private successor. Running sources resume before SDK packaging; user-paused sources stay paused. Stopped/crashed copies retain their lifecycle lock. The SDK packages only the immutable disk closure, rechecks source identity, and removes consumed staging.
@@ -27,7 +29,7 @@ The committed `scripts/smoke/cli/live-disk-snapshot.py` passed on macOS ARM64/HV
 | Checks, on both root layouts | Mac | Linux | Windows |
 | --- | --- | --- | --- |
 | Running installed capture and cold restore; optional integrity | Pass | Pass | Pass |
-| Direct compressed `.msnap` and plain `.tar`; no installed intermediate | Pass | Pass | Pass |
+| Direct compressed `.msb` and plain `.tar`; no installed intermediate | Pass | Pass | Pass |
 | User-paused capture remains paused; exec refuses until explicit resume | Pass | Pass | Pass |
 | Source RAM/boot ID retained; disk child has a new boot ID and no tmpfs marker | Pass | Pass | Pass |
 | Source/child writes isolated; sealed payload hashes unchanged | Pass | Pass | Pass |

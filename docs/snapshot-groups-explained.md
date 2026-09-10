@@ -14,11 +14,11 @@ Running sandbox
       +-- full snapshot ----> new VM resumes saved RAM, CPUs, devices, and disk
 ```
 
-Disk snapshots also work when the source is paused or stopped. Full snapshots require resident execution state: a running or user-paused VM. Each capture produces a new immutable snapshot, even when unchanged disk layers or RAM objects are reused. Exporting a snapshot packages it as a `.msnap` archive; loading an archive installs it without starting a VM.
+Disk snapshots also work when the source is paused or stopped. Full snapshots require resident execution state: a running or user-paused VM. Each capture produces a new immutable snapshot, even when unchanged disk layers or RAM objects are reused. Exporting a snapshot packages it as a `.msb` archive; loading an archive installs it without starting a VM.
 
 ## A group gives those saved points a local home
 
-A **group** is a namespace containing snapshots and one selected **head**. Member names such as `cp01` are meaningful inside their group. Each snapshot also keeps its portable `snap_...` ID.
+A **group** is a namespace containing snapshots and a selected **head**. Member names such as `cp01` are meaningful inside their group. Each snapshot also keeps its portable `snap_...` ID. A new group imported from competing branches can temporarily have no selected head; choose one explicitly before restoring by the bare group name.
 
 ```text
 ~/.microsandbox/snapshots/
@@ -76,7 +76,7 @@ worker:cp01 ---- worker:cp02 ---- worker:cp03  <- head
 
 The rules are small:
 
-- Empty group: the first successful publication initializes its head.
+- Empty group: a single capture or import initializes its head. A batch selects its one provably newest tip, if there is one.
 - Known descendant of the current head: advance automatically.
 - Same member, older member, sibling, unrelated history, or missing ancestry: keep the current head. The capture/import still succeeds.
 - Explicit selection: choose any complete installed member, including an older one.
@@ -89,7 +89,7 @@ msb snapshot head worker:cp01        # Explicitly rewind
 
 There is no special `main` branch. The head is a selected snapshot, not a rule for guessing which future branch is preferred.
 
-### What if two siblings arrive together?
+### What if two separate operations publish siblings concurrently?
 
 ```text
                     +---- snapshot A
@@ -104,28 +104,53 @@ Result: both snapshots exist. Only the first head update wins.
 
 Publication checks and head replacement share a per-group lock. The losing sibling is not discarded or reported as a failed capture. If you want B, select it explicitly. Two captures of the *same* source are serialized and record a parent chain; they are not treated as sibling captures.
 
+A **single batch containing both siblings** is different: neither argument order nor which file finishes first chooses the head. An existing group retains its head; a new group imports both members with no selected head. Then use `msb snapshot head worker:<member>` to choose.
+
 ## Move a history to another machine
 
 ```bash
 # On the source machine:
-msb snapshot save worker:cp01 cp01.msnap
-msb snapshot save worker:cp02 cp02.msnap --since worker:cp01
+mkdir -p checkpoints
+msb snapshot save worker:cp01 checkpoints/cp01.msb
+msb snapshot save worker:cp02 checkpoints/cp02.msb --since worker:cp01
 
 # On the destination machine:
-msb snapshot load cp01.msnap --group received
-msb snapshot load cp02.msnap --group received --base received:cp01
+msb snapshot load checkpoints/*.msb --group received
 msb create --name restored --from-snapshot received --forked
 ```
 
-`--since` omits disk layers and reusable RAM objects supplied by the explicit base. Loading reconstructs a complete owned snapshot; the target does not depend on replaying earlier VMs. Each archive still includes the target's complete memory map and CPU/device state. The `.msnap` archive does not contain a local group's mutable head file: its declared archive head is the import candidate, and the receiving group applies the rules above.
+The shell expands `*.msb` into archive paths. Their order and filenames do not determine ancestry or load order. You can also list them explicitly, in any order:
 
-Loading without `--group` creates a fresh generated group. The final stdout line is the installed artifact **path**, not its ID; scripts can pass it as the next `--base`.
+```bash
+msb snapshot load checkpoints/cp02.msb checkpoints/cp01.msb --group received
+```
+
+Loading unpacks each supplied archive once, matches omitted disk layers and RAM objects to the available payloads, and validates the reconstructed snapshots before publishing members. It looks in the supplied batch first, then the explicitly selected destination group. This works for disk-only and full incremental archives. No intermediate VM runs.
+
+The same automatic lookup works when archives arrive separately:
+
+```bash
+msb snapshot load checkpoints/cp01.msb --group received
+msb snapshot load checkpoints/cp02.msb --group received
+```
+
+`--base` is only needed when the missing data is elsewhere, such as `--base another-group:cp01` or `--base /path/to/baseline.msb`. It supplies data; it does not define ancestry or select the group head. An external archive supplied as `--base` must be standalone; include dependent archives in the batch instead. Missing dependencies and conflicting IDs, names, or duplicate labels fail before publishing any incoming members.
+
+Current development limitation: disk-only captures reassign layer IDs, so `--since` between successive disk-only captures can reject the base. Use standalone disk-only exports for that workflow until capture identity preservation is fixed. Full-checkpoint incremental imports were live-tested successfully; the batch loader also handles dependency-correct disk-only archives.
+
+`--since` omits disk layers and reusable RAM objects supplied by the explicit base. Loading reconstructs a complete owned snapshot; the target does not depend on replaying earlier VMs. Each archive still includes the target's complete memory map and CPU/device state. The `.msb` archive does not contain a local group's mutable head file: its declared archive head is the import candidate, and the receiving group applies the rules above.
+
+Loading without `--group` creates one fresh generated group for the whole batch. The CLI prints a digest and installed artifact **path** for each input archive head, in input order. With one archive, the final line remains its installed path. With several archives, the final path is not necessarily the selected group head; use the group selector or `msb snapshot head received` instead. Repeating the same snapshot installs it only once.
+
+The destination directory is now an explicit `--dest DIR` option, leaving positional arguments for archive paths. Existing snapshot/archive formats are unchanged, including legacy readers.
 
 Importing an old checkpoint does not rewind an existing group. To deliberately select the imported archive's head:
 
 ```bash
-msb snapshot load cp01.msnap --group received --set-head
+msb snapshot load checkpoints/cp01.msb --group received --set-head
 ```
+
+For a batch, `--set-head` requires one unambiguous tip; it refuses competing tips rather than picking the last argument. Load those members without `--set-head`, then select the one you want.
 
 Missing historical checkpoints are okay when payload dependencies are complete. But a missing parent may prevent proving a fast-forward. Filling a history hole does not retrospectively select some other retained tip; select that tip explicitly or import it again once its ancestry is known.
 

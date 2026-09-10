@@ -825,6 +825,15 @@ char *msb_snapshot_import_with_options(uint64_t cancel_id,
                                        uintptr_t buf_len);
 
 /**
+ * Import archives together with dependencies resolved within the batch and destination group.
+ */
+char *msb_snapshot_import_many(uint64_t cancel_id,
+                               const char *archives_json,
+                               const char *opts_json,
+                               unsigned char *buf,
+                               uintptr_t buf_len);
+
+/**
  * Read a group head, or select a `group:member` as its head.
  */
 char *msb_snapshot_group_head(uint64_t cancel_id,

@@ -1,4 +1,4 @@
-//! Snapshot save / load via `.msnap` bundles (tar + zstd, or explicit plain tar).
+//! Snapshot save / load via `.msb` bundles (tar + zstd, or explicit plain tar).
 //! Encoding is detected from contents; legacy suffixes and extensionless inputs remain valid.
 //!
 //! Default archive format is zstd-compressed tar. Regular files with holes, notably the sparse `upper.ext4` whose logical size is the configured upper cap rather than the data
@@ -9,6 +9,7 @@
 //! depths, produced by our own save path), and owning the walk lets sparse entries be restored map-driven: data runs copied straight off the wire, holes never written and kept
 //! unallocated per platform ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`] on APFS). `tokio_tar` remains the header codec and the dense-entry writer.
 
+mod batch;
 mod delta;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -964,187 +965,17 @@ pub(super) async fn load_snapshot_with_options(
     archive: &Path,
     opts: LoadOpts,
 ) -> MicrosandboxResult<SnapshotHandle> {
-    let total_started = Instant::now();
-    let snapshots_dir = opts.dest.clone().unwrap_or_else(|| local.snapshots_dir());
-    tokio::fs::create_dir_all(&snapshots_dir).await?;
-    let cache_dir = local.cache_dir();
-    tokio::fs::create_dir_all(&cache_dir).await?;
+    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts).await?;
+    Ok(loaded.remove(0))
+}
 
-    let snapshot_stage = tempfile::Builder::new()
-        .prefix(".msb-snapshot-import-")
-        .tempdir_in(&snapshots_dir)?;
-    let cache_tmp_dir = cache_dir.join("tmp");
-    tokio::fs::create_dir_all(&cache_tmp_dir).await?;
-    let cache_stage = tempfile::Builder::new()
-        .prefix("snapshot-import-")
-        .tempdir_in(&cache_tmp_dir)?;
-
-    // Stream rather than slurp — archives carry the full upper layer and are
-    // routinely multi-GB.
-    let file = tokio::fs::File::open(archive).await?;
-    let mut buf = BufReader::with_capacity(1024 * 1024, file);
-    let is_zstd = {
-        let bytes = buf.fill_buf().await?;
-        bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
-    };
-
-    let unpack_started = Instant::now();
-    let unpacked = if is_zstd {
-        let decoder = ZstdDecoder::new(buf);
-        // The decoder and archive walker both carry sizeable buffers across
-        // await points. Keep their combined future off Tokio's worker stack.
-        Box::pin(unpack_archive(
-            decoder,
-            snapshot_stage.path(),
-            cache_stage.path(),
-        ))
-        .await?
-    } else {
-        Box::pin(unpack_archive(
-            buf,
-            snapshot_stage.path(),
-            cache_stage.path(),
-        ))
-        .await?
-    };
-    let unpack_us = unpack_started.elapsed().as_micros();
-
-    let validate_started = Instant::now();
-    if unpacked.inventory.is_none() {
-        super::migration::normalize_staged(local.db().await?, &unpacked.manifest_dirs).await?;
-    } else if let Some(inventory) = unpacked.inventory.as_ref() {
-        delta::resolve(
-            local,
-            inventory,
-            snapshot_stage.path(),
-            cache_stage.path(),
-            opts.base.as_deref(),
-        )
-        .await?;
-        materialize_inventory_layers(inventory, snapshot_stage.path()).await?;
-    }
-    let imported = verify_imported_snapshots(local, &unpacked.manifest_dirs).await?;
-    for snapshot in &imported {
-        super::metadata::write(snapshot.path(), snapshot.labels()).await?;
-    }
-    if let Some(inventory) = unpacked.inventory.as_ref() {
-        validate_inventory_snapshot_bindings(inventory, &imported)?;
-    }
-    // Released flat descriptors are translated by open_snapshot in memory. Install that
-    // admitted representation only in our owned staging, after checking the original archive
-    // bindings; group metadata must never point at a descriptor its reader cannot reopen.
-    for snapshot in &imported {
-        normalize_imported_descriptor(snapshot).await?;
-    }
-    let head_index = match unpacked.head.as_deref() {
-        Some(head) => imported
-            .iter()
-            .position(|snapshot| snapshot.id().as_str() == head)
-            .ok_or_else(|| {
-                MicrosandboxError::Custom(format!("archive inventory head {head} was not imported"))
-            })?,
-        None => select_head_snapshot(&imported)?,
-    };
-    let head_manifest = imported[head_index].manifest().clone();
-    let validate_us = validate_started.elapsed().as_micros();
-
-    let promote_started = Instant::now();
-    // Cache installation carries hashing buffers across await points. Keep
-    // that future on the heap so the archive loader remains within Windows'
-    // smaller default worker-thread stack.
-    Box::pin(install_staged_cache(
-        cache_stage.path(),
-        &cache_dir,
-        &head_manifest,
-    ))
-    .await?;
-    let group_dir = super::group::ensure(&snapshots_dir, opts.group.as_deref()).await?;
-    let mut aliases = BTreeMap::new();
-    if let Some(inventory) = unpacked.inventory.as_ref() {
-        if let Some(names) = inventory.extensions.get("msb-snapshot-member-names") {
-            aliases = serde_json::from_value(names.clone())?;
-        }
-        // This older field is only a suggestion. Released archives can carry names that
-        // predate group alias restrictions; ignore those while keeping explicit aliases strict.
-        if let Some(name) = inventory
-            .suggested_name
-            .as_ref()
-            .filter(|name| super::group::validate_alias(name).is_ok())
-        {
-            aliases
-                .entry(head_manifest.snapshot_id.to_string())
-                .or_insert_with(|| name.clone());
-        }
-    }
-    let update = super::group::publish(
-        &group_dir,
-        snapshot_stage.path(),
-        &aliases,
-        &head_manifest.snapshot_id,
-        opts.set_head,
-    )
-    .await?;
-    let head_path = group_dir.join(head_manifest.snapshot_id.as_str());
-
-    let snap = store::open_snapshot(local, head_path.to_string_lossy().as_ref()).await?;
-
-    // Index this and any sibling artifacts that landed in the dest dir.
-    let _ = store::reindex_dir(local, &group_dir).await;
-    let promote_index_us = promote_started.elapsed().as_micros();
-
-    let (state_kind, format, fstype, checkpoint_manifest_digest, size_bytes) =
-        match &snap.manifest().state {
-            SnapshotState::File(state) => (
-                "file".to_string(),
-                Some(state.disk_format),
-                Some(state.filesystem.clone()),
-                None,
-                Some(state.virtual_size),
-            ),
-            SnapshotState::Checkpoint(state) => (
-                "checkpoint".to_string(),
-                None,
-                None,
-                Some(state.checkpoint_root.clone()),
-                None,
-            ),
-        };
-    let handle = SnapshotHandle {
-        group: Some(update.group.clone()),
-        head_update: Some(update),
-        snapshot_id: snap.id().to_string(),
-        digest: snap.digest().to_string(),
-        name: super::group::member_name(snap.path())?,
-        parent_digest: snap.manifest().parent.as_ref().map(ToString::to_string),
-        scope: snap.manifest().scope,
-        image_ref: snap.manifest().image.reference.clone(),
-        state_kind,
-        format,
-        fstype,
-        checkpoint_manifest_digest,
-        size_bytes,
-        locality: "embedded".into(),
-        availability: "ready".into(),
-        migration_state: "canonical".into(),
-        migration_error_code: None,
-        created_at: chrono::DateTime::parse_from_rfc3339(&snap.manifest().capture.created_at)
-            .map(|d| d.naive_utc())
-            .unwrap_or_else(|_| chrono::Utc::now().naive_utc()),
-        artifact_path: snap.path().to_path_buf(),
-    };
-    let archive_bytes = tokio::fs::metadata(archive).await?.len();
-    tracing::info!(
-        target: "microsandbox_checkpoint_timing",
-        operation = "snapshot_load_archive",
-        zstd = is_zstd,
-        archive_bytes,
-        total_us = total_started.elapsed().as_micros(),
-        unpack_us,
-        validate_us,
-        promote_index_us,
-        "snapshot archive load timing"
-    );
-    Ok(handle)
+/// Resolve all supplied archives together, publishing their members into one group.
+pub(super) async fn load_snapshots(
+    local: &LocalBackend,
+    archives: &[PathBuf],
+    opts: LoadOpts,
+) -> MicrosandboxResult<Vec<SnapshotHandle>> {
+    batch::load(local, archives, opts).await
 }
 
 /// Consume a current archive directly into a child sandbox's staging directory.
@@ -4235,7 +4066,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let archive = home.path().join("group.msnap");
+        let archive = home.path().join("group.msb");
         save_snapshot(
             &local,
             "first:child",
@@ -4277,7 +4108,7 @@ mod tests {
         let manifest = grouped_archive_manifest(1, None);
         let artifact = home.path().join("legacy name with spaces");
         write_grouped_archive_fixture(&artifact, &manifest);
-        let archive = home.path().join("legacy.msnap");
+        let archive = home.path().join("legacy.msb");
         save_snapshot(
             &local,
             artifact.to_str().unwrap(),
@@ -4432,7 +4263,7 @@ mod tests {
             let archive_dir = directory.path().join(plain_tar.to_string());
             std::fs::create_dir(&archive_dir).unwrap();
             for name in [
-                "snapshot.msnap",
+                "snapshot.msb",
                 "snapshot.tar.zst",
                 "snapshot.tar",
                 "snapshot",

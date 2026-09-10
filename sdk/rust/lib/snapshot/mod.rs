@@ -250,7 +250,7 @@ impl Snapshot {
         store::reindex_dir(local, dir.as_ref()).await
     }
 
-    /// Bundle a snapshot into a `.msnap` archive (tar + zstd by default).
+    /// Bundle a snapshot into a `.msb` archive (tar + zstd by default).
     /// The explicit output path is preserved; legacy suffixes remain supported.
     pub async fn save(
         name_or_path: &str,
@@ -262,7 +262,7 @@ impl Snapshot {
         archive::save_snapshot(local, name_or_path, out, opts).await
     }
 
-    /// Unpack a snapshot archive (`.msnap`, `.tar.zst`, or `.tar`) into the
+    /// Unpack a snapshot archive (`.msb`, `.tar.zst`, or `.tar`) into the
     /// snapshots dir, registering anything found in the index.
     pub async fn load(
         archive_path: &Path,
@@ -293,6 +293,20 @@ impl Snapshot {
         let backend = crate::backend::default_backend();
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
         archive::load_snapshot_with_options(local, archive_path, opts).await
+    }
+
+    /// Load archives together, resolving omitted payloads from the batch, destination group,
+    /// and optional external base. Input order never chooses the group's head.
+    ///
+    /// Returns one handle per input archive head, in input order. Repeated snapshots are
+    /// installed once; all inputs are validated before publishing any snapshot members.
+    pub async fn load_many(
+        archive_paths: &[std::path::PathBuf],
+        opts: LoadOpts,
+    ) -> MicrosandboxResult<Vec<SnapshotHandle>> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        archive::load_snapshots(local, archive_paths, opts).await
     }
 
     /// Read a group's head, or explicitly select a qualified `group:member`.

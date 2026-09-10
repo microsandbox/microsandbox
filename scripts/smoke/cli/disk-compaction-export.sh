@@ -46,10 +46,10 @@ for layout in managed flat; do
     measure "$layout-save-last" msb snapshot save "$name-4" "$QUAL_ROOT/$layout-last.tar" --last-layers 2 --plain-tar
     measure "$layout-save-base" msb snapshot save "$name-2" "$QUAL_ROOT/$layout-base.tar.zst"
     measure "$layout-invalid-last-zero" refuse msb snapshot save "$name-4" "$QUAL_ROOT/invalid.tar" --last-layers 0
-    measure "$layout-missing-base" refuse msb snapshot load "$QUAL_ROOT/$layout-delta.tar.zst" "$QUAL_ROOT/$layout-missing"
-    measure "$layout-wrong-base" refuse msb snapshot load "$QUAL_ROOT/$layout-delta.tar.zst" "$QUAL_ROOT/$layout-wrong" --base "$name-1"
-    measure "$layout-load-delta" msb snapshot load "$QUAL_ROOT/$layout-delta.tar.zst" "$QUAL_ROOT/$layout-import" --base "$name-2"
-    measure "$layout-load-base-archive" msb snapshot load "$QUAL_ROOT/$layout-last.tar" "$QUAL_ROOT/$layout-base-import" --base "$QUAL_ROOT/$layout-base.tar.zst"
+    measure "$layout-missing-base" refuse msb snapshot load "$QUAL_ROOT/$layout-delta.tar.zst" --dest "$QUAL_ROOT/$layout-missing"
+    measure "$layout-wrong-base" refuse msb snapshot load "$QUAL_ROOT/$layout-delta.tar.zst" --dest "$QUAL_ROOT/$layout-wrong" --base "$name-1"
+    measure "$layout-load-delta" msb snapshot load "$QUAL_ROOT/$layout-delta.tar.zst" --dest "$QUAL_ROOT/$layout-import" --base "$name-2"
+    measure "$layout-load-base-archive" msb snapshot load "$QUAL_ROOT/$layout-last.tar" --dest "$QUAL_ROOT/$layout-base-import" --base "$QUAL_ROOT/$layout-base.tar.zst"
 
     # A long-running agentd-managed writer remains active across preparation and the switch.
     msb exec "$name" -- sh -c 'i=0; while [ ! -e /writer-stop ]; do i=$((i+1)); echo "$i" >>/writes; sync; done' >"$QUAL_ROOT/logs/$layout-writer.out" 2>"$QUAL_ROOT/logs/$layout-writer.err" &

@@ -91,7 +91,7 @@ try:
         if n == 6:
             run("resume-source", source_home, "resume", source)
         artifact = source_home / "snapshots" / name
-        archive = root / f"cp{n:02}.msnap"
+        archive = root / f"cp{n:02}.msb"
         args = ["snapshot", "save", artifact, archive]
         if previous_source:
             args += ["--since", previous_source]
@@ -134,7 +134,7 @@ try:
     for mode in ("eager", "forked"):
         child = restore("installed-" + mode, final_loaded, 12, forked=mode == "forked")
         run("stop-installed-" + mode, dest_home, "stop", child)
-    complete = root / "standalone.msnap"
+    complete = root / "standalone.msb"
     run("export-standalone", source_home, "snapshot", "save", final_artifact, complete)
     assert all(e["included"] for e in inventory(complete)["entries"])
     archive_rows[-1]["standalone_bytes"] = complete.stat().st_size

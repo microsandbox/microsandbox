@@ -164,12 +164,19 @@ async fn verify_file_layer(
     snap: &Snapshot,
     layer: &microsandbox_image::snapshot::DiskLayer,
 ) -> MicrosandboxResult<UpperVerifyStatus> {
-    let Some(expected) = layer.payload.integrity.as_ref() else {
+    verify_file_payload(&snap.layer_path(layer), layer.payload.integrity.as_ref()).await
+}
+
+/// Verify an owned imported layer with the same codecs used by explicit snapshot verification.
+pub(super) async fn verify_file_payload(
+    upper_path: &Path,
+    expected: Option<&UpperIntegrity>,
+) -> MicrosandboxResult<UpperVerifyStatus> {
+    let Some(expected) = expected else {
         return Ok(UpperVerifyStatus::NotRecorded);
     };
 
-    let upper_path = snap.layer_path(layer);
-    let payload = open_verification_source(&upper_path)?;
+    let payload = open_verification_source(upper_path)?;
     let before = verification_source_identity(&payload.metadata()?);
     let actual = match expected {
         UpperIntegrity::Sha256 { .. } => {
@@ -182,7 +189,7 @@ async fn verify_file_layer(
             compute_merkle_integrity_from_file(payload.try_clone()?).await?
         }
     };
-    ensure_verification_source_unchanged(&payload, &upper_path, &before)?;
+    ensure_verification_source_unchanged(&payload, upper_path, &before)?;
 
     if actual != *expected {
         return Err(MicrosandboxError::SnapshotIntegrity(format!(

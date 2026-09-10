@@ -95,29 +95,42 @@ Installed snapshots belong to a group. A bare group selects its head; `group:mem
 
 ```typescript
 const snap = await Snapshot.builder("baseline").fromSandbox("box").group("work").create();
-const loaded = await Snapshot.loadWithOptions("changes.msnap", {
+const loaded = await Snapshot.loadWithOptions("changes.msb", {
   base: "work:baseline",
   group: "work",
 });
 const head = await Snapshot.groupHead("work");
 const selected = await Snapshot.groupHead("work:baseline");
-await Snapshot.loadWithOptions("other.msnap", { group: "work", setHead: true });
+await Snapshot.loadWithOptions("other.msb", { group: "work", setHead: true });
 ```
 
-`LoadOpts` contains optional `dest`, `base`, `group`, and `setHead` fields. `Snapshot.load(archive, dest?, base?)` uses a generated group. `Snapshot.groupHead(selector)` returns `HeadUpdate` with `group`, `previous`, `head`, `reason`, and `changed`; `previous` and `head` are stable snapshot IDs. Automatic head updates initialize an empty group or advance to a proven descendant; divergent imports and imports with unknown ancestry retain the current head. Reasons are `initialized`, `fast_forwarded`, `selected`, `unchanged`, `diverged`, and `unknown_ancestry`. Direct archive capture creates no group and rejects `.group(...)`.
+`LoadOpts` contains optional `dest`, `base`, `group`, and `setHead` fields. `Snapshot.load(archive, dest?, base?)` uses a generated group. `Snapshot.groupHead(selector)` returns `HeadUpdate` with `group`, `previous`, `head`, `reason`, and `changed`; `previous` and `head` are stable snapshot IDs. Automatic head updates initialize an empty group or advance to a proven descendant; divergent imports and imports with unknown ancestry retain the current head. Reasons are `initialized`, `fast_forwarded`, `selected`, `unchanged`, `diverged`, `unknown_ancestry`, and `ambiguous_candidates`. Direct archive capture creates no group and rejects `.group(...)`.
+
+## Load multiple archives
+
+```typescript
+const handles = await Snapshot.loadMany(
+  ["changes.msb", "base.msb"],
+  { group: "received" },
+);
+```
+
+`Snapshot.loadMany(archives: string[], opts?: LoadOpts)` returns `Promise<SnapshotHandle[]>`, with one handle per supplied archive in input order. Dependencies are resolved regardless of argument order from the batch and exact matching snapshots in an explicitly named destination group. `opts.base` supplies an external snapshot or standalone archive when needed. Single-file `loadWithOptions` also reuses dependencies from its named destination group. Omitting `group` creates one generated group for the batch.
+
+All batch members are validated before publication. `setHead: true` requires a unique tip. With divergent tips and the default `false`, an existing head is retained (`ambiguous_candidates`); a new group has no head and imported handles report `headUpdate: null`. Select a member explicitly to give that group a head. The archive format is unchanged. The CLI equivalent is `msb snapshot load checkpoints/*.msb --group received`, with `--dest DIR` for another group-store root.
 
 ## Disk maintenance and incremental export
 
-Exporting since a base omits its reusable disk layers and RAM objects. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option only selects disk layers and leaves RAM payloads complete. Supply the base when loading or restoring a dependent archive; a dependent base archive must be loaded first.
+Exporting since a base omits its reusable disk layers and RAM objects. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option only selects disk layers and leaves RAM payloads complete. Imports resolve dependencies from the batch or an explicitly named destination group. Use an external base for missing dependencies; direct restore still accepts an explicit base.
 
 ```typescript
 const worker = await Sandbox.get("worker");
 const plan = await worker.compact({ layers: 3, dryRun: true });
 const result = await worker.compact({ layers: 3 });
-await Snapshot.save("worker:checkpoint-b", "changes.msnap", { since: "worker:checkpoint-a" });
-await Snapshot.load("changes.msnap", undefined, "worker:checkpoint-a");
+await Snapshot.save("worker:checkpoint-b", "changes.msb", { since: "worker:checkpoint-a" });
+await Snapshot.load("changes.msb", undefined, "worker:checkpoint-a");
 const child = await Sandbox.builder("child")
-  .fromSnapshot("changes.msnap").snapshotBase("worker:checkpoint-a").create();
+  .fromSnapshot("changes.msb").snapshotBase("worker:checkpoint-a").create();
 ```
 
 The count includes the oldest base but excludes the writable head. Omit `layers` to compact all sealed layers. `lastLayers` selects the newest N sealed export layers instead of `since`. Results expose physical counts, `materializedBytes`, `totalUs`, and `pauseUs`; materialized bytes are not reclaimed space. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
@@ -286,7 +299,7 @@ Capture directly into an archive without installing a snapshot directory or inde
 ```typescript
 const archive = await Snapshot.builder("after-pip-install")
   .fromSandbox("baseline")
-  .createArchive("/tmp/after-pip-install.msnap");
+  .createArchive("/tmp/after-pip-install.msb");
 ```
 
 ---
@@ -487,7 +500,7 @@ Walk the snapshots directory (default: the configured snapshots dir) and rebuild
 static save(nameOrPath: string, out: string, opts?: SaveOpts): Promise<void>
 ```
 
-Bundle a snapshot into a `.msnap` archive. The recorded manifest is archived as-is, so create the snapshot with [`recordIntegrity()`](#recordintegrity) if receivers must verify content. See [`SaveOpts`](#saveopts-interface) for bundling options.
+Bundle a snapshot into a `.msb` archive. The recorded manifest is archived as-is, so create the snapshot with [`recordIntegrity()`](#recordintegrity) if receivers must verify content. See [`SaveOpts`](#saveopts-interface) for bundling options.
 
 <p className="msb-label">Parameters</p>
 
@@ -509,7 +522,7 @@ Bundle a snapshot into a `.msnap` archive. The recorded manifest is archived as-
 <Accordion title="Example">
 
 ```typescript
-await Snapshot.save("baseline:after-pip-install", "./baseline.msnap", {
+await Snapshot.save("baseline:after-pip-install", "./baseline.msb", {
   withImage: true,
 });
 ```
@@ -525,7 +538,7 @@ await Snapshot.save("baseline:after-pip-install", "./baseline.msnap", {
 static load(archive: string, dest?: string, base?: string): Promise<SnapshotHandle>
 ```
 
-Unpack a snapshot archive (`.msnap` or `.tar`) into the snapshots directory. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
+Unpack a snapshot archive (`.msb` or `.tar`) into the snapshots directory. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
 
 <p className="msb-label">Parameters</p>
 
@@ -552,7 +565,7 @@ Unpack a snapshot archive (`.msnap` or `.tar`) into the snapshots directory. Str
 <Accordion title="Example">
 
 ```typescript
-const h = await Snapshot.load("./baseline.msnap");
+const h = await Snapshot.load("./baseline.msb");
 console.log("loaded", h.digest);
 ```
 

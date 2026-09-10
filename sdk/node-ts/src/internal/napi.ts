@@ -560,6 +560,7 @@ export interface NapiSnapshotStatic {
   save(name: string, out: string, opts?: NapiSaveOpts): Promise<void>;
   load(archive: string, dest?: string, base?: string): Promise<NapiSnapshotHandle>;
   loadWithOptions(archive: string, opts?: NapiLoadOpts): Promise<NapiSnapshotHandle>;
+  loadMany(archives: string[], opts?: NapiLoadOpts): Promise<NapiSnapshotHandle[]>;
   groupHead(selector: string): Promise<NapiHeadUpdate>;
 }
 

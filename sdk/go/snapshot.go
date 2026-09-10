@@ -40,15 +40,15 @@ type SnapshotSaveOptions struct {
 	PlainTar    bool
 }
 
-// SnapshotLoadOptions configures importing an archive into a snapshot group.
+// SnapshotLoadOptions configures importing one or more archives into a snapshot group.
 type SnapshotLoadOptions struct {
 	// Parent directory containing snapshot groups; empty selects the default.
 	Dest string
-	// Exact base snapshot or standalone archive for a dependent archive.
+	// External snapshot or standalone archive for dependencies absent from the batch/group.
 	Base string
 	// Destination group; generated when empty.
 	Group string
-	// Select the imported member even when it is not a fast-forward.
+	// Select the unique imported tip even when it is not a fast-forward.
 	SetHead bool
 }
 
@@ -431,6 +431,24 @@ func (snapshotFactory) LoadWithOptions(ctx context.Context, archive string, opts
 		return nil, wrapFFI(err)
 	}
 	return snapshotHandleFromInfo(info), nil
+}
+
+// LoadMany imports archives together into one group, resolving dependencies regardless of input order.
+func (snapshotFactory) LoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*SnapshotHandle, error) {
+	infos, err := ffi.SnapshotLoadMany(ctx, archives, ffi.SnapshotLoadOptions{
+		Dest:    opts.Dest,
+		Base:    opts.Base,
+		Group:   opts.Group,
+		SetHead: opts.SetHead,
+	})
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	handles := make([]*SnapshotHandle, len(infos))
+	for index, info := range infos {
+		handles[index] = snapshotHandleFromInfo(info)
+	}
+	return handles, nil
 }
 
 // GroupHead reads a group head, or selects a group:member as its head.

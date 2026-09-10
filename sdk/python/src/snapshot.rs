@@ -309,6 +309,36 @@ impl PySnapshot {
         })
     }
 
+    /// Import archives together, resolving dependencies within the batch and destination group.
+    #[staticmethod]
+    #[pyo3(signature = (archives, *, dest = None, base = None, group = None, set_head = false))]
+    fn load_many<'py>(
+        py: Python<'py>,
+        archives: Vec<PathBuf>,
+        dest: Option<PathBuf>,
+        base: Option<String>,
+        group: Option<String>,
+        set_head: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let handles = RustSnapshot::load_many(
+                &archives,
+                RustLoadOpts {
+                    dest,
+                    base,
+                    group,
+                    set_head,
+                },
+            )
+            .await
+            .map_err(to_py_err)?;
+            Ok(handles
+                .into_iter()
+                .map(PySnapshotHandle::from_rust)
+                .collect::<Vec<_>>())
+        })
+    }
+
     /// Read a group's head, or select `group:member` as its head.
     #[staticmethod]
     fn group_head<'py>(py: Python<'py>, selector: String) -> PyResult<Bound<'py, PyAny>> {

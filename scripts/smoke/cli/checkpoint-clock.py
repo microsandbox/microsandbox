@@ -50,7 +50,7 @@ try:
         snapshot = prefix + "-next"
         run("capture-next", "snapshot", "create", snapshot, "--from", source, "--full", "--info")
     if os.environ.get("CLOCK_ARCHIVE") == "1":
-        archive = str(out / "clock.msnap")
+        archive = str(out / "clock.msb")
         run("archive", "snapshot", "save", snapshot, archive)
         snapshot = archive
     run("stop-source", "stop", source)

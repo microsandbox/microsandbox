@@ -233,6 +233,7 @@ typedef char *(*msb_snapshot_export_fn)(uint64_t cancel_id, const char *name_or_
 typedef char *(*msb_snapshot_import_fn)(uint64_t cancel_id, const char *archive, const char *dest, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_import_with_base_fn)(uint64_t cancel_id, const char *archive, const char *dest, const char *base, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_import_with_options_fn)(uint64_t cancel_id, const char *archive, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_import_many_fn)(uint64_t cancel_id, const char *archives_json, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_group_head_fn)(uint64_t cancel_id, const char *selector, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_compact_fn)(uint64_t cancel_id, uint64_t handle, const char *name, const char *opts, uint8_t *buf, size_t buf_len);
 
@@ -399,6 +400,7 @@ static msb_snapshot_export_fn      ptr_msb_snapshot_export      = NULL;
 static msb_snapshot_import_fn      ptr_msb_snapshot_import      = NULL;
 static msb_snapshot_import_with_base_fn ptr_msb_snapshot_import_with_base = NULL;
 static msb_snapshot_import_with_options_fn ptr_msb_snapshot_import_with_options = NULL;
+static msb_snapshot_import_many_fn ptr_msb_snapshot_import_many = NULL;
 static msb_snapshot_group_head_fn ptr_msb_snapshot_group_head = NULL;
 static msb_sandbox_compact_fn ptr_msb_sandbox_compact = NULL;
 
@@ -584,6 +586,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_snapshot_import);
 	RESOLVE(msb_snapshot_import_with_base);
 	RESOLVE(msb_snapshot_import_with_options);
+	RESOLVE(msb_snapshot_import_many);
 	RESOLVE(msb_snapshot_group_head);
 	RESOLVE(msb_sandbox_compact);
 	return NULL;
@@ -1026,6 +1029,9 @@ char *call_msb_snapshot_import_with_base(uint64_t cancel_id, const char *archive
 }
 char *call_msb_snapshot_import_with_options(uint64_t cancel_id, const char *archive, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_snapshot_import_with_options ? ptr_msb_snapshot_import_with_options(cancel_id, archive, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_import_many(uint64_t cancel_id, const char *archives_json, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_import_many ? ptr_msb_snapshot_import_many(cancel_id, archives_json, opts_json, buf, buf_len) : NULL;
 }
 char *call_msb_snapshot_group_head(uint64_t cancel_id, const char *selector, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_snapshot_group_head ? ptr_msb_snapshot_group_head(cancel_id, selector, buf, buf_len) : NULL;
@@ -5121,6 +5127,38 @@ func SnapshotLoadWithOptions(ctx context.Context, archive string, opts SnapshotL
 		return nil, fmt.Errorf("parse snapshot load: %w", err)
 	}
 	return &info, nil
+}
+
+func SnapshotLoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*SnapshotHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	// A nil slice is an empty batch, not JSON null; the core validates empty batches.
+	if archives == nil {
+		archives = []string{}
+	}
+	archivePayload, err := json.Marshal(archives)
+	if err != nil {
+		return nil, err
+	}
+	optsPayload, err := json.Marshal(opts)
+	if err != nil {
+		return nil, err
+	}
+	cArchives, cOpts := C.CString(string(archivePayload)), C.CString(string(optsPayload))
+	defer C.free(unsafe.Pointer(cArchives))
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_import_many(cancelID, cArchives, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var infos []*SnapshotHandleInfo
+	if err := json.Unmarshal([]byte(out), &infos); err != nil {
+		return nil, fmt.Errorf("parse snapshot batch load: %w", err)
+	}
+	return infos, nil
 }
 
 func SnapshotGroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {

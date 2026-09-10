@@ -174,7 +174,7 @@ async fn fixture(
             reference: "docker.io/library/alpine:3.20".into(),
             manifest_digest: format!("sha256:{}", "0".repeat(64)),
         },
-        parent: None,
+        parent: previous.map(|snapshot| snapshot.id().clone()),
         extensions: BTreeMap::new(),
         requires: Vec::new(),
     };
@@ -243,7 +243,7 @@ async fn chain(disk: bool) {
             disk,
         )
         .await;
-        let archive = temp.path().join(format!("cp{generation:02}.msnap"));
+        let archive = temp.path().join(format!("cp{generation:02}.msb"));
         save_snapshot(
             &local,
             source.path().to_str().unwrap(),
@@ -320,7 +320,7 @@ async fn chain(disk: bool) {
         previous = Some(source);
     }
     let final_snapshot = loaded.unwrap();
-    let standalone = temp.path().join("standalone.msnap");
+    let standalone = temp.path().join("standalone.msb");
     save_snapshot(
         &local,
         final_snapshot.path().to_str().unwrap(),
@@ -338,6 +338,209 @@ async fn chain(disk: bool) {
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unordered_batch_resolves_disk_and_ram_from_all_supplied_archives() {
+    for disk in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let mut previous = None;
+        let mut archives = Vec::new();
+        for generation in 1..=6 {
+            let source = fixture(
+                &local,
+                &temp.path().join(format!("source-{generation}")),
+                generation,
+                previous.as_ref(),
+                disk,
+            )
+            .await;
+            let archive = temp.path().join(format!("cp{generation}.msb"));
+            save_snapshot(
+                &local,
+                source.path().to_str().unwrap(),
+                &archive,
+                SaveOpts {
+                    since: previous
+                        .as_ref()
+                        .map(|snapshot: &Snapshot| snapshot.path().to_string_lossy().into_owned()),
+                    plain_tar: generation % 2 == 0,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            archives.push(archive);
+            previous = Some(source);
+        }
+        archives.reverse();
+        let loaded = load_snapshots(
+            &local,
+            &archives,
+            LoadOpts {
+                group: Some("received".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for (offset, snapshot) in loaded.iter().enumerate() {
+            assert_ram(snapshot.path(), 6 - offset as u64);
+        }
+        assert_eq!(loaded[0].head_update().unwrap().head, loaded[0].snapshot_id);
+        // Neither source files, archive bytes, nor other installed generations are needed by
+        // the final snapshot after the batch has reconstructed destination-owned closures.
+        for generation in 1..=6 {
+            std::fs::remove_dir_all(temp.path().join(format!("source-{generation}"))).unwrap();
+        }
+        for archive in &archives {
+            std::fs::remove_file(archive).unwrap();
+        }
+        for snapshot in &loaded[1..] {
+            std::fs::remove_dir_all(snapshot.path()).unwrap();
+        }
+        assert_ram(loaded[0].path(), 6);
+    }
+}
+
+#[tokio::test]
+async fn automatic_group_sources_fill_ram_and_disks_without_base_flag() {
+    for disk in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let base = fixture(&local, &temp.path().join("base"), 1, None, disk).await;
+        let target = fixture(&local, &temp.path().join("target"), 3, Some(&base), disk).await;
+        let baseline = temp.path().join("base.msb");
+        let delta = temp.path().join("delta.msb");
+        save_snapshot(
+            &local,
+            base.path().to_str().unwrap(),
+            &baseline,
+            SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+        save_snapshot(
+            &local,
+            target.path().to_str().unwrap(),
+            &delta,
+            SaveOpts {
+                since: Some(base.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let opts = LoadOpts {
+            group: Some("received".into()),
+            ..Default::default()
+        };
+        let installed_base = load_snapshot_with_options(&local, &baseline, opts.clone())
+            .await
+            .unwrap();
+        // The same dependent archive cannot search a different, unnamed group implicitly.
+        let error = load_snapshot_with_options(&local, &delta, LoadOpts::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("missing dependencies"),
+            "{error}"
+        );
+        assert!(!local.snapshots_dir().join("elsewhere").exists());
+        let imported = load_snapshot_with_options(&local, &delta, opts)
+            .await
+            .unwrap();
+        assert_ram(imported.path(), 3);
+        std::fs::remove_dir_all(installed_base.path()).unwrap();
+        assert_ram(imported.path(), 3);
+    }
+}
+
+#[tokio::test]
+async fn missing_or_corrupt_borrowed_ram_never_publishes_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let local = LocalBackend::builder()
+        .home(temp.path().join("home"))
+        .build()
+        .await
+        .unwrap();
+    let base = fixture(&local, &temp.path().join("base"), 1, None, false).await;
+    let target = fixture(&local, &temp.path().join("target"), 3, Some(&base), false).await;
+    let baseline = temp.path().join("base.msb");
+    let delta = temp.path().join("delta.msb");
+    save_snapshot(
+        &local,
+        base.path().to_str().unwrap(),
+        &baseline,
+        SaveOpts::default(),
+    )
+    .await
+    .unwrap();
+    save_snapshot(
+        &local,
+        target.path().to_str().unwrap(),
+        &delta,
+        SaveOpts {
+            since: Some(base.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let opts = LoadOpts {
+        group: Some("received".into()),
+        ..Default::default()
+    };
+    let installed = load_snapshot_with_options(&local, &baseline, opts.clone())
+        .await
+        .unwrap();
+    let id = memory_objects(&base)
+        .unwrap()
+        .intersection(&memory_objects(&target).unwrap())
+        .next()
+        .unwrap()
+        .clone();
+    let path = checkpoint_object_path(&installed.path().join(CHECKPOINT_DIRECTORY), &id);
+    let original = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let missing = load_snapshot_with_options(&local, &delta, opts.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        missing.to_string().contains("missing dependencies"),
+        "{missing}"
+    );
+    std::fs::write(&path, vec![0x42; original.len()]).unwrap();
+    let corrupt = load_snapshot_with_options(&local, &delta, opts)
+        .await
+        .unwrap_err();
+    assert!(
+        corrupt
+            .to_string()
+            .contains("RAM object content does not match"),
+        "{corrupt}"
+    );
+    assert!(
+        !installed
+            .path()
+            .parent()
+            .unwrap()
+            .join(target.id().as_str())
+            .exists()
+    );
+    let head = super::super::super::group::select(&local.snapshots_dir(), "received")
+        .await
+        .unwrap();
+    assert_eq!(head.head, base.id().as_str());
+}
 
 #[tokio::test]
 async fn twelve_ram_only_archives_resolve_without_intermediate_vms() {
@@ -371,7 +574,7 @@ async fn last_layers_keeps_ram_complete_and_wrong_ram_base_fails() {
     .unwrap()
     .unwrap();
     assert!(selection.memory.is_empty());
-    let archive = temp.path().join("delta.msnap");
+    let archive = temp.path().join("delta.msb");
     save_snapshot(
         &local,
         target.path().to_str().unwrap(),
@@ -527,7 +730,7 @@ async fn memory_dependency_validation_rejects_incomplete_and_misbound_inventorie
     );
     assert!(!local.snapshots_dir().join(target.id().as_str()).exists());
 
-    let truncated = temp.path().join("truncated.msnap");
+    let truncated = temp.path().join("truncated.msb");
     let bytes = std::fs::read(&archive).unwrap();
     std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
     assert!(
@@ -553,7 +756,7 @@ async fn standalone_base_archive_resolves_ram_but_dependent_base_archive_is_refu
         .unwrap();
     let base = fixture(&local, &temp.path().join("base"), 1, None, false).await;
     let target = fixture(&local, &temp.path().join("target"), 4, None, false).await;
-    let base_archive = temp.path().join("base.msnap");
+    let base_archive = temp.path().join("base.msb");
     save_snapshot(
         &local,
         base.path().to_str().unwrap(),
@@ -562,7 +765,7 @@ async fn standalone_base_archive_resolves_ram_but_dependent_base_archive_is_refu
     )
     .await
     .unwrap();
-    let delta = temp.path().join("delta.msnap");
+    let delta = temp.path().join("delta.msb");
     save_snapshot(
         &local,
         target.path().to_str().unwrap(),

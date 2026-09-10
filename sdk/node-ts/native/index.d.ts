@@ -1510,6 +1510,8 @@ export declare class Snapshot {
   static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
   static load(archive: string, dest?: string | undefined | null, base?: string | undefined | null): Promise<SnapshotHandle>
   static loadWithOptions(archive: string, opts?: LoadOpts | undefined | null): Promise<SnapshotHandle>
+  /** Import archives together, resolving dependencies within the batch and destination group. */
+  static loadMany(archives: Array<string>, opts?: LoadOpts | undefined | null): Promise<Array<SnapshotHandle>>
   /** Read a group's head, or select `group:member` as its head. */
   static groupHead(selector: string): Promise<HeadUpdate>
   get path(): string
@@ -1976,15 +1978,15 @@ export interface JsSandboxPage {
   nextCursor?: string
 }
 
-/** Options for importing an archive into a snapshot group. */
+/** Options for importing one or more archives into a snapshot group. */
 export interface LoadOpts {
   /** Parent directory containing snapshot groups. */
   dest?: string
-  /** Exact base snapshot or standalone archive for a dependent archive. */
+  /** External snapshot or standalone archive for dependencies absent from the batch/group. */
   base?: string
   /** Destination group (generated when omitted). */
   group?: string
-  /** Select the imported member even when it is not a fast-forward. */
+  /** Select the unique imported tip even when it is not a fast-forward. */
   setHead?: boolean
 }
 

@@ -3,7 +3,7 @@ import { Snapshot } from "../../dist/snapshot.js";
 import { napi } from "../../dist/internal/napi.js";
 
 vi.mock("../../dist/internal/napi.js", () => ({
-  napi: { Snapshot: { loadWithOptions: vi.fn(), groupHead: vi.fn() } },
+  napi: { Snapshot: { loadWithOptions: vi.fn(), loadMany: vi.fn(), groupHead: vi.fn() } },
 }));
 
 function projectedSnapshot(
@@ -65,8 +65,8 @@ describe("Snapshot native projections", () => {
       name: "other", createdAt: 0, path: "/snapshots/work/snapshot-2",
     } as never);
     const options = { dest: "/snapshots", base: "work:base", group: "work", setHead: false };
-    const handle = await Snapshot.loadWithOptions("other.msnap", options);
-    expect(napi.Snapshot.loadWithOptions).toHaveBeenCalledWith("other.msnap", options);
+    const handle = await Snapshot.loadWithOptions("other.msb", options);
+    expect(napi.Snapshot.loadWithOptions).toHaveBeenCalledWith("other.msb", options);
     expect(handle.group).toBe("work");
     expect(handle.id).toBe("snapshot-2");
     expect(handle.headUpdate).toEqual(headUpdate);
@@ -78,6 +78,28 @@ describe("Snapshot native projections", () => {
     });
     expect(await Snapshot.groupHead("work:baseline")).toMatchObject({ reason: "selected", changed: true });
     expect(napi.Snapshot.groupHead).toHaveBeenCalledWith("work:baseline");
+  });
+
+  it("loads a batch once and preserves input-order handles and headless outcomes", async () => {
+    vi.mocked(napi.Snapshot.loadMany).mockResolvedValue([
+      { id: "snapshot-tip", digest: "sha256:tip", path: "/snapshots/received/tip", group: "received", createdAt: 0 },
+      { id: "snapshot-base", digest: "sha256:base", path: "/snapshots/received/base", group: "received", createdAt: 0 },
+    ] as never);
+    const archives = ["changes.msb", "base.msb"];
+    const options = { group: "received", dest: "/snapshots" };
+    const handles = await Snapshot.loadMany(archives, options);
+    expect(napi.Snapshot.loadMany).toHaveBeenCalledWith(archives, options);
+    expect(handles.map((handle) => handle.id)).toEqual(["snapshot-tip", "snapshot-base"]);
+    expect(handles.map((handle) => handle.group)).toEqual(["received", "received"]);
+    expect(handles.every((handle) => handle.headUpdate === null)).toBe(true);
+  });
+
+  it("passes explicit batch head selection to the native importer", async () => {
+    vi.mocked(napi.Snapshot.loadMany).mockResolvedValue([]);
+    await Snapshot.loadMany(["tip.msb", "base.msb"], { group: "received", base: "outside:base", setHead: true });
+    expect(napi.Snapshot.loadMany).toHaveBeenLastCalledWith(
+      ["tip.msb", "base.msb"], { group: "received", base: "outside:base", setHead: true },
+    );
   });
 
   it("returns complete file and checkpoint states", () => {

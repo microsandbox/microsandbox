@@ -64,15 +64,15 @@ export interface SaveOpts {
   plainTar?: boolean;
 }
 
-/** Options for importing an archive into a snapshot group. */
+/** Options for importing one or more archives into a snapshot group. */
 export interface LoadOpts {
   /** Parent directory containing snapshot groups. */
   dest?: string;
-  /** Exact base snapshot or standalone archive for a dependent archive. */
+  /** External snapshot or standalone archive for dependencies absent from the batch/group. */
   base?: string;
   /** Destination group; generated when omitted. */
   group?: string;
-  /** Select the imported member even when it is not a fast-forward. */
+  /** Select the unique imported tip even when it is not a fast-forward. */
   setHead?: boolean;
 }
 
@@ -249,6 +249,12 @@ export class Snapshot {
   static async loadWithOptions(archive: string, opts: LoadOpts = {}): Promise<SnapshotHandle> {
     const raw = await withMappedErrors(() => napi.Snapshot.loadWithOptions(archive, opts));
     return new SnapshotHandle(raw);
+  }
+
+  /** Import archives together into one group, resolving dependencies regardless of input order. */
+  static async loadMany(archives: string[], opts: LoadOpts = {}): Promise<SnapshotHandle[]> {
+    const raw = await withMappedErrors(() => napi.Snapshot.loadMany(archives, opts));
+    return raw.map((handle) => new SnapshotHandle(handle));
   }
 
   /** Read a group's head, or select `group:member` as its head. */

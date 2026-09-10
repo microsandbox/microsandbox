@@ -70,7 +70,7 @@ try:
             if mode == "paused":
                 run("pause-" + layout, "pause", source)
             args = ["snapshot", "create", snap, "--from", source]
-            archive = out / (snap + (".tar" if mode == "plain" else ".msnap"))
+            archive = out / (snap + (".tar" if mode == "plain" else ".msb"))
             installed_before = set((home / "snapshots").glob("*"))
             if mode in ("archive", "plain"):
                 args += ["--archive", str(archive)]

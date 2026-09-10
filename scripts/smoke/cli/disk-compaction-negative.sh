@@ -18,9 +18,9 @@ msb stop compact-neg-owned
 refuse msb modify compact-neg-owned --compact
 msb snapshot save "$QUAL_SOURCE-4" "$QUAL_ROOT/truncated.tar" --last-layers 2 --plain-tar
 truncate -s 2048 "$QUAL_ROOT/truncated.tar"
-refuse msb snapshot load "$QUAL_ROOT/truncated.tar" "$QUAL_ROOT/truncated-import" --base "$QUAL_SOURCE-2"
+refuse msb snapshot load "$QUAL_ROOT/truncated.tar" --dest "$QUAL_ROOT/truncated-import" --base "$QUAL_SOURCE-2"
 msb snapshot save "$QUAL_SOURCE-4" "$QUAL_ROOT/complete-last.tar" --last-layers 4 --plain-tar
-msb snapshot load "$QUAL_ROOT/complete-last.tar" "$QUAL_ROOT/complete-last-import"
+msb snapshot load "$QUAL_ROOT/complete-last.tar" --dest "$QUAL_ROOT/complete-last-import"
 msb snapshot save "$QUAL_SOURCE-4" "$QUAL_ROOT/same.tar" --since "$QUAL_SOURCE-4" --plain-tar
-msb snapshot load "$QUAL_ROOT/same.tar" "$QUAL_ROOT/same-import" --base "$QUAL_SOURCE-4"
+msb snapshot load "$QUAL_ROOT/same.tar" --dest "$QUAL_ROOT/same-import" --base "$QUAL_SOURCE-4"
 echo 'tmpfs/user-owned rejection, truncated refusal, all-layer standalone and equal-base export PASS'

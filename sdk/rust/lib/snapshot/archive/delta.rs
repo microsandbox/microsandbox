@@ -1,6 +1,8 @@
 //! Explicit disk-prefix and immutable RAM-object dependencies for incremental exports.
 
-use microsandbox_image::checkpoint::{DiskLayerExportPlan, DiskLayerRef};
+use microsandbox_image::checkpoint::{
+    DiskGenerationManifest, DiskLayerExportPlan, DiskLayerRef, MemoryManifest,
+};
 use microsandbox_image::snapshot::{DiskLayer, Manifest};
 
 use super::*;
@@ -10,6 +12,7 @@ use super::*;
 //--------------------------------------------------------------------------------------------------
 
 pub(super) const REQUIREMENT: &str = "msb-snapshot-dependencies-v1";
+const MAX_METADATA: u64 = 8 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -46,15 +49,242 @@ struct PhysicalLayer {
     source: PathBuf,
 }
 
-struct BaseSnapshot {
-    snapshot: Snapshot,
+pub(super) struct BaseSnapshot {
+    pub(super) snapshot: Snapshot,
     // Keep archive staging alive until all required payloads belong to the destination.
     _stage: Option<tempfile::TempDir>,
+}
+
+/// Sources are scoped to this load, never persisted or discovered through global path scans.
+/// Payload identity, not parentage, connects archives that can reconstruct one another.
+#[derive(Default)]
+pub(super) struct Sources {
+    disks: BTreeMap<String, PathBuf>,
+    memory: BTreeMap<ObjectId, PathBuf>,
+}
+
+type SourceIndex = (Vec<(String, PathBuf)>, Vec<(ObjectId, PathBuf)>);
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl Sources {
+    pub(super) async fn add(
+        &mut self,
+        manifest: &Manifest,
+        directory: &Path,
+        archive_stage: Option<&Path>,
+    ) -> MicrosandboxResult<()> {
+        let manifest = manifest.clone();
+        let directory = directory.to_path_buf();
+        let archive_stage = archive_stage.map(Path::to_path_buf);
+        let (disks, memory) = tokio::task::spawn_blocking(move || {
+            inspect_sources(&manifest, &directory, archive_stage.as_deref())
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Runtime(format!("snapshot source inspection: {error}"))
+        })??;
+        // Prefer batch bytes over destination-group copies. Every borrowed payload is checked in
+        // its owned destination, so this index is a location hint, not an integrity receipt.
+        for (identity, path) in disks {
+            self.disks.entry(identity).or_insert(path);
+        }
+        for (identity, path) in memory {
+            self.memory.entry(identity).or_insert(path);
+        }
+        Ok(())
+    }
+
+    pub(super) fn require(&self, inventory: &ArchiveInventory) -> MicrosandboxResult<()> {
+        let Some(dependencies) = validate(inventory)? else {
+            return Ok(());
+        };
+        let mut missing = Vec::new();
+        for layer in &dependencies.disks {
+            if !self
+                .disks
+                .contains_key(&serde_json::to_string(&layer.identity)?)
+            {
+                missing.push(format!("disk layer {}", layer.path));
+            }
+        }
+        for object in &dependencies.memory {
+            if !self.memory.contains_key(object) {
+                missing.push(format!("RAM object {object}"));
+            }
+        }
+        if !missing.is_empty() {
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                "snapshot {} is missing dependencies: {}; supply the missing archives or an external --base",
+                inventory.head,
+                missing.join(", ")
+            )));
+        }
+        Ok(())
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Inspect only descriptors and small identity-verified manifests. Missing payloads in dependent
+/// archives are expected; admission still happens after filling their complete target closure.
+fn inspect_sources(
+    manifest: &Manifest,
+    directory: &Path,
+    archive_stage: Option<&Path>,
+) -> MicrosandboxResult<SourceIndex> {
+    let mut disks = Vec::new();
+    let mut memory = Vec::new();
+    match &manifest.state {
+        SnapshotState::File(file) => {
+            for layer in &file.layers {
+                let relative = file.layer_path(layer);
+                let path = match archive_stage {
+                    Some(root) => root
+                        .join(".archive-layers")
+                        .join(relative.file_name().expect("canonical layer filename")),
+                    None => directory.join(relative),
+                };
+                if regular_source(&path)? {
+                    disks.push((
+                        serde_json::to_string(&LayerIdentity::File(layer.clone()))?,
+                        path,
+                    ));
+                }
+            }
+        }
+        SnapshotState::Checkpoint(state) => {
+            let root = directory.join(CHECKPOINT_DIRECTORY);
+            let expected = ObjectId::new(&state.checkpoint_root).map_err(source_error)?;
+            let checkpoint = CheckpointClosure::inspect_manifest(&root, Some(&expected))
+                .map_err(source_error)?;
+            let ram = MemoryManifest::from_bytes(&read_metadata_object(&root, &checkpoint.memory)?)
+                .map_err(source_error)?;
+            let mut metadata = BTreeSet::from([
+                checkpoint.memory.clone(),
+                checkpoint.execution_state.clone(),
+            ]);
+            metadata.extend(checkpoint.disks.iter().cloned());
+            metadata.extend(checkpoint.devices.iter().map(|device| device.state.clone()));
+            let objects: BTreeSet<_> = ram
+                .extents
+                .iter()
+                .filter_map(|extent| match &extent.content {
+                    MemoryExtentContent::Object(content) if !metadata.contains(&content.object) => {
+                        Some(content.object.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            for object in objects {
+                let path = checkpoint_object_path(&root, &object);
+                if regular_source(&path)? {
+                    memory.push((object, path));
+                }
+            }
+            for disk in &checkpoint.disks {
+                let disk = DiskGenerationManifest::from_bytes(&read_metadata_object(&root, disk)?)
+                    .map_err(source_error)?;
+                for layer in disk.layers {
+                    let path = root
+                        .join("layers")
+                        .join(format!("{}.{}", layer.layer_id, layer.format));
+                    if regular_source(&path)? {
+                        disks.push((
+                            serde_json::to_string(&LayerIdentity::Checkpoint(layer))?,
+                            path,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok((disks, memory))
+}
+
+fn regular_source(path: &Path) -> MicrosandboxResult<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(MicrosandboxError::SnapshotIntegrity(format!(
+            "snapshot payload is not a regular file: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_metadata_object(root: &Path, id: &ObjectId) -> MicrosandboxResult<Vec<u8>> {
+    use std::io::Read;
+    let path = checkpoint_object_path(root, id);
+    if !regular_source(&path)? {
+        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+            "missing checkpoint metadata {id}"
+        )));
+    }
+    // Match the checkpoint resolver's 8 MiB metadata limit; a changing file cannot cause an
+    // unbounded allocation. This is not a RAM-payload read or a new admission format.
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_METADATA + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_METADATA
+        || &ObjectId::from_bytes(&bytes).map_err(source_error)? != id
+    {
+        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+            "invalid checkpoint metadata {id}"
+        )));
+    }
+    Ok(bytes)
+}
+
+fn source_error(error: impl std::fmt::Display) -> MicrosandboxError {
+    MicrosandboxError::SnapshotIntegrity(error.to_string())
+}
+
+pub(super) async fn resolve_sources(
+    local: &LocalBackend,
+    inventory: &ArchiveInventory,
+    snapshots_dir: &Path,
+    cache_dir: &Path,
+    sources: &Sources,
+) -> MicrosandboxResult<()> {
+    let Some(dependencies) = validate(inventory)? else {
+        return Ok(());
+    };
+    sources.require(inventory)?;
+    for layer in &dependencies.disks {
+        let source = &sources.disks[&serde_json::to_string(&layer.identity)?];
+        let target = inventory_entry_target(&layer.path, snapshots_dir, cache_dir)?;
+        copy_dependency(source, &target).await?;
+        if let LayerIdentity::File(layer) = &layer.identity {
+            super::super::verify::verify_file_payload(&target, layer.payload.integrity.as_ref())
+                .await?;
+        }
+    }
+    for id in &dependencies.memory {
+        let target = inventory_entry_target(
+            &memory_archive_path(&inventory.head, id),
+            snapshots_dir,
+            cache_dir,
+        )?;
+        copy_dependency(&sources.memory[id], &target).await?;
+        let actual = format!(
+            "sha256:{}",
+            hex::encode(Box::pin(file_sha256(&target)).await?)
+        );
+        if actual != id.as_str() {
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                "borrowed RAM object content does not match {id}"
+            )));
+        }
+    }
+    validate_resolved(local, inventory, snapshots_dir, cache_dir, &dependencies).await
+}
 
 pub(super) async fn selection(
     local: &LocalBackend,
@@ -315,6 +545,16 @@ pub(super) async fn resolve(
         }
     }
 
+    validate_resolved(local, inventory, snapshots_dir, cache_dir, &dependencies).await
+}
+
+async fn validate_resolved(
+    local: &LocalBackend,
+    inventory: &ArchiveInventory,
+    snapshots_dir: &Path,
+    cache_dir: &Path,
+    dependencies: &Dependencies,
+) -> MicrosandboxResult<()> {
     // Open the complete target only after filling omissions. This retains its normal metadata,
     // range, epoch and disk-integrity validation instead of introducing a partial-closure mode.
     let artifact = snapshots_dir.join(&inventory.head);
@@ -501,7 +741,10 @@ fn physical_layers(
     }
 }
 
-async fn open_base(local: &LocalBackend, input: &str) -> MicrosandboxResult<BaseSnapshot> {
+pub(super) async fn open_base(
+    local: &LocalBackend,
+    input: &str,
+) -> MicrosandboxResult<BaseSnapshot> {
     let path = Path::new(input);
     if !path.is_file() {
         let snapshot = store::open_snapshot(local, input).await?;
@@ -579,6 +822,143 @@ mod tests {
         DiskLayerId, FileSnapshotState, ImageRef, LayerFileKind, LayerPayload, SnapshotCapture,
         SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope,
     };
+
+    #[tokio::test]
+    async fn batch_rejects_corrupt_borrowed_file_layer_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let base_dir = temp.path().join("base-source");
+        let child_dir = temp.path().join("child-source");
+        std::fs::create_dir_all(base_dir.join("layers")).unwrap();
+        std::fs::create_dir_all(child_dir.join("layers")).unwrap();
+        let mut base_layer = DiskLayer {
+            layer_id: DiskLayerId::new("layer_00000000000000000000000000000001").unwrap(),
+            format: SnapshotFormat::Raw,
+            virtual_size: 65536,
+            backing: None,
+            payload: LayerPayload {
+                file_kind: LayerFileKind::Regular,
+                integrity: None,
+            },
+        };
+        let base_path =
+            microsandbox_image::snapshot::layer_path(&base_layer.layer_id, base_layer.format);
+        std::fs::write(base_dir.join(&base_path), vec![91u8; 65536]).unwrap();
+        std::fs::copy(base_dir.join(&base_path), child_dir.join(&base_path)).unwrap();
+        base_layer.payload.integrity = Some(
+            super::super::super::verify::compute_merkle_integrity(&base_dir.join(&base_path))
+                .await
+                .unwrap(),
+        );
+        let top = DiskLayer {
+            layer_id: DiskLayerId::new("layer_00000000000000000000000000000002").unwrap(),
+            format: SnapshotFormat::Qcow2,
+            virtual_size: 65536,
+            backing: Some(base_layer.layer_id.clone()),
+            payload: LayerPayload {
+                file_kind: LayerFileKind::Regular,
+                integrity: None,
+            },
+        };
+        let top_path = microsandbox_image::snapshot::layer_path(&top.layer_id, top.format);
+        microsandbox_image::checkpoint::create_qcow2_overlay(
+            &child_dir.join(top_path),
+            65536,
+            &child_dir.join(&base_path),
+            "raw",
+        )
+        .await
+        .unwrap();
+        let descriptor = |value: u128, layers: Vec<DiskLayer>, parent| Manifest {
+            schema: "microsandbox.snapshot/1".into(),
+            snapshot_id: SnapshotId::new(format!("snap_{value:032x}")).unwrap(),
+            scope: SnapshotScope::Disk,
+            root_disk: SnapshotRootDisk::Managed,
+            state: SnapshotState::File(FileSnapshotState {
+                disk_format: layers.last().unwrap().format,
+                filesystem: "ext4".into(),
+                virtual_size: 65536,
+                head: layers.last().unwrap().layer_id.clone(),
+                layers,
+            }),
+            capture: SnapshotCapture {
+                created_at: "2026-09-10T00:00:00Z".into(),
+                source_lineage: None,
+                source_checkpoint: None,
+                consistency: SnapshotConsistency::CrashConsistent,
+            },
+            image: ImageRef {
+                reference: "docker.io/library/alpine:3.20".into(),
+                manifest_digest: format!("sha256:{}", "0".repeat(64)),
+            },
+            parent,
+            extensions: BTreeMap::new(),
+            requires: Vec::new(),
+        };
+        let base = descriptor(1, vec![base_layer.clone()], None);
+        let child = descriptor(2, vec![base_layer, top], Some(base.snapshot_id.clone()));
+        for (directory, manifest) in [(&base_dir, &base), (&child_dir, &child)] {
+            std::fs::write(
+                directory.join(DESCRIPTOR_FILENAME),
+                manifest.to_canonical_bytes().unwrap(),
+            )
+            .unwrap();
+        }
+        let base_archive = temp.path().join("base.msb");
+        save_snapshot(
+            &local,
+            base_dir.to_str().unwrap(),
+            &base_archive,
+            SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+        let child_archive = temp.path().join("child.msb");
+        save_snapshot(
+            &local,
+            child_dir.to_str().unwrap(),
+            &child_archive,
+            SaveOpts {
+                since: Some(base_dir.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let options = || LoadOpts {
+            group: Some("corrupt-source".into()),
+            ..Default::default()
+        };
+        let installed = load_snapshots(&local, &[base_archive], options())
+            .await
+            .unwrap();
+        let group_dir = installed[0].path().parent().unwrap().to_path_buf();
+        let previous_head = std::fs::read(group_dir.join("group.json")).unwrap();
+        // Metadata and length still agree: only payload verification can detect this change.
+        std::fs::write(installed[0].path().join(&base_path), vec![92u8; 65536]).unwrap();
+        let error = load_snapshots(&local, &[child_archive], options())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("integrity mismatch"), "{error}");
+        assert!(!group_dir.join(child.snapshot_id.as_str()).exists());
+        assert_eq!(
+            std::fs::read(group_dir.join("group.json")).unwrap(),
+            previous_head
+        );
+        assert_eq!(
+            super::super::super::group::dependency_members(
+                &local.snapshots_dir(),
+                "corrupt-source",
+            )
+            .await
+            .unwrap(),
+            vec![installed[0].path().to_path_buf()]
+        );
+    }
 
     #[tokio::test]
     async fn delta_load_and_direct_restore_require_exact_base_and_own_their_closure() {
@@ -685,11 +1065,12 @@ mod tests {
         .await
         .unwrap();
         assert!(load_snapshot(&local, &archive, None).await.is_err());
-        assert!(
-            load_snapshot_with_base(&local, &archive, None, Some(head_name))
-                .await
-                .is_err()
-        );
+        // Loading now resolves exact payload identities from a source pool. A complete newer
+        // snapshot can supply the required prefix even when it contains additional layers.
+        let supplied_by_newer = load_snapshot_with_base(&local, &archive, None, Some(head_name))
+            .await
+            .unwrap();
+        assert!(supplied_by_newer.path().join(&base_path).exists());
         let loaded = load_snapshot_with_base(&local, &archive, None, Some(base_name))
             .await
             .unwrap();
@@ -739,6 +1120,29 @@ mod tests {
         )
         .await
         .unwrap();
+        // File-state archives use a shared layers directory, unlike full checkpoint payloads.
+        // Both input orders must finish all borrowing reads before consuming those directories.
+        for (group, inputs) in [
+            ("file-reverse", vec![archive.clone(), base_archive.clone()]),
+            ("file-forward", vec![base_archive.clone(), archive.clone()]),
+        ] {
+            let batch = load_snapshots(
+                &local,
+                &inputs,
+                LoadOpts {
+                    group: Some(group.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            for snapshot in &batch {
+                assert_eq!(
+                    std::fs::read(snapshot.path().join(&base_path)).unwrap(),
+                    vec![91u8; 65536]
+                );
+            }
+        }
         std::fs::remove_dir_all(&base_dir).unwrap();
         assert_eq!(
             std::fs::read(loaded.path().join(&base_path)).unwrap(),

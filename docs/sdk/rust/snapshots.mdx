@@ -16,7 +16,7 @@ use microsandbox::{Snapshot, snapshot::LoadOpts};
 use std::path::Path;
 
 let snap = Snapshot::builder("baseline").from_sandbox("box").group("work").create().await?;
-let loaded = Snapshot::load_with_options(Path::new("changes.msnap"), LoadOpts {
+let loaded = Snapshot::load_with_options(Path::new("changes.msb"), LoadOpts {
     base: Some("work:baseline".into()),
     group: Some("work".into()),
     ..Default::default()
@@ -27,22 +27,36 @@ let selected = Snapshot::group_head("work:baseline").await?;
 
 `LoadOpts` contains `dest: Option<PathBuf>`, `base: Option<String>`, `group: Option<String>`, and `set_head: bool`. `set_head: true` explicitly selects the imported member even when it is not a descendant. `load` and `load_with_base` use generated groups. `group_head` returns `HeadUpdate` with `group`, `previous`, `head`, `reason`, and `changed`; `previous` and `head` are stable snapshot IDs. Automatic head updates initialize an empty group or advance to a proven descendant; divergent imports and imports with unknown ancestry retain the current head. `Snapshot::head_update()` and `SnapshotHandle::head_update()` expose the create/import outcome. Direct archive capture creates no group and rejects `.group(...)`.
 
+## Load multiple archives
+
+```rust
+let archives = vec!["changes.msb".into(), "base.msb".into()];
+let handles = Snapshot::load_many(&archives, LoadOpts {
+    group: Some("received".into()),
+    ..Default::default()
+}).await?;
+```
+
+`Snapshot::load_many(archive_paths: &[PathBuf], opts: LoadOpts)` returns `MicrosandboxResult<Vec<SnapshotHandle>>`, with one handle per supplied archive in input order. Dependencies are resolved regardless of argument order from the batch and exact matching snapshots already installed in an explicitly named destination group. `opts.base` supplies an external snapshot or standalone archive when needed. Single-file `load_with_options` also reuses dependencies from its named destination group. Omitting `group` creates one generated group for the batch.
+
+All batch members are validated before publication. `set_head: true` requires a unique tip. With divergent tips and the default `false`, an existing head is retained (`HeadUpdateReason::AmbiguousCandidates`); a new group has no head and imported handles return `None` from `head_update()`. Select a member explicitly to give that group a head. The archive format is unchanged. The CLI equivalent is `msb snapshot load checkpoints/*.msb --group received`, with `--dest DIR` for another group-store root.
+
 ## Disk maintenance and incremental export
 
-Exporting since a base omits its reusable disk layers and RAM objects. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option only selects disk layers and leaves RAM payloads complete. Supply the base when loading or restoring a dependent archive; a dependent base archive must be loaded first.
+Exporting since a base omits its reusable disk layers and RAM objects. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option only selects disk layers and leaves RAM payloads complete. Imports resolve dependencies from the batch or an explicitly named destination group. Use an external base for missing dependencies; direct restore still accepts an explicit base.
 
 ```rust
 let worker = Sandbox::get("worker").await?;
 let plan = worker.compact().layers(3).dry_run().await?;
 let result = worker.compact().layers(3).apply().await?;
-Snapshot::save("worker:checkpoint-b", Path::new("changes.msnap"), SaveOpts {
+Snapshot::save("worker:checkpoint-b", Path::new("changes.msb"), SaveOpts {
     since: Some("worker:checkpoint-a".into()),
     ..Default::default()
 }).await?;
-Snapshot::load_with_base(Path::new("changes.msnap"), None, "worker:checkpoint-a").await?;
+Snapshot::load_with_base(Path::new("changes.msb"), None, "worker:checkpoint-a").await?;
 ```
 
-`layers` counts the oldest physical layers including the base, excluding the writable head. Omit it to compact all sealed layers. `last_layers: Some(n)` is an alternative to `since`; they cannot be combined with each other or `with_parents`. For direct restore, use `Sandbox::builder("child").from_snapshot("changes.msnap").snapshot_base("worker:checkpoint-a")`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
+`layers` counts the oldest physical layers including the base, excluding the writable head. Omit it to compact all sealed layers. `last_layers: Some(n)` is an alternative to `since`; they cannot be combined with each other or `with_parents`. For direct restore, use `Sandbox::builder("child").from_snapshot("changes.msb").snapshot_base("worker:checkpoint-a")`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
 
 ## Snapshot
 
@@ -138,7 +152,7 @@ Capture a disk or full snapshot directly into an archive. The operation creates 
 ```rust
 let archive = Snapshot::create_archive(
     Snapshot::builder("baseline").from_sandbox("api").build()?,
-    "/tmp/baseline.msnap",
+    "/tmp/baseline.msb",
     false,
 ).await?;
 println!("{} {}", archive.id(), archive.path().display());
@@ -351,7 +365,7 @@ println!("indexed {n} snapshots");
 async fn save(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()>
 ```
 
-Bundle a snapshot into a `.msnap` archive (or plain `.tar`) at `out`. Recorded payload integrity is preserved but not executed implicitly; call [`verify()`](#snap-verify) when an independent content scan is part of your workflow. See [`SaveOpts`](#saveopts) to also include ancestors and the OCI image cache.
+Bundle a snapshot into a `.msb` archive (or plain `.tar`) at `out`. Recorded payload integrity is preserved but not executed implicitly; call [`verify()`](#snap-verify) when an independent content scan is part of your workflow. See [`SaveOpts`](#saveopts) to also include ancestors and the OCI image cache.
 
 <p className="msb-label">Parameters</p>
 
@@ -378,7 +392,7 @@ use std::path::Path;
 
 Snapshot::save(
     "api:baseline",
-    Path::new("/tmp/baseline.msnap"),
+    Path::new("/tmp/baseline.msb"),
     SaveOpts { with_parents: true, with_image: true, ..Default::default() },
 ).await?;
 ```
@@ -399,13 +413,13 @@ async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<Sn
 ```rust
 use std::path::Path;
 
-let h = Snapshot::load(Path::new("/tmp/baseline.msnap"), None).await?;
+let h = Snapshot::load(Path::new("/tmp/baseline.msb"), None).await?;
 println!("loaded {}", h.digest());
 ```
 
 </Accordion>
 
-Unpack a snapshot archive (`.msnap` or `.tar`, detected from magic bytes) into the snapshots directory (or `dest`), routing any bundled image-cache entries into the global cache and registering everything found in the index. Structural and archive-entry checks remain mandatory, while recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Returns a handle for the head snapshot.
+Unpack a snapshot archive (`.msb` or `.tar`, detected from magic bytes) into the snapshots directory (or `dest`), routing any bundled image-cache entries into the global cache and registering everything found in the index. Structural and archive-entry checks remain mandatory, while recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Returns a handle for the head snapshot.
 
 <p className="msb-label">Parameters</p>
 
@@ -434,7 +448,7 @@ Unpack a snapshot archive (`.msnap` or `.tar`, detected from magic bytes) into t
 ```rust
 use std::path::Path;
 
-let h = Snapshot::load(Path::new("/tmp/baseline.msnap"), None).await?;
+let h = Snapshot::load(Path::new("/tmp/baseline.msb"), None).await?;
 println!("loaded {}", h.digest());
 ```
 

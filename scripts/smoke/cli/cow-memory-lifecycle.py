@@ -126,7 +126,7 @@ try:
     run("restore-grandchild", "create", "-n", grandchild, "--from-snapshot", child_snapshot,
         *restore_flags, "--info")
     assert run("grandchild-marker", "exec", grandchild, "--", "cat", "/dev/shm/cow-marker").stdout.strip() == "private-a"
-    archive = str(root / "direct.msnap")
+    archive = str(root / "direct.msb")
     run("direct-full", "snapshot", "create", prefix + "-direct", "--from", source,
         "--full", "--archive", archive, "--info")
     child = prefix + "-archive"
@@ -140,7 +140,7 @@ try:
     run("stop-paused", "stop", source, timeout=20)
     disk_snapshot = prefix + "-disk"
     run("stopped-disk-capture", "snapshot", "create", disk_snapshot, "--from", source)
-    disk_archive = str(root / "disk.msnap")
+    disk_archive = str(root / "disk.msb")
     run("disk-archive", "snapshot", "save", disk_snapshot, disk_archive)
     for label, snapshot in (("installed", disk_snapshot), ("archive", disk_archive)):
         refused_name = prefix + "-refused-" + label

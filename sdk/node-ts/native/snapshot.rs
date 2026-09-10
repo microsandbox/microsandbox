@@ -53,17 +53,17 @@ pub struct JsSaveOpts {
     pub last_layers: Option<f64>,
 }
 
-/// Options for importing an archive into a snapshot group.
+/// Options for importing one or more archives into a snapshot group.
 #[derive(Default)]
 #[napi(object, js_name = "LoadOpts")]
 pub struct JsLoadOpts {
     /// Parent directory containing snapshot groups.
     pub dest: Option<String>,
-    /// Exact base snapshot or standalone archive for a dependent archive.
+    /// External snapshot or standalone archive for dependencies absent from the batch/group.
     pub base: Option<String>,
     /// Destination group (generated when omitted).
     pub group: Option<String>,
-    /// Select the imported member even when it is not a fast-forward.
+    /// Select the unique imported tip even when it is not a fast-forward.
     pub set_head: Option<bool>,
 }
 
@@ -245,6 +245,31 @@ impl JsSnapshot {
         .await
         .map_err(to_napi_error)?;
         Ok(JsSnapshotHandle::from_rust(h))
+    }
+
+    /// Import archives together, resolving dependencies within the batch and destination group.
+    #[napi(js_name = "loadMany")]
+    pub async fn load_many(
+        archives: Vec<String>,
+        opts: Option<JsLoadOpts>,
+    ) -> Result<Vec<JsSnapshotHandle>> {
+        let opts = opts.unwrap_or_default();
+        let paths = archives.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+        let handles = RustSnapshot::load_many(
+            &paths,
+            RustLoadOpts {
+                dest: opts.dest.map(PathBuf::from),
+                base: opts.base,
+                group: opts.group,
+                set_head: opts.set_head.unwrap_or(false),
+            },
+        )
+        .await
+        .map_err(to_napi_error)?;
+        Ok(handles
+            .into_iter()
+            .map(JsSnapshotHandle::from_rust)
+            .collect())
     }
 
     /// Read a group's head, or select `group:member` as its head.
@@ -637,6 +662,7 @@ fn head_update_to_js(update: &microsandbox::snapshot::HeadUpdate) -> JsHeadUpdat
         HeadUpdateReason::Unchanged => "unchanged",
         HeadUpdateReason::Diverged => "diverged",
         HeadUpdateReason::UnknownAncestry => "unknown_ancestry",
+        HeadUpdateReason::AmbiguousCandidates => "ambiguous_candidates",
     };
     JsHeadUpdate {
         group: update.group.clone(),

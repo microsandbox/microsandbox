@@ -6301,6 +6301,40 @@ pub unsafe extern "C" fn msb_snapshot_import_with_options(
     })
 }
 
+/// Import archives together with dependencies resolved within the batch and destination group.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_import_many(
+    cancel_id: u64,
+    archives_json: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let archives_raw = unsafe { cstr(archives_json) }?;
+        let archives: Vec<PathBuf> = serde_json::from_str(&archives_raw)
+            .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SnapshotLoadOptsJson = serde_json::from_str(&opts_raw)
+            .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
+        Ok(Box::pin(async move {
+            let handles = Snapshot::load_many(
+                &archives,
+                microsandbox::snapshot::LoadOpts {
+                    dest: opts.dest,
+                    base: opts.base,
+                    group: opts.group,
+                    set_head: opts.set_head,
+                },
+            )
+            .await
+            .map_err(FfiError::from)?;
+            let values = handles.iter().map(snapshot_handle_json).collect::<Vec<_>>();
+            Ok(serde_json::Value::Array(values).to_string())
+        }))
+    })
+}
+
 /// Read a group head, or select a `group:member` as its head.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_snapshot_group_head(
