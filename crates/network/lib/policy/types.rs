@@ -406,6 +406,43 @@ impl NetworkPolicy {
         self.egress_walk(dst.ip(), Some(dst.port()), protocol, shared, source)
     }
 
+    /// Return true when the first matching egress rule is an allow
+    /// `Domain` / `DomainSuffix` rule for the supplied hostname source.
+    pub fn allows_egress_via_hostname(
+        &self,
+        dst: SocketAddr,
+        protocol: Protocol,
+        shared: &SharedState,
+        source: HostnameSource<'_>,
+    ) -> bool {
+        for rule in &self.rules {
+            if !matches!(rule.direction, Direction::Egress | Direction::Any) {
+                continue;
+            }
+            if !rule.protocols.is_empty() && !rule.protocols.contains(&protocol) {
+                continue;
+            }
+            if !rule.ports.is_empty() && !rule.ports.iter().any(|range| range.contains(dst.port()))
+            {
+                continue;
+            }
+            match matches_egress_destination_with_source(
+                &rule.destination,
+                rule.action,
+                dst.ip(),
+                shared,
+                source,
+            ) {
+                DestinationMatch::Match => {
+                    return rule.action.is_allow() && is_hostname_destination(&rule.destination);
+                }
+                DestinationMatch::Defer | DestinationMatch::NoMatch => continue,
+            }
+        }
+
+        false
+    }
+
     /// Shared rule walk for the egress public methods. `port = None`
     /// is the ICMP path; rules with a port filter are skipped there.
     fn egress_walk(
@@ -841,6 +878,10 @@ fn rule_matches_protocol_and_port(rule: &Rule, protocol: Protocol, port: u16) ->
         return false;
     }
     true
+}
+
+fn is_hostname_destination(dest: &Destination) -> bool {
+    matches!(dest, Destination::Domain(_) | Destination::DomainSuffix(_))
 }
 
 /// Internal helper: does this rule match a flow's address/port/protocol?
@@ -2466,6 +2507,51 @@ mod tests {
             HostnameSource::Sni("files.pythonhosted.org"),
         );
         assert_eq!(eval, EgressEvaluation::Allow);
+    }
+
+    #[test]
+    fn hostname_allow_detection_tracks_matching_domain_allow() {
+        let shared = shared_with_host("pypi.org", PYPI_V4);
+        let policy = allow_rule(Destination::Domain(name("pypi.org")));
+
+        assert!(policy.allows_egress_via_hostname(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("pypi.org"),
+        ));
+    }
+
+    #[test]
+    fn hostname_allow_detection_ignores_default_allow() {
+        let shared = SharedState::new(4);
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_egress(Destination::Domain(name(
+                "blocked.example",
+            )))],
+        };
+
+        assert!(!policy.allows_egress_via_hostname(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("pypi.org"),
+        ));
+    }
+
+    #[test]
+    fn hostname_allow_detection_ignores_address_allow() {
+        let shared = SharedState::new(4);
+        let policy = allow_rule(Destination::Cidr("151.101.0.0/16".parse().unwrap()));
+
+        assert!(!policy.allows_egress_via_hostname(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("pypi.org"),
+        ));
     }
 
     /// `From<EgressEvaluation> for Action` debug-panics on

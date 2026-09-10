@@ -2143,6 +2143,11 @@
             "description": "Whether networking is enabled for this sandbox.",
             "default": true
           },
+          "strict": {
+            "type": "boolean",
+            "description": "Require hostname-based policy allows to use inspectable application authority.",
+            "default": false
+          },
           "max_connections": {
             "type": [
               "integer",
@@ -4474,6 +4479,7 @@
         "required": [
           "enabled",
           "ports",
+          "strict",
           "trust_host_cas"
         ],
         "properties": {
@@ -4528,6 +4534,9 @@
             "items": {
               "$ref": "#/components/schemas/SandboxSecretResponse"
             }
+          },
+          "strict": {
+            "type": "boolean"
           },
           "tls": {
             "oneOf": [

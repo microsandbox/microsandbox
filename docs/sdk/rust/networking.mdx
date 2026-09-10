@@ -845,6 +845,14 @@ fn trust_host_cas(self, enabled: bool) -> Self
 
 Whether to ship the host's trusted root CAs into the guest at boot. Default: `false`. Opt in when egress HTTPS inside the sandbox needs to work behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.). Those proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle.
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">strict()</span>
+
+```rust
+fn strict(self, enabled: bool) -> Self
+```
+
+Require hostname-based policy allows to use an inspectable request authority. Default: `false`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">max_connections()</span>
 
 ```rust

@@ -222,6 +222,12 @@ impl NetworkBuilder {
         self
     }
 
+    /// Enable or disable strict hostname-policy enforcement.
+    pub fn strict(mut self, enabled: bool) -> Self {
+        self.config.strict = enabled;
+        self
+    }
+
     /// Add a secret via a closure builder.
     ///
     /// ```ignore
@@ -1040,6 +1046,12 @@ mod tests {
     fn outbound_proxy_defaults_to_none() {
         let cfg = NetworkBuilder::new().build().unwrap();
         assert_eq!(cfg.outbound_proxy, None);
+    }
+
+    #[test]
+    fn network_builder_sets_strict_mode() {
+        let cfg = NetworkBuilder::new().strict(true).build().unwrap();
+        assert!(cfg.strict);
     }
 
     #[test]

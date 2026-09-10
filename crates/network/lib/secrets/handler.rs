@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use httlib_hpack::{Decoder as HpackDecoder, Encoder as HpackEncoder};
@@ -16,6 +17,7 @@ use super::config::{
     HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretEntry, SecretsConfig, ViolationAction,
 };
 use crate::netstack::shared::SharedState;
+use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -96,8 +98,8 @@ pub struct SecretsHandler {
     /// chunk should be parsed as a request start (headers) or treated as a
     /// continuation of the current request's body.
     http_state: HttpState,
-    /// SNI to require in HTTP/1 `Host` headers for DNS-pinned intercepted TLS.
-    http_sni: Option<String>,
+    /// Authority validator for HTTP/1 `Host` and HTTP/2 `:authority` headers.
+    http_authority: Option<HttpAuthorityValidator>,
     /// Current HTTP/1 request metadata while processing body continuations.
     http1_request_summary: Option<RequestSummary>,
     /// Buffered HTTP bytes while waiting for complete headers or a complete
@@ -191,6 +193,19 @@ enum ChunkedPhase {
 struct SecretHostIdentity<'a> {
     guest_ip: IpAddr,
     shared: &'a SharedState,
+}
+
+/// Authority rule applied to inspected HTTP metadata.
+#[derive(Clone)]
+enum HttpAuthorityValidator {
+    /// Require every HTTP authority-bearing field to match this TLS SNI.
+    Sni(String),
+    /// Require every HTTP authority-bearing field to be allowed by egress policy.
+    Policy {
+        guest_dst: SocketAddr,
+        network_policy: Arc<NetworkPolicy>,
+        shared: Arc<SharedState>,
+    },
 }
 
 /// Parsed HTTP/1 request metadata needed for validation and framing.
@@ -482,7 +497,7 @@ impl SecretsHandler {
     /// `tls_intercepted` indicates whether this is a MITM connection
     /// (true) or a bypass/plain connection (false).
     pub fn new(config: &SecretsConfig, sni: &str, tls_intercepted: bool) -> Self {
-        Self::new_inner(config, sni, tls_intercepted, None, false, false)
+        Self::new_inner(config, sni, tls_intercepted, None, None, false)
     }
 
     /// Create a handler for a TLS-intercepted connection.
@@ -500,7 +515,7 @@ impl SecretsHandler {
             sni,
             true,
             Some(SecretHostIdentity { guest_ip, shared }),
-            true,
+            Some(HttpAuthorityValidator::Sni(sni.to_string())),
             false,
         )
     }
@@ -510,7 +525,14 @@ impl SecretsHandler {
     /// The SNI is authoritative: the proxy already verified it against the
     /// CONNECT authority, so no DNS-cache pin is required.
     pub(crate) fn new_tls_intercepted_via_connect(config: &SecretsConfig, sni: &str) -> Self {
-        Self::new_inner(config, sni, true, None, true, false)
+        Self::new_inner(
+            config,
+            sni,
+            true,
+            None,
+            Some(HttpAuthorityValidator::Sni(sni.to_string())),
+            false,
+        )
     }
 
     /// Create a handler for a plain-HTTP (non-TLS) connection.
@@ -528,7 +550,33 @@ impl SecretsHandler {
             host,
             false,
             Some(SecretHostIdentity { guest_ip, shared }),
-            true,
+            Some(HttpAuthorityValidator::Sni(host.to_string())),
+            false,
+        )
+    }
+
+    /// Create a plain-HTTP handler that enforces egress policy for each HTTP authority.
+    pub(crate) fn new_plain_http_policy(
+        config: &SecretsConfig,
+        host: &str,
+        guest_dst: SocketAddr,
+        network_policy: Arc<NetworkPolicy>,
+        shared: Arc<SharedState>,
+    ) -> Self {
+        let identity = (!host.is_empty()).then_some(SecretHostIdentity {
+            guest_ip: guest_dst.ip(),
+            shared: shared.as_ref(),
+        });
+        Self::new_inner(
+            config,
+            host,
+            false,
+            identity,
+            Some(HttpAuthorityValidator::Policy {
+                guest_dst,
+                network_policy,
+                shared: shared.clone(),
+            }),
             false,
         )
     }
@@ -543,7 +591,7 @@ impl SecretsHandler {
             .iter()
             .any(|secret| secret.allowed_hosts.iter().any(|h| *h != HostPattern::Any));
 
-        Self::new_inner(config, "", false, None, false, host_scoped)
+        Self::new_inner(config, "", false, None, None, host_scoped)
     }
 
     /// Handler for HTTP metadata that must never receive substituted secrets.
@@ -552,7 +600,7 @@ impl SecretsHandler {
     /// treated as violations according to their configured action unless a
     /// passthrough policy explicitly allows forwarding the placeholder.
     pub(crate) fn new_plain_http_untrusted_metadata(config: &SecretsConfig) -> Self {
-        Self::new_inner(config, "", false, None, false, true)
+        Self::new_inner(config, "", false, None, None, true)
     }
 
     fn new_inner(
@@ -560,7 +608,7 @@ impl SecretsHandler {
         sni: &str,
         tls_intercepted: bool,
         identity: Option<SecretHostIdentity<'_>>,
-        enforce_http_authority: bool,
+        http_authority: Option<HttpAuthorityValidator>,
         force_ineligible: bool,
     ) -> Self {
         let mut eligible_for_substitution = Vec::new();
@@ -638,7 +686,7 @@ impl SecretsHandler {
             placeholder_limit_exceeded,
             prev_tail: Vec::new(),
             http_state: HttpState::AwaitingHeaders,
-            http_sni: enforce_http_authority.then(|| sni.to_string()),
+            http_authority,
             http1_request_summary: None,
             http_pending: Vec::new(),
             unsupported_body_tail: Vec::new(),
@@ -775,19 +823,10 @@ impl SecretsHandler {
         let (body_bytes, spillover) = if boundary.is_some() {
             let header_text = String::from_utf8_lossy(header_bytes);
             let request_summary = http1_request_summary(header_text.as_ref());
-            if let Some(sni) = self.http_sni.as_deref()
+            if let Some(validator) = self.http_authority.as_ref()
                 && let Some(metadata) = parse_http_request_metadata(header_bytes)?
-                && (metadata.host_headers.len() != 1
-                    || !metadata
-                        .host_headers
-                        .iter()
-                        .all(|host| authority_matches_sni(host, sni))
-                    || metadata
-                        .target_authority
-                        .as_deref()
-                        .is_some_and(|authority| !authority_matches_sni(authority, sni)))
             {
-                return Err(ViolationAction::Block);
+                validate_http1_authority(&metadata, validator)?;
             }
 
             let transfer_encoding = parse_transfer_encoding(header_text.as_ref())?;
@@ -1229,7 +1268,7 @@ impl SecretsHandler {
 
     /// Returns true if this connection needs no secret substitution or violation detection.
     pub fn is_empty(&self) -> bool {
-        self.http_sni.is_none()
+        self.http_authority.is_none()
             && self.http_pending.is_empty()
             && self.unsupported_body_tail.is_empty()
             && self.http1_request_summary.is_none()
@@ -1770,8 +1809,8 @@ impl Http2State {
             return Err(ViolationAction::Block);
         }
 
-        if let Some(sni) = handler.http_sni.as_deref() {
-            validate_http2_authority(&headers, sni, is_initial_request)?;
+        if let Some(validator) = handler.http_authority.as_ref() {
+            validate_http2_authority(&headers, validator, is_initial_request)?;
         }
 
         let detection_bytes = http2_header_detection_bytes(&headers);
@@ -1997,9 +2036,28 @@ fn append_http2_frame(
     Ok(())
 }
 
+fn validate_http1_authority(
+    metadata: &HttpRequestMetadata,
+    validator: &HttpAuthorityValidator,
+) -> Result<(), ViolationAction> {
+    if metadata.host_headers.len() != 1 {
+        return Err(ViolationAction::Block);
+    }
+
+    for authority in metadata
+        .host_headers
+        .iter()
+        .chain(metadata.target_authority.iter())
+    {
+        validate_authority(authority, validator)?;
+    }
+
+    Ok(())
+}
+
 fn validate_http2_authority(
     headers: &[(Vec<u8>, Vec<u8>)],
-    sni: &str,
+    validator: &HttpAuthorityValidator,
     require_authority: bool,
 ) -> Result<(), ViolationAction> {
     let mut authority_count = 0usize;
@@ -2008,14 +2066,10 @@ fn validate_http2_authority(
         if name.eq_ignore_ascii_case(b":authority") {
             authority_count += 1;
             let authority = String::from_utf8_lossy(value);
-            if !authority_matches_sni(authority.as_ref(), sni) {
-                return Err(ViolationAction::Block);
-            }
+            validate_authority(authority.as_ref(), validator)?;
         } else if name.eq_ignore_ascii_case(b"host") {
             let host = String::from_utf8_lossy(value);
-            if !authority_matches_sni(host.as_ref(), sni) {
-                return Err(ViolationAction::Block);
-            }
+            validate_authority(host.as_ref(), validator)?;
         }
     }
 
@@ -2024,6 +2078,39 @@ fn validate_http2_authority(
     }
 
     Ok(())
+}
+
+fn validate_authority(
+    authority: &str,
+    validator: &HttpAuthorityValidator,
+) -> Result<(), ViolationAction> {
+    match validator {
+        HttpAuthorityValidator::Sni(sni) => authority_matches_sni(authority, sni)
+            .then_some(())
+            .ok_or(ViolationAction::Block),
+        HttpAuthorityValidator::Policy {
+            guest_dst,
+            network_policy,
+            shared,
+        } => {
+            let Some(hostname) = authority_hostname(authority) else {
+                return Err(ViolationAction::Block);
+            };
+            let hostname = hostname.to_ascii_lowercase();
+            let authority_dst = SocketAddr::new(guest_dst.ip(), guest_dst.port());
+            match network_policy.evaluate_egress_with_source(
+                authority_dst,
+                Protocol::Tcp,
+                shared,
+                HostnameSource::Sni(&hostname),
+            ) {
+                EgressEvaluation::Allow => Ok(()),
+                EgressEvaluation::Deny | EgressEvaluation::DeferUntilHostname => {
+                    Err(ViolationAction::Block)
+                }
+            }
+        }
+    }
 }
 
 fn http2_header_detection_bytes(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {

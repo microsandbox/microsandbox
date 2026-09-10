@@ -912,6 +912,7 @@ struct NetworkOpts {
     #[serde(default)]
     deny_domain_suffixes: Vec<String>,
     tls: Option<TlsOpts>,
+    strict: Option<bool>,
     /// Ports nested inside network: {host_port: guest_port}.
     #[serde(default)]
     ports: HashMap<u16, u16>,
@@ -1413,6 +1414,11 @@ fn apply_network(
     // Connection ceiling.
     if let Some(max) = net.max_connections {
         builder = builder.network(move |n| n.max_connections(max));
+    }
+
+    // Strict hostname policy.
+    if let Some(strict) = net.strict {
+        builder = builder.network(move |n| n.strict(strict));
     }
 
     // Rate limiters. Validation (empty limiter, zero size/refill, burst

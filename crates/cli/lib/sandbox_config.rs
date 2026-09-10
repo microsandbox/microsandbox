@@ -394,6 +394,7 @@ struct NetworkConfigInput {
     dns: Option<DnsInput>,
     #[config_patch(nested)]
     tls: Option<TlsInput>,
+    strict: Option<bool>,
     trust_host_cas: Option<bool>,
     max_connections: Option<usize>,
 }
@@ -1704,6 +1705,9 @@ fn materialize_network_patch(
     if let Some(entries) = materialized_secrets {
         patch = patch.secrets(SecretsConfigPatch::new().secrets(entries));
     }
+    if let Some(enabled) = input.strict {
+        patch = patch.strict(enabled);
+    }
     if let Some(enabled) = input.trust_host_cas {
         patch = patch.trust_host_cas(enabled);
     }
@@ -2086,6 +2090,7 @@ dns:
   nameservers: ["1.1.1.1"]
 tls:
   bypass: ["higher.example.com"]
+strict: true
 trust_host_cas: false
 max_connections: 20
 "#,
@@ -2129,6 +2134,7 @@ ADD:
         assert_eq!(tls.bypass.as_deref().unwrap(), ["higher.example.com"]);
         assert_eq!(tls.verify_upstream, Some(false));
         assert_eq!(tls.block_quic, Some(true));
+        assert_eq!(network.strict, Some(true));
         assert_eq!(network.trust_host_cas, Some(false));
         assert_eq!(network.max_connections, Some(20));
 
@@ -2529,6 +2535,7 @@ scripts:
 network:
   policy: public
   allow: ["api.openai.com"]
+  strict: true
   max_connections: 64
 secrets:
   TOKEN:
@@ -2552,6 +2559,7 @@ secrets:
             "#!/bin/bash\npython app.py\n"
         );
         assert_eq!(config.spec.network.max_connections, Some(64));
+        assert!(config.spec.network.strict);
         assert_eq!(config.spec.network.ports.len(), 0);
         assert!(config.spec.network.tls.as_ref().unwrap().enabled);
         assert!(config.spec.network.dns.is_none());
