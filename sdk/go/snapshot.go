@@ -30,7 +30,7 @@ type SnapshotCreateOptions struct {
 
 // SnapshotSaveOptions configures Snapshot.Save.
 type SnapshotSaveOptions struct {
-	// Since identifies an exact base snapshot or standalone base archive.
+	// Since omits disk layers and RAM objects supplied by a base snapshot or standalone archive.
 	Since string
 	// LastLayers includes the newest N sealed disk layers. Mutually exclusive with Since.
 	LastLayers  *uint32

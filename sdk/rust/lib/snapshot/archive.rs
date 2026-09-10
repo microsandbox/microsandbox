@@ -70,7 +70,8 @@ pub struct SaveOpts {
     pub with_image: bool,
     /// Skip zstd compression and write a plain `.tar`. Default: zstd.
     pub plain_tar: bool,
-    /// Export only disk layers after this exact base snapshot (name, directory, or archive).
+    /// Omit disk layers and RAM objects supplied by this base (name, directory, or archive).
+    /// The base must be an exact physical disk prefix; full-snapshot metadata stays complete.
     /// Mutually exclusive with `last_layers` and `with_parents`.
     pub since: Option<String>,
     /// Export the newest N sealed disk layers, requiring an explicit base when loading omissions.
@@ -1327,7 +1328,7 @@ async fn write_archive_entries<W>(
     cache_files: &[(PathBuf, String)],
     head: &Snapshot,
     opts: &SaveOpts,
-    dependencies: Option<&delta::DiskDependencies>,
+    dependencies: Option<&delta::Dependencies>,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
@@ -2864,7 +2865,7 @@ async fn validate_archive_inventory(
     }
     if !matches!(
         inventory.completeness.as_str(),
-        "boot-complete" | "disk-dependent"
+        "boot-complete" | "dependent"
     ) {
         return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,

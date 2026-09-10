@@ -45,7 +45,7 @@ pub struct JsSaveOpts {
     pub with_image: Option<bool>,
     /// Skip zstd compression and write a plain `.tar`.
     pub plain_tar: Option<bool>,
-    /// Exact base snapshot or standalone archive for incremental disk export.
+    /// Base snapshot or standalone archive supplying reusable disk layers and RAM objects.
     pub since: Option<String>,
     /// Newest N immutable disk layers to include.
     pub last_layers: Option<f64>,

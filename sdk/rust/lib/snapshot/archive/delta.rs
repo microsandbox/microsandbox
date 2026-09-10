@@ -1,4 +1,4 @@
-//! Exact physical-prefix dependencies for explicitly incremental disk exports.
+//! Explicit disk-prefix and immutable RAM-object dependencies for incremental exports.
 
 use microsandbox_image::checkpoint::{DiskLayerExportPlan, DiskLayerRef};
 use microsandbox_image::snapshot::{DiskLayer, Manifest};
@@ -9,7 +9,7 @@ use super::*;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-pub(super) const REQUIREMENT: &str = "msb-disk-layer-dependencies-v1";
+pub(super) const REQUIREMENT: &str = "msb-snapshot-dependencies-v1";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -36,8 +36,9 @@ struct RequiredLayer {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DiskDependencies {
-    required: Vec<RequiredLayer>,
+pub(super) struct Dependencies {
+    disks: Vec<RequiredLayer>,
+    memory: Vec<ObjectId>,
 }
 
 struct PhysicalLayer {
@@ -47,7 +48,7 @@ struct PhysicalLayer {
 
 struct BaseSnapshot {
     snapshot: Snapshot,
-    // Keep archive staging alive until all required layers have been copied to the destination.
+    // Keep archive staging alive until all required payloads belong to the destination.
     _stage: Option<tempfile::TempDir>,
 }
 
@@ -59,64 +60,84 @@ pub(super) async fn selection(
     local: &LocalBackend,
     head: &Snapshot,
     opts: &SaveOpts,
-) -> MicrosandboxResult<Option<DiskDependencies>> {
+) -> MicrosandboxResult<Option<Dependencies>> {
     if opts.since.is_none() && opts.last_layers.is_none() {
         return Ok(None);
     }
     if opts.with_parents || (opts.since.is_some() && opts.last_layers.is_some()) {
         return Err(MicrosandboxError::InvalidConfig(
-            "disk-layer export takes either since or last_layers, without with_parents".into(),
+            "incremental export takes either since or last_layers, without with_parents".into(),
         ));
     }
     let layers = physical_layers(head.manifest(), head.path())?;
-    let plan = if let Some(base) = &opts.since {
-        let base = open_base(local, base).await?;
+    let mut memory = Vec::new();
+    let required = if let Some(base) = &opts.since {
+        // Base archives carry buffered decoder/verification futures; keep them off the caller's
+        // stack, including when this planner is nested inside a direct restore or SDK call.
+        let base = Box::pin(open_base(local, base)).await?;
         let baseline = physical_layers(base.snapshot.manifest(), base.snapshot.path())?;
-        DiskLayerExportPlan::since(
-            &layers
-                .iter()
-                .map(|layer| &layer.required.identity)
-                .collect::<Vec<_>>(),
-            &baseline
-                .iter()
-                .map(|layer| &layer.required.identity)
-                .collect::<Vec<_>>(),
-        )
+        let available = memory_objects(&base.snapshot)?;
+        memory = memory_objects(head)?
+            .intersection(&available)
+            .cloned()
+            .collect();
+        // Tmpfs-root full snapshots have no disks, but may still depend on RAM objects.
+        // Do not let disk completeness suppress an independent memory dependency.
+        if layers.is_empty() && baseline.is_empty() {
+            0..0
+        } else {
+            DiskLayerExportPlan::since(
+                &layers
+                    .iter()
+                    .map(|layer| &layer.required.identity)
+                    .collect::<Vec<_>>(),
+                &baseline
+                    .iter()
+                    .map(|layer| &layer.required.identity)
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
+            .required()
+        }
     } else {
         DiskLayerExportPlan::last(layers.len(), opts.last_layers.expect("selector checked"))
-    }
-    .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
-    if plan.is_disk_complete() {
+            .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
+            .required()
+    };
+    if required.is_empty() && memory.is_empty() {
         return Ok(None);
     }
-    Ok(Some(DiskDependencies {
-        required: layers[plan.required()]
+    Ok(Some(Dependencies {
+        disks: layers[required]
             .iter()
             .map(|layer| layer.required.clone())
             .collect(),
+        memory,
     }))
 }
 
 pub(super) fn apply(
     inventory: &mut ArchiveInventory,
-    dependencies: &DiskDependencies,
+    dependencies: &Dependencies,
 ) -> MicrosandboxResult<()> {
-    for required in &dependencies.required {
-        let entry = inventory
-            .entries
-            .iter_mut()
-            .find(|entry| entry.path == required.path)
-            .ok_or_else(|| {
-                MicrosandboxError::SnapshotIntegrity(
-                    "required disk layer is absent from archive inventory".into(),
-                )
-            })?;
+    let paths = dependency_paths(&inventory.head, dependencies);
+    let mut found = 0;
+    for entry in &mut inventory.entries {
+        if !paths.contains(entry.path.as_str()) {
+            continue;
+        }
+        found += 1;
         entry.included = false;
         entry.encoded_size = 0;
         entry.sparse_ranges.clear();
         entry.transport_integrity = None;
     }
-    inventory.completeness = "disk-dependent".into();
+    if found != paths.len() {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "required payload is absent from archive inventory".into(),
+        ));
+    }
+    inventory.completeness = "dependent".into();
     inventory.requires.push(REQUIREMENT.into());
     inventory.requires.sort();
     inventory
@@ -142,14 +163,9 @@ pub(super) fn apply(
     Ok(())
 }
 
-pub(super) fn validate(
-    inventory: &ArchiveInventory,
-) -> MicrosandboxResult<Option<DiskDependencies>> {
+pub(super) fn validate(inventory: &ArchiveInventory) -> MicrosandboxResult<Option<Dependencies>> {
     let extension = inventory.extensions.get(REQUIREMENT);
-    let required = inventory
-        .requires
-        .iter()
-        .any(|requirement| requirement == REQUIREMENT);
+    let required = inventory.requires.iter().any(|value| value == REQUIREMENT);
     if inventory.completeness == "boot-complete" && !required && extension.is_none() {
         if inventory.entries.iter().any(|entry| !entry.included) {
             return Err(MicrosandboxError::SnapshotIntegrity(
@@ -158,41 +174,60 @@ pub(super) fn validate(
         }
         return Ok(None);
     }
-    if inventory.completeness != "disk-dependent" || !required || extension.is_none() {
+    if inventory.completeness != "dependent" || !required || extension.is_none() {
         return Err(MicrosandboxError::SnapshotIntegrity(
-            "invalid disk dependency capability/completeness binding".into(),
+            "invalid snapshot dependency capability/completeness binding".into(),
         ));
     }
-    let dependencies: DiskDependencies = serde_json::from_value(extension.unwrap().clone())?;
-    if dependencies.required.is_empty() || dependencies.required.len() > 256 {
+    let dependencies: Dependencies = serde_json::from_value(extension.unwrap().clone())?;
+    if (dependencies.disks.is_empty() && dependencies.memory.is_empty())
+        || dependencies.disks.len() > 256
+        || dependencies.memory.len() > inventory.entries.len()
+        || dependencies
+            .memory
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
         return Err(MicrosandboxError::SnapshotIntegrity(
-            "invalid disk dependency count".into(),
+            "invalid snapshot dependency count or object ordering".into(),
         ));
     }
-    let mut paths = HashSet::new();
-    for layer in &dependencies.required {
-        let entry = inventory
-            .entries
-            .iter()
-            .find(|entry| entry.path == layer.path)
-            .ok_or_else(|| {
-                MicrosandboxError::SnapshotIntegrity(
-                    "disk dependency lacks an inventory entry".into(),
-                )
-            })?;
-        if entry.included
-            || !matches!(
+    let entries: HashMap<_, _> = inventory
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect();
+    let paths = dependency_paths(&inventory.head, &dependencies);
+    if paths.len() != dependencies.disks.len() + dependencies.memory.len() {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "duplicate snapshot dependency".into(),
+        ));
+    }
+    for path in &paths {
+        let entry = entries.get(path.as_str()).ok_or_else(|| {
+            MicrosandboxError::SnapshotIntegrity("dependency lacks an inventory entry".into())
+        })?;
+        let is_memory = dependencies
+            .memory
+            .binary_search_by(|id| memory_archive_path(&inventory.head, id).cmp(path))
+            .is_ok();
+        let valid_kind = if is_memory {
+            entry.kind == "checkpoint-object"
+        } else {
+            matches!(
                 entry.kind.as_str(),
                 "file-payload" | "checkpoint-disk-layer"
             )
+        };
+        if entry.included
+            || !valid_kind
             || entry.owner_snapshot.as_deref() != Some(inventory.head.as_str())
             || entry.encoded_size != 0
             || !entry.sparse_ranges.is_empty()
             || entry.transport_integrity.is_some()
-            || !paths.insert(&layer.path)
         {
             return Err(MicrosandboxError::SnapshotIntegrity(
-                "invalid omitted disk-layer binding".into(),
+                "invalid omitted payload binding".into(),
             ));
         }
     }
@@ -204,13 +239,13 @@ pub(super) fn validate(
         != paths.len()
     {
         return Err(MicrosandboxError::SnapshotIntegrity(
-            "archive omits a non-disk dependency".into(),
+            "archive omits an undeclared dependency".into(),
         ));
     }
     Ok(Some(dependencies))
 }
 
-/// Resolve only a caller-supplied base; never search ambient directories or qcow backing paths.
+/// Resolve only a caller-supplied base; never search ambient directories or backing paths.
 pub(super) async fn resolve(
     local: &LocalBackend,
     inventory: &ArchiveInventory,
@@ -221,54 +256,201 @@ pub(super) async fn resolve(
     let Some(dependencies) = validate(inventory)? else {
         return Ok(());
     };
-    let base = base.ok_or_else(|| MicrosandboxError::InvalidConfig(
-        "this disk-dependent archive requires an explicit base snapshot or standalone base archive".into(),
-    ))?;
-    let base = open_base(local, base).await?;
+    let base = base.ok_or_else(|| {
+        MicrosandboxError::InvalidConfig(
+            "this dependent archive requires an explicit base snapshot or standalone base archive"
+                .into(),
+        )
+    })?;
+    let base = Box::pin(open_base(local, base)).await?;
     let available = physical_layers(base.snapshot.manifest(), base.snapshot.path())?;
-    if available.len() != dependencies.required.len()
-        || available
-            .iter()
-            .zip(&dependencies.required)
-            .any(|(layer, required)| layer.required.identity != required.identity)
+    if !dependencies.disks.is_empty()
+        && (available.len() != dependencies.disks.len()
+            || available
+                .iter()
+                .zip(&dependencies.disks)
+                .any(|(layer, required)| layer.required.identity != required.identity))
     {
         return Err(MicrosandboxError::SnapshotIntegrity(
             "supplied base is not the exact required physical disk prefix".into(),
         ));
     }
-    // Copy into operation-owned staging. Imported artifacts must survive deleting the supplied
-    // base and must never inherit a writable hardlink into another sandbox.
-    for (source, required) in available.iter().zip(&dependencies.required) {
-        let target = inventory_entry_target(&required.path, snapshots_dir, cache_dir)?;
-        if target.exists() {
-            return Err(MicrosandboxError::SnapshotIntegrity(
-                "dependency collides with an extracted member".into(),
-            ));
-        }
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let source = source.source.clone();
-        tokio::task::spawn_blocking(move || microsandbox_utils::copy::fast_copy(&source, &target))
-            .await
-            .map_err(|error| MicrosandboxError::Runtime(format!("base layer copy: {error}")))??;
+    let available_memory = memory_objects(&base.snapshot)?;
+    if dependencies
+        .memory
+        .iter()
+        .any(|id| !available_memory.contains(id))
+    {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "supplied base does not contain the required RAM objects".into(),
+        ));
     }
+
+    // Every dependency is copied into operation-owned staging. In particular, a restored child
+    // must not inherit a writable hardlink into the base; deleting the base must be harmless.
+    for (source, required) in available.iter().zip(&dependencies.disks) {
+        let target = inventory_entry_target(&required.path, snapshots_dir, cache_dir)?;
+        copy_dependency(&source.source, &target).await?;
+    }
+    for id in &dependencies.memory {
+        let source = checkpoint_object_path(&base.snapshot.path().join(CHECKPOINT_DIRECTORY), id);
+        let target = inventory_entry_target(
+            &memory_archive_path(&inventory.head, id),
+            snapshots_dir,
+            cache_dir,
+        )?;
+        copy_dependency(&source, &target).await?;
+        // Verify only the objects actually borrowed, in the destination-owned copy. Export
+        // selection is metadata-only for RAM; it must not scan the base's entire guest memory.
+        // This reader owns a 64 KiB buffer; boxing prevents every enclosing archive/SDK
+        // future from embedding another copy of that buffer in its own stack frame.
+        let actual = format!(
+            "sha256:{}",
+            hex::encode(Box::pin(file_sha256(&target)).await?)
+        );
+        if actual != id.as_str() {
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                "base RAM object content does not match {id}"
+            )));
+        }
+    }
+
+    // Open the complete target only after filling omissions. This retains its normal metadata,
+    // range, epoch and disk-integrity validation instead of introducing a partial-closure mode.
     let artifact = snapshots_dir.join(&inventory.head);
     let manifest =
         Manifest::from_bytes(&tokio::fs::read(artifact.join(DESCRIPTOR_FILENAME)).await?)
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let target = physical_layers(&manifest, &artifact)?;
-    if target.len() < dependencies.required.len()
+    if target.len() < dependencies.disks.len()
         || target
             .iter()
-            .zip(&dependencies.required)
+            .zip(&dependencies.disks)
             .any(|(layer, required)| &layer.required != required)
     {
         return Err(MicrosandboxError::SnapshotIntegrity(
             "dependency list is not the target descriptor's exact disk prefix".into(),
         ));
     }
+    let target_memory = if dependencies.memory.is_empty() {
+        BTreeSet::new()
+    } else {
+        let snapshot = store::open_snapshot(local, artifact.to_string_lossy().as_ref()).await?;
+        memory_objects(&snapshot)?
+    };
+    if dependencies
+        .memory
+        .iter()
+        .any(|id| !target_memory.contains(id))
+    {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "omitted object is not a target RAM payload; metadata must remain included".into(),
+        ));
+    }
+    let entries: HashMap<_, _> = inventory
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect();
+    for id in &dependencies.memory {
+        let path = memory_archive_path(&inventory.head, id);
+        let entry = entries
+            .get(path.as_str())
+            .expect("dependency inventory was validated");
+        let target = inventory_entry_target(&path, snapshots_dir, cache_dir)?;
+        if tokio::fs::metadata(target).await?.len() != entry.apparent_size {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "resolved RAM object size differs from inventory".into(),
+            ));
+        }
+    }
     Ok(())
+}
+
+async fn copy_dependency(source: &Path, target: &Path) -> MicrosandboxResult<()> {
+    if tokio::fs::symlink_metadata(target).await.is_ok() {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "dependency collides with an extracted member".into(),
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let source = source.to_path_buf();
+    let target = target.to_path_buf();
+    tokio::task::spawn_blocking(move || microsandbox_utils::copy::fast_copy(&source, &target))
+        .await
+        .map_err(|error| MicrosandboxError::Runtime(format!("base payload copy: {error}")))??;
+    Ok(())
+}
+
+fn memory_archive_path(snapshot_id: &str, id: &ObjectId) -> String {
+    let hash = id
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("validated ObjectId");
+    format!(
+        "checkpoints/{snapshot_id}/objects/sha256/{}/{hash}",
+        &hash[..2]
+    )
+}
+
+fn checkpoint_object_path(root: &Path, id: &ObjectId) -> PathBuf {
+    let hash = id
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("validated ObjectId");
+    root.join("objects")
+        .join("sha256")
+        .join(&hash[..2])
+        .join(hash)
+}
+
+fn dependency_paths(head: &str, dependencies: &Dependencies) -> BTreeSet<String> {
+    dependencies
+        .disks
+        .iter()
+        .map(|layer| layer.path.clone())
+        .chain(
+            dependencies
+                .memory
+                .iter()
+                .map(|id| memory_archive_path(head, id)),
+        )
+        .collect()
+}
+
+/// Return reusable RAM payload IDs, never metadata objects, even if bytes happen to coincide.
+fn memory_objects(snapshot: &Snapshot) -> MicrosandboxResult<BTreeSet<ObjectId>> {
+    let SnapshotState::Checkpoint(state) = &snapshot.manifest().state else {
+        return Ok(BTreeSet::new());
+    };
+    let expected = ObjectId::new(&state.checkpoint_root)
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let closure = CheckpointClosure::open_portable(
+        snapshot.path().join(CHECKPOINT_DIRECTORY),
+        Some(&expected),
+    )
+    .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let checkpoint = closure.checkpoint();
+    let mut objects: BTreeSet<_> = closure
+        .memory()
+        .extents
+        .iter()
+        .filter_map(|extent| match &extent.content {
+            MemoryExtentContent::Object(content) => Some(content.object.clone()),
+            MemoryExtentContent::Zero => None,
+        })
+        .collect();
+    objects.remove(&checkpoint.memory);
+    objects.remove(&checkpoint.execution_state);
+    for id in &checkpoint.disks {
+        objects.remove(id);
+    }
+    for device in &checkpoint.devices {
+        objects.remove(&device.state);
+    }
+    Ok(objects)
 }
 
 fn physical_layers(
@@ -295,14 +477,15 @@ fn physical_layers(
                 .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
             let closure = CheckpointClosure::open_portable(&root, Some(&expected))
                 .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-            if closure.disks().len() != 1 {
+            if closure.disks().len() > 1 {
                 return Err(MicrosandboxError::InvalidConfig(
-                    "disk-layer selection requires exactly one checkpoint disk".into(),
+                    "disk-layer selection supports at most one checkpoint disk".into(),
                 ));
             }
-            Ok(closure.disks()[0]
-                .layers
+            Ok(closure
+                .disks()
                 .iter()
+                .flat_map(|disk| &disk.layers)
                 .map(|layer| PhysicalLayer {
                     required: RequiredLayer {
                         path: format!(
@@ -322,7 +505,9 @@ async fn open_base(local: &LocalBackend, input: &str) -> MicrosandboxResult<Base
     let path = Path::new(input);
     if !path.is_file() {
         let snapshot = store::open_snapshot(local, input).await?;
-        snapshot.verify().await?;
+        if matches!(snapshot.manifest().state, SnapshotState::File(_)) {
+            Box::pin(snapshot.verify()).await?;
+        }
         return Ok(BaseSnapshot {
             snapshot,
             _stage: None,
@@ -370,6 +555,9 @@ async fn open_base(local: &LocalBackend, input: &str) -> MicrosandboxResult<Base
     if let Some(inventory) = &unpacked.inventory {
         validate_inventory_snapshot_bindings(inventory, &imported)?;
     }
+    if matches!(imported[head].manifest().state, SnapshotState::File(_)) {
+        Box::pin(imported[head].verify()).await?;
+    }
     Ok(BaseSnapshot {
         snapshot: imported[head].clone(),
         _stage: Some(stage),
@@ -379,6 +567,10 @@ async fn open_base(local: &LocalBackend, input: &str) -> MicrosandboxResult<Base
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "delta_tests.rs"]
+mod memory_tests;
 
 #[cfg(test)]
 mod tests {

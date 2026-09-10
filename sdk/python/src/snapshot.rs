@@ -228,6 +228,9 @@ impl PySnapshot {
 
     /// Bundle a snapshot into a `.tar.zst` archive.
     ///
+    /// `since` omits disk layers and RAM objects supplied by the base; `last_layers` only
+    /// selects disk layers. Dependent archives require a base when loaded or restored.
+    ///
     /// The recorded manifest is archived as-is, so create the snapshot
     /// with `record_integrity=True` if receivers must verify content.
     #[staticmethod]

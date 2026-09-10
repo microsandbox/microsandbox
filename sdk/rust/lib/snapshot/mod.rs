@@ -263,7 +263,7 @@ impl Snapshot {
         archive::load_snapshot(local, archive_path, dest).await
     }
 
-    /// Load a disk-dependent archive using its exact base snapshot or standalone base archive.
+    /// Load a dependent archive using its base snapshot or standalone base archive.
     /// The imported snapshot owns a complete local closure after this call.
     pub async fn load_with_base(
         archive_path: &Path,

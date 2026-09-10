@@ -142,7 +142,7 @@ impl JsSandboxBuilder {
         self
     }
 
-    /// Supply the exact base for a disk-dependent snapshot archive.
+    /// Supply the base for omitted disk layers and RAM objects in a snapshot archive.
     #[napi]
     pub fn snapshot_base(&mut self, base: String) -> &Self {
         let prev = self.take_inner();

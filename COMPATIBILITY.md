@@ -190,6 +190,8 @@ Snapshot descriptor bytes are identity-bearing: their canonical bytes determine 
 
 Archive compatibility includes compression detection, `archive.json`, canonical inventory order, transport digests, accepted path grammar, legacy paths, cache-closure entries, and rejection of duplicate, missing, or escaping paths.
 
+Unreleased #8 incremental exports use `completeness: "dependent"` and the must-understand `msb-snapshot-dependencies-v1` extension. `--since` records omitted physical disk-prefix layers and reusable RAM-object identities; `--last-layers` only omits disk layers. The complete target memory manifest and CPU/device state remain included. Loading and direct archive restore resolve the explicitly supplied base into owned staging before opening the complete target. This replaces the unreleased disk-only dependency encoding without a compatibility shim or snapshot descriptor change. Readers that do not understand this requirement refuse it; ordinary standalone archives are unchanged.
+
 Evolution rules:
 
 - Do not make semantically harmless serialization changes to identity-bearing bytes without treating them as an identity format change.

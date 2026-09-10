@@ -1158,7 +1158,7 @@ impl SandboxBuilder {
         self
     }
 
-    /// Supply the exact base snapshot or standalone base archive for a disk-dependent archive.
+    /// Supply the base snapshot or standalone archive for omitted disk layers and RAM objects.
     pub fn snapshot_base(mut self, base: impl Into<String>) -> Self {
         self.config.snapshot_base = Some(base.into());
         self

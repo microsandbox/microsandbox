@@ -1074,7 +1074,7 @@ export declare class SandboxBuilder {
    * snapshot already pins the image reference and digest.
    */
   fromSnapshot(pathOrName: string): this
-  /** Supply the exact base for a disk-dependent snapshot archive. */
+  /** Supply the base for omitted disk layers and RAM objects in a snapshot archive. */
   snapshotBase(base: string): this
   /** Cold-boot only the disk state carried by a full snapshot. */
   diskOnly(): this

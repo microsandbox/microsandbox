@@ -167,7 +167,7 @@ pub struct SnapshotSaveArgs {
     /// CPU but much larger file for sparse uppers.
     #[arg(long)]
     pub plain_tar: bool,
-    /// Export disk layers after an exact base snapshot or standalone base archive.
+    /// Omit disk layers and RAM objects supplied by an exact base snapshot or standalone archive.
     #[arg(long, conflicts_with_all = ["last_layers", "with_parents"])]
     pub since: Option<String>,
     /// Export only the newest N sealed disk layers (load requires the omitted base).

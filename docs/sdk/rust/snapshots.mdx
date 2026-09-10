@@ -9,6 +9,8 @@ Create disk snapshots of running, paused, stopped, or crashed sandboxes, or full
 
 ## Disk maintenance and incremental export
 
+Exporting since a base omits its reusable disk layers and RAM objects. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option only selects disk layers and leaves RAM payloads complete. Supply the base when loading or restoring a dependent archive; a dependent base archive must be loaded first.
+
 ```rust
 let worker = Sandbox::get("worker").await?;
 let plan = worker.compact().layers(3).dry_run().await?;

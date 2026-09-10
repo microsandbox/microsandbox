@@ -9,6 +9,8 @@ Create disk snapshots of stopped sandboxes and full checkpoints of running sandb
 
 ## Disk maintenance and incremental export
 
+Exporting since a base omits its reusable disk layers and RAM objects. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option only selects disk layers and leaves RAM payloads complete. Supply the base when loading or restoring a dependent archive; a dependent base archive must be loaded first.
+
 ```go
 worker, err := m.GetSandbox(ctx, "worker")
 if err != nil { return err }

@@ -101,6 +101,8 @@ sb = await Sandbox.create("worker", image="python:3.12")
 
 ## Disk maintenance and incremental export
 
+Exporting since a base omits its reusable disk layers and RAM objects. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option only selects disk layers and leaves RAM payloads complete. Supply the base when loading or restoring a dependent archive; a dependent base archive must be loaded first.
+
 ```python
 worker = await Sandbox.get("worker")
 plan = await worker.compact(layers=3, dry_run=True)

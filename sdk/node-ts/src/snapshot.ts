@@ -52,7 +52,7 @@ export type SnapshotState =
  * Bundle options for `Snapshot.save`.
  */
 export interface SaveOpts {
-  /** Exact base snapshot or standalone archive; mutually exclusive with lastLayers/withParents. */
+  /** Omit disk layers and RAM objects supplied by this base; mutually exclusive with lastLayers/withParents. */
   since?: string;
   /** Newest N sealed disk layers. Full snapshots still include all memory/device state. */
   lastLayers?: number;

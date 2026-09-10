@@ -196,14 +196,14 @@ msb modify worker --compact --layers 3
 
 `--layers 3` merges the oldest three physical layers, **including the base**. It never includes the writable head, even when stopped. Omit `--layers` to merge all sealed layers; a chain with fewer than two sealed layers is unchanged. Managed and flat roots support compaction, running or stopped. Existing snapshots remain valid and retain their storage until you remove them separately.
 
-`--since` requires an exact physical-prefix base. Alternatively, `--last-layers 2` includes the newest two sealed checkpoint layers. A full checkpoint export still includes all required memory and device state. Unlike ordinary standalone exports, these smaller archives require the omitted base when loading or restoring:
+`--since` omits disk layers and, for full checkpoints, RAM objects already supplied by the base. The disk base must be an exact physical prefix. Each archive still includes its complete memory map and CPU/device state; it does not replay earlier memory images. Alternatively, `--last-layers 2` selects only disk layers and keeps all required RAM objects. These smaller archives require an explicit base when loading or restoring:
 
 ```bash
 msb snapshot load changes.msnap --base checkpoint-a
 msb create --name child --from-snapshot changes.msnap --snapshot-base checkpoint-a
 ```
 
-The base can also be a standalone snapshot archive. Restore copies the required closure into child-owned storage, without installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compaction, export a new standalone baseline before resuming incremental exports: the old physical prefix no longer matches. Do not combine compaction with unrelated `modify` options, or incremental export with `--with-parents`.
+The base can also be a standalone snapshot archive. Load a dependent base first, then pass the installed path printed by `snapshot load` to the next load or restore. Loads resolve disk and RAM dependencies without starting a VM; only the final sandbox creation resumes execution. Missing or incorrect dependencies fail before execution. Loaded snapshots and restored children own their required files, so removing the base later does not break them. Direct restore skips installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compaction, export a new standalone baseline before resuming incremental exports: the old physical prefix no longer matches. Do not combine compaction with unrelated `modify` options, or incremental export with `--with-parents`.
 
 ## Capture directly to an archive
 
