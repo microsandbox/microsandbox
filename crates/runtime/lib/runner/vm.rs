@@ -2288,6 +2288,10 @@ fn publish_control_endpoint(
     run_dir: &Path,
     sandbox_name: &str,
 ) -> RuntimeResult<()> {
+    // Windows uses named pipes and has no legacy Unix socket link to publish.
+    #[cfg(not(unix))]
+    let _ = (run_dir, sandbox_name);
+
     match super::control::spawn_control_listener(control_sock_path.clone(), context) {
         Ok(()) => {
             #[cfg(unix)]
