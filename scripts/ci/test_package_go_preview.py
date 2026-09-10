@@ -35,6 +35,26 @@ class GoPreviewTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     preview.validate_check({**checked, key: value}, checked["head_branch"])
 
+    def test_go_qualification_only_relaxes_the_overall_conclusion(self):
+        checked = {
+            "head_sha": "a" * 40,
+            "conclusion": "failure",
+            "path": ".github/workflows/check.yml",
+            "head_repository": {"full_name": preview.REPOSITORY},
+            "head_branch": "releases/build-pr-1537",
+            "event": "push",
+        }
+        with self.assertRaises(ValueError):
+            preview.validate_check(checked, checked["head_branch"])
+        self.assertEqual(preview.validate_check(
+            checked, checked["head_branch"], go_qualified=True), "a" * 40)
+        for key, value in (("event", "pull_request"), ("head_sha", "main"),
+                           ("head_repository", {"full_name": "someone/fork"})):
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    preview.validate_check({**checked, key: value}, checked["head_branch"],
+                                           go_qualified=True)
+
     def test_preview_revisions_use_distinct_cache_paths(self):
         source = (Path(__file__).parents[2] / "sdk/go/setup.go").read_text()
         first = preview.preview_setup(source, "a" * 40)

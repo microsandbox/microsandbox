@@ -46,11 +46,11 @@ def wait_for_run(run_id: int) -> dict:
     raise SystemExit("Timed out waiting for workflow; no SDK was published")
 
 
-def validate_check(checked: dict, branch: str) -> str:
+def validate_check(checked: dict, branch: str, *, go_qualified: bool = False) -> str:
     sha = checked["head_sha"]
     if (
         not re.fullmatch(r"[0-9a-f]{40}", sha)
-        or checked["conclusion"] != "success"
+        or (checked["conclusion"] != "success" and not go_qualified)
         or checked["path"] != ".github/workflows/check.yml"
         or checked["head_repository"]["full_name"] != REPOSITORY
         or checked["head_branch"] != branch
@@ -73,8 +73,10 @@ def preview_setup(source: str, sha: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-id", type=int, required=True, help="successful Check run")
+    parser.add_argument("--run-id", type=int, required=True, help="Check run supplying the runtime and Go FFI artifacts")
     parser.add_argument("--branch", default="releases/build-pr-1537")
+    parser.add_argument("--go-qualified-run", type=int,
+                        help="successful Go full-snapshot qualification and image publication run")
     parser.add_argument("--wait", action="store_true", help="wait for Check to finish")
     parser.add_argument("--publish-runtime", action="store_true",
                         help="dispatch and wait for the commit OCI publisher on main")
@@ -84,8 +86,38 @@ def main() -> None:
         parser.error("branch must be a releases/ helper branch")
 
     checked = wait_for_run(args.run_id) if args.wait else api(f"actions/runs/{args.run_id}")
-    sha = validate_check(checked, args.branch)
-    if api(f"git/ref/heads/{args.branch}")["object"]["sha"] != sha:
+    parent = api(f"git/ref/heads/{args.branch}")["object"]["sha"]
+    qualification = None
+    if args.go_qualified_run:
+        if args.wait or args.publish_runtime:
+            parser.error("--go-qualified-run uses an already completed Go/image run; omit --wait and --publish-runtime")
+        if checked["status"] != "completed":
+            raise SystemExit("Source Check run is not completed")
+        qualification = api(f"actions/runs/{args.go_qualified_run}")
+        if (qualification["conclusion"] != "success"
+                or qualification["event"] != "workflow_dispatch"
+                or qualification["path"] != ".github/workflows/check.yml"
+                or qualification["head_repository"]["full_name"] != REPOSITORY
+                or qualification["head_branch"] != args.branch
+                or qualification["head_sha"] != parent):
+            raise SystemExit("Expected successful Go qualification on the current helper branch")
+        jobs = json.loads(run(
+            "gh", "api", "--paginate", "--slurp",
+            f"repos/{REPOSITORY}/actions/runs/{args.go_qualified_run}/jobs?per_page=100"))
+        jobs = [job for page in jobs for job in page["jobs"]]
+        project_job = next((j for j in jobs if j["name"] ==
+            "Go full snapshot project / Full snapshot project (Go / Linux amd64)"), None)
+        image_job = next((j for j in jobs if j["name"] ==
+            "Go full snapshot project / Publish commit tag"), None)
+        if not project_job or not image_job or any(
+                j["conclusion"] != "success" for j in (project_job, image_job)):
+            raise SystemExit("Go project and image publication must both have succeeded")
+        logs = run("gh", "api", f"repos/{REPOSITORY}/actions/jobs/{project_job['id']}/logs")
+        # Bind the qualification to the source run it validated, not another successful build.
+        if not re.search(r"CHECK_RUN: " + str(args.run_id) + r"\b", logs):
+            raise SystemExit("Qualification logs do not identify the requested source Check run")
+    sha = validate_check(checked, args.branch, go_qualified=qualification is not None)
+    if not qualification and parent != sha:
         raise SystemExit("Helper branch moved since this Check run; use its latest successful run")
 
     if args.publish_runtime:
@@ -124,7 +156,13 @@ def main() -> None:
     checkout = work / "checkout"
     remote = f"https://github.com/{REPOSITORY}.git"
     run("git", "fetch", remote, f"refs/heads/{args.branch}", cwd=root)
-    run("git", "worktree", "add", "--detach", str(checkout), sha, cwd=root)
+    if qualification:
+        run("git", "merge-base", "--is-ancestor", sha, parent, cwd=root)
+        changed = run("git", "diff", "--name-only", sha, parent, cwd=root).splitlines()
+        allowed = (".github/", "scripts/ci/", "examples/go/full-snapshot-preview/")
+        if any(not path.startswith(allowed) for path in changed):
+            raise SystemExit("Helper branch changed runtime or SDK sources after the checked build")
+    run("git", "worktree", "add", "--detach", str(checkout), parent, cwd=root)
     print(f"Preparing {sha} in {checkout}", flush=True)
 
     artifact_dir = work / "ffi"
@@ -154,6 +192,7 @@ def main() -> None:
         "runtime_tag": f"{IMAGE}:{sha}",
         "platforms": ["linux/amd64"],
         "ffi_sha256": hashlib.sha256(data).hexdigest(),
+        "go_qualification": qualification["html_url"] if qualification else None,
     }
     (sdk / "preview.json").write_text(json.dumps(manifest, indent=2) + "\n")
     # Keep the repeatable publisher and instructions on the packaging branch.
@@ -164,29 +203,32 @@ def main() -> None:
     tests = root / "scripts/ci/test_package_go_preview.py"
     (checkout / "scripts/ci/test_package_go_preview.py").write_bytes(tests.read_bytes())
 
-    env = {**os.environ, "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0"}
-    run("go", "build", "./...", cwd=sdk, env=env)
-    # Exercise the normal embedded-library path in Linux, without dev build tags.
-    probe = work / "probe.go"
-    probe.write_text(
-        'package main\nimport ("fmt"; m "' + MODULE + '")\n'
-        'func main() { v, err := m.RuntimeVersion(); if err != nil { panic(err) }; '
-        'if v == "" { panic("empty runtime version") }; fmt.Println(v) }\n'
-    )
-    run("go", "build", "-o", str(work / "probe"), str(probe), cwd=sdk, env=env)
-    version = run(
-        "docker", "run", "--rm", "--platform", "linux/amd64", "--network", "none",
-        "-v", f"{work / 'probe'}:/preview-probe:ro", "--entrypoint", "/preview-probe",
-        f"{IMAGE}@{digest}",
-    )
-    print(f"Embedded FFI loaded in the runtime image: {version}", flush=True)
+    if qualification:
+        print(f"Embedded FFI and full snapshots verified on Linux/KVM: {qualification['html_url']}", flush=True)
+    else:
+        env = {**os.environ, "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "1"}
+        run("go", "build", "./...", cwd=sdk, env=env)
+        # Exercise the normal embedded-library path in Linux, without dev build tags.
+        probe = work / "probe.go"
+        probe.write_text(
+            'package main\nimport ("fmt"; m "' + MODULE + '")\n'
+            'func main() { v, err := m.RuntimeVersion(); if err != nil { panic(err) }; '
+            'if v == "" { panic("empty runtime version") }; fmt.Println(v) }\n'
+        )
+        run("go", "build", "-o", str(work / "probe"), str(probe), cwd=sdk, env=env)
+        version = run(
+            "docker", "run", "--rm", "--platform", "linux/amd64", "--network", "none",
+            "-v", f"{work / 'probe'}:/preview-probe:ro", "--entrypoint", "/preview-probe",
+            f"{IMAGE}@{digest}",
+        )
+        print(f"Embedded FFI loaded in the runtime image: {version}", flush=True)
     run("git", "diff", "--check", cwd=checkout)
     print(run("git", "diff", "--stat", cwd=checkout), flush=True)
     print(json.dumps(manifest, indent=2), flush=True)
     if not args.publish:
         print(f"Prepared only: {checkout}. Rerun with --publish to sign and push.")
         return
-    if api(f"git/ref/heads/{args.branch}")["object"]["sha"] != sha:
+    if api(f"git/ref/heads/{args.branch}")["object"]["sha"] != parent:
         raise SystemExit("Branch moved during packaging; nothing was pushed")
     run("git", "add", "sdk/go/setup.go", "sdk/go/preview.json",
         "sdk/go/internal/bundle/bundles", str(relative), "scripts/ci/go-preview.md", "scripts/ci/test_package_go_preview.py", cwd=checkout)

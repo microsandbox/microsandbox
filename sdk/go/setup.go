@@ -207,7 +207,7 @@ func materializeFFI(dir string) (string, error) {
 	if err != nil {
 		return "", &Error{Kind: ErrLibraryNotLoaded, Message: err.Error(), Cause: err}
 	}
-	libDir := filepath.Join(dir, "lib", "v"+sdkVersion)
+	libDir := filepath.Join(dir, "lib", "preview-67c047703bad69f5dfc704061088fb6f4e6525ee")
 	if err := os.MkdirAll(libDir, 0o755); err != nil {
 		return "", fmt.Errorf("create %s: %w", libDir, err)
 	}

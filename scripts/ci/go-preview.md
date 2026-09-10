@@ -48,6 +48,33 @@ not create release tags, GitHub releases, or stable package versions.
    `sdk/go/preview.json` records their source commit, Check run and FFI checksum.
    The customer must pin the packaging SHA, not the unbundled feature-branch SHA.
 
+## Qualify and publish only Go
+
+When a preview is intentionally scoped to Go, unrelated Check failures do not
+need to block it. First run the standalone full-snapshot project on Linux/KVM:
+
+```sh
+gh workflow run check.yml --repo superradcompany/microsandbox \
+  --ref releases/build-pr-1537 -f go_snapshot_run=<source-check-run>
+```
+
+This dispatch requires successful runtime, Go FFI, Go quality and both Go
+integration shards from the source run. It executes the standalone Go project
+with the embedded FFI and publishes the runtime image only after that project
+passes. Once the entire qualification run succeeds, package the Go SDK:
+
+```sh
+python3 scripts/ci/package-go-preview.py --run-id <source-check-run> \
+  --go-qualified-run <qualification-run> --publish
+```
+
+This path verifies the qualification used the requested source run. It permits
+only CI/tooling and standalone-project changes between the built source and the
+current helper branch, then appends the packaging commit to that branch. The
+Linux/KVM qualification supplies the embedded-library execution check on hosts
+that cannot execute amd64 Docker images. After pushing, the publisher downloads
+the revision through the public Go module proxy and checks the FFI checksum.
+
 ## Customer setup
 
 These previews currently support **Linux amd64**. Other platforms retain empty
