@@ -1,11 +1,62 @@
 //! Error types for microsandbox.
 
+use std::path::PathBuf;
+
+use serde::Serialize;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
 /// The result type for microsandbox operations.
 pub type MicrosandboxResult<T> = Result<T, MicrosandboxError>;
+
+/// Representation of a successfully published snapshot artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotArtifactKind {
+    /// An installed snapshot directory.
+    Installed,
+    /// A portable snapshot archive.
+    Archive,
+}
+
+/// A completed artifact retained even though the source failed to recover after capture.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PublishedSnapshotArtifact {
+    /// Whether `path` names an installed directory or archive.
+    pub kind: SnapshotArtifactKind,
+    /// Final published path, never an operation's staging directory.
+    pub path: PathBuf,
+    /// Identity stored in the snapshot descriptor.
+    pub snapshot_id: String,
+    /// Digest of the canonical snapshot descriptor.
+    pub digest: String,
+}
+
+/// Capture completed, but restoring the source's prior execution state failed.
+///
+/// The runtime checkpoint remains available at its runtime-local locator. `artifact` is present
+/// only after the requested installed snapshot or archive was also published successfully. Do not
+/// infer that the source is running, safely paused, or eligible for ordinary resume from this
+/// error: a thaw acknowledgement or fail-closed re-pause may itself have failed.
+#[derive(Clone, Debug, Serialize)]
+pub struct SnapshotSourceRecoveryError {
+    /// Sandbox whose post-capture recovery failed.
+    pub source_sandbox: String,
+    /// Verified runtime checkpoint identity.
+    pub checkpoint_id: String,
+    /// Content-addressed root of the verified runtime checkpoint.
+    pub checkpoint_root: String,
+    /// Runtime-local checkpoint path; removing the source may remove this recovery locator.
+    pub checkpoint_path: PathBuf,
+    /// Requested artifact, when its publication completed.
+    pub artifact: Option<PublishedSnapshotArtifact>,
+    /// Original runtime recovery diagnostic, including uncertainty about thaw or re-pause.
+    pub detail: String,
+    /// Additional failure while materializing or publishing the requested artifact.
+    pub publication_error: Option<String>,
+}
 
 /// Errors that can occur in microsandbox operations.
 #[derive(Debug, thiserror::Error)]
@@ -202,6 +253,10 @@ pub enum MicrosandboxError {
     /// The snapshot artifact failed integrity verification.
     #[error("snapshot integrity check failed: {0}")]
     SnapshotIntegrity(String),
+
+    /// A checkpoint was captured, but restoring the source's execution state failed.
+    #[error("{0}")]
+    SnapshotSourceRecovery(Box<SnapshotSourceRecoveryError>),
 
     /// An adjacent-release snapshot artifact migration is blocked.
     #[error("snapshot artifact migration failed for {artifact} during {phase}: {code}: {detail}")]
@@ -548,6 +603,35 @@ impl MicrosandboxError {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl std::fmt::Display for SnapshotSourceRecoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(artifact) = &self.artifact {
+            write!(
+                f,
+                "snapshot {} saved at {}; ",
+                artifact.snapshot_id,
+                artifact.path.display()
+            )?;
+        } else {
+            write!(
+                f,
+                "checkpoint {} retained at {}; requested snapshot publication is unconfirmed; ",
+                self.checkpoint_id,
+                self.checkpoint_path.display()
+            )?;
+        }
+        write!(
+            f,
+            "source sandbox {:?} requires recovery: {}",
+            self.source_sandbox, self.detail
+        )?;
+        if let Some(error) = &self.publication_error {
+            write!(f, "; snapshot publication failed: {error}")?;
+        }
+        Ok(())
+    }
+}
+
 impl From<microsandbox_types::TypesError> for MicrosandboxError {
     fn from(value: microsandbox_types::TypesError) -> Self {
         match value {
@@ -579,6 +663,43 @@ impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_source_recovery_details_keep_artifact_and_diagnostics_structured() {
+        let mut details = SnapshotSourceRecoveryError {
+            source_sandbox: "box".into(),
+            checkpoint_id: "checkpoint_test".into(),
+            checkpoint_root: "sha256:checkpoint".into(),
+            checkpoint_path: "/runtime/checkpoint_test".into(),
+            artifact: Some(PublishedSnapshotArtifact {
+                kind: SnapshotArtifactKind::Archive,
+                path: "/snapshots/saved.tar".into(),
+                snapshot_id: "snap_test".into(),
+                digest: "sha256:descriptor".into(),
+            }),
+            detail: "thaw timed out; re-pause failed".into(),
+            publication_error: None,
+        };
+        let json = serde_json::to_value(&details).unwrap();
+        assert_eq!(json["artifact"]["kind"], "archive");
+        assert_eq!(json["artifact"]["path"], "/snapshots/saved.tar");
+        assert_eq!(json["detail"], details.detail);
+        assert!(json["publication_error"].is_null());
+        assert!(
+            details
+                .to_string()
+                .contains("saved at /snapshots/saved.tar")
+        );
+
+        details.artifact = None;
+        details.publication_error = Some("destination fsync failed".into());
+        let json = serde_json::to_value(&details).unwrap();
+        assert!(json["artifact"].is_null());
+        let rendered = MicrosandboxError::SnapshotSourceRecovery(Box::new(details)).to_string();
+        assert!(rendered.contains("publication is unconfirmed"));
+        assert!(rendered.contains("thaw timed out; re-pause failed"));
+        assert!(rendered.contains("destination fsync failed"));
+    }
 
     #[test]
     fn unsupported_renders_operation_and_reason() {

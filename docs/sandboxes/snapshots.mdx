@@ -148,6 +148,8 @@ msb snapshot create worker-checkpoint --from-sandbox worker --full
 
 Capture briefly quiesces the VM, publishes one same-epoch checkpoint, and returns the source to running state. The first capture records a full memory generation; later captures may reuse unchanged objects through retained dirty tracking while every published manifest still describes complete logical memory.
 
+If capture saves the snapshot but cannot recover the source, the command fails and prints the saved artifact's location. The snapshot remains usable; do not automatically retry capture or resume the source. SDKs return a `SnapshotSourceRecoveryError` with the saved artifact details (Rust: `MicrosandboxError::SnapshotSourceRecovery`). If packaging also failed, the error identifies only the retained runtime checkpoint, not a completed snapshot.
+
 Creating a sandbox from the resulting snapshot restores into a child-owned disk generation and installs a fresh VM Generation ID. Before your processes continue, the guest kernel corrects its wall clock and acknowledges activation; the runtime then thaws the workload and publishes network access last. Full restore requires the matching clock-aware kernel. Older development full snapshots must be recaptured, or restored with `--disk-only` where supported. Restore is eager: the archive or installed artifact is no longer needed after construction succeeds.
 
 Full restore preserves captured processes, but not the host connections that controlled them. Open a new client connection after restore. Inherited process output is drained without being sent to new clients; host filesystem and TCP transfers must be restarted.

@@ -27,6 +27,7 @@ import {
   SandboxNotRunningError,
   SandboxReplacedError,
   SandboxStillRunningError,
+  SnapshotSourceRecoveryError,
   TerminalError,
   UnsupportedOperationError,
   UnsupportedError,
@@ -34,7 +35,7 @@ import {
   VolumeNotFoundError,
 } from "../errors.js";
 
-// The native binding emits every error as `[VariantName] message`.
+// The recovery variant carries a JSON envelope after the usual tag; all others carry text.
 const PATTERN = /^\[(\w+)\] ([\s\S]*)$/;
 
 const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
@@ -90,9 +91,40 @@ export function mapNapiError(err: unknown): unknown {
   if (!(err instanceof Error)) return err;
   const m = PATTERN.exec(err.message);
   if (!m) return err;
+  if (m[1] === "SnapshotSourceRecovery") {
+    return mapRecoveryError(m[2]!, err);
+  }
   const ctor = CTORS.get(m[1]!);
   if (!ctor) return err;
   return ctor(m[2]!, err);
+}
+
+function mapRecoveryError(payload: string, raw: Error): unknown {
+  try {
+    const envelope = JSON.parse(payload);
+    const r = envelope.recovery;
+    const stringFields = ["source_sandbox", "checkpoint_id", "checkpoint_root", "checkpoint_path", "detail"];
+    if (typeof envelope.message !== "string" || !r ||
+        !stringFields.every((key) => typeof r[key] === "string") ||
+        !(r.publication_error === null || typeof r.publication_error === "string")) return raw;
+    const a = r.artifact;
+    if (a !== null && (!a || !(a.kind === "installed" || a.kind === "archive") ||
+        !["path", "snapshot_id", "digest"].every((key) => typeof a[key] === "string"))) return raw;
+    return new SnapshotSourceRecoveryError(envelope.message, {
+      sourceSandbox: r.source_sandbox,
+      checkpointId: r.checkpoint_id,
+      checkpointRoot: r.checkpoint_root,
+      checkpointPath: r.checkpoint_path,
+      detail: r.detail,
+      publicationError: r.publication_error,
+      artifact: a === null ? null : {
+        kind: a.kind, path: a.path, snapshotId: a.snapshot_id, digest: a.digest,
+      },
+    }, { cause: raw });
+  } catch {
+    // Preserve the original refusal if a mismatched native binary sends an unknown envelope.
+    return raw;
+  }
 }
 
 export async function withMappedErrors<T>(fn: () => Promise<T>): Promise<T> {
