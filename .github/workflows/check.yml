@@ -4,7 +4,14 @@ on:
   push:
     branches: [main, "releases/**"]
   pull_request:
-    branches: [main, mintlify, "releases/**"]
+    branches:
+      - main
+      - mintlify
+      - "releases/**"
+      - appcypher/direct-snapshot-archives
+      - appcypher/composite-checkpoint-pr
+      - appcypher/checkpoint-restore-clone
+      - appcypher/live-root-disk-growth
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
