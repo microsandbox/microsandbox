@@ -574,15 +574,23 @@ fn resolved_installed(config: &GlobalConfig) -> MicrosandboxResult<ResolvedRunti
 mod tests {
     use super::*;
 
-    fn archive_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    fn archive_bytes(entries: &[(&str, tar::EntryType, &[u8])]) -> Vec<u8> {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut archive = tar::Builder::new(encoder);
-        for (name, bytes) in entries {
+        for (name, entry_type, bytes) in entries {
             let mut header = tar::Header::new_gnu();
+            // Write the raw name so malicious fixtures reach our reader instead
+            // of being rejected by tar::Builder's safe path setter first.
+            assert!(name.len() < 100, "fixture name fits the tar name field");
+            header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_entry_type(*entry_type);
+            if entry_type.is_symlink() || entry_type.is_hard_link() {
+                header.set_link_name("../outside-target").unwrap();
+            }
             header.set_mode(0o755);
             header.set_size(bytes.len() as u64);
             header.set_cksum();
-            archive.append_data(&mut header, name, *bytes).unwrap();
+            archive.append(&header, *bytes).unwrap();
         }
         archive
             .into_inner()
@@ -747,34 +755,161 @@ mod tests {
         let msb_name = microsandbox_utils::msb_binary_filename(std::env::consts::OS);
         let library_name = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
         let archive = archive_bytes(&[
-            (&msb_name, b"msb"),
-            (&library_name, b"libkrunfw"),
-            ("unexpected", b"unexpected"),
+            (&msb_name, tar::EntryType::Regular, b"msb"),
+            (&library_name, tar::EntryType::Regular, b"libkrunfw"),
+            ("unexpected", tar::EntryType::Regular, b"unexpected"),
         ]);
 
         let error = install_archive_bytes(&config, &archive, false).unwrap_err();
         assert!(error.to_string().contains("unexpected entry"));
+        assert!(!runtime_in_home(&config).msb_path.exists());
+        assert!(!runtime_in_home(&config).libkrunfw_path.exists());
+    }
+
+    #[tokio::test]
+    async fn archive_install_cannot_choose_the_returned_executable_path() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let archive_path = root.path().join("caller-selected-archive-name.tar.gz");
+        let msb_name = microsandbox_utils::msb_binary_filename(std::env::consts::OS);
+        let library_name = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
+        let archive = archive_bytes(&[
+            (
+                &msb_name,
+                tar::EntryType::Regular,
+                b"../not-an-executable-path",
+            ),
+            (&library_name, tar::EntryType::Regular, b"library payload"),
+        ]);
+        fs::write(&archive_path, archive).unwrap();
+        let config = GlobalConfig {
+            home: Some(home.clone()),
+            ..Default::default()
+        };
+        let runtime = install_runtime(
+            &config,
+            InstallOptions {
+                source: InstallSource::Archive(archive_path),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtime.origin, RuntimeOrigin::Installed);
+        assert_eq!(runtime.msb_path, home.join(BIN_SUBDIR).join(msb_name));
+        assert_eq!(
+            runtime.libkrunfw_path,
+            home.join(LIB_SUBDIR).join(library_name)
+        );
+        assert_eq!(
+            fs::read(runtime.msb_path).unwrap(),
+            b"../not-an-executable-path"
+        );
+        assert_eq!(
+            fs::read(runtime.libkrunfw_path).unwrap(),
+            b"library payload"
+        );
+        assert!(!root.path().join("not-an-executable-path").exists());
+    }
+
+    #[test]
+    fn unsafe_archive_entries_fail_before_publishing_or_replacing_a_pair() {
+        let msb_name = microsandbox_utils::msb_binary_filename(std::env::consts::OS);
+        let library_name = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
+        for (name, entry_type, expected_error) in [
+            (
+                "../escaped-msb",
+                tar::EntryType::Regular,
+                "unexpected entry",
+            ),
+            ("/absolute-msb", tar::EntryType::Regular, "unexpected entry"),
+            ("nested/msb", tar::EntryType::Regular, "unexpected entry"),
+            ("unexpected", tar::EntryType::Regular, "unexpected entry"),
+            (
+                msb_name.as_str(),
+                tar::EntryType::Symlink,
+                "unexpected entry",
+            ),
+            (
+                library_name.as_str(),
+                tar::EntryType::Link,
+                "unexpected entry",
+            ),
+            (msb_name.as_str(), tar::EntryType::Regular, "duplicate msb"),
+        ] {
+            for existing in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let config = GlobalConfig {
+                    home: Some(root.path().join("home")),
+                    ..Default::default()
+                };
+                let runtime = runtime_in_home(&config);
+                if existing {
+                    fs::create_dir_all(runtime.msb_path.parent().unwrap()).unwrap();
+                    fs::create_dir_all(runtime.libkrunfw_path.parent().unwrap()).unwrap();
+                    fs::write(&runtime.msb_path, b"original-msb").unwrap();
+                    fs::write(&runtime.libkrunfw_path, b"original-library").unwrap();
+                }
+                // Place the bad entry after both legitimate files: even a
+                // complete staged pair must not publish until parsing finishes.
+                let archive = archive_bytes(&[
+                    (&msb_name, tar::EntryType::Regular, b"replacement-msb"),
+                    (
+                        &library_name,
+                        tar::EntryType::Regular,
+                        b"replacement-library",
+                    ),
+                    (name, entry_type, b""),
+                ]);
+                let error = install_archive_bytes(&config, &archive, true).unwrap_err();
+                assert!(
+                    error.to_string().contains(expected_error),
+                    "{name}: {error}"
+                );
+                if existing {
+                    assert_eq!(fs::read(&runtime.msb_path).unwrap(), b"original-msb");
+                    assert_eq!(
+                        fs::read(&runtime.libkrunfw_path).unwrap(),
+                        b"original-library"
+                    );
+                } else {
+                    assert!(!runtime.msb_path.exists());
+                    assert!(!runtime.libkrunfw_path.exists());
+                }
+                assert!(!root.path().join("escaped-msb").exists());
+                assert!(!config.home().join("nested").exists());
+            }
+        }
     }
 
     #[cfg(feature = "embed-binaries")]
-    #[tokio::test]
-    async fn embedded_ensure_materializes_into_normal_home_layout() {
+    #[test]
+    fn embedded_ensure_materializes_into_normal_home_layout_without_network_io() {
         let home = tempfile::tempdir().unwrap();
         let config = GlobalConfig {
             home: Some(home.path().to_path_buf()),
             ..Default::default()
         };
 
-        let runtime = ensure_runtime(
-            &config,
-            InstallOptions {
-                source: InstallSource::EmbeddedArchive,
-                verify: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        // No I/O driver is enabled: a Tokio/reqwest download cannot complete
+        // here. This tests the selected embedded branch, not packet filtering
+        // or the separate, explicitly requested ReleaseDownload installer.
+        let offline = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let embedded = EMBEDDED_RUNTIME_ARCHIVE.expect("compiled embedded runtime");
+        let runtime = offline
+            .block_on(ensure_runtime(
+                &config,
+                InstallOptions {
+                    source: InstallSource::EmbeddedArchive,
+                    expected_archive_sha256: Some(hex::encode(Sha256::digest(embedded))),
+                    verify: false,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
 
         assert_eq!(runtime.origin, RuntimeOrigin::Installed);
         let expected_msb =
@@ -791,5 +926,19 @@ mod tests {
         assert_eq!(runtime.libkrunfw_path, expected_library);
         assert!(expected_msb.is_file());
         assert!(expected_library.is_file());
+        let mut archive = Archive::new(GzDecoder::new(embedded));
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let name = entry.path().unwrap();
+            let destination = if name == Path::new(expected_msb.file_name().unwrap()) {
+                &expected_msb
+            } else {
+                assert_eq!(name, Path::new(expected_library.file_name().unwrap()));
+                &expected_library
+            };
+            let mut expected = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut expected).unwrap();
+            assert_eq!(fs::read(destination).unwrap(), expected);
+        }
     }
 }
