@@ -11,11 +11,16 @@ permissions:
   actions: read
   contents: read
 
+env:
+  IMAGE: ghcr.io/superradcompany/microsandbox
+
 jobs:
   snapshot-project:
     name: Full snapshot project (Go / Linux amd64)
     runs-on: self-hosted-ubuntu-2404-x64
     timeout-minutes: 30
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
     steps:
       - name: Validate Go build provenance
         id: source
@@ -25,26 +30,36 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$CHECK_RUN" =~ ^[0-9]+$ ]]
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CHECK_RUN" > "$RUNNER_TEMP/go-check-run.json"
-          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$CHECK_RUN/jobs?per_page=100" \
-            --jq '.jobs[]' | jq -s . > "$RUNNER_TEMP/go-check-jobs.json"
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          root = Path(os.environ['RUNNER_TEMP'])
-          run = json.loads((root / 'go-check-run.json').read_text())
+          python3 - <<'PYCODE'
+          import json, os, urllib.request
+          def get(path):
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + path,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          run_id = os.environ['CHECK_RUN']
+          run = get('/actions/runs/' + run_id)
           assert run['status'] == 'completed', 'Check run is not complete'
           assert run['path'] == '.github/workflows/check.yml', 'Not a Check run'
           assert run['head_repository']['full_name'] == os.environ['GITHUB_REPOSITORY'], 'Foreign repository'
           assert run['event'] == 'push', 'Expected a same-repository push build'
-          jobs = json.loads((root / 'go-check-jobs.json').read_text())
+          jobs = []
+          page = 1
+          while True:
+              batch = get(f'/actions/runs/{run_id}/jobs?per_page=100&page={page}')['jobs']
+              jobs.extend(batch)
+              if len(batch) < 100:
+                  break
+              page += 1
           required = {'Build runtime (linux-x86_64)', 'Build Go FFI (linux-x86_64)',
                       'Go Quality', 'Go SDK Tests (shard 1/2)', 'Go SDK Tests (shard 2/2)'}
           passed = {j['name'] for j in jobs if j['conclusion'] == 'success'}
           assert required <= passed, f'Go gates did not pass: {required - passed}'
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               print(f"commit={run['head_sha']}", file=output)
-          PY
+          PYCODE
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -129,3 +144,144 @@ jobs:
             go-full-snapshot.log
             go-full-snapshot-cleanup.json
           if-no-files-found: warn
+
+  build-runtime-image:
+    name: Package runtime (${{ matrix.arch }})
+    needs: snapshot-project
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            artifact: msb-linux-x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            artifact: msb-linux-aarch64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.snapshot-project.outputs.commit }}
+          persist-credentials: false
+
+      - name: Download runtime artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: runtime
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.run_id }}
+
+      - name: Stage runtime
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t firmware < <(find runtime -maxdepth 1 -type f \
+            -name 'libkrunfw.so.*.*.*' -print)
+          if [[ ! -f runtime/msb || ${#firmware[@]} -ne 1 ]]; then
+            echo "::error::Runtime artifact does not contain msb and one versioned libkrunfw."
+            exit 1
+          fi
+
+          destination="packaging/docker/build/$ARCH"
+          mkdir -p "$destination"
+          install -m 755 runtime/msb "$destination/msb"
+          install -m 644 "${firmware[0]}" "$destination/$(basename "${firmware[0]}")"
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push runtime image by digest
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: packaging/docker
+          platforms: linux/${{ matrix.arch }}
+          labels: org.opencontainers.image.revision=${{ needs.snapshot-project.outputs.commit }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export image digest
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p digests
+          echo "$DIGEST" > "digests/$ARCH.txt"
+
+      - name: Upload image digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-digest-${{ matrix.arch }}
+          path: digests/${{ matrix.arch }}.txt
+
+  publish-runtime-image:
+    name: Publish commit tag
+    needs: [snapshot-project, build-runtime-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      packages: write
+    steps:
+      - name: Download image digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: digests
+          pattern: runtime-digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create immutable commit manifest
+        env:
+          COMMIT: ${{ needs.snapshot-project.outputs.commit }}
+        run: |
+          set -euo pipefail
+
+          if docker buildx imagetools inspect "$IMAGE:$COMMIT" >/dev/null 2>&1; then
+            echo "::error::$IMAGE:$COMMIT was created while this workflow was running."
+            exit 1
+          fi
+
+          amd64_digest=$(cat digests/amd64.txt)
+          arm64_digest=$(cat digests/arm64.txt)
+          docker buildx imagetools create \
+            -t "$IMAGE:$COMMIT" \
+            "$IMAGE@$amd64_digest" \
+            "$IMAGE@$arm64_digest"
+
+          inspection=$(docker buildx imagetools inspect "$IMAGE:$COMMIT")
+          digest=$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")
+          if [[ -z "$digest" ]] ||
+            ! grep -Fq 'linux/amd64' <<<"$inspection" ||
+            ! grep -Fq 'linux/arm64' <<<"$inspection"; then
+            echo "$inspection"
+            echo "::error::Published manifest did not contain both expected platforms."
+            exit 1
+          fi
+
+          {
+            echo "## Runtime published"
+            echo
+            echo "- Image: \`$IMAGE:$COMMIT\`"
+            echo "- Digest: \`$digest\`"
+            echo "- Check run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.run_id }}"
+          } >> "$GITHUB_STEP_SUMMARY"

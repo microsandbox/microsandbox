@@ -1989,3 +1989,4 @@ jobs:
     permissions:
       actions: read
       contents: read
+      packages: write
