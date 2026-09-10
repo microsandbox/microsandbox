@@ -30,6 +30,7 @@
 ##
 
 - <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with microVM technology.
+- <img height="14" src="https://octicons-col.vercel.app/repo-forked/A770EF"> **Branch & Snapshot**: Save state. Fork live sandboxes.
 - <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux, macOS, and Windows.
 - <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **Docker-Like Workflows**: Familiar image, command, shell, and volume workflows.
@@ -284,7 +285,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/ffffff" alt="cli-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/000000" alt="cli"></a>&nbsp;&nbsp;CLI
 
-The `msb` CLI provides a complete interface for managing sandboxes, images, and volumes.
+The `msb` CLI provides a complete interface for managing sandboxes, snapshots, images, and volumes.
 
 #### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run a Command
 
@@ -303,6 +304,19 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 > # Execute commands
 > msb exec app -- python -c "import this"
 > msb exec app -- curl https://example.com
+> ```
+>
+> ```sh
+> # Fork a running sandbox. Take a new path.
+> msb branch app --name experiment
+> msb exec experiment -- python -c "print('An independent copy!')"
+> msb branch experiment --name another-experiment
+> ```
+>
+> ```sh
+> # Save now, resume later
+> msb snapshot create saved --from app --full
+> msb create --name restored --from-snapshot saved
 > ```
 >
 > ```sh
