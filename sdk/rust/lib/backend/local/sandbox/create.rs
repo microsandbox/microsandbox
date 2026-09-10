@@ -73,6 +73,44 @@ pub(crate) struct SandboxTransitionGuard {
     _file: File,
 }
 
+/// Removes direct archive staging unless creation reaches durable sandbox state.
+struct ArchiveChildStageGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl ArchiveChildStageGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for ArchiveChildStageGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && let Err(error) = remove_dir_if_exists(&self.path)
+        {
+            tracing::warn!(
+                error = %error,
+                path = %self.path.display(),
+                "failed to remove direct archive child staging"
+            );
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods: Create Flow
 //--------------------------------------------------------------------------------------------------
@@ -129,6 +167,20 @@ impl LocalBackend {
             Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name)
                 .await?;
         Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
+        let mut archive_stage_guard = None;
+
+        // A direct archive restore streams its layer into the ordinary child
+        // staging location before image resolution. The archive supplies the
+        // pinned image identity; no installed snapshot artifact is created.
+        if let Some(archive) = config.snapshot_archive_source.take() {
+            archive_stage_guard = Some(ArchiveChildStageGuard::new(sandbox_dir.clone()));
+            let manifest =
+                crate::snapshot::materialize_archive_for_child(self, &archive, &sandbox_dir)
+                    .await?;
+            config.spec.image = RootfsSource::oci(manifest.image.reference);
+            config.manifest_digest = Some(manifest.image.manifest_digest);
+            config.snapshot_upper_source = Some(sandbox_dir.join("upper.ext4"));
+        }
 
         // Resolve OCI images before spawning the sandbox process.
         if let RootfsSource::Oci(oci) = config.spec.image.clone() {
@@ -294,14 +346,16 @@ impl LocalBackend {
                         "patches cannot be combined with from_snapshot".into(),
                     ));
                 }
-                let dst = upper_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
-                })
-                .await
-                .map_err(|e| {
-                    crate::MicrosandboxError::Custom(format!("snapshot copy task: {e}"))
-                })??;
+                if snap_upper != upper_path {
+                    let dst = upper_path.clone();
+                    tokio::task::spawn_blocking(move || {
+                        microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
+                    })
+                    .await
+                    .map_err(|e| {
+                        crate::MicrosandboxError::Custom(format!("snapshot copy task: {e}"))
+                    })??;
+                }
             } else {
                 match &root_disk {
                     RootDisk::Managed { size_mib } => {
@@ -386,6 +440,11 @@ impl LocalBackend {
                     return Err(err);
                 }
             };
+        if let Some(guard) = archive_stage_guard.as_mut() {
+            // The database row now owns the fully materialized child storage;
+            // later failures intentionally follow ordinary sandbox cleanup.
+            guard.disarm();
+        }
         tracing::debug!(sandbox_id, sandbox = %config.spec.name, "create_local: db record inserted");
 
         // Spawn the sandbox process and create the bridge. On failure, return the provisional
@@ -1446,7 +1505,7 @@ mod tests {
 
     #[cfg(unix)]
     use super::sandbox_runtime_endpoint_is_live;
-    use super::{sandbox_entity, sandbox_label_entity};
+    use super::{ArchiveChildStageGuard, sandbox_entity, sandbox_label_entity};
     use crate::backend::{Backend, LocalBackend};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{
@@ -1469,6 +1528,31 @@ mod tests {
         .unwrap();
         Migrator::up(pools.write().inner(), None).await.unwrap();
         pools
+    }
+
+    #[test]
+    fn archive_child_stage_guard_removes_uncommitted_storage() {
+        let directory = tempdir().unwrap();
+        let stage = directory.path().join("child");
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(stage.join("partial.raw"), b"partial").unwrap();
+
+        drop(ArchiveChildStageGuard::new(stage.clone()));
+
+        assert!(!stage.exists());
+    }
+
+    #[test]
+    fn archive_child_stage_guard_preserves_committed_storage() {
+        let directory = tempdir().unwrap();
+        let stage = directory.path().join("child");
+        fs::create_dir_all(&stage).unwrap();
+        let mut guard = ArchiveChildStageGuard::new(stage.clone());
+
+        guard.disarm();
+        drop(guard);
+
+        assert!(stage.exists());
     }
 
     #[test]

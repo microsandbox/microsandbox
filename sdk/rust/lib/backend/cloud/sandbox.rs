@@ -538,7 +538,7 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
         return Err(unsupported("mount owner"));
     }
 
-    if config.snapshot_upper_source.is_some() {
+    if config.snapshot_upper_source.is_some() || config.snapshot_archive_source.is_some() {
         return Err(unsupported("from_snapshot"));
     }
     if !config.spec.vsock.is_empty() {
@@ -671,6 +671,8 @@ mod tests {
     use super::*;
     use crate::backend::{Backend, SandboxBackend};
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
+
+    type ConfigMutation = fn(&mut SandboxConfig);
 
     #[tokio::test]
     async fn cloud_boot_error_is_absent_until_the_api_exposes_diagnostics() {
@@ -996,7 +998,7 @@ mod tests {
 
     #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
-        let cases: [(&str, fn(&mut SandboxConfig)); 8] = [
+        let cases: [(&str, ConfigMutation); 9] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),
             ("max_memory", |config| {
                 config.spec.resources.max_memory_mib = 1024
@@ -1023,6 +1025,9 @@ mod tests {
             }),
             ("from_snapshot", |config| {
                 config.snapshot_upper_source = Some("snapshot/upper.ext4".into())
+            }),
+            ("from_snapshot", |config| {
+                config.snapshot_archive_source = Some("snapshot.tar.zst".into())
             }),
         ];
 

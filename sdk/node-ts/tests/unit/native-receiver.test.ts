@@ -23,7 +23,11 @@ let invoke;
 if (receiverKind === "constructor") {
   invoke = () => Reflect.construct(NativeClass, []);
 } else {
-  const method = NativeClass.prototype[methodName];
+  // Read the accessor itself without invoking it on the unwrapped prototype.
+  // This exercises the getter's native receiver check, not a JS property read.
+  const getterName = methodName.startsWith("get:") ? methodName.slice(4) : null;
+  const method = getterName === null ? NativeClass.prototype[methodName]
+    : Object.getOwnPropertyDescriptor(NativeClass.prototype, getterName)?.get;
   assert.equal(typeof method, "function", "native method must exist");
   let receiver;
   switch (receiverKind) {
@@ -93,6 +97,9 @@ describe("native receiver validation", () => {
     ["SandboxBuilder", "cpus"],
     ["SnapshotBuilder", "label"],
     ["SnapshotBuilder", "build"],
+    ["SnapshotArchive", "get:id"],
+    ["SnapshotArchive", "get:descriptorDigest"],
+    ["SnapshotArchive", "get:path"],
   ] as const;
 
   for (const [className, method] of methods) {
@@ -105,7 +112,7 @@ describe("native receiver validation", () => {
     }
   }
 
-  for (const className of ["SandboxFsOps", "Sandbox", "LogStream"]) {
+  for (const className of ["SandboxFsOps", "Sandbox", "LogStream", "SnapshotArchive"]) {
     it(`${className} rejects direct construction without crashing`, () => {
       expectCleanRefusal(className, "constructor", "constructor");
     });
