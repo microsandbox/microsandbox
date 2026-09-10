@@ -392,7 +392,13 @@ fn wait_for_cgroup_event(fd: RawFd, remaining: Duration) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     let result = {
         let timeout = libc::timespec {
-            tv_sec: remaining.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
+            // Infer the platform's field type: naming libc::time_t is deprecated on musl.
+            tv_sec: remaining.as_secs().try_into().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "cgroup wait duration is too large",
+                )
+            })?,
             tv_nsec: remaining.subsec_nanos().into(),
         };
         unsafe { libc::ppoll(&mut event, 1, &timeout, std::ptr::null()) }

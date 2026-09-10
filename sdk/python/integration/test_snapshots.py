@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from pathlib import Path
 
 import pytest
 
@@ -17,7 +18,10 @@ from microsandbox import (
 
 
 @pytest.mark.asyncio
-async def test_snapshot_create_open_list_and_boot(sandbox_name):
+@pytest.mark.parametrize(
+    "source_kind", ["member", "group", "id", "directory", "pathlike", "archive"]
+)
+async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source_kind):
     base_name = sandbox_name("py-sdk-snap-base")
     fork_name = sandbox_name("py-sdk-snap-fork")
     snapshot_name = sandbox_name("py-sdk-snap")
@@ -64,9 +68,25 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
         snapshots = await Snapshot.list()
         assert any(item.digest == snapshot.digest for item in snapshots)
 
+        # All public selector forms must reach the same Rust resolver. In particular, a
+        # group:member selector is not a literal directory underneath MSB_HOME/snapshots.
+        sources = {
+            "member": snapshot_selector,
+            "group": base_name,
+            "id": snapshot.id,
+            "directory": snapshot.path,
+            "pathlike": Path(snapshot.path),
+        }
+        if source_kind == "archive":
+            archive = tmp_path / "saved.msb"
+            await Snapshot.save(snapshot_selector, str(archive))
+            source = archive
+        else:
+            source = sources[source_kind]
+
         fork = await Sandbox.create(
             fork_name,
-            from_snapshot=snapshot_selector,
+            from_snapshot=source,
             cpus=1,
             memory=512,
             replace=True,

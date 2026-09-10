@@ -7,6 +7,8 @@ import subprocess
 import time
 
 binary = os.environ["MSB_PATH"]
+# Match CI's public mirror; callers may select an explicit local fixture instead.
+image = os.environ.get("MSB_TEST_IMAGE", "mirror.gcr.io/library/alpine:latest")
 root = Path(os.environ["STACK8_OUT"])
 root.mkdir(parents=True, exist_ok=True)
 prefix = os.environ.get("STACK8_PREFIX", "cow8")
@@ -47,14 +49,14 @@ def run(label, *args, expected=0, timeout=120):
 
 try:
     refused = prefix + "-forked-boot"
-    result = run("forked-boot-rejected", "create", "alpine", "-n", refused,
+    result = run("forked-boot-rejected", "create", image, "-n", refused,
                  "--forked", expected=None)
     assert result.returncode != 0, "forked must require captured RAM"
     source = prefix + "-source"
     names.append(source)
     run("fresh-" + mode, "run", "-d", "-n", source,
         "--root-disk", layout, "--memory", "256M", "--cpus", "2",
-        *(["--max-memory", "512M"] if resize else []), "alpine",
+        *(["--max-memory", "512M"] if resize else []), image,
         "--", "sh", "-c", "mkdir -p /dev/shm; echo captured > /dev/shm/cow-marker; i=0; while :; do echo $i > /tmp/cow-counter; i=$((i+1)); sleep 0.05; done")
     # Detached launch acknowledges the runtime, not the application's first write.
     for attempt in range(30):

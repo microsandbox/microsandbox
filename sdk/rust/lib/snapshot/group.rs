@@ -103,7 +103,13 @@ pub(super) async fn resolve(root: &Path, selector: &str) -> MicrosandboxResult<P
     blocking(move || {
         let (name, member) = parse_selector(&selector)?;
         let directory = root.join(name);
-        let _lock = lock_group(&directory)?;
+        let _lock = lock_group(&directory).map_err(|error| match error {
+            // A selector lookup has the same not-found contract as an explicit snapshot path.
+            MicrosandboxError::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound => {
+                MicrosandboxError::SnapshotNotFound(selector.clone())
+            }
+            other => other,
+        })?;
         let state = read_group(&directory)?;
         let (id, _) = resolve_selected(&directory, &state, member)?;
         Ok(directory.join(id))

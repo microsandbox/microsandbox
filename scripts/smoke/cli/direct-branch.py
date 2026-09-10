@@ -8,6 +8,8 @@ import subprocess
 import time
 
 binary = os.environ["MSB_PATH"]
+# Match CI's public mirror; callers may select an explicit local fixture instead.
+image = os.environ.get("MSB_TEST_IMAGE", "mirror.gcr.io/library/alpine:latest")
 root = Path(os.environ["STACK8_OUT"])
 root.mkdir(parents=True, exist_ok=True)
 prefix = os.environ.get("STACK8_PREFIX", f"branch8-{os.getpid()}")
@@ -84,7 +86,7 @@ def benchmark(source):
 try:
     source = prefix + "-source"
     names.append(source)
-    run("boot", "create", "alpine", "--name", source, "--root-disk", layout,
+    run("boot", "create", image, "--name", source, "--root-disk", layout,
         "--memory", "256M", "--cpus", "2")
     exec_guest(source, "echo source > /dev/shm/branch-marker; echo source > /disk-marker; sh -c 'i=0; while :; do i=$((i+1)); echo $i > /dev/shm/branch-counter; sleep 0.02; done' >/tmp/branch-counter.log 2>&1 </dev/null &", "prepare")
     if os.environ.get("STACK8_BENCH_ONLY") == "1":

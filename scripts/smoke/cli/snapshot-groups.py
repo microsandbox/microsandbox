@@ -13,6 +13,8 @@ import subprocess
 import time
 
 binary = os.environ["MSB_PATH"]
+# Match CI's public mirror; callers may select an explicit local fixture instead.
+image = os.environ.get("MSB_TEST_IMAGE", "mirror.gcr.io/library/alpine:latest")
 root = Path(os.environ["GROUP_TEST_OUT"])
 root.mkdir(parents=True, exist_ok=False)
 home = root / "home"
@@ -48,7 +50,7 @@ def create(name, snapshot=None, forked=False):
     if snapshot:
         args += ["--from-snapshot", snapshot]
     else:
-        args += ["alpine", "--root-disk", layout, "--memory", "256M", "--cpus", "2"]
+        args += [image, "--root-disk", layout, "--memory", "256M", "--cpus", "2"]
     if forked:
         args.append("--forked")
     run("create-" + name, *args)
