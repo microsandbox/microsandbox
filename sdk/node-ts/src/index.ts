@@ -451,13 +451,18 @@ export {
   SandboxNotRunningError,
   SandboxReplacedError,
   SandboxStillRunningError,
+  SnapshotSourceRecoveryError,
   TerminalError,
   UnsupportedOperationError,
   UnsupportedError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "./errors.js";
-export type { MicrosandboxErrorCode } from "./errors.js";
+export type {
+  MicrosandboxErrorCode,
+  PublishedSnapshotArtifact,
+  SnapshotSourceRecoveryDetails,
+} from "./errors.js";
 
 // Sizes
 export { GiB, KiB, MiB, TiB } from "./size.js";

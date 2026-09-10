@@ -16,7 +16,10 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use crate::backend::LocalBackend;
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::{RootDisk, SandboxConfig, SandboxStatus};
-use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
+use crate::{
+    MicrosandboxError, MicrosandboxResult, Operation, PublishedSnapshotArtifact,
+    SnapshotArtifactKind, SnapshotSourceRecoveryError, UnsupportedReason,
+};
 
 use super::store::index_upsert;
 use super::{Snapshot, SnapshotArchive, SnapshotConfig};
@@ -36,6 +39,23 @@ struct CapturedFullSnapshot {
     checkpoint_root: ObjectId,
     manifest: Manifest,
     labels: BTreeMap<String, String>,
+    source_recovery: Option<SnapshotSourceRecoveryError>,
+}
+
+/// Non-identity publication options shared by the full-capture entry point.
+#[derive(Clone, Copy)]
+struct SnapshotDestination<'a> {
+    name: &'a str,
+    path: &'a Path,
+    force: bool,
+}
+
+/// Descriptor metadata kept separate from physical disk-copy inputs.
+struct FileSnapshotMetadata<'a> {
+    image_reference: String,
+    manifest_digest: String,
+    source_sandbox: &'a str,
+    root_disk: SnapshotRootDisk,
 }
 
 #[derive(Clone)]
@@ -89,11 +109,13 @@ pub(super) async fn create_snapshot(
     if full {
         return create_full_snapshot(
             local,
-            &name,
-            &dest_dir,
+            SnapshotDestination {
+                name: &name,
+                path: &dest_dir,
+                force,
+            },
             &source_sandbox,
             labels,
-            force,
             model,
         )
         .await;
@@ -176,11 +198,13 @@ pub(super) async fn create_snapshot(
         &staging_dir,
         &disk,
         &labels,
-        image_reference,
-        manifest_digest_str,
-        &source_sandbox,
         record_integrity,
-        root_disk,
+        FileSnapshotMetadata {
+            image_reference,
+            manifest_digest: manifest_digest_str,
+            source_sandbox: &source_sandbox,
+            root_disk,
+        },
     )
     .await;
     let (digest, manifest) = match built {
@@ -220,13 +244,12 @@ pub(super) async fn create_snapshot(
 /// Capture one running sandbox into an installed composite-checkpoint snapshot.
 async fn create_full_snapshot(
     local: &LocalBackend,
-    name: &str,
-    dest_dir: &Path,
+    destination: SnapshotDestination<'_>,
     source_sandbox: &str,
     labels: Vec<(String, String)>,
-    force: bool,
     model: sandbox_entity::Model,
 ) -> MicrosandboxResult<Snapshot> {
+    let dest_dir = destination.path;
     let total_started = Instant::now();
     let parent_dir = dest_dir
         .parent()
@@ -244,72 +267,114 @@ async fn create_full_snapshot(
     // succeeds. The guard also removes partial materialization on ordinary errors/cancellation.
     let captured = capture_full_snapshot(source_sandbox, labels, model).await?;
     let capture_us = capture_started.elapsed().as_micros();
-    let staging = tempfile::Builder::new()
-        .prefix(&format!(".{name}."))
-        .suffix(".staging")
-        .tempdir_in(&parent_dir)?;
-    let staging_dir = staging.path().to_path_buf();
-    let checkpoint_source = captured.checkpoint_path.clone();
-    let checkpoint_destination = staging_dir.join(CHECKPOINT_DIRECTORY);
-    let checkpoint_destination_for_copy = checkpoint_destination.clone();
-    let materialize_started = Instant::now();
-    let materialized = tokio::task::spawn_blocking(move || {
-        materialize_checkpoint_closure(&checkpoint_source, &checkpoint_destination_for_copy)
-    })
-    .await
-    .map_err(|error| MicrosandboxError::Custom(format!("checkpoint copy task: {error}")))?;
-    if let Err(error) = materialized {
-        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-        return Err(error.into());
-    }
-    let materialize_us = materialize_started.elapsed().as_micros();
-    let closure_verify_started = Instant::now();
-    CheckpointClosure::open(&checkpoint_destination, Some(&captured.checkpoint_root))
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let closure_verify_us = closure_verify_started.elapsed().as_micros();
-    let metadata_started = Instant::now();
-    super::metadata::write(&staging_dir, &captured.labels).await?;
-    let descriptor = captured
-        .manifest
-        .to_canonical_bytes()
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let digest = captured
-        .manifest
-        .digest()
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    if let Err(error) = write_descriptor(&staging_dir, &descriptor).await {
-        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-        return Err(error);
-    }
-    let metadata_descriptor_us = metadata_started.elapsed().as_micros();
-
-    let promote_started = Instant::now();
-    promote_snapshot_directory(&staging_dir, dest_dir, force).await?;
-    let promote_us = promote_started.elapsed().as_micros();
-    let index_started = Instant::now();
-    if let Err(error) = index_upsert(local, dest_dir, &digest, &captured.manifest).await {
-        tracing::warn!(error = %error, snapshot = %digest, "snapshot_index upsert failed");
-    }
-    let index_us = index_started.elapsed().as_micros();
-    tracing::info!(
-        target: "microsandbox_checkpoint_timing",
-        operation = "snapshot_create_installed_full",
+    publish_full_snapshot(
+        local,
+        destination,
         source_sandbox,
-        total_us = total_started.elapsed().as_micros(),
+        captured,
+        parent_dir,
+        total_started,
         capture_us,
-        materialize_us,
-        closure_verify_us,
-        metadata_descriptor_us,
-        promote_us,
-        index_us,
-        "installed full snapshot creation timing"
-    );
-    Ok(Snapshot::from_parts(
-        dest_dir.to_path_buf(),
-        digest,
-        captured.manifest,
-        captured.labels,
-    ))
+    )
+    .await
+}
+
+/// Publish a validated capture independently from the running source. Keeping this boundary
+/// separate also lets failure tests exercise real materialization without starting a VM.
+async fn publish_full_snapshot(
+    local: &LocalBackend,
+    destination: SnapshotDestination<'_>,
+    source_sandbox: &str,
+    mut captured: CapturedFullSnapshot,
+    parent_dir: PathBuf,
+    total_started: Instant,
+    capture_us: u128,
+) -> MicrosandboxResult<Snapshot> {
+    let SnapshotDestination {
+        name,
+        path: dest_dir,
+        force,
+    } = destination;
+    let source_recovery = captured.source_recovery.take();
+    // Recovery belongs to the source, not to the immutable artifact. Complete publication before
+    // returning the diagnostic; all intermediate errors must retain it as well.
+    let published = async {
+        let staging = tempfile::Builder::new()
+            .prefix(&format!(".{name}."))
+            .suffix(".staging")
+            .tempdir_in(&parent_dir)?;
+        let staging_dir = staging.path().to_path_buf();
+        let checkpoint_source = captured.checkpoint_path.clone();
+        let checkpoint_destination = staging_dir.join(CHECKPOINT_DIRECTORY);
+        let checkpoint_destination_for_copy = checkpoint_destination.clone();
+        let materialize_started = Instant::now();
+        let materialized = tokio::task::spawn_blocking(move || {
+            materialize_checkpoint_closure(&checkpoint_source, &checkpoint_destination_for_copy)
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Custom(format!("checkpoint copy task: {error}")))?;
+        if let Err(error) = materialized {
+            let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+            return Err(error.into());
+        }
+        let materialize_us = materialize_started.elapsed().as_micros();
+        let closure_verify_started = Instant::now();
+        CheckpointClosure::open(&checkpoint_destination, Some(&captured.checkpoint_root))
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let closure_verify_us = closure_verify_started.elapsed().as_micros();
+        let metadata_started = Instant::now();
+        super::metadata::write(&staging_dir, &captured.labels).await?;
+        let descriptor = captured
+            .manifest
+            .to_canonical_bytes()
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let digest = captured
+            .manifest
+            .digest()
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        if let Err(error) = write_descriptor(&staging_dir, &descriptor).await {
+            let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+            return Err(error);
+        }
+        let metadata_descriptor_us = metadata_started.elapsed().as_micros();
+
+        let promote_started = Instant::now();
+        promote_snapshot_directory(&staging_dir, dest_dir, force).await?;
+        let promote_us = promote_started.elapsed().as_micros();
+        let index_started = Instant::now();
+        if let Err(error) = index_upsert(local, dest_dir, &digest, &captured.manifest).await {
+            tracing::warn!(error = %error, snapshot = %digest, "snapshot_index upsert failed");
+        }
+        let index_us = index_started.elapsed().as_micros();
+        tracing::info!(
+            target: "microsandbox_checkpoint_timing",
+            operation = "snapshot_create_installed_full",
+            source_sandbox,
+            total_us = total_started.elapsed().as_micros(),
+            capture_us,
+            materialize_us,
+            closure_verify_us,
+            metadata_descriptor_us,
+            promote_us,
+            index_us,
+            "installed full snapshot creation timing"
+        );
+        Ok(Snapshot::from_parts(
+            dest_dir.to_path_buf(),
+            digest,
+            captured.manifest,
+            captured.labels,
+        ))
+    }
+    .await;
+    finish_capture(published, source_recovery, |snapshot| {
+        PublishedSnapshotArtifact {
+            kind: SnapshotArtifactKind::Installed,
+            path: snapshot.path().to_path_buf(),
+            snapshot_id: snapshot.id().to_string(),
+            digest: snapshot.digest().to_string(),
+        }
+    })
 }
 
 /// Capture directly from a stopped sandbox into an archive without creating
@@ -346,38 +411,19 @@ pub(super) async fn create_snapshot_archive(
         let capture_started = Instant::now();
         let captured = capture_full_snapshot(&source_sandbox, labels, model).await?;
         let capture_us = capture_started.elapsed().as_micros();
-        let digest = captured
-            .manifest
-            .digest()
-            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-        let archive_started = Instant::now();
-        super::archive::save_direct_checkpoint_snapshot(
-            &captured.manifest,
-            &captured.labels,
-            &name,
-            &captured.checkpoint_path,
-            out,
+        return publish_full_archive(
+            SnapshotDestination {
+                name: &name,
+                path: out,
+                force,
+            },
+            &source_sandbox,
+            captured,
             plain_tar,
-            force,
-        )
-        .await?;
-        let archive_us = archive_started.elapsed().as_micros();
-        tracing::info!(
-            target: "microsandbox_checkpoint_timing",
-            operation = "snapshot_create_archive_full",
-            source_sandbox,
-            plain_tar,
-            total_us = total_started.elapsed().as_micros(),
+            total_started,
             capture_us,
-            archive_us,
-            "direct full snapshot archive timing"
-        );
-        return Ok(SnapshotArchive::from_parts(
-            out.to_path_buf(),
-            digest,
-            captured.manifest,
-            captured.labels,
-        ));
+        )
+        .await;
     }
     if matches!(
         model.status,
@@ -487,6 +533,62 @@ pub(super) async fn create_snapshot_archive(
     ))
 }
 
+/// Publish the archive before surfacing source recovery failure, just like installed capture.
+async fn publish_full_archive(
+    destination: SnapshotDestination<'_>,
+    source_sandbox: &str,
+    mut captured: CapturedFullSnapshot,
+    plain_tar: bool,
+    total_started: Instant,
+    capture_us: u128,
+) -> MicrosandboxResult<SnapshotArchive> {
+    let SnapshotDestination {
+        name,
+        path: out,
+        force,
+    } = destination;
+    let source_recovery = captured.source_recovery.take();
+    let published = async {
+        let digest = captured
+            .manifest
+            .digest()
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let archive_started = Instant::now();
+        super::archive::save_direct_checkpoint_snapshot(
+            &captured.manifest,
+            &captured.labels,
+            name,
+            &captured.checkpoint_path,
+            out,
+            plain_tar,
+            force,
+        )
+        .await?;
+        let archive_us = archive_started.elapsed().as_micros();
+        tracing::info!(
+            target: "microsandbox_checkpoint_timing",
+            operation = "snapshot_create_archive_full",
+            source_sandbox, plain_tar, total_us = total_started.elapsed().as_micros(),
+            capture_us, archive_us, "direct full snapshot archive timing"
+        );
+        Ok(SnapshotArchive::from_parts(
+            out.to_path_buf(),
+            digest,
+            captured.manifest,
+            captured.labels,
+        ))
+    }
+    .await;
+    finish_capture(published, source_recovery, |archive| {
+        PublishedSnapshotArtifact {
+            kind: SnapshotArtifactKind::Archive,
+            path: archive.path().to_path_buf(),
+            snapshot_id: archive.id().to_string(),
+            digest: archive.descriptor_digest().to_string(),
+        }
+    })
+}
+
 /// Capture and validate runtime-owned checkpoint state without choosing its final representation.
 ///
 /// Installed snapshots and direct archives share this boundary so both publish byte-for-byte the
@@ -512,89 +614,135 @@ async fn capture_full_snapshot(
     let root_disk = snapshot_root_disk(sandbox_config.spec.image.oci_root_disk(), source_sandbox)?;
 
     let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
-    let checkpoint =
+    let outcome =
         crate::sandbox::control_checkpoint_create(source_sandbox, checkpoint_id.clone()).await?;
-    if checkpoint.checkpoint_id != checkpoint_id {
-        return Err(MicrosandboxError::SnapshotIntegrity(
-            "runtime returned a checkpoint for another capture attempt".into(),
-        ));
-    }
-    let checkpoint_root = ObjectId::new(&checkpoint.checkpoint_root)
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let closure = CheckpointClosure::open(&checkpoint.path, Some(&checkpoint_root))
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    if closure.checkpoint().checkpoint_id != checkpoint_id {
-        return Err(MicrosandboxError::SnapshotIntegrity(
-            "runtime checkpoint closure has another capture identity".into(),
-        ));
-    }
+    let checkpoint = outcome.checkpoint;
+    let validated = (|| {
+        if checkpoint.checkpoint_id != checkpoint_id {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "runtime returned a checkpoint for another capture attempt".into(),
+            ));
+        }
+        let checkpoint_root = ObjectId::new(&checkpoint.checkpoint_root)
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let closure = CheckpointClosure::open(&checkpoint.path, Some(&checkpoint_root))
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        if closure.checkpoint().checkpoint_id != checkpoint_id {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "runtime checkpoint closure has another capture identity".into(),
+            ));
+        }
 
-    let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let requirements_summary = BTreeMap::from([
-        (
-            "architecture".into(),
-            serde_json::Value::String(closure.checkpoint().architecture.clone()),
-        ),
-        (
-            "device_count".into(),
-            serde_json::Value::from(closure.checkpoint().devices.len() as u64),
-        ),
-        (
-            "memory_bytes".into(),
-            serde_json::Value::from(checkpoint.memory_logical_bytes),
-        ),
-        (
-            "vcpus".into(),
-            serde_json::Value::from(sandbox_config.spec.resources.cpus),
-        ),
-        (
-            "max_vcpus".into(),
-            serde_json::Value::from(sandbox_config.spec.resources.max_cpus),
-        ),
-        (
-            "memory_mib".into(),
-            serde_json::Value::from(sandbox_config.spec.resources.memory_mib),
-        ),
-        (
-            "max_memory_mib".into(),
-            serde_json::Value::from(sandbox_config.spec.resources.max_memory_mib),
-        ),
-    ]);
-    let manifest = Manifest {
-        schema: SCHEMA.into(),
-        snapshot_id,
-        scope: SnapshotScope::Full,
-        state: SnapshotState::Checkpoint(CheckpointSnapshotState {
-            checkpoint_id: checkpoint_id.clone(),
-            checkpoint_root: checkpoint.checkpoint_root,
-            restore_intents: vec!["clone".into(), "resume".into()],
-            requirements_summary,
-        }),
-        capture: SnapshotCapture {
-            created_at: Utc::now().to_rfc3339(),
-            source_lineage: Some(source_sandbox.into()),
-            source_checkpoint: Some(checkpoint_id),
-            consistency: SnapshotConsistency::ApplicationConsistent,
-        },
-        image: ImageRef {
-            reference: image_reference,
-            manifest_digest,
-        },
-        root_disk,
-        parent: None,
-        requires: Vec::new(),
-        extensions: BTreeMap::new(),
+        let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let requirements_summary = BTreeMap::from([
+            (
+                "architecture".into(),
+                serde_json::Value::String(closure.checkpoint().architecture.clone()),
+            ),
+            (
+                "device_count".into(),
+                serde_json::Value::from(closure.checkpoint().devices.len() as u64),
+            ),
+            (
+                "memory_bytes".into(),
+                serde_json::Value::from(checkpoint.memory_logical_bytes),
+            ),
+            (
+                "vcpus".into(),
+                serde_json::Value::from(sandbox_config.spec.resources.cpus),
+            ),
+            (
+                "max_vcpus".into(),
+                serde_json::Value::from(sandbox_config.spec.resources.max_cpus),
+            ),
+            (
+                "memory_mib".into(),
+                serde_json::Value::from(sandbox_config.spec.resources.memory_mib),
+            ),
+            (
+                "max_memory_mib".into(),
+                serde_json::Value::from(sandbox_config.spec.resources.max_memory_mib),
+            ),
+        ]);
+        let manifest = Manifest {
+            schema: SCHEMA.into(),
+            snapshot_id,
+            scope: SnapshotScope::Full,
+            state: SnapshotState::Checkpoint(CheckpointSnapshotState {
+                checkpoint_id: checkpoint_id.clone(),
+                checkpoint_root: checkpoint.checkpoint_root.clone(),
+                restore_intents: vec!["clone".into(), "resume".into()],
+                requirements_summary,
+            }),
+            capture: SnapshotCapture {
+                created_at: Utc::now().to_rfc3339(),
+                source_lineage: Some(source_sandbox.into()),
+                source_checkpoint: Some(checkpoint_id.clone()),
+                consistency: SnapshotConsistency::ApplicationConsistent,
+            },
+            image: ImageRef {
+                reference: image_reference,
+                manifest_digest,
+            },
+            root_disk,
+            parent: None,
+            requires: Vec::new(),
+            extensions: BTreeMap::new(),
+        };
+        manifest
+            .validate()
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        Ok(CapturedFullSnapshot {
+            source_recovery: outcome.recovery_error.as_ref().map(|detail| {
+                SnapshotSourceRecoveryError {
+                    source_sandbox: source_sandbox.into(),
+                    checkpoint_id,
+                    checkpoint_root: checkpoint.checkpoint_root,
+                    checkpoint_path: checkpoint.path.clone(),
+                    artifact: None,
+                    detail: detail.clone(),
+                    publication_error: None,
+                }
+            }),
+            checkpoint_path: checkpoint.path,
+            checkpoint_root,
+            manifest,
+            labels: labels.into_iter().collect(),
+        })
+    })();
+    validated.map_err(|error| capture_validation_failure(error, outcome.recovery_error.as_deref()))
+}
+
+/// Until validation succeeds, preserve the runtime diagnostic without claiming that its supplied
+/// checkpoint locator is trustworthy or that the requested snapshot has been published.
+fn capture_validation_failure(
+    error: MicrosandboxError,
+    recovery_error: Option<&str>,
+) -> MicrosandboxError {
+    match recovery_error {
+        Some(detail) => MicrosandboxError::SnapshotIntegrity(format!(
+            "{error}; source recovery also failed: {detail}"
+        )),
+        None => error,
+    }
+}
+
+/// Only a successful publication may supply an artifact locator. Failure reporting never rolls
+/// back the runtime checkpoint or a committed destination, and never attempts another source thaw.
+fn finish_capture<T>(
+    published: MicrosandboxResult<T>,
+    source_recovery: Option<SnapshotSourceRecoveryError>,
+    artifact: impl FnOnce(&T) -> PublishedSnapshotArtifact,
+) -> MicrosandboxResult<T> {
+    let Some(mut failure) = source_recovery else {
+        return published;
     };
-    manifest
-        .validate()
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    Ok(CapturedFullSnapshot {
-        checkpoint_path: checkpoint.path,
-        checkpoint_root,
-        manifest,
-        labels: labels.into_iter().collect(),
-    })
+    match published {
+        Ok(value) => failure.artifact = Some(artifact(&value)),
+        Err(error) => failure.publication_error = Some(error.to_string()),
+    }
+    Err(MicrosandboxError::SnapshotSourceRecovery(Box::new(failure)))
 }
 
 /// Build the artifact contents (upper copy, integrity, descriptor) into
@@ -603,12 +751,15 @@ async fn build_artifact(
     dir: &std::path::Path,
     disk: &SnapshotDiskClosure,
     labels: &BTreeMap<String, String>,
-    image_reference: String,
-    manifest_digest_str: String,
-    source_sandbox: &str,
     record_integrity: bool,
-    root_disk: SnapshotRootDisk,
+    metadata: FileSnapshotMetadata<'_>,
 ) -> MicrosandboxResult<(String, Manifest)> {
+    let FileSnapshotMetadata {
+        image_reference,
+        manifest_digest: manifest_digest_str,
+        source_sandbox,
+        root_disk,
+    } = metadata;
     let total_started = Instant::now();
     let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
         .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
@@ -1213,6 +1364,298 @@ mod tests {
 
     use super::*;
 
+    fn file_metadata(root_disk: SnapshotRootDisk) -> FileSnapshotMetadata<'static> {
+        FileSnapshotMetadata {
+            image_reference: "docker.io/library/alpine:3.20".into(),
+            manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            source_sandbox: "box",
+            root_disk,
+        }
+    }
+
+    #[test]
+    fn invalid_capture_keeps_recovery_diagnostic_without_a_trusted_locator() {
+        let error = capture_validation_failure(
+            MicrosandboxError::SnapshotIntegrity("checkpoint digest mismatch".into()),
+            Some("thaw timed out; re-pause failed"),
+        );
+        assert!(matches!(&error, MicrosandboxError::SnapshotIntegrity(_)));
+        let message = error.to_string();
+        assert!(message.contains("checkpoint digest mismatch"));
+        assert!(message.contains("thaw timed out; re-pause failed"));
+        assert!(!message.contains("saved at"));
+    }
+
+    /// A real, verifiable checkpoint closure without a VMM or guest process.
+    fn captured_fixture(root: &Path, detail: Option<&str>) -> CapturedFullSnapshot {
+        use microsandbox_image::checkpoint::{
+            CaptureIntent, CheckpointManifest, ContentRef, LocalObjectStore, MemoryCaptureMode,
+            MemoryExtent, MemoryExtentContent, MemoryManifest,
+        };
+        let store = LocalObjectStore::open(root).unwrap();
+        let memory = MemoryManifest {
+            schema: "microsandbox.memory/1".into(),
+            architecture: std::env::consts::ARCH.into(),
+            guest_page_size: 4096,
+            topology_generation: 1,
+            generation: 1,
+            capture_mode: MemoryCaptureMode::Full,
+            pause_generation: 7,
+            extents: vec![MemoryExtent {
+                start: 0,
+                length: 6,
+                content: MemoryExtentContent::Object(ContentRef {
+                    object: store.put_bytes(b"memory").unwrap(),
+                    object_offset: 0,
+                }),
+            }],
+        };
+        let checkpoint = CheckpointManifest {
+            schema: "microsandbox.checkpoint/1".into(),
+            checkpoint_id: "checkpoint_fixture".into(),
+            capture_intent: CaptureIntent::FullSnapshot,
+            architecture: std::env::consts::ARCH.into(),
+            pause_generation: 7,
+            execution_state: store.put_bytes(b"execution").unwrap(),
+            memory: store
+                .put_bytes(&memory.to_canonical_bytes().unwrap())
+                .unwrap(),
+            disks: Vec::new(),
+            devices: Vec::new(),
+            resources: Vec::new(),
+            requires: Vec::new(),
+        };
+        let bytes = checkpoint.to_canonical_bytes().unwrap();
+        let checkpoint_root = ObjectId::from_bytes(&bytes).unwrap();
+        std::fs::write(root.join("checkpoint.json"), bytes).unwrap();
+        CheckpointClosure::open(root, Some(&checkpoint_root)).unwrap();
+        let manifest = Manifest {
+            schema: SCHEMA.into(),
+            snapshot_id: SnapshotId::new("snap_00000000000000000000000000000001").unwrap(),
+            scope: SnapshotScope::Full,
+            state: SnapshotState::Checkpoint(CheckpointSnapshotState {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                checkpoint_root: checkpoint_root.to_string(),
+                restore_intents: vec!["clone".into(), "resume".into()],
+                requirements_summary: BTreeMap::new(),
+            }),
+            capture: SnapshotCapture {
+                created_at: "2026-09-10T00:00:00Z".into(),
+                source_lineage: Some("box".into()),
+                source_checkpoint: Some(checkpoint.checkpoint_id.clone()),
+                consistency: SnapshotConsistency::ApplicationConsistent,
+            },
+            image: ImageRef {
+                reference: "docker.io/library/alpine:3.20".into(),
+                manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            root_disk: SnapshotRootDisk::Tmpfs { size_mib: Some(64) },
+            parent: None,
+            requires: Vec::new(),
+            extensions: BTreeMap::new(),
+        };
+        manifest.validate().unwrap();
+        CapturedFullSnapshot {
+            checkpoint_path: root.to_path_buf(),
+            source_recovery: detail.map(|detail| SnapshotSourceRecoveryError {
+                source_sandbox: "box".into(),
+                checkpoint_id: checkpoint.checkpoint_id,
+                checkpoint_root: checkpoint_root.to_string(),
+                checkpoint_path: root.to_path_buf(),
+                artifact: None,
+                detail: detail.into(),
+                publication_error: None,
+            }),
+            checkpoint_root,
+            manifest,
+            labels: BTreeMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_failure_preserves_published_installed_snapshot() {
+        for detail in [
+            "source resume failed",
+            "workload thaw timed out; re-pause failed",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let local = LocalBackend::builder()
+                .home(temp.path().join("home"))
+                .build()
+                .await
+                .unwrap();
+            let captured = captured_fixture(&temp.path().join("checkpoint"), Some(detail));
+            let canonical = captured.manifest.to_canonical_bytes().unwrap();
+            let root = captured.checkpoint_root.clone();
+            let destination = temp.path().join("snapshot");
+            let error = publish_full_snapshot(
+                &local,
+                SnapshotDestination {
+                    name: "snapshot",
+                    path: &destination,
+                    force: false,
+                },
+                "box",
+                captured,
+                temp.path().to_path_buf(),
+                Instant::now(),
+                0,
+            )
+            .await
+            .unwrap_err();
+            let MicrosandboxError::SnapshotSourceRecovery(failure) = error else {
+                panic!("expected partial failure")
+            };
+            assert_eq!(failure.detail, detail);
+            assert!(failure.publication_error.is_none());
+            let artifact = failure.artifact.unwrap();
+            assert_eq!(artifact.kind, SnapshotArtifactKind::Installed);
+            assert_eq!(artifact.path, destination);
+            assert_eq!(
+                std::fs::read(destination.join(DESCRIPTOR_FILENAME)).unwrap(),
+                canonical
+            );
+            CheckpointClosure::open(destination.join(CHECKPOINT_DIRECTORY), Some(&root)).unwrap();
+            CheckpointClosure::open(&failure.checkpoint_path, Some(&root)).unwrap();
+            let reopened =
+                super::super::store::open_snapshot(&local, destination.to_str().unwrap())
+                    .await
+                    .unwrap();
+            assert_eq!(artifact.snapshot_id, reopened.id().to_string());
+            assert_eq!(artifact.digest, reopened.digest());
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_failure_preserves_published_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let captured = captured_fixture(
+            &temp.path().join("checkpoint"),
+            Some("workload thaw failed"),
+        );
+        let expected = captured.manifest.to_canonical_bytes().unwrap();
+        let out = temp.path().join("snapshot.tar");
+        let error = publish_full_archive(
+            SnapshotDestination {
+                name: "snapshot",
+                path: &out,
+                force: false,
+            },
+            "box",
+            captured,
+            true,
+            Instant::now(),
+            0,
+        )
+        .await
+        .unwrap_err();
+        let MicrosandboxError::SnapshotSourceRecovery(failure) = error else {
+            panic!("expected partial failure")
+        };
+        assert!(failure.publication_error.is_none());
+        let artifact = failure.artifact.unwrap();
+        assert_eq!(artifact.kind, SnapshotArtifactKind::Archive);
+        assert_eq!(artifact.path, out);
+        let restored = super::super::archive::materialize_archive_for_child(
+            &local,
+            &out,
+            &temp.path().join("child"),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.manifest.to_canonical_bytes().unwrap(), expected);
+        assert_eq!(artifact.digest, restored.manifest.digest().unwrap());
+        assert!(failure.checkpoint_path.join("checkpoint.json").exists());
+    }
+
+    #[tokio::test]
+    async fn recovery_failure_keeps_original_artifact_and_both_diagnostics_on_publication_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        for archive in [false, true] {
+            let captured = captured_fixture(
+                &temp.path().join(if archive {
+                    "archive-checkpoint"
+                } else {
+                    "installed-checkpoint"
+                }),
+                Some("source resume failed"),
+            );
+            let destination = temp
+                .path()
+                .join(if archive { "existing.tar" } else { "existing" });
+            std::fs::write(&destination, b"previous artifact").unwrap();
+            let target = SnapshotDestination {
+                name: "snapshot",
+                path: &destination,
+                force: false,
+            };
+            let error = if archive {
+                publish_full_archive(target, "box", captured, true, Instant::now(), 0)
+                    .await
+                    .unwrap_err()
+            } else {
+                publish_full_snapshot(
+                    &local,
+                    target,
+                    "box",
+                    captured,
+                    temp.path().to_path_buf(),
+                    Instant::now(),
+                    0,
+                )
+                .await
+                .unwrap_err()
+            };
+            let MicrosandboxError::SnapshotSourceRecovery(failure) = error else {
+                panic!("expected partial failure")
+            };
+            assert_eq!(failure.detail, "source resume failed");
+            assert!(failure.artifact.is_none());
+            assert!(
+                failure
+                    .publication_error
+                    .as_ref()
+                    .unwrap()
+                    .contains("already exists")
+            );
+            assert_eq!(std::fs::read(destination).unwrap(), b"previous artifact");
+            CheckpointClosure::open(&failure.checkpoint_path, None).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_source_recovery_keeps_existing_success_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let captured = captured_fixture(&temp.path().join("checkpoint"), None);
+        let out = temp.path().join("snapshot.tar");
+        let archive = publish_full_archive(
+            SnapshotDestination {
+                name: "snapshot",
+                path: &out,
+                force: false,
+            },
+            "box",
+            captured,
+            true,
+            Instant::now(),
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(archive.path(), out);
+    }
+
     #[test]
     fn snapshot_root_layout_preserves_owned_kinds() {
         assert_eq!(
@@ -1289,11 +1732,8 @@ mod tests {
             &without_dir,
             &disk,
             &BTreeMap::new(),
-            "docker.io/library/alpine:3.20".into(),
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            "box",
             false,
-            SnapshotRootDisk::Managed,
+            file_metadata(SnapshotRootDisk::Managed),
         )
         .await
         .unwrap();
@@ -1308,11 +1748,8 @@ mod tests {
             &with_dir,
             &disk,
             &BTreeMap::new(),
-            "docker.io/library/alpine:3.20".into(),
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            "box",
             true,
-            SnapshotRootDisk::Managed,
+            file_metadata(SnapshotRootDisk::Managed),
         )
         .await
         .unwrap();
@@ -1352,11 +1789,8 @@ mod tests {
             &artifact,
             &disk,
             &BTreeMap::new(),
-            "docker.io/library/alpine:3.20".into(),
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            "box",
             true,
-            SnapshotRootDisk::Flat,
+            file_metadata(SnapshotRootDisk::Flat),
         )
         .await
         .unwrap();

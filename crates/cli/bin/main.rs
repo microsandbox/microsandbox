@@ -744,6 +744,33 @@ mod command_tests {
     use super::*;
 
     #[test]
+    fn partial_capture_failure_keeps_artifact_locator_and_nonzero_exit() {
+        let error: anyhow::Error = microsandbox::MicrosandboxError::SnapshotSourceRecovery(
+            Box::new(microsandbox::SnapshotSourceRecoveryError {
+                source_sandbox: "source".into(),
+                checkpoint_id: "checkpoint_test".into(),
+                checkpoint_root: "root".into(),
+                checkpoint_path: "/runtime/checkpoint_test".into(),
+                artifact: Some(microsandbox::PublishedSnapshotArtifact {
+                    kind: microsandbox::SnapshotArtifactKind::Archive,
+                    path: "/saved/snapshot.tar".into(),
+                    snapshot_id: "snap_test".into(),
+                    digest: "digest".into(),
+                }),
+                detail: "thaw acknowledgement timed out".into(),
+                publication_error: None,
+            }),
+        )
+        .into();
+        // Quiet capture suppresses success output, never this top-level error renderer.
+        assert_eq!(render_anyhow_error(&error), 1);
+        let message = error.to_string();
+        assert!(message.contains("/saved/snapshot.tar"));
+        assert!(message.contains("requires recovery"));
+        assert!(message.contains("thaw acknowledgement timed out"));
+    }
+
+    #[test]
     fn maintenance_commands_do_not_require_backend_resolution() {
         let maintenance_commands = [
             Cli::try_parse_from(["msb", "doctor"]).unwrap().command,

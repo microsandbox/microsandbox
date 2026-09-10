@@ -469,6 +469,7 @@ mod error_kind {
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const SNAPSHOT_MIGRATION: &str = "snapshot_migration";
+    pub const SNAPSHOT_SOURCE_RECOVERY: &str = "snapshot_source_recovery";
     pub const PATCH_FAILED: &str = "patch_failed";
     pub const METRICS_DISABLED: &str = "metrics_disabled";
     pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
@@ -479,6 +480,7 @@ mod error_kind {
 struct FfiError {
     kind: &'static str,
     message: String,
+    recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
 }
 
 impl FfiError {
@@ -486,6 +488,7 @@ impl FfiError {
         Self {
             kind,
             message: message.into(),
+            recovery: None,
         }
     }
 
@@ -508,6 +511,14 @@ impl FfiError {
     fn to_json(&self) -> String {
         // Message is escaped via serde_json so it's safe to embed arbitrary text.
         let msg = serde_json::to_string(&self.message).unwrap_or_else(|_| "\"\"".into());
+        if let Some(recovery) = &self.recovery
+            && let Ok(recovery) = serde_json::to_string(recovery)
+        {
+            return format!(
+                r#"{{"kind":"{}","message":{},"recovery":{}}}"#,
+                self.kind, msg, recovery
+            );
+        }
         format!(r#"{{"kind":"{}","message":{}}}"#, self.kind, msg)
     }
 }
@@ -534,6 +545,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::SnapshotMigration { .. } => error_kind::SNAPSHOT_MIGRATION,
+            MicrosandboxError::SnapshotSourceRecovery(_) => error_kind::SNAPSHOT_SOURCE_RECOVERY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
             MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
@@ -544,6 +556,10 @@ impl From<MicrosandboxError> for FfiError {
         Self {
             kind,
             message: e.to_string(),
+            recovery: match e {
+                MicrosandboxError::SnapshotSourceRecovery(recovery) => Some(recovery),
+                _ => None,
+            },
         }
     }
 }
@@ -7155,6 +7171,35 @@ fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_recovery_error_preserves_ffi_payload() {
+        let error = MicrosandboxError::SnapshotSourceRecovery(Box::new(
+            microsandbox::SnapshotSourceRecoveryError {
+                source_sandbox: "team/source".into(),
+                checkpoint_id: "checkpoint-1".into(),
+                checkpoint_root: "sha256:root".into(),
+                checkpoint_path: "/runtime/checkpoint".into(),
+                artifact: Some(microsandbox::PublishedSnapshotArtifact {
+                    kind: microsandbox::SnapshotArtifactKind::Archive,
+                    path: "/saved.msnap".into(),
+                    snapshot_id: "snap_1".into(),
+                    digest: "sha256:descriptor".into(),
+                }),
+                detail: "thaw acknowledgement lost".into(),
+                publication_error: None,
+            },
+        ));
+        let message = error.to_string();
+        let payload: serde_json::Value =
+            serde_json::from_str(&FfiError::from(error).to_json()).unwrap();
+        assert_eq!(payload["kind"], "snapshot_source_recovery");
+        assert_eq!(payload["message"], message);
+        assert_eq!(payload["recovery"]["checkpoint_id"], "checkpoint-1");
+        assert_eq!(payload["recovery"]["artifact"]["kind"], "archive");
+        assert_eq!(payload["recovery"]["artifact"]["path"], "/saved.msnap");
+        assert!(payload["recovery"]["publication_error"].is_null());
+    }
 
     #[test]
     fn sandbox_create_opts_preserves_explicit_zero_oci_upper_size() {

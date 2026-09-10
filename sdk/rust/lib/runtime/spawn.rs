@@ -4207,7 +4207,11 @@ mod tests {
         let base = temp.path().join("rootfs.raw");
         let head = temp.path().join("root-active.qcow2");
         std::fs::write(&base, vec![0; 4096]).unwrap();
-        std::fs::write(&head, b"qcow").unwrap();
+        // Capacity inspection must succeed before the sealed-chain grow guard.
+        microsandbox_image::checkpoint::create_qcow2_overlay(&head, 4096, &base, "raw")
+            .await
+            .unwrap();
+        let head_before = std::fs::read(&head).unwrap();
         let state = serde_json::json!({
             "schema": "microsandbox.runtime-root-disk/1",
             "volume_id": "vol_00000000000000000000000000000000",
@@ -4219,7 +4223,7 @@ mod tests {
                     "layer_id": "layer_00000000000000000000000000000001",
                     "path": base,
                     "format": "raw",
-                    "integrity_root": "blake3:sealed"
+                    "integrity_root": microsandbox_image::checkpoint::sparse_file_integrity(&base).unwrap().root
                 },
                 {
                     "layer_id": "layer_00000000000000000000000000000002",
@@ -4249,7 +4253,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("checkpoint-backed root disk"));
-        assert_eq!(std::fs::metadata(base).unwrap().len(), 4096);
+        assert_eq!(std::fs::read(&base).unwrap(), vec![0; 4096]);
+        assert_eq!(std::fs::read(&head).unwrap(), head_before);
+        assert_eq!(
+            std::fs::read(runtime.join("root-disk.json")).unwrap(),
+            serde_json::to_vec(&state).unwrap()
+        );
+
+        // A corrupt head must also fail closed, not fall back to growing its base.
+        std::fs::write(&head, b"qcow").unwrap();
+        let error = super::prepare_oci_upper(&config, temp.path())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot inspect the root-disk chain")
+        );
+        assert_eq!(std::fs::read(&base).unwrap(), vec![0; 4096]);
+        assert_eq!(std::fs::read(&head).unwrap(), b"qcow");
+        assert_eq!(
+            std::fs::read(runtime.join("root-disk.json")).unwrap(),
+            serde_json::to_vec(&state).unwrap()
+        );
     }
 
     #[tokio::test]
