@@ -2,10 +2,12 @@
 
 use std::collections::BTreeMap;
 
-use super::ObjectId;
-use crate::error::{ImageError, ImageResult};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+use crate::error::{ImageError, ImageResult};
+
+use super::ObjectId;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -201,39 +203,6 @@ pub struct CheckpointManifest {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-macro_rules! manifest_methods {
-    ($type:ty, $schema:literal) => {
-        impl $type {
-            /// Validate structural and same-record invariants.
-            pub fn validate(&self) -> ImageResult<()> {
-                if self.schema != $schema {
-                    return manifest_error(format!(
-                        "unsupported schema {} (expected {})",
-                        self.schema, $schema
-                    ));
-                }
-                self.validate_body()
-            }
-
-            /// Serialize this manifest using the repository's bounded RFC 8785 subset.
-            pub fn to_canonical_bytes(&self) -> ImageResult<Vec<u8>> {
-                self.validate()?;
-                canonical_bytes(self)
-            }
-
-            /// Parse and validate one complete canonical manifest.
-            pub fn from_bytes(bytes: &[u8]) -> ImageResult<Self> {
-                parse_manifest(bytes)
-            }
-
-            /// Compute the immutable SHA-256 identity of canonical bytes.
-            pub fn digest(&self) -> ImageResult<ObjectId> {
-                ObjectId::from_bytes(&self.to_canonical_bytes()?)
-            }
-        }
-    };
-}
-
 impl MemoryManifest {
     fn validate_body(&self) -> ImageResult<()> {
         if self.architecture.is_empty() || self.guest_page_size == 0 || self.generation == 0 {
@@ -321,10 +290,6 @@ impl CheckpointManifest {
     }
 }
 
-manifest_methods!(MemoryManifest, "microsandbox.memory/1");
-manifest_methods!(DiskGenerationManifest, "microsandbox.disk-generation/1");
-manifest_methods!(CheckpointManifest, "microsandbox.checkpoint/1");
-
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
@@ -410,6 +375,47 @@ fn manifest_error<T>(message: impl Into<String>) -> ImageResult<T> {
 fn manifest_error_value(message: impl Into<String>) -> ImageError {
     ImageError::ManifestParse(format!("checkpoint manifest: {}", message.into()))
 }
+
+//--------------------------------------------------------------------------------------------------
+// Macros
+//--------------------------------------------------------------------------------------------------
+
+macro_rules! manifest_methods {
+    ($type:ty, $schema:literal) => {
+        impl $type {
+            /// Validate structural and same-record invariants.
+            pub fn validate(&self) -> ImageResult<()> {
+                if self.schema != $schema {
+                    return manifest_error(format!(
+                        "unsupported schema {} (expected {})",
+                        self.schema, $schema
+                    ));
+                }
+                self.validate_body()
+            }
+
+            /// Serialize this manifest using the repository's bounded RFC 8785 subset.
+            pub fn to_canonical_bytes(&self) -> ImageResult<Vec<u8>> {
+                self.validate()?;
+                canonical_bytes(self)
+            }
+
+            /// Parse and validate one complete canonical manifest.
+            pub fn from_bytes(bytes: &[u8]) -> ImageResult<Self> {
+                parse_manifest(bytes)
+            }
+
+            /// Compute the immutable SHA-256 identity of canonical bytes.
+            pub fn digest(&self) -> ImageResult<ObjectId> {
+                ObjectId::from_bytes(&self.to_canonical_bytes()?)
+            }
+        }
+    };
+}
+
+manifest_methods!(MemoryManifest, "microsandbox.memory/1");
+manifest_methods!(DiskGenerationManifest, "microsandbox.disk-generation/1");
+manifest_methods!(CheckpointManifest, "microsandbox.checkpoint/1");
 
 //--------------------------------------------------------------------------------------------------
 // Tests
