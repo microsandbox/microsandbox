@@ -92,6 +92,8 @@ class Sandbox:
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
         from_snapshot: str | os.PathLike[str] | None = None,
+        disk_only: bool = False,
+        snapshot_base: str | None = None,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -132,6 +134,8 @@ class Sandbox:
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
         from_snapshot: str | os.PathLike[str] | None = None,
+        disk_only: bool = False,
+        snapshot_base: str | None = None,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -187,6 +191,8 @@ class Sandbox:
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
         from_snapshot: str | os.PathLike[str] | None = None,
+        disk_only: bool = False,
+        snapshot_base: str | None = None,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -322,6 +328,9 @@ class Sandbox:
     async def metrics(self) -> SandboxMetrics: ...
     async def ping(self) -> SandboxPingResult: ...
     async def touch(self) -> SandboxTouchResult: ...
+    async def compact(
+        self, *, layers: int | None = None, dry_run: bool = False
+    ) -> dict[str, int | bool]: ...
     async def modify(
         self,
         *,
@@ -424,6 +433,9 @@ class SandboxHandle:
     async def metrics(self) -> SandboxMetrics: ...
     async def ping(self) -> SandboxPingResult: ...
     async def touch(self) -> SandboxTouchResult: ...
+    async def compact(
+        self, *, layers: int | None = None, dry_run: bool = False
+    ) -> dict[str, int | bool]: ...
     async def modify(
         self,
         *,
@@ -883,7 +895,7 @@ class Snapshot:
         labels: dict[str, str] | None = None,
         force: bool = False,
         record_integrity: bool = False,
-        resumable: bool = False,
+        full: bool = False,
     ) -> Snapshot: ...
     @staticmethod
     async def create_archive(
@@ -894,7 +906,7 @@ class Snapshot:
         labels: dict[str, str] | None = None,
         force: bool = False,
         record_integrity: bool = False,
-        resumable: bool = False,
+        full: bool = False,
         plain_tar: bool = False,
     ) -> SnapshotArchive: ...
     @staticmethod
@@ -917,12 +929,15 @@ class Snapshot:
         with_parents: bool = False,
         with_image: bool = False,
         plain_tar: bool = False,
+        since: str | None = None,
+        last_layers: int | None = None,
     ) -> None: ...
     @staticmethod
     async def load(
         archive: str | os.PathLike[str],
         *,
         dest: str | os.PathLike[str] | None = None,
+        base: str | None = None,
     ) -> SnapshotHandle: ...
     @property
     def id(self) -> str: ...

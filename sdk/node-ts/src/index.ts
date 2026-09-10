@@ -105,6 +105,7 @@ export {
 
 // Snapshots
 export { Snapshot, SnapshotArchive } from "./snapshot.js";
+export type { DiskCompactionOptions, DiskCompactionResult } from "./compact.js";
 import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapshot.js";
 /**
  * Native fluent builder for a snapshot. `new SnapshotBuilder(name)`
@@ -450,13 +451,18 @@ export {
   SandboxNotRunningError,
   SandboxReplacedError,
   SandboxStillRunningError,
+  SnapshotSourceRecoveryError,
   TerminalError,
   UnsupportedOperationError,
   UnsupportedError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "./errors.js";
-export type { MicrosandboxErrorCode } from "./errors.js";
+export type {
+  MicrosandboxErrorCode,
+  PublishedSnapshotArtifact,
+  SnapshotSourceRecoveryDetails,
+} from "./errors.js";
 
 // Sizes
 export { GiB, KiB, MiB, TiB } from "./size.js";

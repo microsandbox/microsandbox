@@ -25,7 +25,8 @@ use microsandbox_protocol::bulk::{
 use microsandbox_protocol::codec::{self, DecodedFrame, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
     ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ping, Pong, Ready,
-    RelayClientDisconnected, ResolvedUser, Touch, Touched,
+    RelayClientDisconnected, ResolvedUser, Touch, Touched, WorkloadFreeze, WorkloadFrozen,
+    WorkloadThaw, WorkloadThawed,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
@@ -55,6 +56,7 @@ use crate::session::{
     SessionOutput, SessionOutputEnvelope, SessionOutputSender, resolve_default_user,
 };
 use crate::tcp::TcpSession;
+use crate::workload::{WorkloadLatch, WorkloadLatchError};
 use crate::{clock, fs, handoff, heartbeat, serial};
 
 //--------------------------------------------------------------------------------------------------
@@ -133,6 +135,9 @@ const BULK_FAILURE_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 //--------------------------------------------------------------------------------------------------
 
 struct AgentState {
+    // Retain stdin/PTY and process registrations until inherited output readers finish.
+    detached_sessions: HashMap<(u64, u32), ExecSession>,
+    restored_attempt: Option<String>,
     client_incarnations: HashMap<u32, ClientIncarnation>,
     bulk_input_budget: Arc<Semaphore>,
     sessions: HashMap<u32, ExecSession>,
@@ -227,6 +232,8 @@ enum BulkOutputCleanup {
 impl Default for AgentState {
     fn default() -> Self {
         Self {
+            detached_sessions: HashMap::new(),
+            restored_attempt: None,
             client_incarnations: HashMap::new(),
             bulk_input_budget: Arc::new(Semaphore::new(BULK_INPUT_BYTE_CAPACITY)),
             sessions: HashMap::new(),
@@ -405,6 +412,16 @@ pub async fn run(
     let mut serial_out_buf = Vec::new();
 
     let mut state = AgentState::default();
+    let mut workload = if handoff::is_pid_1() {
+        WorkloadLatch::initialize()
+    } else {
+        WorkloadLatch::unavailable(
+            "PID 1 handoff workloads are not wholly owned by agentd's cgroup",
+        )
+    };
+    if let Some(reason) = workload.unavailable_reason() {
+        eprintln!("checkpoint workload freezer unavailable: {reason}");
+    }
 
     // Channel for session output events.
     let (mut session_tx, mut session_rx, bulk_session_rx, bulk_command_rx) =
@@ -420,7 +437,12 @@ pub async fn run(
     // kill the sandbox. A plain OS thread is scheduled by the guest kernel
     // independently of the async runtime, so the pulse keeps ticking under load.
     let heartbeat_shutdown = Arc::new(AtomicBool::new(false));
-    let heartbeat_thread = spawn_heartbeat_thread(heartbeat_rx, Arc::clone(&heartbeat_shutdown));
+    let heartbeat_control = Arc::new(heartbeat::HeartbeatControl::default());
+    let heartbeat_thread = spawn_heartbeat_thread(
+        heartbeat_rx,
+        Arc::clone(&heartbeat_shutdown),
+        Arc::clone(&heartbeat_control),
+    );
 
     // Send core.ready with boot timing data.
     let ready_time_ns = clock::boottime_ns();
@@ -566,6 +588,9 @@ pub async fn run(
             }
 
             Some(envelope) = recv_optional(&mut combined_bulk_rx) => {
+                if discard_inherited_output(&mut state, &envelope, session_tx.generation()) {
+                    continue;
+                }
                 if envelope.incarnation.is_some()
                     && client_incarnation_for_id(&state, envelope.id) != envelope.incarnation
                 {
@@ -807,9 +832,11 @@ pub async fn run(
                                     msg,
                                     &mut state,
                                     &mut activity,
-                                    &session_tx,
+                                    &mut session_tx,
                                     &mut serial_out_buf,
                                     config,
+                                    &mut workload,
+                                    &heartbeat_control,
                                 ).await?;
                                 record_encoded_guest_messages(
                                     &serial_out_buf,
@@ -842,6 +869,9 @@ pub async fn run(
 
             // Receive output events from session reader tasks.
             Some(envelope) = session_rx.recv() => {
+                if discard_inherited_output(&mut state, &envelope, session_tx.generation()) {
+                    continue;
+                }
                 if envelope.incarnation.is_some()
                     && client_incarnation_for_id(&state, envelope.id) != envelope.incarnation
                 {
@@ -988,6 +1018,7 @@ async fn bulk_writer_task(
     activity_tx: tokio::sync::mpsc::Sender<RawActivity>,
 ) -> AgentdResult<()> {
     let async_port = AsyncFd::new(file)?;
+    let mut generation = 0;
     let mut flows = HashMap::<(ClientIncarnation, u32), BulkWriteFlow>::new();
     let mut active = VecDeque::<(ClientIncarnation, u32)>::new();
     let mut retired = HashMap::<ClientIncarnation, Vec<u64>>::new();
@@ -1001,6 +1032,7 @@ async fn bulk_writer_task(
             Some(command) = command_rx.recv() => {
                 cleanups.push(apply_bulk_output_command(
                     command,
+                    &mut generation,
                     &mut flows,
                     &mut active,
                     &mut retired,
@@ -1010,6 +1042,7 @@ async fn bulk_writer_task(
             Some(envelope) = output_rx.recv() => {
                 enqueue_bulk_output(
                     envelope,
+                    generation,
                     &mut flows,
                     &mut active,
                     &retired,
@@ -1021,6 +1054,7 @@ async fn bulk_writer_task(
         while let Ok(command) = command_rx.try_recv() {
             cleanups.push(apply_bulk_output_command(
                 command,
+                &mut generation,
                 &mut flows,
                 &mut active,
                 &mut retired,
@@ -1030,6 +1064,7 @@ async fn bulk_writer_task(
         while let Ok(envelope) = output_rx.try_recv() {
             enqueue_bulk_output(
                 envelope,
+                generation,
                 &mut flows,
                 &mut active,
                 &retired,
@@ -1103,14 +1138,7 @@ async fn bulk_writer_task(
                         .saturating_add(pending_activity.tcp_bytes)
                         >= BULK_ACTIVITY_PUBLISH_BYTES
                     {
-                        activity_tx
-                            .send(std::mem::take(&mut pending_activity))
-                            .await
-                            .map_err(|_| {
-                                AgentdError::ExecSession(
-                                    "dedicated bulk activity consumer stopped".into(),
-                                )
-                            })?;
+                        publish_bulk_activity(&activity_tx, &mut pending_activity)?;
                     }
                     burst = burst.saturating_add(next_len);
                 }
@@ -1126,6 +1154,7 @@ async fn bulk_writer_task(
             while let Ok(command) = command_rx.try_recv() {
                 cleanups.push(apply_bulk_output_command(
                     command,
+                    &mut generation,
                     &mut flows,
                     &mut active,
                     &mut retired,
@@ -1135,6 +1164,7 @@ async fn bulk_writer_task(
             while let Ok(envelope) = output_rx.try_recv() {
                 enqueue_bulk_output(
                     envelope,
+                    generation,
                     &mut flows,
                     &mut active,
                     &retired,
@@ -1143,12 +1173,7 @@ async fn bulk_writer_task(
             }
             complete_bulk_output_cleanups(cleanups, &mut retired, &mut retiring_incarnations);
             if active.is_empty() && pending_activity.guest_messages != 0 {
-                activity_tx
-                    .send(std::mem::take(&mut pending_activity))
-                    .await
-                    .map_err(|_| {
-                        AgentdError::ExecSession("dedicated bulk activity consumer stopped".into())
-                    })?;
+                publish_bulk_activity(&activity_tx, &mut pending_activity)?;
             }
             tokio::task::yield_now().await;
         }
@@ -1157,14 +1182,43 @@ async fn bulk_writer_task(
     Ok(())
 }
 
+/// Activity must never prevent a restore command from reaching the scheduler.
+fn publish_bulk_activity(
+    sender: &tokio::sync::mpsc::Sender<RawActivity>,
+    pending: &mut RawActivity,
+) -> AgentdResult<()> {
+    match sender.try_send(std::mem::take(pending)) {
+        Ok(()) => Ok(()),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(activity)) => {
+            *pending = activity;
+            Ok(())
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(AgentdError::ExecSession(
+            "dedicated bulk activity consumer stopped".into(),
+        )),
+    }
+}
+
 fn apply_bulk_output_command(
     command: BulkOutputCommand,
+    generation: &mut u64,
     flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
     active: &mut VecDeque<(ClientIncarnation, u32)>,
     retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
     retiring_incarnations: &mut HashSet<ClientIncarnation>,
 ) -> AgentdResult<BulkOutputCleanup> {
     match command {
+        BulkOutputCommand::Restore {
+            generation: next,
+            completion,
+        } => {
+            *generation = next;
+            flows.clear();
+            active.clear();
+            retired.clear();
+            retiring_incarnations.clear();
+            Ok(BulkOutputCleanup::Flow(completion))
+        }
         BulkOutputCommand::DropFlow {
             incarnation,
             id,
@@ -1216,11 +1270,15 @@ fn complete_bulk_output_cleanups(
 
 fn enqueue_bulk_output(
     envelope: SessionOutputEnvelope,
+    generation: u64,
     flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
     active: &mut VecDeque<(ClientIncarnation, u32)>,
     retired: &HashMap<ClientIncarnation, Vec<u64>>,
     retiring_incarnations: &HashSet<ClientIncarnation>,
 ) -> AgentdResult<()> {
+    if envelope.generation != generation {
+        return Ok(());
+    }
     let id = envelope.id;
     let incarnation = envelope.incarnation.ok_or_else(|| {
         AgentdError::ExecSession("dedicated bulk output is missing client incarnation".into())
@@ -2031,17 +2089,77 @@ fn cleanup_relay_client_range(state: &mut AgentState, id_start: u32, id_end_excl
     clear_bulk_receive_range(state, id_start, id_end_exclusive);
 }
 
+/// Detach transport ownership while retaining the complete guest process lifetime.
+async fn restore_client_state(
+    state: &mut AgentState,
+    sender: &mut SessionOutputSender,
+) -> AgentdResult<()> {
+    let generation = sender.generation();
+    state.detached_sessions.extend(
+        std::mem::take(&mut state.sessions)
+            .into_iter()
+            .map(|(id, session)| ((generation, id), session)),
+    );
+    state.client_incarnations.clear();
+    for (_, session) in state.read_sessions.drain() {
+        session.abort();
+    }
+    for (_, worker) in state.bulk_write_workers.drain() {
+        worker.task.abort();
+        let _ = worker.task.await;
+    }
+    state.write_sessions.clear();
+    for (_, session) in state.tcp_sessions.drain() {
+        session.close();
+    }
+    state.fs.clear();
+    state.bulk_received_offsets.clear();
+    state.pending_bulk_finishes.clear();
+    // The host drains both physical ports during this barrier. A partially written old record
+    // must finish, not be interrupted midway and desynchronize the bulk byte stream.
+    time::timeout(Duration::from_secs(5), sender.restore_generation())
+        .await
+        .map_err(|_| {
+            AgentdError::ExecSession(
+                "restore bulk cleanup timed out; workloads remain frozen".into(),
+            )
+        })?
+        .map_err(|error| AgentdError::ExecSession(error.into()))
+}
+
+/// Retired producers still drain stdout/stderr so inherited children never hit a closed pipe.
+fn discard_inherited_output(
+    state: &mut AgentState,
+    envelope: &SessionOutputEnvelope,
+    generation: u64,
+) -> bool {
+    if envelope.generation == generation {
+        return false;
+    }
+    if matches!(envelope.output, SessionOutput::Exited(_)) {
+        state
+            .detached_sessions
+            .remove(&(envelope.generation, envelope.id));
+    }
+    true
+}
+
+// Keep the loop-owned latch and output generation explicit at this dispatch boundary; merging
+// them into AgentState would obscure the ownership needed by restore and background producers.
+#[allow(clippy::too_many_arguments)]
 async fn handle_message(
     msg: Message,
     state: &mut AgentState,
     activity: &mut ActivityTracker,
-    session_tx: &SessionOutputSender,
+    root_session_tx: &mut SessionOutputSender,
     out_buf: &mut Vec<u8>,
     config: &AgentdConfig,
+    workload: &mut WorkloadLatch,
+    heartbeat_control: &heartbeat::HeartbeatControl,
 ) -> AgentdResult<()> {
     // Background producers retain the range owner that opened them. The main loop can then drop
     // queued output after a disconnect instead of relabelling it with a recycled correlation ID.
-    let session_tx = session_tx.with_incarnation(client_incarnation_for_id(state, msg.id));
+    let session_tx = root_session_tx.with_incarnation(client_incarnation_for_id(state, msg.id));
     match msg.t {
         MessageType::Ping => {
             let Some(_) = decode_payload_or_core_error::<Ping>(&msg, out_buf)? else {
@@ -2070,6 +2188,93 @@ async fn handle_message(
                 .map_err(|e| AgentdError::ExecSession(format!("encode touched frame: {e}")))?;
         }
 
+        MessageType::WorkloadFreeze => {
+            let Some(request) = decode_payload_or_core_error::<WorkloadFreeze>(&msg, out_buf)?
+            else {
+                return Ok(());
+            };
+            let was_frozen = workload.is_frozen();
+            match workload.freeze(&request.attempt_id) {
+                Ok(()) => {
+                    if !was_frozen {
+                        // A new capture can reuse a human-selected checkpoint name.
+                        state.restored_attempt = None;
+                    }
+                    if let Err(pause_error) = heartbeat_control.pause() {
+                        let rollback = workload.thaw(&request.attempt_id).err();
+                        let message = match rollback {
+                            Some(error) => format!(
+                                "heartbeat checkpoint gate failed: {pause_error}; workload rollback failed: {error}"
+                            ),
+                            None => format!("heartbeat checkpoint gate failed: {pause_error}"),
+                        };
+                        encode_workload_error(
+                            &msg,
+                            WorkloadLatchError::Io(std::io::Error::other(message)),
+                            out_buf,
+                        )?;
+                    } else {
+                        let reply = Message::with_payload(
+                            MessageType::WorkloadFrozen,
+                            msg.id,
+                            &WorkloadFrozen {
+                                attempt_id: request.attempt_id,
+                            },
+                        )
+                        .map_err(|error| {
+                            AgentdError::ExecSession(format!(
+                                "encode workload-frozen response: {error}"
+                            ))
+                        })?;
+                        codec::encode_to_buf(&reply, out_buf).map_err(|error| {
+                            AgentdError::ExecSession(format!(
+                                "encode workload-frozen frame: {error}"
+                            ))
+                        })?;
+                    }
+                }
+                Err(error) => encode_workload_error(&msg, error, out_buf)?,
+            }
+        }
+
+        MessageType::WorkloadThaw => {
+            let Some(request) = decode_payload_or_core_error::<WorkloadThaw>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            if request.mode == microsandbox_protocol::core::WorkloadThawMode::Restore
+                && state.restored_attempt.as_deref() != Some(&request.attempt_id)
+            {
+                if let Err(error) = workload.require_frozen_attempt(&request.attempt_id) {
+                    encode_workload_error(&msg, error, out_buf)?;
+                    return Ok(());
+                }
+                // Never call ordinary disconnect here: it kills the very processes we captured.
+                restore_client_state(state, root_session_tx).await?;
+                state.restored_attempt = Some(request.attempt_id.clone());
+            }
+            match workload.thaw(&request.attempt_id) {
+                Ok(()) => {
+                    heartbeat_control.resume();
+                    let reply = Message::with_payload(
+                        MessageType::WorkloadThawed,
+                        msg.id,
+                        &WorkloadThawed {
+                            attempt_id: request.attempt_id,
+                        },
+                    )
+                    .map_err(|error| {
+                        AgentdError::ExecSession(format!(
+                            "encode workload-thawed response: {error}"
+                        ))
+                    })?;
+                    codec::encode_to_buf(&reply, out_buf).map_err(|error| {
+                        AgentdError::ExecSession(format!("encode workload-thawed frame: {error}"))
+                    })?;
+                }
+                Err(error) => encode_workload_error(&msg, error, out_buf)?,
+            }
+        }
+
         MessageType::ExecRequest => {
             let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
                 return Ok(());
@@ -2078,12 +2283,44 @@ async fn handle_message(
                 req.cwd = config.default_cwd().map(str::to_string);
             }
             prepend_scripts_to_path(&mut req);
+            if workload.is_frozen() {
+                encode_exec_failed(
+                    msg.id,
+                    ExecFailed {
+                        kind: ExecFailureKind::Other,
+                        errno: None,
+                        errno_name: None,
+                        message: "sandbox workload is frozen for checkpoint activation".into(),
+                        stage: Some("workload_latch".into()),
+                    },
+                    out_buf,
+                )?;
+                return Ok(());
+            }
+            let workload_placement = match workload.placement() {
+                Ok(placement) => placement,
+                Err(error) => {
+                    encode_exec_failed(
+                        msg.id,
+                        ExecFailed {
+                            kind: ExecFailureKind::Other,
+                            errno: None,
+                            errno_name: None,
+                            message: error.to_string(),
+                            stage: Some("workload_cgroup".into()),
+                        },
+                        out_buf,
+                    )?;
+                    return Ok(());
+                }
+            };
             match ExecSession::spawn(
                 msg.id,
                 &req,
                 session_tx.clone(),
                 config.user.as_deref(),
                 config.security_profile,
+                workload_placement,
             ) {
                 Ok(session) => {
                     let reply = Message::with_payload(
@@ -2417,7 +2654,12 @@ async fn handle_message(
             // Graceful shutdown — signal all sessions, then ask the guest
             // kernel to power off so block-root filesystems can shut down
             // cleanly instead of leaving ext4 journal recovery pending.
-            for (_, session) in state.sessions.drain() {
+            for session in state
+                .sessions
+                .drain()
+                .map(|(_, session)| session)
+                .chain(state.detached_sessions.drain().map(|(_, session)| session))
+            {
                 let _ = session.send_signal(15); // SIGTERM
             }
             state.write_sessions.clear();
@@ -2454,7 +2696,11 @@ async fn handle_message(
 fn message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(
         t,
-        MessageType::ClockSync | MessageType::Ping | MessageType::Touch
+        MessageType::ClockSync
+            | MessageType::Ping
+            | MessageType::Touch
+            | MessageType::WorkloadFreeze
+            | MessageType::WorkloadThaw
     )
 }
 
@@ -2468,7 +2714,11 @@ fn message_refreshes_idle_timer(t: &MessageType) -> bool {
 fn guest_message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(
         t,
-        MessageType::Pong | MessageType::Touched | MessageType::CoreError
+        MessageType::Pong
+            | MessageType::Touched
+            | MessageType::WorkloadFrozen
+            | MessageType::WorkloadThawed
+            | MessageType::CoreError
     )
 }
 
@@ -2484,6 +2734,7 @@ fn guest_message_refreshes_idle_timer(t: &MessageType) -> bool {
 fn spawn_heartbeat_thread(
     snapshot_rx: watch::Receiver<HeartbeatSnapshot>,
     shutdown: Arc<AtomicBool>,
+    control: Arc<heartbeat::HeartbeatControl>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("agentd-heartbeat".to_string())
@@ -2526,6 +2777,9 @@ fn spawn_heartbeat_thread(
                     active_tcp_streams: snapshot.active_tcp_streams,
                     activity_counters: snapshot.counters,
                 };
+                let Some(_write_guard) = control.begin_write() else {
+                    continue;
+                };
                 let _ = heartbeat::write_heartbeat(&heartbeat);
             }
         })
@@ -2535,7 +2789,7 @@ fn spawn_heartbeat_thread(
 fn heartbeat_snapshot(state: &AgentState, activity: &ActivityTracker) -> HeartbeatSnapshot {
     HeartbeatSnapshot {
         activity_seq: activity.activity_seq,
-        active_exec_sessions: state.sessions.len() as u32,
+        active_exec_sessions: (state.sessions.len() + state.detached_sessions.len()) as u32,
         active_fs_streams: state
             .read_sessions
             .len()
@@ -2818,6 +3072,36 @@ fn encode_core_error(
     .map_err(|e| AgentdError::ExecSession(format!("encode core error: {e}")))?;
     codec::encode_to_buf(&reply, out_buf)
         .map_err(|e| AgentdError::ExecSession(format!("encode core error frame: {e}")))?;
+    Ok(())
+}
+
+fn encode_workload_error(
+    source: &Message,
+    error: WorkloadLatchError,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    let kind = match &error {
+        WorkloadLatchError::Unavailable(_) | WorkloadLatchError::Io(_) => {
+            CoreErrorKind::CapabilityUnavailable
+        }
+        WorkloadLatchError::InvalidAttempt(_) => CoreErrorKind::InvalidPayload,
+        WorkloadLatchError::Conflict(_) => CoreErrorKind::InvalidSession,
+    };
+    encode_core_error_if_supported(
+        source,
+        source.id,
+        kind,
+        error.to_string(),
+        Some(source.t.as_str().to_string()),
+        out_buf,
+    )
+}
+
+fn encode_exec_failed(id: u32, payload: ExecFailed, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
+    let reply = Message::with_payload(MessageType::ExecFailed, id, &payload)
+        .map_err(|error| AgentdError::ExecSession(format!("encode exec failure: {error}")))?;
+    codec::encode_to_buf(&reply, out_buf)
+        .map_err(|error| AgentdError::ExecSession(format!("encode exec failure frame: {error}")))?;
     Ok(())
 }
 
@@ -3549,12 +3833,14 @@ mod tests {
                 .await
         );
 
+        let mut generation = 0;
         let mut flows = HashMap::new();
         let mut active = VecDeque::new();
         let mut retired = HashMap::new();
         let mut retiring_incarnations = HashSet::new();
         enqueue_bulk_output(
             bulk_rx.recv().await.unwrap(),
+            0,
             &mut flows,
             &mut active,
             &retired,
@@ -3568,6 +3854,7 @@ mod tests {
                 id: 17,
                 completion,
             },
+            &mut generation,
             &mut flows,
             &mut active,
             &mut retired,
@@ -3594,6 +3881,7 @@ mod tests {
         );
         enqueue_bulk_output(
             bulk_rx.recv().await.unwrap(),
+            0,
             &mut flows,
             &mut active,
             &retired,
@@ -3744,5 +4032,473 @@ mod tests {
             assert_eq!(message.flags, microsandbox_protocol::message::FLAG_TERMINAL);
             assert!(bytes.is_empty());
         }
+    }
+    #[tokio::test]
+    async fn restore_thaw_checks_ownership_is_idempotent_and_leaves_source_clients_alone() {
+        use microsandbox_protocol::core::WorkloadThawMode;
+
+        let mut state = AgentState::default();
+        let (mut sender, _output) = SessionOutputSender::channel();
+        let mut activity = ActivityTracker::new();
+        let heartbeat = heartbeat::HeartbeatControl::default();
+        let config = AgentdConfig {
+            user: None,
+            security_profile: Default::default(),
+            default_cwd: None,
+            default_env: Vec::new(),
+        };
+        let mut workload = crate::workload::tests::fake_latch();
+        let owner = [0x51; CLIENT_INCARNATION_SIZE];
+        let connect = |state: &mut AgentState| {
+            establish_relay_client(
+                state,
+                RelayClientConnected {
+                    id_start: 1,
+                    id_end_exclusive: microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP,
+                    incarnation: owner,
+                },
+            )
+            .unwrap();
+        };
+        connect(&mut state);
+        workload.freeze("capture").unwrap();
+
+        // Wrong attempts cannot detach a client's state. Source-side thaw must also preserve it.
+        for (attempt, mode, expected) in [
+            ("wrong", WorkloadThawMode::Restore, MessageType::CoreError),
+            (
+                "capture",
+                WorkloadThawMode::Continue,
+                MessageType::WorkloadThawed,
+            ),
+        ] {
+            let request = Message::with_payload(
+                MessageType::WorkloadThaw,
+                0,
+                &WorkloadThaw {
+                    attempt_id: attempt.into(),
+                    mode,
+                },
+            )
+            .unwrap();
+            let mut encoded = Vec::new();
+            handle_message(
+                request,
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut encoded,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            let mut bytes = BytesMut::from(encoded.as_slice());
+            let Some(DecodedFrame::Control(reply)) =
+                codec::try_decode_frame_from_bytes(&mut bytes).unwrap()
+            else {
+                panic!("missing thaw response");
+            };
+            assert_eq!(reply.t, expected);
+            assert_eq!(sender.generation(), 0);
+            assert_eq!(client_incarnation_for_id(&state, 1), Some(owner));
+        }
+
+        for generation in 1..=2 {
+            // Reuse the same human-readable name for a subsequent capture, then retry its thaw.
+            let request = Message::with_payload(
+                MessageType::WorkloadFreeze,
+                0,
+                &WorkloadFreeze {
+                    attempt_id: "capture".into(),
+                },
+            )
+            .unwrap();
+            handle_message(
+                request,
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut Vec::new(),
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            for retry in [false, true] {
+                let request = Message::with_payload(
+                    MessageType::WorkloadThaw,
+                    0,
+                    &WorkloadThaw {
+                        attempt_id: "capture".into(),
+                        mode: WorkloadThawMode::Restore,
+                    },
+                )
+                .unwrap();
+                let mut encoded = Vec::new();
+                handle_message(
+                    request,
+                    &mut state,
+                    &mut activity,
+                    &mut sender,
+                    &mut encoded,
+                    &config,
+                    &mut workload,
+                    &heartbeat,
+                )
+                .await
+                .unwrap();
+                let mut bytes = BytesMut::from(encoded.as_slice());
+                let Some(DecodedFrame::Control(reply)) =
+                    codec::try_decode_frame_from_bytes(&mut bytes).unwrap()
+                else {
+                    panic!("missing restored thaw response");
+                };
+                assert_eq!(reply.t, MessageType::WorkloadThawed);
+                assert!(!workload.is_frozen());
+                assert_eq!(sender.generation(), generation);
+                assert_eq!(client_incarnation_for_id(&state, 1), retry.then_some(owner));
+                if !retry {
+                    // A retry must not detach clients which connected after the first success.
+                    connect(&mut state);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_detaches_piped_and_pty_workloads_without_killing_or_reusing_output() {
+        for tty in [false, true] {
+            let mut state = AgentState::default();
+            let (mut sender, mut output) = SessionOutputSender::channel();
+            let id = 1;
+            let end = microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP;
+            let old_owner = [0x31; CLIENT_INCARNATION_SIZE];
+            let new_owner = [0x32; CLIENT_INCARNATION_SIZE];
+            establish_relay_client(
+                &mut state,
+                RelayClientConnected {
+                    id_start: id,
+                    id_end_exclusive: end,
+                    incarnation: old_owner,
+                },
+            )
+            .unwrap();
+            let request = |script: &str| ExecRequest {
+                cmd: "/bin/sh".into(),
+                args: vec!["-c".into(), script.into()],
+                env: vec![],
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: vec![],
+            };
+            let session = ExecSession::spawn(
+                id,
+                &request("echo before; sleep 0.3; echo inherited; exit 23"),
+                sender.with_incarnation(Some(old_owner)),
+                None,
+                crate::config::SecurityProfile::Default,
+                None,
+            )
+            .unwrap();
+            let pid = session.pid();
+            state.sessions.insert(id, session);
+            let before = time::timeout(Duration::from_secs(5), output.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(before.output, SessionOutput::Stdout(_)));
+            let old_generation = sender.generation();
+
+            restore_client_state(&mut state, &mut sender).await.unwrap();
+            assert_eq!(
+                unsafe { libc::kill(pid as i32, 0) },
+                0,
+                "restore killed the captured process"
+            );
+            assert_eq!(state.detached_sessions.len(), 1);
+            assert!(state.sessions.is_empty());
+            establish_relay_client(
+                &mut state,
+                RelayClientConnected {
+                    id_start: id,
+                    id_end_exclusive: end,
+                    incarnation: new_owner,
+                },
+            )
+            .unwrap();
+            let fresh = ExecSession::spawn(
+                id,
+                &request("echo fresh; sleep 0.8; exit 24"),
+                sender.with_incarnation(Some(new_owner)),
+                None,
+                crate::config::SecurityProfile::Default,
+                None,
+            )
+            .unwrap();
+            state.sessions.insert(id, fresh);
+            let mut saw_old_exit = false;
+            let mut saw_new_exit = false;
+            let mut saw_inherited = false;
+            time::timeout(Duration::from_secs(5), async {
+                while !saw_old_exit || !saw_new_exit {
+                    let envelope = output.recv().await.unwrap();
+                    if envelope.generation == old_generation {
+                        if let SessionOutput::Stdout(bytes) = &envelope.output {
+                            saw_inherited |= String::from_utf8_lossy(bytes).contains("inherited");
+                        }
+                        if let SessionOutput::Exited(code) = &envelope.output {
+                            assert_eq!(*code, 23);
+                            saw_old_exit = true;
+                        }
+                        assert!(discard_inherited_output(
+                            &mut state,
+                            &envelope,
+                            sender.generation()
+                        ));
+                        assert!(
+                            state.sessions.contains_key(&id),
+                            "old exit removed new session"
+                        );
+                    } else {
+                        assert!(!discard_inherited_output(
+                            &mut state,
+                            &envelope,
+                            sender.generation()
+                        ));
+                        if let SessionOutput::Exited(code) = envelope.output {
+                            assert_eq!(code, 24);
+                            saw_new_exit = true;
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert!(saw_inherited, "inherited output reader stopped draining");
+            assert!(
+                state.detached_sessions.is_empty(),
+                "exited inherited handles leaked"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_closes_inherited_filesystem_handles_and_tcp_transfers() {
+        use microsandbox_protocol::fs::{FsOp, FsOpenOptions, FsResponse, FsResponseData};
+        use tokio::io::AsyncReadExt;
+
+        async fn fs_request(
+            state: &mut AgentState,
+            sender: &SessionOutputSender,
+            op: FsOp,
+        ) -> FsResponse {
+            let mut encoded = Vec::new();
+            crate::fs::handle_fs_request(
+                1,
+                PROTOCOL_VERSION,
+                FsRequest { op, bulk: None },
+                &mut state.fs,
+                &mut encoded,
+                sender,
+            )
+            .await
+            .unwrap();
+            let mut bytes = BytesMut::from(encoded.as_slice());
+            let Some(DecodedFrame::Control(reply)) =
+                codec::try_decode_frame_from_bytes(&mut bytes).unwrap()
+            else {
+                panic!("missing filesystem response");
+            };
+            reply.payload::<FsResponse>().unwrap()
+        }
+
+        let mut state = AgentState::default();
+        let (mut sender, _output) = SessionOutputSender::channel();
+        let open = || FsOp::OpenFile {
+            path: "/dev/null".into(),
+            options: FsOpenOptions {
+                read: true,
+                ..Default::default()
+            },
+        };
+        let Some(FsResponseData::Handle(old_handle)) =
+            fs_request(&mut state, &sender, open()).await.data
+        else {
+            panic!("file did not open");
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        state.tcp_sessions.insert(
+            2,
+            TcpSession::open(
+                2,
+                TcpConnect {
+                    host: "127.0.0.1".into(),
+                    port: listener.local_addr().unwrap().port(),
+                    bulk: None,
+                },
+                &sender,
+            ),
+        );
+        let (mut peer, _) = time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+
+        restore_client_state(&mut state, &mut sender).await.unwrap();
+        assert!(state.tcp_sessions.is_empty());
+        assert_eq!(
+            time::timeout(Duration::from_secs(5), peer.read(&mut [0u8; 1]))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert!(
+            !fs_request(&mut state, &sender, FsOp::FStat { handle: old_handle })
+                .await
+                .ok
+        );
+        let Some(FsResponseData::Handle(new_handle)) =
+            fs_request(&mut state, &sender, open()).await.data
+        else {
+            panic!("fresh file did not open");
+        };
+        // Closing handles must not reset their allocator and alias a stale handle to a new file.
+        assert_ne!(new_handle, old_handle);
+        assert!(
+            fs_request(&mut state, &sender, FsOp::FStat { handle: new_handle })
+                .await
+                .ok
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_retires_unleased_output_and_can_repeat_with_the_same_ids() {
+        let mut state = AgentState::default();
+        let (mut sender, mut output) = SessionOutputSender::channel();
+        for _ in 0..3 {
+            let old = sender.clone();
+            old.send(1, SessionOutput::Exited(7)).await;
+            restore_client_state(&mut state, &mut sender).await.unwrap();
+            let stale = output.recv().await.unwrap();
+            assert!(discard_inherited_output(
+                &mut state,
+                &stale,
+                sender.generation()
+            ));
+            // A late producer is as stale as an event that was already queued at the cut.
+            old.send(1, SessionOutput::Exited(7)).await;
+            assert!(discard_inherited_output(
+                &mut state,
+                &output.recv().await.unwrap(),
+                sender.generation()
+            ));
+            sender.send(1, SessionOutput::Exited(8)).await;
+            assert!(!discard_inherited_output(
+                &mut state,
+                &output.recv().await.unwrap(),
+                sender.generation()
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_bulk_cut_drops_queued_and_late_records_and_releases_capacity() {
+        let (mut sender, _control, mut bulk, mut commands) = SessionOutputSender::split_channel();
+        let old = sender.with_incarnation(Some([0x41; CLIENT_INCARNATION_SIZE]));
+        let send = |sender: SessionOutputSender| async move {
+            sender
+                .send(
+                    1,
+                    SessionOutput::Bulk(crate::session::BulkSessionOutput::new(
+                        BulkRecord {
+                            id: 1,
+                            kind: BulkKind::Filesystem,
+                            flow: BulkFlow::GuestToHost,
+                            offset: 0,
+                            payload: bytes::Bytes::from_static(b"old"),
+                        },
+                        RawActivity::default(),
+                    )),
+                )
+                .await
+        };
+        assert!(send(old.clone()).await);
+        let reset = tokio::spawn(async move {
+            sender.restore_generation().await.unwrap();
+            sender
+        });
+        let command = commands.recv().await.unwrap();
+        let mut generation = 0;
+        let mut flows = HashMap::new();
+        let mut active = VecDeque::new();
+        let mut retired = HashMap::new();
+        let mut retiring = HashSet::new();
+        let cleanup = apply_bulk_output_command(
+            command,
+            &mut generation,
+            &mut flows,
+            &mut active,
+            &mut retired,
+            &mut retiring,
+        )
+        .unwrap();
+        enqueue_bulk_output(
+            bulk.recv().await.unwrap(),
+            generation,
+            &mut flows,
+            &mut active,
+            &retired,
+            &retiring,
+        )
+        .unwrap();
+        assert!(flows.is_empty());
+        complete_bulk_output_cleanups(vec![cleanup], &mut retired, &mut retiring);
+        let fresh = reset.await.unwrap();
+        assert!(send(old).await);
+        enqueue_bulk_output(
+            bulk.recv().await.unwrap(),
+            generation,
+            &mut flows,
+            &mut active,
+            &retired,
+            &retiring,
+        )
+        .unwrap();
+        assert!(flows.is_empty());
+        assert!(send(fresh.with_incarnation(Some([0x42; CLIENT_INCARNATION_SIZE]))).await);
+        enqueue_bulk_output(
+            bulk.recv().await.unwrap(),
+            generation,
+            &mut flows,
+            &mut active,
+            &retired,
+            &retiring,
+        )
+        .unwrap();
+        assert_eq!(flows.len(), 1);
+    }
+
+    #[test]
+    fn restore_activity_backpressure_does_not_block_scheduler_control() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        sender.try_send(RawActivity::default()).unwrap();
+        let mut pending = RawActivity {
+            guest_messages: 3,
+            fs_bytes: 17,
+            ..Default::default()
+        };
+        publish_bulk_activity(&sender, &mut pending).unwrap();
+        assert_eq!(pending.fs_bytes, 17);
+        receiver.try_recv().unwrap();
+        publish_bulk_activity(&sender, &mut pending).unwrap();
+        assert_eq!(receiver.try_recv().unwrap().fs_bytes, 17);
+        assert_eq!(pending.fs_bytes, 0);
     }
 }

@@ -469,6 +469,7 @@ mod error_kind {
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const SNAPSHOT_MIGRATION: &str = "snapshot_migration";
+    pub const SNAPSHOT_SOURCE_RECOVERY: &str = "snapshot_source_recovery";
     pub const PATCH_FAILED: &str = "patch_failed";
     pub const METRICS_DISABLED: &str = "metrics_disabled";
     pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
@@ -479,6 +480,7 @@ mod error_kind {
 struct FfiError {
     kind: &'static str,
     message: String,
+    recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
 }
 
 impl FfiError {
@@ -486,6 +488,7 @@ impl FfiError {
         Self {
             kind,
             message: message.into(),
+            recovery: None,
         }
     }
 
@@ -508,6 +511,14 @@ impl FfiError {
     fn to_json(&self) -> String {
         // Message is escaped via serde_json so it's safe to embed arbitrary text.
         let msg = serde_json::to_string(&self.message).unwrap_or_else(|_| "\"\"".into());
+        if let Some(recovery) = &self.recovery
+            && let Ok(recovery) = serde_json::to_string(recovery)
+        {
+            return format!(
+                r#"{{"kind":"{}","message":{},"recovery":{}}}"#,
+                self.kind, msg, recovery
+            );
+        }
         format!(r#"{{"kind":"{}","message":{}}}"#, self.kind, msg)
     }
 }
@@ -534,6 +545,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::SnapshotMigration { .. } => error_kind::SNAPSHOT_MIGRATION,
+            MicrosandboxError::SnapshotSourceRecovery(_) => error_kind::SNAPSHOT_SOURCE_RECOVERY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
             MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
@@ -544,6 +556,10 @@ impl From<MicrosandboxError> for FfiError {
         Self {
             kind,
             message: e.to_string(),
+            recovery: match e {
+                MicrosandboxError::SnapshotSourceRecovery(recovery) => Some(recovery),
+                _ => None,
+            },
         }
     }
 }
@@ -1036,6 +1052,10 @@ struct SandboxCreateOpts {
     /// accepted so older Go SDK versions keep working against this dylib.
     oci_upper_size_mib: Option<u32>,
     snapshot: Option<String>,
+    #[serde(default)]
+    snapshot_disk_only: bool,
+    #[serde(default)]
+    snapshot_base: Option<String>,
     memory_mib: Option<u32>,
     cpus: Option<u8>,
     max_memory_mib: Option<u32>,
@@ -1173,11 +1193,13 @@ struct SnapshotCreateOpts {
     #[serde(default)]
     record_integrity: bool,
     #[serde(default)]
-    resumable: bool,
+    full: bool,
 }
 
 #[derive(serde::Deserialize, Default)]
 struct SnapshotSaveOptsJson {
+    since: Option<String>,
+    last_layers: Option<usize>,
     #[serde(default)]
     with_parents: bool,
     #[serde(default)]
@@ -2235,6 +2257,12 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(snapshot) = opts.snapshot {
                 builder = builder.from_snapshot(snapshot);
             }
+            if opts.snapshot_disk_only {
+                builder = builder.disk_only();
+            }
+            if let Some(base) = opts.snapshot_base {
+                builder = builder.snapshot_base(base);
+            }
             if let Some(m) = opts.memory_mib {
                 builder = builder.memory(m);
             }
@@ -3000,6 +3028,56 @@ pub unsafe extern "C" fn msb_sandbox_handle_modify(
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
             let builder = configure_modify(h.modify(), opts.patch, policy);
             run_modify(builder, opts.dry_run).await
+        }))
+    })
+}
+
+/// Explicit compaction. A nonzero handle retains its backend; zero resolves the supplied name.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_compact(
+    cancel_id: u64,
+    handle: Handle,
+    name: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Options {
+        layers: Option<usize>,
+        #[serde(default)]
+        dry_run: bool,
+    }
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let opts: Options =
+            serde_json::from_str(&unsafe { cstr(opts_json) }?).map_err(|error| {
+                FfiError::invalid_argument(format!("invalid compaction options: {error}"))
+            })?;
+        let sandbox = if handle == 0 {
+            None
+        } else {
+            Some(get(handle)?)
+        };
+        Ok(Box::pin(async move {
+            let mut builder = if let Some(sandbox) = sandbox {
+                sandbox.compact()
+            } else {
+                Sandbox::get(&name).await.map_err(FfiError::from)?.compact()
+            };
+            if let Some(layers) = opts.layers {
+                builder = builder.layers(layers);
+            }
+            let result = if opts.dry_run {
+                builder.dry_run().await
+            } else {
+                builder.apply().await
+            }
+            .map_err(FfiError::from)?;
+            Ok(serde_json::to_value(result)
+                .map_err(|error| FfiError::invalid_argument(error.to_string()))?
+                .to_string())
         }))
     })
 }
@@ -5920,7 +5998,7 @@ fn snapshot_format_str(f: SnapshotFormat) -> &'static str {
 fn snapshot_scope_str(scope: SnapshotScope) -> &'static str {
     match scope {
         SnapshotScope::Disk => "disk",
-        SnapshotScope::Resumable => "resumable",
+        SnapshotScope::Full => "full",
     }
 }
 
@@ -6034,10 +6112,14 @@ fn verify_report_json(report: microsandbox::snapshot::SnapshotVerifyReport) -> s
             serde_json::json!({"kind":"verified","algorithm":algorithm,"digest":digest})
         }
     };
+    let checkpoint = report
+        .checkpoint
+        .map(|checkpoint| serde_json::json!({"kind":"verified","root":checkpoint.root}));
     serde_json::json!({
         "digest": report.digest,
         "path": report.path.display().to_string(),
         "upper": upper,
+        "checkpoint": checkpoint,
     })
 }
 
@@ -6061,8 +6143,8 @@ fn snapshot_builder_from_opts(
     if opts.record_integrity {
         builder = builder.record_integrity();
     }
-    if opts.resumable {
-        builder = builder.resumable();
+    if opts.full {
+        builder = builder.full();
     }
     Ok(builder)
 }
@@ -6288,6 +6370,8 @@ pub unsafe extern "C" fn msb_snapshot_export(
                     with_parents: opts.with_parents,
                     with_image: opts.with_image,
                     plain_tar: opts.plain_tar,
+                    since: opts.since,
+                    last_layers: opts.last_layers,
                 },
             )
             .await
@@ -6315,6 +6399,34 @@ pub unsafe extern "C" fn msb_snapshot_import(
         };
         Ok(Box::pin(async move {
             let h = Snapshot::load(&PathBuf::from(archive), dest.as_deref())
+                .await
+                .map_err(FfiError::from)?;
+            Ok(snapshot_handle_json(&h).to_string())
+        }))
+    })
+}
+
+/// Import a dependent archive with an explicit base without changing the existing import ABI.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_import_with_base(
+    cancel_id: u64,
+    archive: *const c_char,
+    dest: *const c_char,
+    base: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let archive = PathBuf::from(unsafe { cstr(archive) }?);
+        let dest = unsafe { cstr(dest) }?;
+        let base = unsafe { cstr(base) }?;
+        let dest = if dest.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(dest))
+        };
+        Ok(Box::pin(async move {
+            let h = Snapshot::load_with_base(&archive, dest.as_deref(), &base)
                 .await
                 .map_err(FfiError::from)?;
             Ok(snapshot_handle_json(&h).to_string())
@@ -7059,6 +7171,35 @@ fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_recovery_error_preserves_ffi_payload() {
+        let error = MicrosandboxError::SnapshotSourceRecovery(Box::new(
+            microsandbox::SnapshotSourceRecoveryError {
+                source_sandbox: "team/source".into(),
+                checkpoint_id: "checkpoint-1".into(),
+                checkpoint_root: "sha256:root".into(),
+                checkpoint_path: "/runtime/checkpoint".into(),
+                artifact: Some(microsandbox::PublishedSnapshotArtifact {
+                    kind: microsandbox::SnapshotArtifactKind::Archive,
+                    path: "/saved.msnap".into(),
+                    snapshot_id: "snap_1".into(),
+                    digest: "sha256:descriptor".into(),
+                }),
+                detail: "thaw acknowledgement lost".into(),
+                publication_error: None,
+            },
+        ));
+        let message = error.to_string();
+        let payload: serde_json::Value =
+            serde_json::from_str(&FfiError::from(error).to_json()).unwrap();
+        assert_eq!(payload["kind"], "snapshot_source_recovery");
+        assert_eq!(payload["message"], message);
+        assert_eq!(payload["recovery"]["checkpoint_id"], "checkpoint-1");
+        assert_eq!(payload["recovery"]["artifact"]["kind"], "archive");
+        assert_eq!(payload["recovery"]["artifact"]["path"], "/saved.msnap");
+        assert!(payload["recovery"]["publication_error"].is_null());
+    }
 
     #[test]
     fn sandbox_create_opts_preserves_explicit_zero_oci_upper_size() {

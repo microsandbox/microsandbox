@@ -303,7 +303,7 @@ mod tests {
     fn checkpoint_request_round_trips_through_json() {
         let request = ControlRequest::CheckpointCreate {
             checkpoint_id: "checkpoint_0123456789abcdef".into(),
-            intent: CheckpointCaptureIntent::ResumableSnapshot,
+            intent: CheckpointCaptureIntent::FullSnapshot,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -313,7 +313,7 @@ mod tests {
             parsed,
             ControlRequest::CheckpointCreate {
                 checkpoint_id,
-                intent: CheckpointCaptureIntent::ResumableSnapshot,
+                intent: CheckpointCaptureIntent::FullSnapshot,
             } if checkpoint_id == "checkpoint_0123456789abcdef"
         ));
     }
@@ -323,6 +323,7 @@ mod tests {
         let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
+                disk_compact: true,
                 cpu_resize: true,
                 memory_resize: false,
                 secrets_update: true,

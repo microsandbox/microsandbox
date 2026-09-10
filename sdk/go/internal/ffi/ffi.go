@@ -227,6 +227,8 @@ typedef char *(*msb_snapshot_remove_fn)(uint64_t cancel_id, const char *path_or_
 typedef char *(*msb_snapshot_reindex_fn)(uint64_t cancel_id, const char *dir, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_export_fn)(uint64_t cancel_id, const char *name_or_path, const char *out, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_import_fn)(uint64_t cancel_id, const char *archive, const char *dest, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_import_with_base_fn)(uint64_t cancel_id, const char *archive, const char *dest, const char *base, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_compact_fn)(uint64_t cancel_id, uint64_t handle, const char *name, const char *opts, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_fs_read_stream_fn)(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_fs_read_stream_recv_fn)(uint64_t cancel_id, uint64_t stream_handle, uint8_t *buf, size_t buf_len);
@@ -385,6 +387,8 @@ static msb_snapshot_remove_fn      ptr_msb_snapshot_remove      = NULL;
 static msb_snapshot_reindex_fn     ptr_msb_snapshot_reindex     = NULL;
 static msb_snapshot_export_fn      ptr_msb_snapshot_export      = NULL;
 static msb_snapshot_import_fn      ptr_msb_snapshot_import      = NULL;
+static msb_snapshot_import_with_base_fn ptr_msb_snapshot_import_with_base = NULL;
+static msb_sandbox_compact_fn ptr_msb_sandbox_compact = NULL;
 
 // dlopen handle — set once by load_microsandbox, never closed.
 static void *lib_handle = NULL;
@@ -562,6 +566,8 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_snapshot_reindex);
 	RESOLVE(msb_snapshot_export);
 	RESOLVE(msb_snapshot_import);
+	RESOLVE(msb_snapshot_import_with_base);
+	RESOLVE(msb_sandbox_compact);
 	return NULL;
 }
 
@@ -984,6 +990,13 @@ char *call_msb_snapshot_export(uint64_t cancel_id, const char *name_or_path, con
 char *call_msb_snapshot_import(uint64_t cancel_id, const char *archive, const char *dest, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_snapshot_import ? ptr_msb_snapshot_import(cancel_id, archive, dest, buf, buf_len) : NULL;
 }
+
+char *call_msb_snapshot_import_with_base(uint64_t cancel_id, const char *archive, const char *dest, const char *base, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_import_with_base ? ptr_msb_snapshot_import_with_base(cancel_id, archive, dest, base, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_compact(uint64_t cancel_id, uint64_t handle, const char *name, const char *opts, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_compact ? ptr_msb_sandbox_compact(cancel_id, handle, name, opts, buf, buf_len) : NULL;
+}
 */
 import "C"
 
@@ -1102,11 +1115,31 @@ const fsStreamBufSize = 6 << 20
 const logsBufSize = 48 << 20
 
 // Error is the typed error surfaced across the FFI boundary. The Rust side
-// serialises {kind, message} JSON; this type unmarshals it. The public SDK
+// serialises {kind, message} JSON with optional recovery metadata; this type unmarshals it. The public SDK
 // maps Kind back into microsandbox.ErrorKind.
 type Error struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
+	Kind     string                         `json:"kind"`
+	Message  string                         `json:"message"`
+	Recovery *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+}
+
+// SnapshotSourceRecoveryDetails preserves native recovery metadata across the FFI.
+type SnapshotSourceRecoveryDetails struct {
+	SourceSandbox    string                     `json:"source_sandbox"`
+	CheckpointID     string                     `json:"checkpoint_id"`
+	CheckpointRoot   string                     `json:"checkpoint_root"`
+	CheckpointPath   string                     `json:"checkpoint_path"`
+	Artifact         *PublishedSnapshotArtifact `json:"artifact"`
+	Detail           string                     `json:"detail"`
+	PublicationError *string                    `json:"publication_error"`
+}
+
+// PublishedSnapshotArtifact names a completed installed snapshot or archive.
+type PublishedSnapshotArtifact struct {
+	Kind       string `json:"kind"`
+	Path       string `json:"path"`
+	SnapshotID string `json:"snapshot_id"`
+	Digest     string `json:"digest"`
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -1136,6 +1169,7 @@ const (
 	KindSnapshotImageMissing   = "snapshot_image_missing"
 	KindSnapshotIntegrity      = "snapshot_integrity"
 	KindSnapshotMigration      = "snapshot_migration"
+	KindSnapshotSourceRecovery = "snapshot_source_recovery"
 	KindPatchFailed            = "patch_failed"
 	KindMetricsDisabled        = "metrics_disabled"
 	KindMetricsUnavailable     = "metrics_unavailable"
@@ -1561,6 +1595,8 @@ type CreateOptions struct {
 	ImageBind            string               `json:"image_bind,omitempty"`
 	RootDisk             *RootDiskSpec        `json:"root_disk,omitempty"`
 	Snapshot             string               `json:"snapshot,omitempty"`
+	SnapshotDiskOnly     bool                 `json:"snapshot_disk_only,omitempty"`
+	SnapshotBase         string               `json:"snapshot_base,omitempty"`
 	MemoryMiB            uint32               `json:"memory_mib,omitempty"`
 	CPUs                 uint8                `json:"cpus,omitempty"`
 	MaxMemoryMiB         uint32               `json:"max_memory_mib,omitempty"`
@@ -2527,6 +2563,22 @@ func (s *Sandbox) Modify(ctx context.Context, optsJSON string) (string, error) {
 	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_sandbox_modify(cancelID, s.h(), cOpts, buf, bufLen)
 	})
+}
+
+func CompactSandbox(ctx context.Context, handle uint64, name, opts string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	cName, cOpts := C.CString(name), C.CString(opts)
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cOpts))
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_compact(cancelID, C.uint64_t(handle), cName, cOpts, buf, bufLen)
+	})
+}
+
+func (s *Sandbox) Compact(ctx context.Context, opts string) (string, error) {
+	return CompactSandbox(ctx, uint64(s.h()), "", opts)
 }
 
 // ListSandboxes returns one configured page of sandbox metadata.
@@ -4812,6 +4864,10 @@ type SnapshotVerifyReport struct {
 		Algorithm string `json:"algorithm,omitempty"`
 		Digest    string `json:"digest,omitempty"`
 	} `json:"upper"`
+	Checkpoint *struct {
+		Kind string `json:"kind"`
+		Root string `json:"root"`
+	} `json:"checkpoint,omitempty"`
 }
 
 type SnapshotCreateOptions struct {
@@ -4820,13 +4876,15 @@ type SnapshotCreateOptions struct {
 	Labels          map[string]string `json:"labels,omitempty"`
 	Force           bool              `json:"force,omitempty"`
 	RecordIntegrity bool              `json:"record_integrity,omitempty"`
-	Resumable       bool              `json:"resumable,omitempty"`
+	Full            bool              `json:"full,omitempty"`
 }
 
 type SnapshotSaveOptions struct {
-	WithParents bool `json:"with_parents,omitempty"`
-	WithImage   bool `json:"with_image,omitempty"`
-	PlainTar    bool `json:"plain_tar,omitempty"`
+	Since       string  `json:"since,omitempty"`
+	LastLayers  *uint32 `json:"last_layers,omitempty"`
+	WithParents bool    `json:"with_parents,omitempty"`
+	WithImage   bool    `json:"with_image,omitempty"`
+	PlainTar    bool    `json:"plain_tar,omitempty"`
 }
 
 func SandboxHandleSnapshot(ctx context.Context, sandboxName, snapshotName string) (*SnapshotInfo, error) {
@@ -5065,6 +5123,27 @@ func SnapshotLoad(ctx context.Context, archive, dest string) (*SnapshotHandleInf
 	var info SnapshotHandleInfo
 	if err := json.Unmarshal([]byte(out), &info); err != nil {
 		return nil, fmt.Errorf("parse snapshot load: %w", err)
+	}
+	return &info, nil
+}
+
+func SnapshotLoadWithBase(ctx context.Context, archive, dest, base string) (*SnapshotHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cArchive, cDest, cBase := C.CString(archive), C.CString(dest), C.CString(base)
+	defer C.free(unsafe.Pointer(cArchive))
+	defer C.free(unsafe.Pointer(cDest))
+	defer C.free(unsafe.Pointer(cBase))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_import_with_base(cancelID, cArchive, cDest, cBase, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info SnapshotHandleInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, err
 	}
 	return &info, nil
 }

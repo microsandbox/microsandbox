@@ -91,6 +91,49 @@ pub struct Touched {
     pub activity_seq: u64,
 }
 
+/// Payload for `core.workload.freeze` messages.
+///
+/// The attempt identity makes retries idempotent and prevents one checkpoint
+/// operation from accidentally releasing another operation's freeze.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadFreeze {
+    /// Stable checkpoint attempt identity selected by the host.
+    pub attempt_id: String,
+}
+
+/// Payload for `core.workload.frozen` messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadFrozen {
+    /// Attempt identity whose workload boundary is now frozen.
+    pub attempt_id: String,
+}
+
+/// Payload for `core.workload.thaw` messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadThaw {
+    /// Attempt identity that established the freeze being released.
+    pub attempt_id: String,
+    /// Continue the source, or activate a restored guest with fresh host-client ownership.
+    pub mode: WorkloadThawMode,
+}
+
+/// How a captured workload returns to execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadThawMode {
+    /// Continue the source without changing any connected client or stream.
+    Continue,
+    /// Detach inherited host clients without killing their captured processes.
+    Restore,
+}
+
+/// Payload for `core.workload.thawed` messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadThawed {
+    /// Attempt identity whose workload boundary is now runnable.
+    pub attempt_id: String,
+}
+
 /// Payload for `core.error` messages.
 ///
 /// Sent when a peer can identify a recoverable protocol error for a specific
@@ -131,6 +174,9 @@ pub enum CoreErrorKind {
 
     /// The message refers to an unknown, closed, or incompatible session.
     InvalidSession,
+
+    /// The peer understands the request but the runtime cannot provide its capability.
+    CapabilityUnavailable,
 }
 
 /// Payload for `core.init.resolved` messages.

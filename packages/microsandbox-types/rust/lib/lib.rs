@@ -8,6 +8,7 @@ mod domain;
 mod error;
 pub mod modify;
 mod registry;
+mod snapshot;
 mod validation;
 
 #[cfg(feature = "ts")]
@@ -54,6 +55,7 @@ pub use modify::{
     SecretModificationPatch, SecretPlannedChange, SecretSource,
 };
 pub use registry::RegistryAuth;
+pub use snapshot::DiskCompactionResult;
 pub use validation::{
     MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, hostname_from_sandbox_name, validate_hostname,
     validate_sandbox_name,

@@ -194,6 +194,8 @@ body = CBOR { v, t, p }            <- ordinary control envelope
               p = CBOR { ... }     <- payload for that message type
 ```
 
+Generation 9 adds attempt-scoped workload freeze/thaw for full checkpoint capture and activation. Hosts reject those operations against generation-8 agents before sending. Generation 8's released bulk-transfer contract remains unchanged; the discarded, unreleased freeze/thaw assignment to generation 8 has no compatibility shim.
+
 Generation 8 adds one negotiated data-body alternative without changing the header:
 
 ```

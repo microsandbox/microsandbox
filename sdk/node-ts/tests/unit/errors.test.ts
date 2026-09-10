@@ -7,10 +7,48 @@ import {
   NoDefaultCommandError,
   SandboxNotFoundError,
   SandboxReplacedError,
+  SnapshotSourceRecoveryError,
 } from "../../dist/index.js";
 import { mapNapiError } from "../../dist/internal/error-mapping.js";
 
 describe("mapNapiError", () => {
+  for (const kind of ["installed", "archive", null]) {
+    it(`retains source recovery metadata with ${kind ?? "unpublished"} artifact`, () => {
+      const recovery = {
+        source_sandbox: "team/source", checkpoint_id: "checkpoint-1",
+        checkpoint_root: "sha256:root", checkpoint_path: "/runtime/checkpoint",
+        artifact: kind === null ? null : {
+          kind, path: "/snapshots/saved", snapshot_id: "snap_1", digest: "sha256:descriptor",
+        },
+        detail: "thaw acknowledgement lost\nsource recovery is uncertain",
+        publication_error: kind === null ? "disk full" : null,
+      };
+      const raw = new Error(`[SnapshotSourceRecovery] ${JSON.stringify({
+        message: "capture completed, source recovery failed", recovery,
+      })}`);
+      const mapped = mapNapiError(raw) as SnapshotSourceRecoveryError;
+      expect(mapped).toBeInstanceOf(SnapshotSourceRecoveryError);
+      expect(mapped.code).toBe("snapshotSourceRecovery");
+      expect(mapped.message).toBe("capture completed, source recovery failed");
+      expect(mapped.cause).toBe(raw);
+      expect(mapped.recovery).toEqual({
+        sourceSandbox: "team/source", checkpointId: "checkpoint-1",
+        checkpointRoot: "sha256:root", checkpointPath: "/runtime/checkpoint",
+        artifact: kind === null ? null : {
+          kind, path: "/snapshots/saved", snapshotId: "snap_1", digest: "sha256:descriptor",
+        },
+        detail: recovery.detail, publicationError: recovery.publication_error,
+      });
+    });
+  }
+
+  for (const payload of ["not json", "null", "{}", '{"message":"failed","recovery":{}}']) {
+    it(`preserves malformed recovery envelopes: ${payload}`, () => {
+      const raw = new Error(`[SnapshotSourceRecovery] ${payload}`);
+      expect(mapNapiError(raw)).toBe(raw);
+    });
+  }
+
   it("translates a tagged napi error into the matching subclass", () => {
     const raw = new Error("[SandboxNotFound] no such sandbox: foo");
     const mapped = mapNapiError(raw);

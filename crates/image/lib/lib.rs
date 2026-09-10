@@ -49,6 +49,7 @@ pub use cache::{CachedImageMetadata, CachedLayerMetadata, FlatRootfsRef, GlobalC
 pub use config::ImageConfig;
 pub use digest::Digest;
 pub use error::{ImageError, ImageResult};
+pub use flat::merge_erofs_layers;
 pub use microsandbox_types::RegistryAuth;
 pub use oci_client::Reference;
 pub use platform::{Arch, Os, Platform};

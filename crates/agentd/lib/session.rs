@@ -21,6 +21,7 @@ use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
 use crate::process::{ProcessExitWatcher, ProcessIdentity, ProcessManager};
 use crate::rlimit;
+use crate::workload::WorkloadPlacement;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -170,6 +171,8 @@ pub enum SessionOutput {
 
 /// One queued session event and the data-budget capacity owned by its buffer.
 pub struct SessionOutputEnvelope {
+    /// Host attachment generation captured when the producer was created.
+    pub generation: u64,
     /// Correlation ID for the session event.
     pub id: u32,
 
@@ -185,6 +188,13 @@ pub struct SessionOutputEnvelope {
 
 /// Lifecycle commands processed ahead of queued dedicated-lane output.
 pub enum BulkOutputCommand {
+    /// Discard inherited transfer output before acknowledging restore activation.
+    Restore {
+        /// New attachment generation; late output from previous generations is discarded.
+        generation: u64,
+        /// Resolves after the scheduler has crossed the cut.
+        completion: oneshot::Sender<()>,
+    },
     /// Release queued records for one cancelled operation.
     DropFlow {
         /// Range owner that opened the operation.
@@ -210,6 +220,7 @@ pub struct SessionOutputPermit(tokio::sync::OwnedSemaphorePermit);
 /// Cloneable producer for the byte-bounded session output queue.
 #[derive(Clone)]
 pub struct SessionOutputSender {
+    generation: u64,
     control_tx: mpsc::Sender<SessionOutputEnvelope>,
     bulk_tx: Option<mpsc::Sender<SessionOutputEnvelope>>,
     bulk_command_tx: Option<mpsc::Sender<BulkOutputCommand>>,
@@ -365,6 +376,7 @@ impl SessionOutputSender {
         let budget = Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY));
         (
             Self {
+                generation: 0,
                 control_tx: tx,
                 bulk_tx: None,
                 bulk_command_tx: None,
@@ -388,6 +400,7 @@ impl SessionOutputSender {
         let (bulk_command_tx, bulk_command_rx) = mpsc::channel(SESSION_BULK_COMMAND_CAPACITY);
         (
             Self {
+                generation: 0,
                 control_tx,
                 bulk_tx: Some(bulk_tx),
                 bulk_command_tx: Some(bulk_command_tx),
@@ -404,6 +417,7 @@ impl SessionOutputSender {
     /// Scope future producer events to the client incarnation that opened their session.
     pub fn with_incarnation(&self, incarnation: Option<ClientIncarnation>) -> Self {
         Self {
+            generation: self.generation,
             control_tx: self.control_tx.clone(),
             bulk_tx: self.bulk_tx.clone(),
             bulk_command_tx: self.bulk_command_tx.clone(),
@@ -411,6 +425,34 @@ impl SessionOutputSender {
             bulk_budget: Arc::clone(&self.bulk_budget),
             incarnation,
         }
+    }
+
+    /// Current local attachment generation, independent of the wire protocol version.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Change only the root sender. Existing producers keep their old generation while they
+    /// drain inherited pipes, so their output can never complete a new client's correlation.
+    pub(crate) async fn restore_generation(&mut self) -> Result<(), &'static str> {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or("attachment generation exhausted")?;
+        if let Some(commands) = &self.bulk_command_tx {
+            let (completion, completed) = oneshot::channel();
+            commands
+                .send(BulkOutputCommand::Restore {
+                    generation: self.generation,
+                    completion,
+                })
+                .await
+                .map_err(|_| "bulk scheduler closed during restore")?;
+            completed
+                .await
+                .map_err(|_| "bulk scheduler restore barrier failed")?;
+        }
+        Ok(())
     }
 
     /// Restore one ordered producer queue after boot selected combined mode.
@@ -525,6 +567,7 @@ impl SessionOutputSender {
             &self.control_tx
         };
         tx.send(SessionOutputEnvelope {
+            generation: self.generation,
             id,
             incarnation: self.incarnation,
             output,
@@ -568,12 +611,13 @@ impl ExecSession {
     ///
     /// If `req.tty` is true, uses a PTY. Otherwise, uses piped stdin/stdout/stderr.
     /// A background task is spawned to read output and send events via `tx`.
-    pub fn spawn(
+    pub(crate) fn spawn(
         id: u32,
         req: &ExecRequest,
         tx: SessionOutputSender,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
+        workload_placement: Option<WorkloadPlacement>,
     ) -> AgentdResult<Self> {
         let process_manager = ProcessManager::get()?;
         if req.tty {
@@ -584,6 +628,7 @@ impl ExecSession {
                 default_user,
                 security_profile,
                 &process_manager,
+                workload_placement,
             )
         } else {
             Self::spawn_pipe(
@@ -593,6 +638,7 @@ impl ExecSession {
                 default_user,
                 security_profile,
                 &process_manager,
+                workload_placement,
             )
         }
     }
@@ -662,6 +708,7 @@ impl ExecSession {
         default_user: Option<&str>,
         security_profile: SecurityProfile,
         process_manager: &Arc<ProcessManager>,
+        workload_placement: Option<WorkloadPlacement>,
     ) -> AgentdResult<Self> {
         let pty = pty::openpty(None, None)?;
         let err_pipe = new_exec_error_pipe()?;
@@ -749,6 +796,14 @@ impl ExecSession {
             // Child process — only async-signal-safe operations from here.
             drop(pty.master);
             drop(err_pipe.read_end);
+
+            // Join the workload cgroup before any user code can execute. This
+            // closes the post-spawn PID-assignment race with checkpoint freeze.
+            if let Some(ref placement) = workload_placement
+                && placement.place_current().is_err()
+            {
+                write_exec_error_and_exit(err_pipe.write_end.as_raw_fd());
+            }
 
             // Create new session.
             if unsafe { libc::setsid() } < 0 {
@@ -874,6 +929,7 @@ impl ExecSession {
         default_user: Option<&str>,
         security_profile: SecurityProfile,
         process_manager: &Arc<ProcessManager>,
+        workload_placement: Option<WorkloadPlacement>,
     ) -> AgentdResult<Self> {
         let mut cmd = Command::new(&req.cmd);
         cmd.args(&req.args)
@@ -900,6 +956,11 @@ impl ExecSession {
         let parsed_rlimits = rlimit::to_libc(&req.rlimits);
         unsafe {
             cmd.pre_exec(move || {
+                // This uses only write(2) in the child and therefore remains
+                // safe in the fork-to-exec window.
+                if let Some(ref placement) = workload_placement {
+                    placement.place_current()?;
+                }
                 // Become a session (and process-group) leader so signals sent
                 // to the group reach every descendant the command spawns, not
                 // just the direct child. The PTY path does the same for its
@@ -1801,7 +1862,7 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let session = ExecSession::spawn(17, &req, tx, None, SecurityProfile::Default)
+        let session = ExecSession::spawn(17, &req, tx, None, SecurityProfile::Default, None)
             .expect("spawn background descendant session");
         let leader_pid = session.pid() as i32;
         let mut stdout = Vec::new();
@@ -1944,7 +2005,7 @@ mod tests {
                     cols: 80,
                     rlimits: Vec::new(),
                 };
-                ExecSession::spawn(100 + offset, &req, tx, None, SecurityProfile::Default)
+                ExecSession::spawn(100 + offset, &req, tx, None, SecurityProfile::Default, None)
             }));
         }
         drop(tx);
@@ -2033,7 +2094,7 @@ mod tests {
             cols: 80,
             rlimits: Vec::new(),
         };
-        let _session = ExecSession::spawn(id, &req, tx, None, SecurityProfile::Default)
+        let _session = ExecSession::spawn(id, &req, tx, None, SecurityProfile::Default, None)
             .expect("spawn session on replacement runtime");
 
         let actual = time::timeout(Duration::from_secs(5), async {
@@ -2135,7 +2196,7 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let session = ExecSession::spawn(7, &req, tx, None, SecurityProfile::Default)
+        let session = ExecSession::spawn(7, &req, tx, None, SecurityProfile::Default, None)
             .expect("spawn pty session");
         let mut stdout = Vec::new();
         let mut exit = None;
@@ -2356,6 +2417,7 @@ mod tests {
             None,
             SecurityProfile::Default,
             &process_manager,
+            None,
         )
         .expect_err("spawn should fail");
 

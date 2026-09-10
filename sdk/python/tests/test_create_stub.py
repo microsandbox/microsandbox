@@ -10,6 +10,8 @@ STUB_PATH = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
 EXPECTED_KWARGS = [
     "image",
     "from_snapshot",
+    "disk_only",
+    "snapshot_base",
     "memory",
     "cpus",
     "max_memory",

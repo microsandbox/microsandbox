@@ -78,3 +78,9 @@ describe("native image cache contract", () => {
     }
   });
 });
+
+describe("native snapshot contract", () => {
+  it("exports the direct archive result used by the TS wrapper", () => {
+    expect(typeof napi.SnapshotArchive).toBe("function");
+  });
+});

@@ -1666,6 +1666,10 @@ mod tests {
             (FsRequest, 3, true),
             (BulkAccepted, 7, false),
             (BulkAccepted, 8, true),
+            (MessageType::WorkloadFreeze, 8, false),
+            (MessageType::WorkloadThaw, 8, false),
+            (MessageType::WorkloadFreeze, 9, true),
+            (MessageType::WorkloadThaw, 9, true),
         ];
         for (t, generation, allowed) in cases {
             assert_eq!(

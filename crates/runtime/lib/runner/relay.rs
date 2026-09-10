@@ -16,6 +16,7 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use bytes::{Buf, Bytes, BytesMut};
 #[cfg(unix)]
@@ -34,7 +35,9 @@ use microsandbox_protocol::bulk::{
     BulkFinish, BulkFlow, BulkKind, MAX_BULK_RECORD_PAYLOAD,
 };
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE, MAX_WIRE_FRAME};
-use microsandbox_protocol::core::{InitAck, InitResolved, Ready, RelayClientDisconnected};
+use microsandbox_protocol::core::{
+    CoreError, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThaw, WorkloadThawed,
+};
 use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
 use microsandbox_protocol::fs::{FsRequest, FsResponse};
 use microsandbox_protocol::message::{
@@ -60,6 +63,7 @@ use tokio::net::UnixListener;
 use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
+use crate::checkpoint::RestoredAgentState;
 use crate::clock::spawn_clock_sync_task;
 use crate::console::ConsoleSharedState;
 use crate::exec_log::{LogSource, LogWriter};
@@ -98,6 +102,8 @@ type SessionRegistry = std::sync::Mutex<HashMap<u32, SessionInfo>>;
 
 /// Size of the length prefix in the wire format.
 const LEN_PREFIX_SIZE: usize = 4;
+const RESTORE_ACTIVATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const RESTORE_CONTROL_ID: u32 = u32::MAX;
 
 /// Aggregate guest-to-client bytes retained by the relay.
 const CLIENT_OUTPUT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
@@ -213,7 +219,14 @@ enum MergeCommand {
 }
 
 /// Shared routing and observability state owned by the guest-to-host reader.
+#[derive(Default)]
+struct RestoreInput {
+    control: BytesMut,
+    bulk: BytesMut,
+}
+
 struct RingReaderContext {
+    initial: RestoreInput,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
     log_writer: Option<Arc<LogWriter>>,
     session_registry: Arc<SessionRegistry>,
@@ -379,6 +392,7 @@ struct GuestFrameMerger {
 /// for client connections on a Unix domain socket. Frames are routed between
 /// clients and the guest agent without decoding.
 pub struct AgentRelay {
+    restored_input: RestoreInput,
     /// Shared ring buffers + wake pipes for console backend communication.
     shared: Arc<ConsoleSharedState>,
     /// Optional second ring pair dedicated to generation-8 raw records.
@@ -390,11 +404,12 @@ pub struct AgentRelay {
     /// Whether the relay selected acknowledged correlation-range ownership.
     range_lease_active: bool,
     /// Local IPC listener for client connections.
-    listener: AgentListener,
+    listener: Option<AgentListener>,
     /// Local IPC endpoint address.
     endpoint: PathBuf,
     /// Cached `core.ready` frame bytes (length-prefixed wire format).
     ready_frame: Option<Vec<u8>>,
+    kernel_clock_synchronized: bool,
     /// Optional `exec.log` writer. When set, the ring reader task
     /// captures the primary session's stdout/stderr to JSON Lines.
     log_writer: Option<Arc<LogWriter>>,
@@ -432,6 +447,13 @@ struct RawFrame {
     id: u32,
     /// The flags byte extracted from the frame header.
     flags: u8,
+}
+
+#[derive(serde::Serialize)]
+struct RestoreActivationRecord<'a> {
+    attempt_id: &'a str,
+    vm_generation_id: String,
+    state: &'a str,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -839,18 +861,62 @@ impl AgentRelay {
         Ok(Self {
             shared,
             bulk_shared,
+            restored_input: RestoreInput::default(),
             bulk_connection_id: None,
             dual_port_active: false,
             range_lease_active: false,
-            listener,
+            listener: Some(listener),
             endpoint: agent_sock_path.to_path_buf(),
             ready_frame: None,
+            kernel_clock_synchronized: false,
             log_writer: None,
             #[cfg(unix)]
             bind_identity_map: None,
             #[cfg(unix)]
             bind_identity_map_mount_count: 0,
         })
+    }
+
+    /// Construct a relay without publishing its client endpoint.
+    ///
+    /// Checkpoint restore uses the console rings privately while the VM is at
+    /// its activation barrier. The listener is bound only after VMGenID has
+    /// been acknowledged and the captured workload latch has been released.
+    pub(crate) fn new_deferred(
+        agent_sock_path: &Path,
+        shared: Arc<ConsoleSharedState>,
+        bulk_shared: Option<Arc<ConsoleSharedState>>,
+    ) -> Self {
+        Self {
+            shared,
+            bulk_shared,
+            restored_input: RestoreInput::default(),
+            bulk_connection_id: None,
+            dual_port_active: false,
+            range_lease_active: false,
+            listener: None,
+            endpoint: agent_sock_path.to_path_buf(),
+            ready_frame: None,
+            kernel_clock_synchronized: false,
+            log_writer: None,
+            #[cfg(unix)]
+            bind_identity_map: None,
+            #[cfg(unix)]
+            bind_identity_map_mount_count: 0,
+        }
+    }
+
+    /// Publish a relay that was constructed behind an activation barrier.
+    pub(crate) fn bind_public_endpoint(&mut self) -> RuntimeResult<()> {
+        if self.listener.is_some() {
+            return Ok(());
+        }
+        self.listener = Some(AgentListener::bind(&self.endpoint)?);
+        tracing::info!(
+            "agent relay listening on {} after restore activation",
+            self.endpoint.display()
+        );
+        Ok(())
     }
 
     /// Attach a log writer for `exec.log` capture.
@@ -1132,6 +1198,245 @@ impl AgentRelay {
         Ok(())
     }
 
+    /// Activate a construction-paused checkpoint before serving public clients.
+    ///
+    /// The restored agent does not reboot and therefore does not emit another
+    /// `core.ready`. This path resumes only the kernel and agentd, waits for the
+    /// exact VM Generation ID acknowledgement, releases the captured workload
+    /// latch over the private console path, and only then installs the cached
+    /// ready frame used by ordinary client handshakes.
+    pub(crate) fn activate_restored(
+        &mut self,
+        vm: &msb_krun::VmControl,
+        restored: &RestoredAgentState,
+        runtime_dir: &Path,
+    ) -> RuntimeResult<()> {
+        let total_started = Instant::now();
+        let wait_paused_started = Instant::now();
+        let paused = vm
+            .wait_until_paused(RESTORE_ACTIVATION_TIMEOUT)
+            .map_err(|error| {
+                RuntimeError::Custom(format!("wait for restored VM pause: {error}"))
+            })?;
+        let msb_krun::VmExecutionState::Paused(pause_generation) = paused else {
+            return Err(RuntimeError::Custom(
+                "restored VM did not reach its construction pause".into(),
+            ));
+        };
+        let wait_paused_us = wait_paused_started.elapsed().as_micros();
+
+        let generation_bytes: [u8; 16] = rand::random();
+        let prepared_persist_started = Instant::now();
+        persist_restore_activation(
+            runtime_dir,
+            &restored.attempt_id,
+            generation_bytes,
+            "prepared",
+        )?;
+        let prepared_persist_us = prepared_persist_started.elapsed().as_micros();
+        let generation_install_started = Instant::now();
+        let request = vm
+            .install_vm_generation_and_clock(generation_bytes.into())
+            .ok_or_else(|| {
+                RuntimeError::Custom("restored kernel lacks identity-and-clock activation; recreate this development full snapshot with the updated kernel or use disk-only restore".into())
+            })?;
+        let generation_install_us = generation_install_started.elapsed().as_micros();
+        let resume_started = Instant::now();
+        vm.resume(pause_generation).map_err(|error| {
+            RuntimeError::Custom(format!("resume restored VM for activation: {error}"))
+        })?;
+        let resume_us = resume_started.elapsed().as_micros();
+
+        let generation_ack_started = Instant::now();
+        match vm.wait_vm_generation_processed(request, RESTORE_ACTIVATION_TIMEOUT) {
+            Some(msb_krun::VmGenerationWaitOutcome::Processed) => {}
+            Some(msb_krun::VmGenerationWaitOutcome::Failed) => {
+                return Err(RuntimeError::Custom("restored kernel rejected identity-and-clock activation; workloads remain frozen".into()));
+            }
+            Some(msb_krun::VmGenerationWaitOutcome::Superseded) => {
+                return Err(RuntimeError::Custom(
+                    "restored VM Generation ID request was superseded".into(),
+                ));
+            }
+            Some(msb_krun::VmGenerationWaitOutcome::TimedOut) => {
+                return Err(RuntimeError::Custom(
+                    "restored VM Generation ID acknowledgement timed out".into(),
+                ));
+            }
+            None => {
+                return Err(RuntimeError::Custom(
+                    "restored VM Generation ID transport disappeared".into(),
+                ));
+            }
+        }
+        let generation_ack_us = generation_ack_started.elapsed().as_micros();
+        self.kernel_clock_synchronized = true;
+
+        let ready_started = Instant::now();
+        self.install_restored_ready(restored)?;
+        let ready_us = ready_started.elapsed().as_micros();
+        let thaw_started = Instant::now();
+        self.thaw_restored_workload(restored)?;
+        let thaw_us = thaw_started.elapsed().as_micros();
+        let activated_persist_started = Instant::now();
+        persist_restore_activation(
+            runtime_dir,
+            &restored.attempt_id,
+            generation_bytes,
+            "activated",
+        )?;
+        let activated_persist_us = activated_persist_started.elapsed().as_micros();
+        if let Some(ref writer) = self.log_writer {
+            writer.write_system("--- sandbox restored ---");
+        }
+        tracing::info!(
+            target: "microsandbox_checkpoint_timing",
+            operation = "restore_activate",
+            checkpoint_id = restored.attempt_id,
+            total_us = total_started.elapsed().as_micros(),
+            wait_paused_us,
+            prepared_persist_us,
+            generation_install_us,
+            resume_us,
+            generation_ack_us,
+            thaw_us,
+            ready_us,
+            activated_persist_us,
+            "checkpoint restore activation timing"
+        );
+        Ok(())
+    }
+
+    fn thaw_restored_workload(&mut self, restored: &RestoredAgentState) -> RuntimeResult<()> {
+        let mut request = Message::with_payload(
+            MessageType::WorkloadThaw,
+            RESTORE_CONTROL_ID,
+            &WorkloadThaw {
+                attempt_id: restored.attempt_id.clone(),
+                mode: microsandbox_protocol::core::WorkloadThawMode::Restore,
+            },
+        )
+        .map_err(|error| RuntimeError::Custom(format!("encode restored workload thaw: {error}")))?;
+        request.v = restored.protocol_generation;
+        let mut frame = Vec::new();
+        codec::encode_to_buf(&request, &mut frame).map_err(|error| {
+            RuntimeError::Custom(format!("encode restored workload thaw frame: {error}"))
+        })?;
+        let mut pending_request = Some(Bytes::from(frame));
+
+        let deadline = std::time::Instant::now() + RESTORE_ACTIVATION_TIMEOUT;
+        let mut input = std::mem::take(&mut self.restored_input.control);
+        loop {
+            // Drain old bulk records while the guest waits for its scheduler cut. Preserve any
+            // partial final record for the ordinary reader; never restart decoding mid-frame.
+            if let Some(shared) = &self.bulk_shared {
+                drain_restored_bulk(shared, &mut self.restored_input.bulk)?;
+            }
+            if let Some(frame) = pending_request.take() {
+                match self.shared.rx_ring.push(frame) {
+                    Ok(()) => self.shared.rx_wake.wake(),
+                    Err(frame) => pending_request = Some(frame),
+                }
+            }
+            self.shared.tx_wake.drain();
+            while let Some(chunk) = self.shared.tx_ring.pop() {
+                input.extend_from_slice(&chunk);
+                drop(chunk);
+                self.shared.tx_capacity_wake.wake();
+            }
+            loop {
+                if try_decode_relay_client_disconnected_ack_from_bytes(&mut input)
+                    .map_err(|error| {
+                        RuntimeError::Custom(format!("restore disconnect acknowledgement: {error}"))
+                    })?
+                    .is_some()
+                {
+                    continue;
+                }
+                let Some(frame) = try_extract_frame(&mut input)? else {
+                    break;
+                };
+                // Combined-mode stale bulk is opaque, not a CBOR control message.
+                if frame.flags == FLAG_BULK {
+                    continue;
+                }
+                let message = decode_frame(frame.data.as_ref())?;
+                if message.id != RESTORE_CONTROL_ID {
+                    tracing::debug!(
+                        message_type = message.t.as_str(),
+                        id = message.id,
+                        "discarding pre-activation restored-agent frame"
+                    );
+                    continue;
+                }
+                if message.t == MessageType::CoreError {
+                    let error = message.payload::<CoreError>().map_err(|decode| {
+                        RuntimeError::Custom(format!(
+                            "decode restored workload thaw error: {decode}"
+                        ))
+                    })?;
+                    return Err(RuntimeError::Custom(format!(
+                        "restored workload thaw rejected: {}",
+                        error.message
+                    )));
+                }
+                if message.t != MessageType::WorkloadThawed {
+                    return Err(RuntimeError::Custom(format!(
+                        "unexpected restored workload reply {}",
+                        message.t.as_str()
+                    )));
+                }
+                let thawed = message.payload::<WorkloadThawed>().map_err(|error| {
+                    RuntimeError::Custom(format!("decode restored workload thaw: {error}"))
+                })?;
+                if thawed.attempt_id != restored.attempt_id {
+                    return Err(RuntimeError::Custom(
+                        "restored workload thaw belongs to another checkpoint attempt".into(),
+                    ));
+                }
+                self.restored_input.control = input;
+                return Ok(());
+            }
+
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(RuntimeError::Custom(
+                    "restored workload thaw timed out".into(),
+                ));
+            }
+            let wait = if self.bulk_shared.is_some() || pending_request.is_some() {
+                remaining.min(std::time::Duration::from_millis(10))
+            } else {
+                remaining
+            };
+            let _ = self.shared.tx_wake.wait_timeout(wait);
+        }
+    }
+
+    fn install_restored_ready(&mut self, restored: &RestoredAgentState) -> RuntimeResult<()> {
+        // Guest RAM already contains the completed bulk binding: no new boot hello is sent.
+        if restored.ready.bulk_transport.is_some() && self.bulk_shared.is_none() {
+            return Err(RuntimeError::Custom(
+                "restored agent requires its captured bulk console lane".into(),
+            ));
+        }
+        self.bulk_connection_id = restored
+            .ready
+            .bulk_transport
+            .as_ref()
+            .map(|ready| ready.connection_id);
+        self.select_ready_transport(&restored.ready)?;
+        let mut ready = Message::with_payload(MessageType::Ready, 0, &restored.ready)
+            .map_err(|error| RuntimeError::Custom(format!("encode restored ready: {error}")))?;
+        ready.v = restored.protocol_generation;
+        let mut frame = Vec::new();
+        codec::encode_to_buf(&ready, &mut frame).map_err(|error| {
+            RuntimeError::Custom(format!("encode restored ready frame: {error}"))
+        })?;
+        self.ready_frame = Some(frame);
+        Ok(())
+    }
+
     /// Run the main relay loop.
     ///
     /// Accepts client connections, relays frames between clients and the
@@ -1152,6 +1457,11 @@ impl AgentRelay {
             RuntimeError::Custom("agent relay: run() called before wait_ready()".into())
         })?;
 
+        let mut listener = self
+            .listener
+            .take()
+            .ok_or_else(|| RuntimeError::Custom("agent relay: endpoint not published".into()))?;
+
         // Shared state: map from client slot index to client state.
         let clients: Arc<Mutex<HashMap<u32, ClientState>>> = Arc::new(Mutex::new(HashMap::new()));
 
@@ -1171,7 +1481,8 @@ impl AgentRelay {
         // Spawn the ring writer task (client frames → rx_ring → guest).
         let shared_for_writer = Arc::clone(&self.shared);
         let mut ring_writer_handle = tokio::spawn(ring_writer_task(shared_for_writer, agent_rx));
-        let clock_sync_handle = spawn_clock_sync_task(agent_tx.clone());
+        let clock_sync_handle =
+            spawn_clock_sync_task(agent_tx.clone(), self.kernel_clock_synchronized);
         let bulk_write_budget = self
             .dual_port_active
             .then(|| Arc::new(Semaphore::new(BULK_WRITE_BYTE_CAPACITY)));
@@ -1223,6 +1534,7 @@ impl AgentRelay {
             self.range_lease_active,
             merge_command_rx,
             RingReaderContext {
+                initial: std::mem::take(&mut self.restored_input),
                 clients: clients_for_reader,
                 log_writer: log_writer_for_reader,
                 session_registry: registry_for_reader,
@@ -1237,7 +1549,7 @@ impl AgentRelay {
         let mut can_observe_failure_terminals = false;
         loop {
             tokio::select! {
-                accept_result = self.listener.accept() => {
+                accept_result = listener.accept() => {
                     match accept_result {
                         Ok(stream) => {
                             // Allocate a client slot.
@@ -1513,7 +1825,7 @@ impl AgentRelay {
         // double-write it here.
 
         // Clean up the local IPC endpoint.
-        self.listener.cleanup(&self.endpoint);
+        listener.cleanup(&self.endpoint);
 
         // Wake any libkrun or relay producer blocked on console capacity.
         self.shared.close();
@@ -1548,7 +1860,9 @@ impl Drop for AgentRelay {
         if let Some(shared) = self.bulk_shared.as_ref() {
             shared.close();
         }
-        self.listener.cleanup(&self.endpoint);
+        if let Some(listener) = &self.listener {
+            listener.cleanup(&self.endpoint);
+        }
         let guest_to_host = self.shared.tx_ring.snapshot();
         let host_to_guest = self.shared.rx_ring.snapshot();
         tracing::debug!(
@@ -1579,6 +1893,53 @@ pub(crate) fn push_guest_frame_blocking(
     frame: Vec<u8>,
 ) -> RuntimeResult<()> {
     push_guest_frame_until(shared, frame, std::time::Duration::from_secs(60))
+}
+
+/// Discard complete pre-activation records, retaining a possible fragmented tail.
+fn drain_restored_bulk(shared: &ConsoleSharedState, input: &mut BytesMut) -> RuntimeResult<()> {
+    shared.tx_wake.drain();
+    while let Some(chunk) = shared.tx_ring.pop() {
+        input.extend_from_slice(&chunk);
+        drop(chunk);
+        shared.tx_capacity_wake.wake();
+        while try_decode_incarnated_bulk_from_bytes(input)
+            .map_err(|error| RuntimeError::Custom(format!("restored bulk framing: {error}")))?
+            .is_some()
+        {}
+    }
+    Ok(())
+}
+
+fn persist_restore_activation(
+    runtime_dir: &Path,
+    attempt_id: &str,
+    generation_id: [u8; 16],
+    state: &str,
+) -> RuntimeResult<()> {
+    use std::io::Write as _;
+
+    let target = runtime_dir.join("restore-activation.json");
+    let temporary = runtime_dir.join(format!(".restore-activation.{}.tmp", rand::random::<u64>()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    serde_json::to_writer(
+        &mut file,
+        &RestoreActivationRecord {
+            attempt_id,
+            vm_generation_id: hex::encode(generation_id),
+            state,
+        },
+    )
+    .map_err(|error| RuntimeError::Custom(format!("encode restore activation: {error}")))?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    drop(file);
+    crate::checkpoint::replace_file(&temporary, &target)?;
+    #[cfg(unix)]
+    std::fs::File::open(runtime_dir)?.sync_all()?;
+    Ok(())
 }
 
 pub(crate) fn push_guest_frame_until(
@@ -2371,6 +2732,7 @@ async fn ring_reader_task(
     context: RingReaderContext,
 ) -> RuntimeResult<()> {
     let RingReaderContext {
+        initial,
         clients,
         log_writer,
         session_registry,
@@ -2382,6 +2744,7 @@ async fn ring_reader_task(
         // actor nor a cross-lane merger. Reading and routing it directly preserves the PR2 hot
         // path while dual-port keeps the isolation machinery below.
         return combined_ring_reader_task(
+            initial.control,
             shared,
             range_lease_active,
             clients,
@@ -2404,6 +2767,7 @@ async fn ring_reader_task(
     let control_failure_tx = lane_failure_tx.clone();
     let control_handle = tokio::spawn(async move {
         let result = lane_reader_task(
+            initial.control,
             shared,
             GuestLane::Control,
             dual_port,
@@ -2417,6 +2781,7 @@ async fn ring_reader_task(
     let bulk_handle = bulk_shared.map(|shared| {
         tokio::spawn(async move {
             let result = lane_reader_task(
+                initial.bulk,
                 shared,
                 GuestLane::Bulk,
                 true,
@@ -2743,6 +3108,7 @@ async fn route_guest_lane_frame(
 
 /// Read and route the single ordered guest stream without dual-port actor hops.
 async fn combined_ring_reader_task(
+    mut buf: BytesMut,
     shared: Arc<ConsoleSharedState>,
     range_lease_active: bool,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
@@ -2753,7 +3119,9 @@ async fn combined_ring_reader_task(
     #[cfg(unix)]
     let async_fd = AsyncFd::new(shared.tx_wake.as_raw_fd()).map_err(RuntimeError::Io)?;
     let output_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_BYTE_CAPACITY));
-    let mut buf = BytesMut::new();
+    if !buf.is_empty() {
+        shared.tx_wake.wake();
+    }
 
     loop {
         #[cfg(unix)]
@@ -2831,6 +3199,7 @@ async fn combined_ring_reader_task(
 
 /// Read and frame one physical guest console lane without interpreting control payloads.
 async fn lane_reader_task(
+    mut buf: BytesMut,
     shared: Arc<ConsoleSharedState>,
     lane: GuestLane,
     dual_port: bool,
@@ -2840,7 +3209,9 @@ async fn lane_reader_task(
 ) -> RuntimeResult<()> {
     #[cfg(unix)]
     let async_fd = AsyncFd::new(shared.tx_wake.as_raw_fd()).map_err(RuntimeError::Io)?;
-    let mut buf = BytesMut::new();
+    if !buf.is_empty() {
+        shared.tx_wake.wake();
+    }
 
     loop {
         #[cfg(unix)]
@@ -4963,6 +5334,7 @@ mod tests {
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             lane_reader_task(
+                BytesMut::new(),
                 Arc::clone(&shared),
                 GuestLane::Bulk,
                 true,
@@ -5207,6 +5579,7 @@ mod tests {
         )])));
         let frame = encoded_message_id(MessageType::Pong, 1, &microsandbox_protocol::core::Pong {});
         let reader = tokio::spawn(combined_ring_reader_task(
+            BytesMut::new(),
             Arc::clone(&shared),
             false,
             clients,
@@ -5523,5 +5896,255 @@ mod tests {
             }
             Poll::Ready(Ok(written))
         }
+    }
+    fn restored_agent(attempt_id: &str) -> RestoredAgentState {
+        RestoredAgentState {
+            protocol_generation: microsandbox_protocol::message::PROTOCOL_VERSION,
+            ready: Ready {
+                boot_time_ns: 11,
+                init_time_ns: 22,
+                ready_time_ns: 33,
+                agent_version: "test-agent".into(),
+                ..Default::default()
+            },
+            attempt_id: attempt_id.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn restored_workload_thaw_uses_private_attempt_scoped_exchange() {
+        // Console capacity is now a byte budget, not a count of queued frames.
+        let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
+        let sock_path = test_agent_endpoint("restore-thaw");
+        let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
+            .await
+            .unwrap();
+        let restored = restored_agent("checkpoint-attempt");
+
+        let guest_shared = Arc::clone(&shared);
+        let guest = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let request = loop {
+                if let Some(frame) = guest_shared.rx_ring.pop() {
+                    break codec::decode_message_frame(&frame).unwrap();
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "host did not send the private thaw request"
+                );
+                let _ = guest_shared
+                    .rx_wake
+                    .wait_timeout(std::time::Duration::from_millis(10));
+            };
+
+            assert_eq!(request.id, RESTORE_CONTROL_ID);
+            assert_eq!(request.t, MessageType::WorkloadThaw);
+            assert_eq!(
+                request.payload::<WorkloadThaw>().unwrap().mode,
+                microsandbox_protocol::core::WorkloadThawMode::Restore
+            );
+            assert_eq!(
+                request.payload::<WorkloadThaw>().unwrap().attempt_id,
+                "checkpoint-attempt"
+            );
+
+            let mut response = Message::with_payload(
+                MessageType::WorkloadThawed,
+                RESTORE_CONTROL_ID,
+                &WorkloadThawed {
+                    attempt_id: "checkpoint-attempt".into(),
+                },
+            )
+            .unwrap();
+            response.v = request.v;
+            let mut frame = Vec::new();
+            codec::encode_to_buf(&response, &mut frame).unwrap();
+            guest_shared.tx_ring.push(frame).unwrap();
+            guest_shared.tx_wake.wake();
+        });
+
+        relay.thaw_restored_workload(&restored).unwrap();
+        guest.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn restored_ready_preserves_captured_agent_identity() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let sock_path = test_agent_endpoint("restore-ready");
+        let mut relay = AgentRelay::new(&sock_path, shared).await.unwrap();
+        let restored = restored_agent("ready-attempt");
+
+        relay.install_restored_ready(&restored).unwrap();
+
+        let message = codec::decode_message_frame(relay.ready_frame.as_ref().unwrap()).unwrap();
+        let ready = message.payload::<Ready>().unwrap();
+        assert_eq!(message.v, restored.protocol_generation);
+        assert_eq!(message.t, MessageType::Ready);
+        assert_eq!(ready.boot_time_ns, 11);
+        assert_eq!(ready.init_time_ns, 22);
+        assert_eq!(ready.ready_time_ns, 33);
+        assert_eq!(ready.agent_version, "test-agent");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn restored_relay_defers_public_endpoint_binding() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let sock_path = test_agent_endpoint("restore-deferred-endpoint");
+        let mut relay = AgentRelay::new_deferred(&sock_path, shared, None);
+
+        assert!(!sock_path.exists());
+        relay.bind_public_endpoint().unwrap();
+        assert!(sock_path.exists());
+
+        relay.listener.as_ref().unwrap().cleanup(&sock_path);
+    }
+
+    #[test]
+    fn restore_bulk_drain_preserves_every_fragmented_tail() {
+        let record = microsandbox_protocol::bulk::BulkRecord {
+            id: 1,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::GuestToHost,
+            offset: 0,
+            payload: Bytes::from_static(b"captured bulk"),
+        };
+        let mut wire = vec![0x51; CLIENT_INCARNATION_SIZE];
+        codec::encode_bulk_to_buf(&record, &mut wire).unwrap();
+        for split in 0..wire.len() {
+            let shared = ConsoleSharedState::with_capacity(4096);
+            let mut input = BytesMut::new();
+            if split != 0 {
+                shared.tx_ring.push(wire[..split].to_vec()).unwrap();
+            }
+            drain_restored_bulk(&shared, &mut input).unwrap();
+            assert_eq!(input.as_ref(), &wire[..split]);
+            shared.tx_ring.push(wire[split..].to_vec()).unwrap();
+            drain_restored_bulk(&shared, &mut input).unwrap();
+            assert!(input.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_thaw_drains_backpressured_bulk_before_acknowledgement() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
+        let bulk = Arc::new(ConsoleSharedState::with_capacity(256));
+        let path = test_agent_endpoint("restore-bulk-pressure");
+        let mut relay = AgentRelay::new_deferred(&path, shared.clone(), Some(bulk.clone()));
+        let guest = std::thread::spawn(move || {
+            let deadline = Instant::now() + std::time::Duration::from_secs(3);
+            while shared.rx_ring.pop().is_none() {
+                assert!(Instant::now() < deadline);
+                let _ = shared
+                    .rx_wake
+                    .wait_timeout(std::time::Duration::from_millis(1));
+            }
+            let record = microsandbox_protocol::bulk::BulkRecord {
+                id: 1,
+                kind: BulkKind::Filesystem,
+                flow: BulkFlow::GuestToHost,
+                offset: 0,
+                payload: Bytes::from(vec![0x61; 128]),
+            };
+            let mut wire = vec![0x52; CLIENT_INCARNATION_SIZE];
+            codec::encode_bulk_to_buf(&record, &mut wire).unwrap();
+            // A reset cannot finish if the host leaves old records blocking the bulk port.
+            for _ in 0..32 {
+                let mut bytes = Bytes::from(wire.clone());
+                loop {
+                    match bulk.tx_ring.push(bytes) {
+                        Ok(()) => {
+                            bulk.tx_wake.wake();
+                            break;
+                        }
+                        Err(returned) => {
+                            bytes = returned;
+                            assert!(Instant::now() < deadline, "restore stopped draining bulk");
+                            let _ = bulk
+                                .tx_capacity_wake
+                                .wait_timeout(std::time::Duration::from_millis(1));
+                        }
+                    }
+                }
+            }
+            let mut response =
+                microsandbox_protocol::transport::encode_relay_client_disconnected_ack(
+                    RelayClientDisconnectedAck {
+                        id_start: 1,
+                        id_end_exclusive: microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP,
+                        incarnation: [0x53; CLIENT_INCARNATION_SIZE],
+                    },
+                )
+                .to_vec();
+            let ack = Message::with_payload(
+                MessageType::WorkloadThawed,
+                RESTORE_CONTROL_ID,
+                &WorkloadThawed {
+                    attempt_id: "bulk-cut".into(),
+                },
+            )
+            .unwrap();
+            codec::encode_to_buf(&ack, &mut response).unwrap();
+            let tail =
+                encoded_message_id(MessageType::Pong, 99, &microsandbox_protocol::core::Pong {});
+            response.extend_from_slice(&tail);
+            shared.tx_ring.push(response).unwrap();
+            shared.tx_wake.wake();
+            tail
+        });
+        relay
+            .thaw_restored_workload(&restored_agent("bulk-cut"))
+            .unwrap();
+        assert_eq!(relay.restored_input.control.as_ref(), guest.join().unwrap());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn restored_lane_reader_consumes_initial_frame_without_another_write() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
+        let (sender, mut receiver) = mpsc::channel(4);
+        let frame = encoded_message_id(MessageType::Pong, 1, &microsandbox_protocol::core::Pong {});
+        let reader = tokio::spawn(lane_reader_task(
+            BytesMut::from(frame.as_slice()),
+            shared,
+            GuestLane::Control,
+            false,
+            false,
+            sender,
+            Arc::new(Semaphore::new(4096)),
+        ));
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, LaneEvent::Frame(_)));
+        reader.abort();
+        let _ = reader.await;
+    }
+
+    #[test]
+    fn restore_activation_record_replaces_prepared_state_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let generation = [0xabu8; 16];
+
+        persist_restore_activation(directory.path(), "attempt-7", generation, "prepared").unwrap();
+        persist_restore_activation(directory.path(), "attempt-7", generation, "activated").unwrap();
+
+        let value: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("restore-activation.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["attempt_id"], "attempt-7");
+        assert_eq!(value["vm_generation_id"], hex::encode(generation));
+        assert_eq!(value["state"], "activated");
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+                .count(),
+            0,
+            "atomic publication must not leave temporary activation records"
+        );
     }
 }

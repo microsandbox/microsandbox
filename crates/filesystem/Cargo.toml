@@ -11,12 +11,14 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
+bincode = { version = "2.0.1", features = ["serde"] }
 hex.workspace = true
 libc.workspace = true
 microsandbox-utils.workspace = true
 msb_krun.workspace = true
 sha2.workspace = true
 scopeguard.workspace = true
+serde.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

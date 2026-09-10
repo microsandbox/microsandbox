@@ -996,9 +996,38 @@ fn linux_u64_file(path: &str) -> MicrosandboxResult<u64> {
 
 /// Grow the sandbox-owned OCI root disk before boot when its persisted target increased.
 async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> MicrosandboxResult<()> {
+    // A restored checkpoint chain already ends in a fresh writable qcow2 head. Its earlier layers
+    // are sealed capture state and must never pass through ordinary root-disk growth.
+    if !config.snapshot_upper_layers.is_empty() {
+        return Ok(());
+    }
+
     let RootfsSource::Oci(oci) = &config.spec.image else {
         return Ok(());
     };
+    let desired_mib = match &oci.root_disk {
+        Some(microsandbox_types::RootDisk::Flat { size_mib, .. })
+        | Some(microsandbox_types::RootDisk::Managed { size_mib }) => *size_mib,
+        _ => None,
+    };
+    if let Some(chain) = microsandbox_runtime::checkpoint::load_runtime_owned_root_chain(
+        &sandbox_dir.join("runtime"),
+    )
+    .map_err(|error| {
+        MicrosandboxError::Runtime(format!(
+            "cannot inspect the root-disk chain before startup: {error}"
+        ))
+    })? && chain.layers.len() > 1
+    {
+        if desired_mib.is_some_and(|desired| u64::from(desired) * 1024 * 1024 > chain.virtual_size)
+        {
+            return Err(MicrosandboxError::Custom(
+                "cannot grow a checkpoint-backed root disk yet; its sealed raw ancestor must not be resized"
+                    .into(),
+            ));
+        }
+        return Ok(());
+    }
     match &oci.root_disk {
         Some(microsandbox_types::RootDisk::Flat { size_mib, .. }) => {
             let Some(desired_mib) = size_mib else {
@@ -2506,6 +2535,7 @@ fn sandbox_cli_args(
             idle_timeout_secs: config.spec.lifecycle.idle_timeout_secs,
         },
         vsock: config.spec.vsock.routes.clone(),
+        checkpoint_restore: config.checkpoint_restore.clone(),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
         bootstrap: GuestBootstrap {
@@ -2580,9 +2610,14 @@ fn sandbox_cli_args(
         RootfsSource::Oci(oci) => {
             if let Some(microsandbox_types::RootDisk::Flat { fstype, .. }) = &oci.root_disk {
                 let sandbox_dir = local.sandboxes_dir().join(&config.spec.name);
-                launch.rootfs.disk =
-                    Some(sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME));
-                launch.rootfs.disk_format = Some("raw".to_string());
+                if config.snapshot_upper_layers.is_empty() {
+                    launch.rootfs.disk =
+                        Some(sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME));
+                    launch.rootfs.disk_format = Some("raw".to_string());
+                } else {
+                    launch.rootfs.disk_layers = config.snapshot_upper_layers.clone();
+                }
+                launch.rootfs.disk_runtime_owned = true;
                 launch.bootstrap.block_root = Some(BootstrapBlockRoot::DiskImage {
                     device: "/dev/vda".to_string(),
                     fstype: Some(fstype.as_deref().unwrap_or("ext4").to_string()),
@@ -2605,7 +2640,11 @@ fn sandbox_cli_args(
                 let block_root = match &oci.root_disk {
                     None | Some(RootDisk::Managed { .. }) => {
                         let sandbox_dir = local.sandboxes_dir().join(&config.spec.name);
-                        launch.rootfs.upper = Some(sandbox_dir.join("upper.ext4"));
+                        if config.snapshot_upper_layers.is_empty() {
+                            launch.rootfs.upper = Some(sandbox_dir.join("upper.ext4"));
+                        } else {
+                            launch.rootfs.upper_layers = config.snapshot_upper_layers.clone();
+                        }
                         BootstrapBlockRoot::OciErofs {
                             lower: "/dev/vda".to_string(),
                             upper: BootstrapBlockRootUpper::Device {
@@ -2876,7 +2915,9 @@ mod tests {
     use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    use microsandbox_runtime::launch::LaunchConfig;
+    use microsandbox_runtime::launch::{
+        CheckpointRestoreConfig, LaunchConfig, RootfsUpperLayerConfig,
+    };
 
     #[cfg(feature = "net")]
     use super::NetworkSlot;
@@ -4044,6 +4085,197 @@ mod tests {
         assert!(!rendered.contains(&"--rootfs-blk".to_string()));
         assert!(!rendered.contains(&"--rootfs-disk".to_string()));
         assert!(!rendered.iter().any(|a| a.starts_with("MSB_BLOCK_ROOT=")));
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_preserve_checkpoint_root_chain_and_restore_source() {
+        let mut config = SandboxConfig::default();
+        config.spec.name = "restored".into();
+        config.spec.image = RootfsSource::oci("alpine");
+        config.manifest_digest =
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        config.snapshot_upper_layers = vec![
+            RootfsUpperLayerConfig {
+                path: PathBuf::from("/tmp/upper.ext4"),
+                format: "raw".into(),
+            },
+            RootfsUpperLayerConfig {
+                path: PathBuf::from("/tmp/upper-active.qcow2"),
+                format: "qcow2".into(),
+            },
+        ];
+        config.checkpoint_restore = Some(CheckpointRestoreConfig {
+            closure: PathBuf::from("/tmp/checkpoint"),
+            checkpoint_root:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            checkpoint_id: "checkpoint_test".into(),
+        });
+
+        let launch = render_launch(&config);
+
+        assert!(launch.rootfs.upper.is_none());
+        assert_eq!(launch.rootfs.upper_layers.len(), 2);
+        assert_eq!(launch.rootfs.upper_layers[0].format, "raw");
+        assert_eq!(launch.rootfs.upper_layers[1].format, "qcow2");
+        assert_eq!(
+            launch
+                .checkpoint_restore
+                .as_ref()
+                .map(|restore| restore.checkpoint_id.as_str()),
+            Some("checkpoint_test")
+        );
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_preserve_flat_checkpoint_root_chain() {
+        let mut config = SandboxConfig::default();
+        config.spec.name = "restored-flat".into();
+        config.spec.image = RootfsSource::Oci(OciRootfsSource {
+            reference: "alpine".into(),
+            root_disk: Some(microsandbox_types::RootDisk::Flat {
+                size_mib: None,
+                fstype: Some("ext4".into()),
+                clone: microsandbox_types::FlatClone::Auto,
+            }),
+        });
+        config.manifest_digest =
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        config.snapshot_upper_layers = vec![
+            RootfsUpperLayerConfig {
+                path: PathBuf::from("/tmp/rootfs.raw"),
+                format: "raw".into(),
+            },
+            RootfsUpperLayerConfig {
+                path: PathBuf::from("/tmp/root-active.qcow2"),
+                format: "qcow2".into(),
+            },
+        ];
+
+        let launch = render_launch(&config);
+
+        assert!(launch.rootfs.disk.is_none());
+        assert_eq!(launch.rootfs.disk_layers.len(), 2);
+        assert_eq!(launch.rootfs.disk_layers[0].format, "raw");
+        assert_eq!(launch.rootfs.disk_layers[1].format, "qcow2");
+        assert!(launch.rootfs.disk_runtime_owned);
+        assert_eq!(
+            launch.bootstrap.block_root,
+            Some(BootstrapBlockRoot::DiskImage {
+                device: "/dev/vda".into(),
+                fstype: Some("ext4".into()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_root_chain_skips_ordinary_upper_growth() {
+        let temp = tempdir().unwrap();
+        let upper = temp.path().join("upper.ext4");
+        std::fs::File::create(&upper)
+            .unwrap()
+            .set_len(512 * 1024)
+            .unwrap();
+
+        let mut config = SandboxConfig::default();
+        config.spec.image = RootfsSource::Oci(OciRootfsSource {
+            reference: "alpine".into(),
+            root_disk: Some(microsandbox_types::RootDisk::managed(4096)),
+        });
+        config.snapshot_upper_layers = vec![
+            RootfsUpperLayerConfig {
+                path: upper.clone(),
+                format: "raw".into(),
+            },
+            RootfsUpperLayerConfig {
+                path: temp.path().join("upper-active.qcow2"),
+                format: "qcow2".into(),
+            },
+        ];
+
+        super::prepare_oci_upper(&config, temp.path())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::metadata(upper).unwrap().len(), 512 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_persisted_checkpoint_chain_refuses_deferred_root_grow() {
+        let temp = tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let base = temp.path().join("rootfs.raw");
+        let head = temp.path().join("root-active.qcow2");
+        std::fs::write(&base, vec![0; 4096]).unwrap();
+        // Capacity inspection must succeed before the sealed-chain grow guard.
+        microsandbox_image::checkpoint::create_qcow2_overlay(&head, 4096, &base, "raw")
+            .await
+            .unwrap();
+        let head_before = std::fs::read(&head).unwrap();
+        let state = serde_json::json!({
+            "schema": "microsandbox.runtime-root-disk/1",
+            "volume_id": "vol_00000000000000000000000000000000",
+            "device_id": "vda",
+            "layout": "flat-root",
+            "published_generation": 1,
+            "layers": [
+                {
+                    "layer_id": "layer_00000000000000000000000000000001",
+                    "path": base,
+                    "format": "raw",
+                    "integrity_root": microsandbox_image::checkpoint::sparse_file_integrity(&base).unwrap().root
+                },
+                {
+                    "layer_id": "layer_00000000000000000000000000000002",
+                    "path": head,
+                    "format": "qcow2",
+                    "integrity_root": null
+                }
+            ]
+        });
+        std::fs::write(
+            runtime.join("root-disk.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+
+        let mut config = SandboxConfig::default();
+        config.spec.image = RootfsSource::Oci(OciRootfsSource {
+            reference: "alpine".into(),
+            root_disk: Some(microsandbox_types::RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: Some("ext4".into()),
+                clone: microsandbox_types::FlatClone::Auto,
+            }),
+        });
+
+        let error = super::prepare_oci_upper(&config, temp.path())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("checkpoint-backed root disk"));
+        assert_eq!(std::fs::read(&base).unwrap(), vec![0; 4096]);
+        assert_eq!(std::fs::read(&head).unwrap(), head_before);
+        assert_eq!(
+            std::fs::read(runtime.join("root-disk.json")).unwrap(),
+            serde_json::to_vec(&state).unwrap()
+        );
+
+        // A corrupt head must also fail closed, not fall back to growing its base.
+        std::fs::write(&head, b"qcow").unwrap();
+        let error = super::prepare_oci_upper(&config, temp.path())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot inspect the root-disk chain")
+        );
+        assert_eq!(std::fs::read(&base).unwrap(), vec![0; 4096]);
+        assert_eq!(std::fs::read(&head).unwrap(), b"qcow");
+        assert_eq!(
+            std::fs::read(runtime.join("root-disk.json")).unwrap(),
+            serde_json::to_vec(&state).unwrap()
+        );
     }
 
     #[tokio::test]

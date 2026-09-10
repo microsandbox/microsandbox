@@ -6,7 +6,7 @@
 //! the networking stack.
 
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
@@ -57,6 +57,7 @@ pub struct SmoltcpNetwork {
     shared: Arc<SharedState>,
     backend: Option<SmoltcpBackend>,
     poll_handle: Option<JoinHandle<()>>,
+    activation_gate: Option<Arc<NetworkActivationGate>>,
 
     // Resolved from config + slot.
     guest_mac: [u8; 6],
@@ -141,6 +142,17 @@ pub struct TerminationHandle {
 #[derive(Clone)]
 pub struct MetricsHandle {
     shared: Arc<SharedState>,
+}
+
+/// One-shot handle that permits a deferred network stack to publish listeners and process traffic.
+#[derive(Clone)]
+pub struct NetworkActivationHandle {
+    gate: Arc<NetworkActivationGate>,
+}
+
+struct NetworkActivationGate {
+    active: Mutex<bool>,
+    changed: Condvar,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -279,6 +291,7 @@ impl SmoltcpNetwork {
             shared,
             backend: Some(backend),
             poll_handle: None,
+            activation_gate: None,
             guest_mac,
             gateway_mac,
             mtu,
@@ -289,6 +302,24 @@ impl SmoltcpNetwork {
             tls_state,
             secrets,
         })
+    }
+
+    /// Hold network processing and published-port creation behind an explicit one-shot gate.
+    ///
+    /// This must be selected before [`start`](Self::start). It is used by checkpoint restore so
+    /// ingress cannot reach the child until guest activation has completed. The gate is consumed
+    /// once at poll-thread startup and adds no checks to steady-state packet processing.
+    pub fn defer_activation(&mut self) -> NetworkActivationHandle {
+        assert!(
+            self.poll_handle.is_none(),
+            "network activation can only be deferred before start"
+        );
+        let gate = Arc::new(NetworkActivationGate {
+            active: Mutex::new(false),
+            changed: Condvar::new(),
+        });
+        self.activation_gate = Some(Arc::clone(&gate));
+        NetworkActivationHandle { gate }
     }
 
     fn platform_policy(deployment_profile: DeploymentProfile) -> Option<NetworkPolicy> {
@@ -331,12 +362,16 @@ impl SmoltcpNetwork {
         let strict = config.strict;
         let max_connections = config.max_connections;
         let secrets = self.secrets.clone();
+        let activation_gate = self.activation_gate.take();
         let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
 
         self.poll_handle = Some(
             std::thread::Builder::new()
                 .name("smoltcp-poll".into())
                 .spawn(move || {
+                    if let Some(gate) = activation_gate {
+                        gate.wait();
+                    }
                     poll::smoltcp_poll_loop(
                         shared,
                         poll_config,
@@ -494,6 +529,26 @@ impl SmoltcpNetwork {
     /// updates without restarting the sandbox.
     pub fn secrets_handle(&self) -> SecretsHandle {
         self.secrets.clone()
+    }
+}
+
+impl NetworkActivationHandle {
+    /// Release a deferred network exactly once. Repeated calls are harmless.
+    pub fn activate(&self) {
+        let mut active = self.gate.active.lock().unwrap();
+        if !*active {
+            *active = true;
+            self.gate.changed.notify_all();
+        }
+    }
+}
+
+impl NetworkActivationGate {
+    fn wait(&self) {
+        let mut active = self.active.lock().unwrap();
+        while !*active {
+            active = self.changed.wait(active).unwrap();
+        }
     }
 }
 
@@ -699,6 +754,36 @@ mod tests {
 
     fn routes(ipv4: bool, ipv6: bool) -> HostRoutes {
         HostRoutes { ipv4, ipv6 }
+    }
+
+    #[test]
+    fn deferred_activation_blocks_until_released() {
+        let mut network = SmoltcpNetwork::build(
+            resolved(NetworkConfig::default()),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(true, false),
+        )
+        .unwrap();
+        let handle = network.defer_activation();
+        let gate = Arc::clone(network.activation_gate.as_ref().unwrap());
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            gate.wait();
+            released_tx.send(()).unwrap();
+        });
+
+        assert!(
+            released_rx
+                .recv_timeout(std::time::Duration::from_millis(25))
+                .is_err(),
+            "deferred network became active before explicit release"
+        );
+        handle.activate();
+        released_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        waiter.join().unwrap();
     }
 
     #[test]

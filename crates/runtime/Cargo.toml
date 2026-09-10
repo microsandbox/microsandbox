@@ -13,7 +13,7 @@ path = "lib/lib.rs"
 
 [features]
 default = ["download-binaries", "embed-binaries", "net", "runner"]
-client = []
+client = ["dep:hex", "dep:microsandbox-image", "dep:rand", "dep:tempfile", "dep:tokio"]
 runner = [
     "client",
     "dep:bytes",
