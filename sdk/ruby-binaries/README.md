@@ -1,0 +1,41 @@
+# microsandbox-binaries
+
+`microsandbox-binaries` is the optional runtime companion for the
+[`microsandbox`](../ruby) Ruby SDK. Its platform gems contain the `msb`
+executable and libkrunfw firmware library used by local sandboxes. Most users
+should install `microsandbox`; install this companion only when local runtime
+support is needed:
+
+```sh
+gem install microsandbox-binaries
+```
+
+For Bundler applications, add `gem "microsandbox-binaries"` to the Gemfile
+alongside `microsandbox`, then run `bundle install`.
+
+The main gem discovers this gem opportunistically and has no dependency on it,
+so cloud-only installations do not download runtime binaries. Explicit
+`MSB_PATH` and `MSB_LIBKRUNFW_PATH` environment variables retain precedence
+over the bundled files. Keep this gem on the same minor series as
+`microsandbox`: the SDK warns and ignores a companion from another series.
+
+Runtime files are downloaded from the matching Microsandbox GitHub release and
+packaged as pure data for `arm64-darwin`, `x86_64-linux-gnu`, and
+`aarch64-linux-gnu`. There is no generic `ruby`-platform fallback gem.
+RubyGems 3.3.11 or newer is required to select these platform gems correctly.
+
+## Building from a checkout
+
+Run from `sdk/ruby-binaries`:
+
+```sh
+rake test
+rake package
+```
+
+Both commands check that the companion version matches the Ruby SDK and
+workspace version. `rake package` downloads that release's bundles, verifies
+their SHA-256 checksums, and writes the three verified gems to `pkg/`.
+An explicit release, such as `rake 'package[0.6.17]'`, must match the version
+in `lib/microsandbox/binaries/version.rb`. Run `rake clobber` to remove cached
+downloads and packaged gems before a fresh build.

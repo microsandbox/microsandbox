@@ -19,6 +19,8 @@
 #   - crates/agentd/Cargo.lock (the agentd sub-workspace ships its own
 #     lockfile that the root `cargo check` won't refresh — targeted sed
 #     against microsandbox-* entries)
+#   - sdk/ruby/lib/microsandbox/version.rb
+#   - sdk/ruby-binaries/lib/microsandbox/binaries/version.rb
 #   - packages/agent-client/typescript/package.json
 #   - packages/microsandbox-types/typescript/package.json
 #   - sdk/node-ts/package.json (top-level + optionalDependencies versions)
@@ -124,6 +126,18 @@ for f in Cargo.lock crates/agentd/Cargo.lock; do
     fi
   done
   [ "$changed" -eq 1 ] && echo "  updated ${f}"
+done
+
+# --- Ruby: SDK and companion gem version constants ----------------------
+for f in \
+  sdk/ruby/lib/microsandbox/version.rb \
+  sdk/ruby-binaries/lib/microsandbox/binaries/version.rb; do
+  if grep -q "VERSION = \"${OLD}\"" "$f"; then
+    inplace "s/VERSION = \"${OLD}\"/VERSION = \"${NEW}\"/" "$f"
+    echo "  updated ${f}"
+  else
+    echo "warning: ${f} does not contain VERSION = \"${OLD}\"" >&2
+  fi
 done
 
 # --- Node: package.json files --------------------------------------------
