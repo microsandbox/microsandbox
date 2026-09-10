@@ -1,0 +1,131 @@
+name: Check Go Full Snapshot
+
+on:
+  workflow_call:
+    inputs:
+      run_id:
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  snapshot-project:
+    name: Full snapshot project (Go / Linux amd64)
+    runs-on: self-hosted-ubuntu-2404-x64
+    timeout-minutes: 30
+    steps:
+      - name: Validate Go build provenance
+        id: source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHECK_RUN: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$CHECK_RUN" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CHECK_RUN" > "$RUNNER_TEMP/go-check-run.json"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$CHECK_RUN/jobs?per_page=100" \
+            --jq '.jobs[]' | jq -s . > "$RUNNER_TEMP/go-check-jobs.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          run = json.loads((root / 'go-check-run.json').read_text())
+          assert run['status'] == 'completed', 'Check run is not complete'
+          assert run['path'] == '.github/workflows/check.yml', 'Not a Check run'
+          assert run['head_repository']['full_name'] == os.environ['GITHUB_REPOSITORY'], 'Foreign repository'
+          assert run['event'] == 'push', 'Expected a same-repository push build'
+          jobs = json.loads((root / 'go-check-jobs.json').read_text())
+          required = {'Build runtime (linux-x86_64)', 'Build Go FFI (linux-x86_64)',
+                      'Go Quality', 'Go SDK Tests (shard 1/2)', 'Go SDK Tests (shard 2/2)'}
+          passed = {j['name'] for j in jobs if j['conclusion'] == 'success'}
+          assert required <= passed, f'Go gates did not pass: {required - passed}'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print(f"commit={run['head_sha']}", file=output)
+          PY
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.source.outputs.commit }}
+          path: checked
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: preview
+          persist-credentials: false
+          sparse-checkout: examples/go/full-snapshot-preview
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: runtime
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: go-ffi-linux-x86_64
+          path: ffi
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Embed the checked FFI and isolate its cache
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test -r /dev/kvm && test -w /dev/kvm
+          chmod +x runtime/msb
+          install -m644 ffi/libmicrosandbox_go_ffi.so \
+            checked/sdk/go/internal/bundle/bundles/libmicrosandbox_go_ffi-linux-amd64.so
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          path = Path('checked/sdk/go/setup.go')
+          source = path.read_text()
+          old = '"v"+sdkVersion'
+          assert source.count(old) == 1, 'Unexpected FFI cache layout'
+          path.write_text(source.replace(old, '"preview-' + os.environ['SOURCE_COMMIT'] + '"'))
+          PY
+
+      - name: Run the standalone Go project
+        working-directory: preview/examples/go/full-snapshot-preview
+        env:
+          MSB_PATH: ${{ github.workspace }}/runtime/msb
+          MSB_LIBKRUNFW_PATH: ${{ github.workspace }}/runtime/libkrunfw.so.5.6.1
+          LD_LIBRARY_PATH: ${{ github.workspace }}/runtime
+        run: |
+          set -euo pipefail
+          go mod edit -replace "github.com/superradcompany/microsandbox/sdk/go=$GITHUB_WORKSPACE/checked/sdk/go"
+          go test -v -count=1 -timeout=25m ./... 2>&1 | tee "$GITHUB_WORKSPACE/go-full-snapshot.log"
+
+      - name: Check test VM cleanup
+        if: always()
+        run: |
+          set -euo pipefail
+          log="$GITHUB_WORKSPACE/go-full-snapshot.log"
+          if [[ -f "$log" ]]; then
+            test_root=$(sed -n 's/^TEST_HOME=//p' "$log" | head -1)
+            if [[ -n "$test_root" ]]; then
+              MSB_HOME="$test_root/home" "$GITHUB_WORKSPACE/runtime/msb" list --format json \
+                | tee "$GITHUB_WORKSPACE/go-full-snapshot-cleanup.json"
+              jq -e 'length == 0' "$GITHUB_WORKSPACE/go-full-snapshot-cleanup.json"
+            fi
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: go-full-snapshot-project-results
+          path: |
+            go-full-snapshot.log
+            go-full-snapshot-cleanup.json
+          if-no-files-found: warn

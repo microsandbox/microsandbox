@@ -1,6 +1,12 @@
 name: Check
 
 on:
+  workflow_dispatch:
+    inputs:
+      go_snapshot_run:
+        description: Completed Check run whose Go and runtime artifacts to validate.
+        required: true
+        type: string
   push:
     branches: [main, "releases/**"]
   pull_request:
@@ -28,6 +34,7 @@ jobs:
   # the required status checks on main without burning CI minutes.
   # ---------------------------------------------------------------------------
   changes:
+    if: github.event_name != 'workflow_dispatch'
     name: Detect code changes
     runs-on: ubuntu-latest
     outputs:
@@ -1972,3 +1979,13 @@ jobs:
             exit 1
           fi
           echo "All required jobs passed or were skipped"
+
+  go-full-snapshot-preview:
+    name: Go full snapshot project
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/check-go-full-snapshot.yml
+    with:
+      run_id: ${{ inputs.go_snapshot_run }}
+    permissions:
+      actions: read
+      contents: read
