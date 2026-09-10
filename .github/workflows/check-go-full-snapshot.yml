@@ -135,6 +135,7 @@ jobs:
           else
             [[ "$SDK_REVISION" =~ ^[0-9a-f]{40}$ ]]
             go mod edit -dropreplace github.com/superradcompany/microsandbox/sdk/go
+            go mod edit -droprequire github.com/superradcompany/microsandbox/sdk/go
             go get "github.com/superradcompany/microsandbox/sdk/go@$SDK_REVISION"
             sdk_dir=$(go list -m -f '{{.Dir}}' github.com/superradcompany/microsandbox/sdk/go)
             jq -e --arg sha "$SOURCE_COMMIT" '.source_commit == $sha' "$sdk_dir/preview.json"
