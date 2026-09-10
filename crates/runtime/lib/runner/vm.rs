@@ -1616,14 +1616,19 @@ fn build_vm(
                 cfg!(target_os = "linux") && matches!(format, msb_krun::DiskImageFormat::Qcow2);
             let writeback_limit = writeback_limit.cloned();
             builder = builder.disk(move |d| {
-                let layers = layers
-                    .into_iter()
-                    .map(|layer| msb_krun::DiskLayer::new(layer.path, layer.format));
-                let d = d
-                    .layers(layers)
-                    .format(format)
-                    .read_only(read_only)
-                    .direct_io(direct_io);
+                // A lone raw layer has no dependencies. Keep it on the ordinary raw backend,
+                // which enforces the same bounded writeback budget as a fresh sandbox. The
+                // explicit-chain backend rejects that budget even for a one-file raw chain.
+                let d = if layers.len() == 1 && format == msb_krun::DiskImageFormat::Raw {
+                    d.path(&layers[0].path)
+                } else {
+                    d.layers(
+                        layers
+                            .into_iter()
+                            .map(|layer| msb_krun::DiskLayer::new(layer.path, layer.format)),
+                    )
+                };
+                let d = d.format(format).read_only(read_only).direct_io(direct_io);
                 apply_block_writeback_limit(d, format, read_only, writeback_limit.as_ref())
             });
         } else if let Some(ref upper) = vm.rootfs_upper {
