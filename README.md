@@ -444,7 +444,7 @@ Practical ways to put microsandbox to work:
 
 #### <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF">&nbsp;&nbsp;Optional host-shell hooks
 
-> MCP-only clients do not need this. Coding agents that still have a **host shell** can attach an optional PreToolUse-style hook so `apt` / `brew` / `npm -g` on the workstation is denied unless wrapped in `msb run` / `msb exec`.
+> MCP-only clients do not need this. Coding agents that still have a **host shell** can attach an optional PreToolUse-style hook so `apt install` / `brew install` / `npm install -g` on the workstation is denied unless wrapped in `msb run` / `msb exec`.
 >
 > The hook pack lives in the [skills](https://github.com/superradcompany/skills) repo and is **not** auto-installed. Guest bootstrap / `--init` stays a separate mechanism.
 
