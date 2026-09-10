@@ -62,7 +62,7 @@ use microsandbox::{
     snapshot::{SaveOpts, SnapshotFormat, SnapshotScope},
     volume::{Volume, VolumeBuilder, VolumeFs, VolumeHandle, VolumeKind},
 };
-use microsandbox_network::{builder::ViolationActionBuilder, secrets::config::ViolationAction};
+use microsandbox_network::secrets::config::SecretViolationAction;
 use tokio::io::AsyncWriteExt;
 use tokio::runtime::Runtime;
 use tokio_stream::StreamExt as _;
@@ -448,6 +448,8 @@ mod error_kind {
     pub const SANDBOX_NOT_FOUND: &str = "sandbox_not_found";
     pub const SANDBOX_STILL_RUNNING: &str = "sandbox_still_running";
     pub const SANDBOX_NOT_RUNNING: &str = "sandbox_not_running";
+    pub const SANDBOX_ALREADY_EXISTS: &str = "sandbox_already_exists";
+    pub const SANDBOX_REPLACED: &str = "sandbox_replaced";
     pub const VOLUME_NOT_FOUND: &str = "volume_not_found";
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
@@ -516,6 +518,8 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SandboxNotFound(_) => error_kind::SANDBOX_NOT_FOUND,
             MicrosandboxError::SandboxStillRunning(_) => error_kind::SANDBOX_STILL_RUNNING,
             MicrosandboxError::SandboxNotRunning(_) => error_kind::SANDBOX_NOT_RUNNING,
+            MicrosandboxError::SandboxAlreadyExists(_) => error_kind::SANDBOX_ALREADY_EXISTS,
+            MicrosandboxError::SandboxReplaced { .. } => error_kind::SANDBOX_REPLACED,
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
@@ -769,7 +773,7 @@ pub unsafe extern "C" fn msb_cancel_unregister(id: u64) {
 //   name: null-terminated C string, owned by caller (Go), borrowed for call.
 //   opts_json: JSON object with optional fields (image, memory_mib, cpus,
 //     max_memory_mib, max_cpus, thp, workdir, env). Owned by caller, borrowed for call.
-// Output on success: {"handle": <u64>}
+// Output on success: {"handle": <u64>, "id": <string>, "backend_kind": <string>}
 // The caller MUST eventually call `msb_sandbox_close(handle)` to release.
 // ---------------------------------------------------------------------------
 
@@ -908,6 +912,7 @@ struct NetworkOpts {
     #[serde(default)]
     deny_domain_suffixes: Vec<String>,
     tls: Option<TlsOpts>,
+    strict: Option<bool>,
     /// Ports nested inside network: {host_port: guest_port}.
     #[serde(default)]
     ports: HashMap<u16, u16>,
@@ -923,9 +928,28 @@ struct NetworkOpts {
     rate_limiter: Option<NetworkRateLimiterOpts>,
     /// Sandbox-wide secret violation action: "block", "block-and-log",
     /// "block-and-terminate".
-    on_secret_violation: Option<String>,
+    secret_violation_action: Option<String>,
     /// Trust the host's extra CA certificates inside the guest.
     trust_host_cas: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+struct OutboundProxyOpts {
+    protocol: String,
+    address: String,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password_source: Option<SecretSourceOpts>,
+}
+
+#[derive(serde::Deserialize)]
+struct SecretSourceOpts {
+    kind: String,
+    #[serde(default)]
+    var: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -933,16 +957,23 @@ struct SecretOpts {
     env_var: String,
     value: String,
     #[serde(default)]
-    allow_hosts: Vec<String>,
+    allow: Vec<String>,
     #[serde(default)]
-    allow_host_patterns: Vec<String>,
+    passthrough: Vec<String>,
     placeholder: Option<String>,
-    require_tls: Option<bool>,
-    /// Per-network (sandbox-wide) violation action override. The Node/Python
-    /// SDKs accept this as a per-secret field on `SecretEntry`; it ends up
-    /// applied at the network builder level. We honour it the same way:
-    /// the last seen non-null value wins.
-    on_violation: Option<String>,
+    require_tls_identity: Option<bool>,
+    #[serde(default)]
+    substitution: SecretSubstitutionOpts,
+    violation_action: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SecretSubstitutionOpts {
+    headers: Option<bool>,
+    #[serde(default)]
+    query: bool,
+    #[serde(default)]
+    body: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -1065,6 +1096,8 @@ struct SandboxCreateOpts {
     #[serde(default)]
     registry_ca_certs: Vec<String>,
     network: Option<NetworkOpts>,
+    /// Proxy that all outbound sandbox connections are dialed through.
+    proxy: Option<OutboundProxyOpts>,
     /// Top-level ports shorthand: {host_port: guest_port} (TCP).
     #[serde(default)]
     ports: HashMap<u16, u16>,
@@ -1407,6 +1440,11 @@ fn apply_network(
         builder = builder.network(move |n| n.max_connections(max));
     }
 
+    // Strict hostname policy.
+    if let Some(strict) = net.strict {
+        builder = builder.network(move |n| n.strict(strict));
+    }
+
     // Rate limiters. Validation (empty limiter, zero size/refill, burst
     // without a bucket) happens in the network builder's build step.
     if let Some(ref rate_limiter) = net.rate_limiter {
@@ -1430,11 +1468,9 @@ fn apply_network(
     }
 
     // Sandbox-wide secret violation action.
-    if let Some(ref violation) = net.on_secret_violation {
+    if let Some(ref violation) = net.secret_violation_action {
         let action = parse_violation_action(violation)?;
-        builder = builder.network(move |n| {
-            n.on_secret_violation(move |_| ViolationActionBuilder::from_action(action))
-        });
+        builder = builder.network(move |n| n.secret_violation_action(action));
     }
 
     // Ports nested inside network object.
@@ -1616,11 +1652,13 @@ fn parse_port_string(s: &str) -> Result<microsandbox_network::policy::PortRange,
     }
 }
 
-fn parse_violation_action(s: &str) -> Result<ViolationAction, FfiError> {
+fn parse_violation_action(s: &str) -> Result<SecretViolationAction, FfiError> {
     match s {
-        "block" => Ok(ViolationAction::Block),
-        "block-and-log" | "block_and_log" => Ok(ViolationAction::BlockAndLog),
-        "block-and-terminate" | "block_and_terminate" => Ok(ViolationAction::BlockAndTerminate),
+        "block" => Ok(SecretViolationAction::Block),
+        "block-and-log" | "block_and_log" => Ok(SecretViolationAction::BlockAndLog),
+        "block-and-terminate" | "block_and_terminate" => {
+            Ok(SecretViolationAction::BlockAndTerminate)
+        }
         other => Err(FfiError::invalid_argument(format!(
             "unknown violation action: {other}"
         ))),
@@ -1771,28 +1809,31 @@ fn apply_secret(
 ) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
     let env_var = s.env_var.clone();
     let value = s.value.clone();
-    let allow_hosts = s.allow_hosts.clone();
-    let allow_host_patterns = s.allow_host_patterns.clone();
-    if allow_hosts.is_empty() && allow_host_patterns.is_empty() {
+    let allow = s.allow.clone();
+    if allow.is_empty() {
         return Err(FfiError::invalid_argument(
             "secret requires at least one allowed host or allowed host pattern",
         ));
     }
     let placeholder = s.placeholder.clone();
-    let require_tls = s.require_tls;
-    let on_violation = s
-        .on_violation
+    let require_tls = s.require_tls_identity;
+    let violation_action = s
+        .violation_action
         .as_ref()
         .map(|violation| parse_violation_action(violation))
         .transpose()?;
 
     builder = builder.secret(move |mut sb| {
         sb = sb.env(&env_var).value(value.clone());
-        for h in &allow_hosts {
-            sb = sb.allow_host(h);
+        for host in &allow {
+            sb = if host == "*" {
+                sb.allow_any_host_dangerous(true)
+            } else {
+                sb.allow(host)
+            };
         }
-        for p in &allow_host_patterns {
-            sb = sb.allow_host_pattern(p);
+        for host in &s.passthrough {
+            sb = sb.allow_passthrough_for(host);
         }
         if let Some(ref ph) = placeholder {
             sb = sb.placeholder(ph);
@@ -1800,8 +1841,14 @@ fn apply_secret(
         if let Some(req) = require_tls {
             sb = sb.require_tls_identity(req);
         }
-        if let Some(action) = on_violation {
-            sb = sb.on_violation(move |_| ViolationActionBuilder::from_action(action));
+        if let Some(headers) = s.substitution.headers {
+            sb = sb.substitute_in_headers(headers);
+        }
+        sb = sb
+            .substitute_in_query(s.substitution.query)
+            .substitute_in_body(s.substitution.body);
+        if let Some(action) = violation_action {
+            sb = sb.violation_action(action);
         }
         sb
     });
@@ -2132,6 +2179,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
     cancel_id: u64,
     name: *const c_char,
     opts_json: *const c_char,
+    connect_or_create: bool,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
@@ -2354,6 +2402,55 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(ref net) = opts.network {
                 builder = apply_network(builder, net)?;
             }
+            if let Some(proxy) = opts.proxy {
+                if proxy.protocol != "socks5"
+                    && (proxy.username.is_some() || proxy.password_source.is_some())
+                {
+                    return Err(FfiError::invalid_argument(
+                        "credentials are only supported for SOCKS5 proxies",
+                    ));
+                }
+                if let Some(source) = &proxy.password_source
+                    && source.kind != "env"
+                {
+                    return Err(FfiError::invalid_argument(format!(
+                        "unsupported SOCKS5 password source {:?}; only env is supported",
+                        source.kind
+                    )));
+                }
+                builder = match proxy.protocol.as_str() {
+                    "socks4" => builder.proxy(move |p| {
+                        let proxy_builder = p.socks4(proxy.address);
+                        match proxy.user_id {
+                            Some(user_id) => proxy_builder.user_id(user_id),
+                            None => proxy_builder,
+                        }
+                    }),
+                    "socks5" => builder.proxy(move |p| {
+                        let proxy_builder = p.socks5(proxy.address);
+                        match (proxy.username, proxy.password_source) {
+                            (Some(username), Some(password)) if password.kind == "env" => {
+                                proxy_builder.credentials(
+                                    username,
+                                    microsandbox::sandbox::SecretSource::env(
+                                        password.var.unwrap_or_default(),
+                                    ),
+                                )
+                            }
+                            (None, None) => proxy_builder,
+                            _ => proxy_builder.credentials(
+                                String::new(),
+                                microsandbox::sandbox::SecretSource::env(String::new()),
+                            ),
+                        }
+                    }),
+                    protocol => {
+                        return Err(FfiError::invalid_argument(format!(
+                            "unsupported outbound proxy protocol {protocol:?}"
+                        )));
+                    }
+                };
+            }
             // Secrets.
             for s in &opts.secrets {
                 builder = apply_secret(builder, s)?;
@@ -2367,16 +2464,20 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = apply_volume(builder, guest_path, mount)?;
             }
 
-            let sandbox = if opts.detached {
+            let sandbox = if connect_or_create {
+                builder.detached(opts.detached).connect_or_create().await?
+            } else if opts.detached {
                 builder.create_detached().await?
             } else {
                 builder.create().await?
             };
             let backend_kind = sandbox.backend_kind().as_str();
+            let id = sandbox.id().to_string();
             let handle = register(sandbox)?;
             Ok(serde_json::json!({
                 "handle": handle,
                 "backend_kind": backend_kind,
+                "id": id,
             })
             .to_string())
         }))
@@ -2401,6 +2502,22 @@ fn sandbox_status_str(s: microsandbox::sandbox::SandboxStatus) -> &'static str {
         Paused => "paused",
         Stopped => "stopped",
         Crashed => "crashed",
+    }
+}
+
+fn parse_sandbox_status(status: &str) -> Result<microsandbox::sandbox::SandboxStatus, FfiError> {
+    use microsandbox::sandbox::SandboxStatus;
+    match status {
+        "created" => Ok(SandboxStatus::Created),
+        "starting" => Ok(SandboxStatus::Starting),
+        "running" => Ok(SandboxStatus::Running),
+        "draining" => Ok(SandboxStatus::Draining),
+        "paused" => Ok(SandboxStatus::Paused),
+        "stopped" => Ok(SandboxStatus::Stopped),
+        "crashed" => Ok(SandboxStatus::Crashed),
+        other => Err(FfiError::invalid_argument(format!(
+            "invalid sandbox status {other:?}"
+        ))),
     }
 }
 
@@ -2508,6 +2625,7 @@ pub unsafe extern "C" fn msb_sandbox_lookup(
         Ok(Box::pin(async move {
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
             Ok(serde_json::json!({
+                "id": h.id().to_string(),
                 "name": h.name(),
                 "status": sandbox_status_str(h.status_snapshot()),
                 "config_json": h.config_json(),
@@ -2540,10 +2658,12 @@ pub unsafe extern "C" fn msb_sandbox_connect(
         Ok(Box::pin(async move {
             let sb = Sandbox::get(&name).await?.connect().await?;
             let backend_kind = sb.backend_kind().as_str();
+            let id = sb.id().to_string();
             let handle = register(sb)?;
             Ok(serde_json::json!({
                 "handle": handle,
                 "backend_kind": backend_kind,
+                "id": id,
             })
             .to_string())
         }))
@@ -2577,12 +2697,162 @@ pub unsafe extern "C" fn msb_sandbox_start(
                 h.start().await.map_err(FfiError::from)?
             };
             let backend_kind = sb.backend_kind().as_str();
+            let id = sb.id().to_string();
             let handle = register(sb)?;
             Ok(serde_json::json!({
                 "handle": handle,
                 "backend_kind": backend_kind,
+                "id": id,
             })
             .to_string())
+        }))
+    })
+}
+
+#[derive(Default, serde::Deserialize)]
+struct SandboxHandleLifecycleOpts {
+    #[serde(default)]
+    detached: bool,
+    #[serde(default)]
+    force: bool,
+    timeout_ms: Option<u64>,
+    status: Option<String>,
+}
+
+async fn identified_sandbox_handle(
+    name: &str,
+    expected_id: &str,
+) -> Result<microsandbox::sandbox::SandboxHandle, FfiError> {
+    let handle = Sandbox::get(name).await.map_err(FfiError::from)?;
+    let actual_id = handle.id().to_string();
+    if actual_id != expected_id {
+        return Err(FfiError::from(MicrosandboxError::SandboxReplaced {
+            name: name.to_string(),
+            expected: expected_id.to_string(),
+            actual: actual_id,
+        }));
+    }
+    Ok(handle)
+}
+
+fn registered_sandbox_json(sandbox: Sandbox) -> Result<String, FfiError> {
+    let backend_kind = sandbox.backend_kind().as_str();
+    let id = sandbox.id().to_string();
+    let handle = register(sandbox)?;
+    Ok(serde_json::json!({
+        "handle": handle,
+        "backend_kind": backend_kind,
+        "id": id,
+    })
+    .to_string())
+}
+
+/// Identity-safe lifecycle dispatch for Go `SandboxHandle` receivers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
+    cancel_id: u64,
+    name: *const c_char,
+    expected_id: *const c_char,
+    operation: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let expected_id = unsafe { cstr(expected_id) }?;
+        let operation = unsafe { cstr(operation) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SandboxHandleLifecycleOpts =
+            serde_json::from_str(&opts_raw).map_err(|error| {
+                FfiError::invalid_argument(format!("invalid lifecycle opts: {error}"))
+            })?;
+
+        Ok(Box::pin(async move {
+            let handle = identified_sandbox_handle(&name, &expected_id).await?;
+            match operation.as_str() {
+                "refresh" => Ok(sandbox_handle_json(&handle)),
+                "connect" => registered_sandbox_json(handle.connect().await?),
+                "start" => {
+                    let sandbox = if opts.detached {
+                        handle.start_detached().await?
+                    } else {
+                        handle.start().await?
+                    };
+                    registered_sandbox_json(sandbox)
+                }
+                "connect_or_start" => {
+                    let sandbox = if opts.detached {
+                        handle.connect_or_start_detached().await?
+                    } else {
+                        handle.connect_or_start().await?
+                    };
+                    registered_sandbox_json(sandbox)
+                }
+                "stop" => {
+                    handle
+                        .stop_with_timeout(Duration::from_millis(opts.timeout_ms.unwrap_or(10_000)))
+                        .await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "request_stop" => {
+                    handle.request_stop().await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "kill" => {
+                    handle
+                        .kill_with_timeout(Duration::from_millis(opts.timeout_ms.unwrap_or(5_000)))
+                        .await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "request_kill" => {
+                    handle.request_kill().await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "request_drain" => {
+                    handle.request_drain().await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "wait_until_stopped" => {
+                    Ok(sandbox_stop_result_json(handle.wait_until_stopped().await?))
+                }
+                "wait_for_status" => {
+                    let status = opts.status.as_deref().ok_or_else(|| {
+                        FfiError::invalid_argument("wait_for_status requires status")
+                    })?;
+                    let status = parse_sandbox_status(status)?;
+                    Ok(sandbox_handle_json(&handle.wait_for_status(status).await?))
+                }
+                "restart" => {
+                    let mut options = microsandbox::sandbox::RestartOptions {
+                        force: opts.force,
+                        detached: opts.detached,
+                        ..Default::default()
+                    };
+                    if let Some(timeout_ms) = opts.timeout_ms {
+                        options.timeout = Duration::from_millis(timeout_ms);
+                    }
+                    registered_sandbox_json(handle.restart_with(options).await?)
+                }
+                "remove" => {
+                    handle.remove().await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "destroy" => {
+                    let mut options = microsandbox::sandbox::DestroyOptions {
+                        force: opts.force,
+                        ..Default::default()
+                    };
+                    if let Some(timeout_ms) = opts.timeout_ms {
+                        options.timeout = Duration::from_millis(timeout_ms);
+                    }
+                    handle.destroy_with(options).await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                other => Err(FfiError::invalid_argument(format!(
+                    "unknown sandbox lifecycle operation {other:?}"
+                ))),
+            }
         }))
     })
 }
@@ -3288,7 +3558,8 @@ fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
         None => "null".to_string(),
     };
     format!(
-        r#"{{"name":{name},"status":"{status}","config_json":{config},"created_at_unix":{created},"updated_at_unix":{updated},"backend_kind":"{backend_kind}"}}"#,
+        r#"{{"id":"{id}","name":{name},"status":"{status}","config_json":{config},"created_at_unix":{created},"updated_at_unix":{updated},"backend_kind":"{backend_kind}"}}"#,
+        id = h.id(),
         name = name_json,
         status = sandbox_status_str(h.status_snapshot()),
         config = cfg_json,

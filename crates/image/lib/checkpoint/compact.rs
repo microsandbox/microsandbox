@@ -191,6 +191,14 @@ pub fn layer_capacities(layers: Vec<CompactLayer>) -> io::Result<Vec<u64>> {
     .map_err(|_| io::Error::other("layer-capacity worker panicked"))?
 }
 
+/// Validate a complete explicit chain without linking a VM runner or following header paths.
+///
+/// The caller must prevent concurrent mutation until publication completes.
+pub async fn validate_compact_chain(layers: &[CompactLayer]) -> io::Result<()> {
+    open_chain(layers).await?;
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------

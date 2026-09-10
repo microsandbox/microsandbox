@@ -1,9 +1,16 @@
 //! Direct local RAM generations. The source's live mappings are never replaced.
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "runner")]
+use std::{
+    fs::OpenOptions,
+    io::{Seek, SeekFrom, Write},
+};
+
+#[cfg(feature = "runner")]
 use msb_krun::{GuestMemoryRange, MemoryCaptureSink};
 use serde::{Deserialize, Serialize};
 
@@ -28,11 +35,13 @@ pub struct LocalMemory {
     pub topology: u64,
 }
 
+#[cfg(feature = "runner")]
 pub(crate) struct LocalMemoryPin {
     pub(crate) memory: LocalMemory,
     pub(crate) _file: File,
 }
 
+#[cfg(feature = "runner")]
 pub(super) struct LocalMemoryCapture {
     staging: tempfile::TempDir,
     file: File,
@@ -108,6 +117,7 @@ impl LocalMemory {
     }
 }
 
+#[cfg(feature = "runner")]
 impl LocalMemoryCapture {
     pub(super) fn new(
         root: &Path,
@@ -237,6 +247,7 @@ impl LocalMemoryCapture {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "runner")]
 impl MemoryCaptureSink for LocalMemoryCapture {
     fn write_bytes(&mut self, range: GuestMemoryRange, bytes: &[u8]) -> io::Result<()> {
         if range.length() != bytes.len() as u64 {
@@ -268,7 +279,7 @@ impl MemoryCaptureSink for LocalMemoryCapture {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runner"))]
 mod tests {
     use std::io::Read;
     #[cfg(unix)]

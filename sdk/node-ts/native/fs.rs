@@ -22,8 +22,6 @@ pub struct JsSandboxFsOps {
     sandbox: Arc<SharedHandle<microsandbox::sandbox::Sandbox>>,
 }
 
-pub type JsSandboxFs = JsSandboxFsOps;
-
 /// A streaming reader for file data from the sandbox.
 ///
 /// Supports both manual `recv()` calls and `for await...of` iteration:

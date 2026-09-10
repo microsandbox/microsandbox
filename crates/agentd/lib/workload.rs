@@ -161,6 +161,22 @@ impl WorkloadLatch {
         Ok(())
     }
 
+    /// Validate restore ownership before changing any host-client state.
+    pub(crate) fn require_frozen_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<(), WorkloadLatchError> {
+        validate_attempt_id(attempt_id)?;
+        match &self.state {
+            LatchState::Frozen {
+                attempt_id: current,
+            } if current == attempt_id => Ok(()),
+            _ => Err(WorkloadLatchError::Conflict(
+                "restore requires its matching active freeze".into(),
+            )),
+        }
+    }
+
     /// Release the freeze owned by `attempt_id`.
     pub(crate) fn thaw(&mut self, attempt_id: &str) -> Result<(), WorkloadLatchError> {
         validate_attempt_id(attempt_id)?;
@@ -433,7 +449,7 @@ fn parse_frozen_event(events: &str) -> Option<bool> {
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::Cell;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -724,6 +740,13 @@ mod tests {
             self.states.lock().unwrap().push(frozen);
             Ok(())
         }
+    }
+
+    /// Exercise the real latch/handler without freezing the test runner's cgroup.
+    pub(crate) fn fake_latch() -> WorkloadLatch {
+        WorkloadLatch::with_freezer(Box::new(FakeFreezer {
+            states: Arc::new(Mutex::new(Vec::new())),
+        }))
     }
 
     #[test]

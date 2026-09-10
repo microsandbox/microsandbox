@@ -81,7 +81,7 @@ Sources and checks:
 - [`crates/protocol/lib/message.rs`](crates/protocol/lib/message.rs) defines the generation, frame constants, flags, wire names, and message introduction map.
 - [`crates/protocol/lib/codec.rs`](crates/protocol/lib/codec.rs) defines current framing and validation.
 - [`packages/agent-client/rust/lib/client.rs`](packages/agent-client/rust/lib/client.rs) performs codec detection, version negotiation, and host-side send gating.
-- [`crates/runtime/lib/relay.rs`](crates/runtime/lib/relay.rs) depends on ID ranges and flag semantics without decoding message bodies.
+- [`crates/runtime/lib/runner/relay.rs`](crates/runtime/lib/runner/relay.rs) depends on ID ranges and flag semantics without decoding message bodies.
 - [`crates/protocol/tests/schema_snapshot.rs`](crates/protocol/tests/schema_snapshot.rs) freezes the versioned surface and checks append-only message evolution.
 - [`scripts/smoke/cli/pre05-running-sandbox-compat.sh`](scripts/smoke/cli/pre05-running-sandbox-compat.sh) exercises a current host against a real pre-0.5 running sandbox.
 
@@ -110,7 +110,7 @@ Stable guest/VMM identifiers and paths include:
 - Additional disk lookup through `/dev/disk/by-id/virtio-<id>` with the existing sysfs fallback.
 - Special host and guest shutdown delays used for normal termination and handoff.
 
-Sources: [`crates/protocol/lib/bootstrap.rs`](crates/protocol/lib/bootstrap.rs), [`crates/protocol/lib/lib.rs`](crates/protocol/lib/lib.rs), [`crates/agentd/lib/agent.rs`](crates/agentd/lib/agent.rs), [`crates/agentd/lib/init.rs`](crates/agentd/lib/init.rs), and [`crates/runtime/lib/vm.rs`](crates/runtime/lib/vm.rs).
+Sources: [`crates/protocol/lib/bootstrap.rs`](crates/protocol/lib/bootstrap.rs), [`crates/protocol/lib/lib.rs`](crates/protocol/lib/lib.rs), [`crates/agentd/lib/agent.rs`](crates/agentd/lib/agent.rs), [`crates/agentd/lib/init.rs`](crates/agentd/lib/init.rs), and [`crates/runtime/lib/runner/vm.rs`](crates/runtime/lib/runner/vm.rs).
 
 ## 3. Local Agent IPC and Relay Routing
 
@@ -118,7 +118,7 @@ Unix clients and runtimes recognize canonical hashed socket paths, legacy flat h
 
 Compatibility-sensitive elements include the hash input and truncation, directory and socket names, Unix path-length fallback, Windows pipe names, compatibility symlinks, stale-endpoint cleanup ordering, lifecycle-lock paths, and lock ownership. Relay compatibility also depends on client ID-range allocation, maximum clients, terminal routing, disconnect cleanup, and shutdown flags.
 
-Sources: [`crates/runtime/lib/ipc.rs`](crates/runtime/lib/ipc.rs), [`crates/runtime/lib/relay.rs`](crates/runtime/lib/relay.rs), and [`sdk/rust/lib/runtime/spawn.rs`](sdk/rust/lib/runtime/spawn.rs).
+Sources: [`crates/runtime/lib/client/ipc.rs`](crates/runtime/lib/client/ipc.rs), [`crates/runtime/lib/runner/relay.rs`](crates/runtime/lib/runner/relay.rs), and [`sdk/rust/lib/runtime/spawn.rs`](sdk/rust/lib/runtime/spawn.rs).
 
 Path changes require an old-path probe or alias for the supported horizon. Never change a path hash or delete a socket until liveness and ownership have been resolved through the existing lock and endpoint checks.
 
@@ -128,7 +128,7 @@ The host runtime exposes a separate Unix socket or Windows named pipe for live m
 
 Compatibility-sensitive elements include newline framing, the tagged `op` names, response variants, resource field meanings, capability discovery, and the distinction between an absent endpoint, an unsupported operation, and a failed operation. Older runtimes predate capability discovery, and callers intentionally use operation-specific fallback behavior.
 
-Sources: [`crates/runtime/lib/control.rs`](crates/runtime/lib/control.rs) and [`sdk/rust/lib/sandbox/modify.rs`](sdk/rust/lib/sandbox/modify.rs).
+Sources: [`crates/runtime/lib/runner/control.rs`](crates/runtime/lib/runner/control.rs) and [`sdk/rust/lib/sandbox/modify.rs`](sdk/rust/lib/sandbox/modify.rs).
 
 Add operations and optional fields rather than redefining existing ones. Capability-gate behavior whose absence cannot be interpreted safely by older clients.
 
@@ -136,13 +136,15 @@ Live disk-only snapshots use the distinct `disk_checkpoint_create` operation and
 
 Resident pause/resume sends one authoritative mutation rather than first observing pause state and querying capabilities. The runtime checks support before mutation, including idempotent requests, and the client requires the expected state in the response; unknown operations and incomplete replies fail. Ordinary get/list pause projection remains unchanged. Guest freezing retains one `cgroup.events` descriptor and waits for notifications with a fixed deadline; each poll timeout is capped at 1 ms so rate-limited kernel notifications cannot delay the next authoritative state check. Clock correction still precedes workload thaw, and no control or agent wire format changes.
 
+The subsequent unreleased generation-9 transport repair routes internal freeze/thaw directly from the coordinator to the existing relay through a bounded in-process queue. Ordinary control/bulk input is gated at complete frames; admitted input remains guest-owned until consumed, while unadmitted input stays source-owned and ordered. The guest keeps stdin/TCP delivery nonblocking with respect to its control loop and preserves accepted input through restore. Private replies and cumulative credit updates never become SDK responses. The immutable frame header, released generation-8 schema, and public sockets are unchanged. Full capture requires an acknowledged bidirectional frame boundary; failure or timeout does not authorize a partial capture.
+
 ## 5. Launcher-to-Runtime Process Protocol
 
 Starting a sandbox crosses a private process boundary. On Unix, launch JSON is passed through inherited descriptor 96, the parent watchdog uses descriptor 97, startup JSON uses descriptor 98, and the lifecycle lock uses descriptor 99. Windows uses a short-lived launch-config file and platform-specific startup plumbing. Detach acknowledgement bytes and graceful-shutdown signals are also part of this contract.
 
 Compatibility-sensitive elements include descriptor numbers, ownership and close-on-exec behavior, launch JSON field names and defaults, startup response shape, watchdog EOF meaning, signal meaning, detach acknowledgement, secret transport, and parent/child cleanup ordering.
 
-Sources: [`crates/runtime/lib/launch.rs`](crates/runtime/lib/launch.rs), [`crates/runtime/lib/vm.rs`](crates/runtime/lib/vm.rs), [`sdk/rust/lib/runtime/spawn.rs`](sdk/rust/lib/runtime/spawn.rs), and [`crates/cli/lib/sandbox_cmd.rs`](crates/cli/lib/sandbox_cmd.rs).
+Sources: [`crates/runtime/lib/client/launch.rs`](crates/runtime/lib/client/launch.rs), [`crates/runtime/lib/runner/vm.rs`](crates/runtime/lib/runner/vm.rs), [`sdk/rust/lib/runtime/spawn.rs`](sdk/rust/lib/runtime/spawn.rs), and [`crates/cli/lib/sandbox_cmd.rs`](crates/cli/lib/sandbox_cmd.rs).
 
 Launch JSON requires an explicit `execution` intent (`boot` or `restore`) and rejects unknown fields. Restores also pass the internal `msb sandbox --restore` argument: a runtime predating this contract rejects the unknown argument rather than ignoring a JSON restore source and cold-booting. The argument, intent, and complete strictly validated `checkpoint_restore` source must agree before VM construction. Unsupported restore behavior is an error, never a fresh-boot fallback. These #8 development contracts replace superseded unreleased forms without shims; they do not change portable snapshot bytes.
 
@@ -172,7 +174,7 @@ Tests should open copies of real older databases, migrate them, exercise the aff
 
 Directory names under `MSB_HOME` and the runtime directory are durable locators used by binaries from different releases. This includes the database, cache, sandboxes, volumes, snapshots, logs, secrets, TLS material, SSH state, sockets, locks, journals, and configuration files.
 
-Sources: [`crates/utils/lib/lib.rs`](crates/utils/lib/lib.rs) and [`crates/runtime/lib/ipc.rs`](crates/runtime/lib/ipc.rs).
+Sources: [`crates/utils/lib/lib.rs`](crates/utils/lib/lib.rs) and [`crates/runtime/lib/client/ipc.rs`](crates/runtime/lib/client/ipc.rs).
 
 Renaming a directory or file requires migration or old-location probing. Preserve atomic publication and cleanup ordering, and never infer that an unrecognized old path is safe to delete.
 
@@ -194,11 +196,15 @@ Installed snapshots now live under `snapshots/<group>/<snapshot_id>/`. `group.js
 
 Capture records the actual source snapshot lineage in the existing descriptor `parent` field. Per-sandbox cursor publication serializes captures without holding a VM pause; group head publication is locked separately. Automatic head advancement requires known ancestry, not capture timestamps, export dependency bases, or import order. An explicit head selection may rewind or choose a sibling. Missing ancestry may prevent advancement but is not a missing payload dependency. Archives optionally carry friendly names in `msb-snapshot-member-names`; their snapshot IDs, payload paths and descriptor schema are unchanged.
 
+Capture publication and source removal/replacement share a stable lock in `run_dir/locks/<lifecycle-hash>.snapshot-lineage.lock`, outside the removable sandbox directory. A caller needing multiple ownership guards acquires transition, then lineage, then runtime lifecycle ownership. The cursor remains in the sandbox directory; its schema and portable snapshot identities are unchanged. This replaces the unreleased directory-local lock, not a shipped artifact format.
+
 `snapshot load` accepts multiple archive paths; the former positional destination is now `--dest DIR`. Single-archive SDK methods and their return types remain; batch methods return one handle per input archive head in input order. The batch resolves exact disk-layer and RAM-object dependencies from supplied archives, the explicitly selected destination group, and an optional external base. No archive encoding changes or global snapshot search are involved. Borrowed payloads belong to destination staging and use the existing integrity codecs before publication. A compatible source may contain more layers than the omitted prefix; dependency identities still must match. Direct archive restore retains its explicit-base contract.
 
 Batch head selection is independent of input order: one proven lineage tip uses existing fast-forward rules; ambiguous tips preserve an existing head or leave a new group headless. `--set-head` refuses an ambiguous batch. IDs, aliases, duplicate labels, and payloads are checked before member publication. An I/O failure during final publication can still leave complete additional members, as with single-archive publication, but never a head pointing at an incomplete member.
 
 Unreleased #8 incremental exports use `completeness: "dependent"` and the must-understand `msb-snapshot-dependencies-v1` extension. `--since` records omitted physical disk-prefix layers and reusable RAM-object identities; `--last-layers` only omits disk layers. The complete target memory manifest and CPU/device state remain included. Loading and direct archive restore resolve the explicitly supplied base into owned staging before opening the complete target. This replaces the unreleased disk-only dependency encoding without a compatibility shim or snapshot descriptor change. Readers that do not understand this requirement refuse it; ordinary standalone archives are unchanged.
+
+Full checkpoints and local branches now retain `transport_host_input`, `transport_input_credit`, and `transport_guest_bulk_bytes` in the existing `guest:agentd` resource binding. These are complete-frame cumulative positions and absolute grants, including credit still owned by pending captured input. Restore validates and seeds them before guest activation; resetting them would incorrectly grant capacity twice. Older unreleased development full snapshots missing this state are refused, and new full captures require their matching host/guest implementation. This is an approved replacement of unreleased state, not a snapshot schema bump or migration; released disk-only snapshots are unaffected.
 
 Evolution rules:
 
@@ -244,7 +250,7 @@ Do not independently substitute or upgrade one component because its upstream AB
 
 Observable network behavior is an effective compatibility contract. It includes default MTU, sandbox-slot address derivation, IPv4 subnet sizing, guest and gateway offsets, IPv6 prefixes, deterministic MAC addresses, interface name `eth0`, `host.microsandbox.internal`, DNS UDP and TCP behavior, DNS-over-TLS, TLS interception and trust paths, published-port binding, TCP half-close, UDP peer lifetime, destination policy, and host-side secret placeholder substitution.
 
-Sources: [`crates/network/lib/lib.rs`](crates/network/lib/lib.rs), [`crates/network/lib/network.rs`](crates/network/lib/network.rs), and the remaining modules under [`crates/network/lib`](crates/network/lib).
+Sources: [`crates/network/lib/lib.rs`](crates/network/lib/lib.rs), [`crates/network/lib/engine/network.rs`](crates/network/lib/engine/network.rs), and the remaining modules under [`crates/network/lib`](crates/network/lib).
 
 Address or MAC changes can create collisions or silently alter policy identity. Protocol changes should be tested with real TCP, UDP, DNS, TLS, HTTP CONNECT, published-port, and secret-substitution clients, including fragmentation, half-close, cancellation, and denied-destination cases.
 
@@ -254,7 +260,7 @@ Vsock stream and datagram routes have different message-boundary and shutdown se
 
 Compatibility-sensitive elements include vsock port and route configuration, stream half-close, datagram boundaries, backend availability, SSH host-key and known-host persistence, authentication behavior, exit status and signal mapping, SFTP file semantics, and direct-tcpip capability gating.
 
-Sources: [`crates/vsock/lib/stream.rs`](crates/vsock/lib/stream.rs), [`crates/vsock/lib/dgram.rs`](crates/vsock/lib/dgram.rs), [`crates/runtime/lib/vm.rs`](crates/runtime/lib/vm.rs), and [`sdk/rust/lib/sandbox/ssh.rs`](sdk/rust/lib/sandbox/ssh.rs).
+Sources: [`crates/vsock/lib/stream.rs`](crates/vsock/lib/stream.rs), [`crates/vsock/lib/dgram.rs`](crates/vsock/lib/dgram.rs), [`crates/runtime/lib/runner/vm.rs`](crates/runtime/lib/runner/vm.rs), and [`sdk/rust/lib/sandbox/ssh.rs`](sdk/rust/lib/sandbox/ssh.rs).
 
 Use standards-compliant clients in tests and exercise connections against older running agentd versions when changing the adapter-to-agent mapping.
 
@@ -272,7 +278,7 @@ Operational artifacts are consumed across process boundaries and can influence l
 
 Heartbeat semantics are compatibility-sensitive: missing or stale data alone is not proof that a sandbox has died, while active sessions affect idle shutdown. Boot errors must remain available before agent readiness. Log schemas and rotation ordering must remain readable by current SDK consumers.
 
-Sources: [`crates/protocol/lib/heartbeat.rs`](crates/protocol/lib/heartbeat.rs), [`crates/runtime/lib/heartbeat.rs`](crates/runtime/lib/heartbeat.rs), [`crates/runtime/lib/boot_error.rs`](crates/runtime/lib/boot_error.rs), and [`crates/runtime/lib/exec_log.rs`](crates/runtime/lib/exec_log.rs).
+Sources: [`crates/protocol/lib/heartbeat.rs`](crates/protocol/lib/heartbeat.rs), [`crates/runtime/lib/runner/heartbeat.rs`](crates/runtime/lib/runner/heartbeat.rs), [`crates/runtime/lib/client/boot_error.rs`](crates/runtime/lib/client/boot_error.rs), and [`crates/runtime/lib/runner/exec_log.rs`](crates/runtime/lib/runner/exec_log.rs).
 
 Add optional fields where readers are tolerant. Rename files or fields only with dual-read or migration behavior for the supported horizon.
 
@@ -289,7 +295,7 @@ Compatibility-sensitive ordering includes:
 - Writing and verifying payloads before atomically publishing their identity-bearing descriptor.
 - Persisting a recovery journal before the first mutation and clearing it only after durable completion.
 
-Sources: [`crates/runtime/lib/ipc.rs`](crates/runtime/lib/ipc.rs), [`sdk/rust/lib/backend/local/mod.rs`](sdk/rust/lib/backend/local/mod.rs), [`sdk/rust/lib/runtime/handle.rs`](sdk/rust/lib/runtime/handle.rs), and artifact-specific migration and publication modules.
+Sources: [`crates/runtime/lib/client/ipc.rs`](crates/runtime/lib/client/ipc.rs), [`sdk/rust/lib/backend/local/mod.rs`](sdk/rust/lib/backend/local/mod.rs), [`sdk/rust/lib/runtime/handle.rs`](sdk/rust/lib/runtime/handle.rs), and artifact-specific migration and publication modules.
 
 Review concurrency and crash points explicitly. A same-version happy-path test does not establish cross-version or crash compatibility.
 

@@ -11,6 +11,7 @@ use super::{
 };
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::SandboxStatus;
+use crate::sandbox::identity::SandboxRunIdentity;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -18,12 +19,70 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 //--------------------------------------------------------------------------------------------------
 
 impl LocalBackend {
+    /// Select the exact live run while the caller owns the name's transition guard.
+    pub(crate) async fn control_run_identity(
+        &self,
+        name: &str,
+        expected_id: i32,
+    ) -> MicrosandboxResult<SandboxRunIdentity> {
+        if let Some((model, run)) = self.try_control_target(name).await? {
+            if model.id != expected_id {
+                return Err(MicrosandboxError::SandboxReplaced {
+                    name: name.into(),
+                    expected: format!("local:{expected_id}"),
+                    actual: format!("local:{}", model.id),
+                });
+            }
+            return Ok(run);
+        }
+        let (model, _) = self.sandbox_handle_state(name, Some(expected_id)).await?;
+        let run = Self::load_active_run(self.db().await?.read(), model.id).await?;
+        let run = run
+            .filter(|run| run.pid.is_some_and(Self::pid_is_alive))
+            .ok_or_else(|| {
+                MicrosandboxError::SandboxNotRunning(format!(
+                    "sandbox {name:?} has no live runtime"
+                ))
+            })?;
+        Ok(SandboxRunIdentity {
+            sandbox_id: model.id,
+            run_id: run.id,
+            pid: run.pid.expect("live run has a PID"),
+        })
+    }
+
+    /// A runtime restart must not redirect a control request selected for its predecessor.
+    pub(crate) async fn validate_control_run(
+        &self,
+        name: &str,
+        expected: SandboxRunIdentity,
+    ) -> MicrosandboxResult<()> {
+        let current = self.control_run_identity(name, expected.sandbox_id).await?;
+        if current != expected {
+            return Err(MicrosandboxError::Runtime(format!(
+                "sandbox {name:?} changed runtime during control operation"
+            )));
+        }
+        Ok(())
+    }
+
     /// Return a healthy live target from a current catalog. `None` requests the existing
     /// migration/stale-runtime path; errors must never become an unvalidated fast path.
     pub(crate) async fn try_control_handle_state(
         &self,
         name: &str,
     ) -> MicrosandboxResult<Option<(sandbox_entity::Model, Option<i32>)>> {
+        Ok(self
+            .try_control_target(name)
+            .await?
+            .map(|(model, run)| (model, Some(run.pid))))
+    }
+
+    /// Keep authoritative control selection on the same read-only path as CLI lookup.
+    async fn try_control_target(
+        &self,
+        name: &str,
+    ) -> MicrosandboxResult<Option<(sandbox_entity::Model, SandboxRunIdentity)>> {
         let db_dir = self.config().home().join(microsandbox_utils::DB_SUBDIR);
         let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
         match std::fs::metadata(&db_path) {
@@ -86,8 +145,13 @@ impl LocalBackend {
         let pid = Self::pid_from_run(run.as_ref());
         // Do not clean up sockets from this read-only observation. The slow path rechecks
         // the exact row/run under lifecycle ownership before touching stale artifacts.
-        if pid.is_some_and(Self::pid_is_alive) {
-            Ok(Some((model, pid)))
+        if let (Some(run), Some(pid)) = (run, pid) {
+            let identity = SandboxRunIdentity {
+                sandbox_id: model.id,
+                run_id: run.id,
+                pid,
+            };
+            Ok(Some((model, identity)))
         } else {
             Ok(None)
         }
@@ -140,10 +204,62 @@ mod tests {
         assert_eq!(model.id, 1);
         assert_eq!(pid, Some(std::process::id() as i32));
         assert!(backend.db.get().is_none());
+        let run = backend
+            .control_run_identity("source", model.id)
+            .await
+            .unwrap();
+        backend.validate_control_run("source", run).await.unwrap();
+        assert!(
+            backend.db.get().is_none(),
+            "control run validation must stay read-only"
+        );
         assert_eq!(
             std::fs::read(snapshots).unwrap(),
             b"unrelated snapshot inventory"
         );
+    }
+
+    #[tokio::test]
+    async fn branch_refuses_a_restarted_source_before_writing_handoff_state() {
+        let (home, backend) = fixture().await;
+        let selected = backend.control_run_identity("source", 1).await.unwrap();
+        let writer = backend.db().await.unwrap().write();
+        writer
+            .execute_unprepared("UPDATE run SET status = 'Terminated' WHERE sandbox_id = 1")
+            .await
+            .unwrap();
+        writer
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO run (sandbox_id, pid, status) VALUES (1, ?, 'Running')",
+                [i64::from(std::process::id()).into()],
+            ))
+            .await
+            .unwrap();
+        assert_ne!(
+            selected.run_id,
+            backend
+                .control_run_identity("source", 1)
+                .await
+                .unwrap()
+                .run_id
+        );
+        let mut child = crate::sandbox::SandboxConfig::default();
+        child.spec.name = "child".into();
+        let child_dir = home.path().join("child");
+        std::fs::create_dir(&child_dir).unwrap();
+        let result = crate::sandbox::branch::capture_child(
+            &backend,
+            &mut child,
+            &crate::sandbox::identity::BranchSource {
+                name: "source".into(),
+                run: selected,
+            },
+            &child_dir,
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("changed runtime"));
+        assert_eq!(std::fs::read_dir(child_dir).unwrap().count(), 0);
     }
 
     #[tokio::test]

@@ -52,8 +52,10 @@ export interface NativeBindings {
   readonly DnsBuilder: NapiBuilderCtor<NapiDnsBuilder>;
   readonly TlsBuilder: NapiBuilderCtor<NapiTlsBuilder>;
   readonly SecretBuilder: NapiBuilderCtor<NapiSecretBuilder>;
-  readonly ViolationActionBuilder: NapiBuilderCtor<NapiViolationActionBuilder>;
   readonly NetworkBuilder: NapiBuilderCtor<NapiNetworkBuilder>;
+  readonly OutboundProxyBuilder: NapiBuilderCtor<NapiOutboundProxyBuilder>;
+  readonly Socks4ProxyBuilder: { prototype: NapiSocks4ProxyBuilder };
+  readonly Socks5ProxyBuilder: { prototype: NapiSocks5ProxyBuilder };
   readonly NetworkPolicyBuilder: NapiBuilderCtor<NapiNetworkPolicyBuilder>;
   readonly RuleBuilder: NapiBuilderCtor<NapiRuleBuilder>;
   readonly RuleDestinationBuilder: NapiBuilderCtor<NapiRuleDestinationBuilder>;
@@ -215,6 +217,11 @@ export interface NapiSandboxBuilderSetters {
   disableNetwork(): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   network(configure: (b: any) => any): this;
+  proxy(
+    configure: (
+      b: NapiOutboundProxyBuilder,
+    ) => NapiSocks4ProxyBuilder | NapiSocks5ProxyBuilder,
+  ): this;
   port(host: number, guest: number): this;
   portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
@@ -243,11 +250,25 @@ export interface NapiSandboxBuilderSetters {
 
 export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<NapiSandbox>;
+  connectOrCreate(): Promise<NapiSandbox>;
   createWithPullProgress(): Promise<NapiPullProgressCreate>;
+}
+
+export interface NapiSandboxRestartOptions {
+  force?: boolean;
+  timeoutMs?: number;
+  detached?: boolean;
+}
+
+export interface NapiSandboxDestroyOptions {
+  force?: boolean;
+  timeoutMs?: number;
 }
 
 export interface NapiSandbox {
   readonly backendKind: "local" | "cloud";
+  readonly id: string;
+  readonly ownsLifecycle: boolean;
   configJson(): Promise<string>;
   execDefault(): Promise<NapiExecOutput>;
   execDefaultWithBuilder(builder: NapiExecOptionsBuilder): Promise<NapiExecOutput>;
@@ -283,6 +304,9 @@ export interface NapiSandbox {
   requestKill(): Promise<void>;
   killWithTimeout(timeoutMs: number): Promise<void>;
   requestDrain(): Promise<void>;
+  waitForStatus(status: string): Promise<NapiSandboxHandle>;
+  restart(options?: NapiSandboxRestartOptions): Promise<NapiSandbox>;
+  destroy(options?: NapiSandboxDestroyOptions): Promise<void>;
   waitUntilStopped(): Promise<NapiSandboxStopResult>;
   detach(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
@@ -290,6 +314,7 @@ export interface NapiSandbox {
 }
 
 export interface NapiSandboxHandle {
+  readonly id: string;
   readonly name: string;
   readonly status: string;
   readonly backendKind: "local" | "cloud";
@@ -306,6 +331,7 @@ export interface NapiSandboxHandle {
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
+  connectOrStart(detached?: boolean): Promise<NapiSandbox>;
   stop(): Promise<void>;
   branch(name: string): Promise<NapiSandbox>;
   pause(): Promise<void>;
@@ -316,6 +342,9 @@ export interface NapiSandboxHandle {
   requestKill(): Promise<void>;
   killWithTimeout(timeoutMs: number): Promise<void>;
   requestDrain(): Promise<void>;
+  waitForStatus(status: string): Promise<NapiSandboxHandle>;
+  restart(options?: NapiSandboxRestartOptions): Promise<NapiSandbox>;
+  destroy(options?: NapiSandboxDestroyOptions): Promise<void>;
   waitUntilStopped(): Promise<NapiSandboxStopResult>;
   remove(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
@@ -958,17 +987,14 @@ export interface NapiSecretBuilder {
   env(varName: string): this;
   value(value: string): this;
   placeholder(placeholder: string): this;
-  allowHost(host: string): this;
-  allowHostPattern(pattern: string): this;
+  allow(host: string): this;
   allowAnyHostDangerous(iUnderstand: boolean): this;
+  allowPassthroughFor(host: string): this;
   requireTlsIdentity(enabled: boolean): this;
-  injectHeaders(enabled: boolean): this;
-  injectBasicAuth(enabled: boolean): this;
-  injectQuery(enabled: boolean): this;
-  injectBody(enabled: boolean): this;
-  onViolation(
-    configure: (b: NapiViolationActionBuilder) => NapiViolationActionBuilder,
-  ): this;
+  substituteInHeaders(enabled: boolean): this;
+  substituteInQuery(enabled: boolean): this;
+  substituteInBody(enabled: boolean): this;
+  violationAction(action: string): this;
   build(): NapiSecretEntry;
 }
 
@@ -979,14 +1005,14 @@ export interface NapiSecretEntry {
   readonly allowedHosts: string[];
   readonly allowedHostPatterns: string[];
   readonly allowAnyHost: boolean;
+  readonly passthroughHosts: string[];
   readonly requireTlsIdentity: boolean;
-  readonly injection: NapiSecretInjection;
+  readonly substitution: NapiSecretSubstitution;
 }
 
-export interface NapiSecretInjection {
+export interface NapiSecretSubstitution {
   readonly headers: boolean;
-  readonly basicAuth: boolean;
-  readonly queryParams: boolean;
+  readonly query: boolean;
   readonly body: boolean;
 }
 
@@ -1007,10 +1033,9 @@ export interface NapiNetworkBuilder {
   interface(
     configure: (b: NapiInterfaceOverridesBuilder) => NapiInterfaceOverridesBuilder,
   ): this;
-  onSecretViolation(
-    configure: (b: NapiViolationActionBuilder) => NapiViolationActionBuilder,
-  ): this;
+  secretViolationAction(action: string): this;
   maxConnections(max: number): this;
+  strict(enabled: boolean): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
@@ -1018,6 +1043,22 @@ export interface NapiNetworkBuilder {
     configure: (b: NapiNetworkRateLimiterBuilder) => NapiNetworkRateLimiterBuilder,
   ): this;
   build(): NetworkConfig;
+}
+
+export interface NapiOutboundProxyBuilder {
+  socks4(address: string): NapiSocks4ProxyBuilder;
+  socks5(address: string): NapiSocks5ProxyBuilder;
+}
+
+export interface NapiSocks4ProxyBuilder {
+  userId(userId: string): this;
+}
+
+export interface NapiSocks5ProxyBuilder {
+  credentials(
+    username: string,
+    password: { kind: "env"; var: string },
+  ): this;
 }
 
 export interface NapiRateLimiterBuilder {
@@ -1032,20 +1073,12 @@ export interface NapiNetworkRateLimiterBuilder {
   ingress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
 }
 
+
 export interface NapiInterfaceOverridesBuilder {
   mac(mac: string): this;
   mtu(mtu: number): this;
   ipv4(address: string): this;
   ipv6(address: string): this;
-}
-
-export interface NapiViolationActionBuilder {
-  block(): this;
-  blockAndLog(): this;
-  blockAndTerminate(): this;
-  passthroughHost(host: string): this;
-  passthroughHostPattern(pattern: string): this;
-  passthroughAllHosts(iUnderstand: boolean): this;
 }
 
 export interface NapiPullProgressEvent {

@@ -8,7 +8,7 @@ use std::time::Instant;
 use microsandbox_image::checkpoint::{
     CheckpointClosure, MemoryExtentContent, ObjectId, ResourceDescriptor, ResourceTreatment,
 };
-use microsandbox_protocol::core::Ready;
+use microsandbox_protocol::core::{Ready, WorkloadTransportCredit, WorkloadTransportPosition};
 use microsandbox_protocol::message::{MessageType, PROTOCOL_VERSION};
 
 use super::coordinator::TYPE_FS;
@@ -43,6 +43,12 @@ pub(crate) struct RestoredAgentState {
     pub(crate) ready: Ready,
     /// Checkpoint attempt that owns the captured workload freeze.
     pub(crate) attempt_id: String,
+    /// Complete host input admitted before the captured freeze acknowledgement.
+    pub(crate) host_input: WorkloadTransportPosition,
+    /// Absolute guest grants, including debt retained by inherited stdin.
+    pub(crate) input_credit: WorkloadTransportCredit,
+    /// Complete dedicated guest bulk output observed before capture.
+    pub(crate) guest_bulk_bytes_target: u64,
 }
 
 enum PreparedDeviceRestore {
@@ -401,11 +407,6 @@ fn parse_restored_agent_resource(
             .get(key)
             .ok_or_else(|| format!("checkpoint guest agent is missing {key}"))
     };
-    let parse_u64 = |key: &str| {
-        value(key)?
-            .parse::<u64>()
-            .map_err(|error| format!("checkpoint guest agent has invalid {key}: {error}"))
-    };
     let protocol_generation = value("protocol_generation")?
         .parse::<u8>()
         .map_err(|error| {
@@ -419,14 +420,36 @@ fn parse_restored_agent_resource(
         ));
     }
 
+    let ready: Ready = serde_json::from_str(value("ready")?)
+        .map_err(|error| format!("checkpoint guest readiness is invalid: {error}"))?;
+    if ready.workload_transport_barrier_version != Some(1) {
+        return Err("checkpoint guest lacks a complete-frame transport barrier".into());
+    }
+    let host_input: WorkloadTransportPosition =
+        serde_json::from_str(value("transport_host_input")?)
+            .map_err(|error| format!("checkpoint host input position is invalid: {error}"))?;
+    let input_credit: WorkloadTransportCredit =
+        serde_json::from_str(value("transport_input_credit")?)
+            .map_err(|error| format!("checkpoint input credit is invalid: {error}"))?;
+    if host_input.control_bytes > input_credit.control_bytes
+        || host_input.control_frames > input_credit.control_frames
+        || host_input.bulk_bytes > input_credit.bulk_bytes
+        || host_input.bulk_frames > input_credit.bulk_frames
+    {
+        return Err("checkpoint transport input exceeds captured credit".into());
+    }
+    let guest_bulk_bytes_target = value("transport_guest_bulk_bytes")?
+        .parse::<u64>()
+        .map_err(|error| format!("checkpoint guest bulk position is invalid: {error}"))?;
+    if ready.bulk_transport.is_none() && guest_bulk_bytes_target != 0 {
+        return Err("combined checkpoint has a dedicated guest bulk counter".into());
+    }
     Ok(RestoredAgentState {
         protocol_generation,
-        ready: Ready {
-            boot_time_ns: parse_u64("boot_time_ns")?,
-            init_time_ns: parse_u64("init_time_ns")?,
-            ready_time_ns: parse_u64("ready_time_ns")?,
-            agent_version: value("agent_version")?.clone(),
-        },
+        ready,
+        host_input,
+        input_credit,
+        guest_bulk_bytes_target,
         attempt_id: resource
             .binding
             .get("attempt_id")
@@ -457,6 +480,27 @@ mod tests {
                 ("boot_time_ns".into(), "10".into()),
                 ("init_time_ns".into(), "20".into()),
                 ("ready_time_ns".into(), "30".into()),
+                (
+                    "transport_host_input".into(),
+                    serde_json::to_string(&WorkloadTransportPosition::default()).unwrap(),
+                ),
+                (
+                    "transport_input_credit".into(),
+                    serde_json::to_string(&WorkloadTransportCredit::default()).unwrap(),
+                ),
+                ("transport_guest_bulk_bytes".into(), "0".into()),
+                (
+                    "ready".into(),
+                    serde_json::to_string(&Ready {
+                        agent_version: "0.6.16-test".into(),
+                        boot_time_ns: 10,
+                        init_time_ns: 20,
+                        ready_time_ns: 30,
+                        workload_transport_barrier_version: Some(1),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                ),
             ]),
         }
     }
@@ -477,11 +521,11 @@ mod tests {
 
     #[test]
     fn rejects_agent_generation_without_workload_thaw() {
-        let error = parse_restored_agent_resource(&agent_resource(7), "checkpoint-attempt")
+        let error = parse_restored_agent_resource(&agent_resource(8), "checkpoint-attempt")
             .err()
             .unwrap();
 
-        assert!(error.contains("protocol generation 7 is unsupported"));
+        assert!(error.contains("protocol generation 8 is unsupported"));
     }
 
     #[test]
@@ -494,5 +538,75 @@ mod tests {
             .unwrap();
 
         assert!(error.contains("incompatible resource treatment"));
+    }
+
+    #[test]
+    fn rejects_development_capture_without_proven_transport_position() {
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        resource.binding.remove("transport_host_input");
+        assert!(
+            parse_restored_agent_resource(&resource, "attempt")
+                .err()
+                .unwrap()
+                .contains("transport_host_input")
+        );
+    }
+
+    #[test]
+    fn rejects_transport_debt_beyond_captured_grants() {
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        resource.binding.insert(
+            "transport_host_input".into(),
+            serde_json::to_string(&WorkloadTransportPosition {
+                control_bytes: 1,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        assert!(
+            parse_restored_agent_resource(&resource, "attempt")
+                .err()
+                .unwrap()
+                .contains("exceeds captured credit")
+        );
+    }
+
+    #[test]
+    fn combined_transport_accepts_input_bulk_counter_but_not_dedicated_output_cut() {
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        resource.binding.insert(
+            "transport_host_input".into(),
+            serde_json::to_string(&WorkloadTransportPosition {
+                bulk_bytes: 32,
+                bulk_frames: 1,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        resource.binding.insert(
+            "transport_input_credit".into(),
+            serde_json::to_string(&WorkloadTransportCredit {
+                bulk_bytes: 64,
+                bulk_frames: 2,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        assert_eq!(
+            parse_restored_agent_resource(&resource, "attempt")
+                .unwrap()
+                .host_input
+                .bulk_bytes,
+            32
+        );
+        resource
+            .binding
+            .insert("transport_guest_bulk_bytes".into(), "1".into());
+        assert!(
+            parse_restored_agent_resource(&resource, "attempt")
+                .err()
+                .unwrap()
+                .contains("dedicated guest bulk counter")
+        );
     }
 }

@@ -308,22 +308,13 @@ impl MemoryCache {
         // Windows readers deliberately deny write sharing. Close the completed writer before
         // publishing/opening its immutable view; keeping it open would cause a sharing violation.
         drop(staging);
-        // Keep no-replacement publication even under the build lock: older builders may not
-        // participate in single-flight, and eviction must never replace a live mapped inode.
-        match std::fs::hard_link(&staging_path, &path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-        let syncing = Instant::now();
-        #[cfg(unix)]
-        File::open(&self.root)?.sync_all()?;
-        let directory_sync_us = syncing.elapsed().as_micros();
-        let file = open_pinned(&path, length)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "memory cache was evicted before it could be pinned; retry restore",
-            )
+        let mut directory_sync_us = 0;
+        let file = publish_pinned_entry(&staging_path, &path, length, || {
+            let syncing = Instant::now();
+            #[cfg(unix)]
+            File::open(&self.root)?.sync_all()?;
+            directory_sync_us = syncing.elapsed().as_micros();
+            Ok(())
         })?;
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
@@ -370,6 +361,32 @@ impl MemoryCache {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Pin the completed inode before exposing its name to cooperative eviction. An older builder
+/// may win publication without taking our build lock; pin its winner or retry if it was evicted.
+fn publish_pinned_entry(
+    staging: &Path,
+    path: &Path,
+    length: u64,
+    after_publication: impl FnOnce() -> io::Result<()>,
+) -> io::Result<File> {
+    let staged = open_pinned(staging, length)?
+        .ok_or_else(|| io::Error::other("completed memory staging disappeared"))?;
+    let file = loop {
+        match std::fs::hard_link(staging, path) {
+            Ok(()) => break staged,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if let Some(winner) = open_pinned(path, length)? {
+                    break winner;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    // The pin also spans the directory durability barrier, which can take arbitrarily long.
+    after_publication()?;
+    Ok(file)
+}
 
 fn write_object_slices(
     staging: &mut File,
@@ -631,6 +648,46 @@ mod tests {
         };
         let id = ObjectId::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
         (manifest, id, bytes)
+    }
+
+    #[test]
+    fn publication_already_owns_a_pin_before_the_directory_barrier() {
+        let directory = tempfile::tempdir().unwrap();
+        let staging = directory.path().join("staged");
+        let published = directory.path().join("published");
+        std::fs::write(&staging, b"complete memory").unwrap();
+        let file = publish_pinned_entry(&staging, &published, 15, || {
+            // This is the old publication-to-pin window. Run eviction on another thread so the
+            // test exercises independent lock ownership even on process-oriented platforms.
+            assert!(!std::thread::scope(|scope| {
+                scope
+                    .spawn(|| evict_unpinned(&published).unwrap())
+                    .join()
+                    .unwrap()
+            }));
+            Ok(())
+        })
+        .unwrap();
+        assert!(!evict_unpinned(&published).unwrap());
+        drop(file);
+        assert!(evict_unpinned(&published).unwrap());
+    }
+
+    #[test]
+    fn publication_pins_an_existing_winner_without_replacing_its_inode() {
+        let directory = tempfile::tempdir().unwrap();
+        let staging = directory.path().join("staged");
+        let published = directory.path().join("published");
+        std::fs::write(&staging, b"candidate").unwrap();
+        std::fs::write(&published, b"thewinner").unwrap();
+        let file = publish_pinned_entry(&staging, &published, 9, || {
+            assert!(!evict_unpinned(&published).unwrap());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&published).unwrap(), b"thewinner");
+        drop(file);
+        assert!(evict_unpinned(&published).unwrap());
     }
 
     #[test]

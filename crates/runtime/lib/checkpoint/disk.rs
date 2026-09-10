@@ -10,14 +10,16 @@ use std::time::Instant;
 #[cfg(unix)]
 use std::fs::File;
 
-use microsandbox_image::checkpoint::{
-    CheckpointClosure, DiskGenerationManifest, DiskLayerRef, sparse_file_integrity,
-};
+use microsandbox_image::checkpoint::sparse_file_integrity;
+#[cfg(feature = "runner")]
+use microsandbox_image::checkpoint::{CheckpointClosure, DiskGenerationManifest, DiskLayerRef};
 use microsandbox_image::checkpoint::{
     CompactLayer, DiskCompactionPlan, compact_layer_capacity, materialize_compact_prefix,
 };
+pub use microsandbox_types::DiskCompactionResult;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "runner")]
 use crate::vm::{UpperLayerSpec, UpperSpec, VmConfig};
 
 //--------------------------------------------------------------------------------------------------
@@ -60,26 +62,8 @@ pub struct RuntimeOwnedRootLayer {
     pub format: String,
 }
 
-/// Measured outcome or dry-run projection of an explicit root-disk compaction.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct DiskCompactionResult {
-    /// Whether only selection was performed.
-    pub dry_run: bool,
-    /// Physical layers before compaction, including the writable head.
-    pub input_layers: usize,
-    /// Selected oldest layers, including the base, excluding the writable head.
-    pub selected_layers: usize,
-    /// Physical layers after compaction, including the writable head.
-    pub output_layers: usize,
-    /// Guest bytes materialized; not a disk-space saving estimate.
-    pub materialized_bytes: u64,
-    /// Total operation duration in microseconds.
-    pub total_us: u64,
-    /// Measured VM pause through resume, zero for stopped sources and dry runs.
-    pub pause_us: u64,
-}
-
 /// Successfully sealed disk generation and the block state captured at its pause boundary.
+#[cfg(feature = "runner")]
 pub(crate) struct RootDiskRollover {
     pub(crate) manifest: DiskGenerationManifest,
     pub(crate) device_state: Vec<u8>,
@@ -89,6 +73,7 @@ pub(crate) struct RootDiskRollover {
 #[derive(Debug)]
 pub(crate) struct RootDiskRolloverError {
     message: String,
+    #[cfg(feature = "runner")]
     pub(crate) keep_paused: bool,
 }
 
@@ -144,6 +129,7 @@ impl RuntimeOwnedRootDisk {
         self.state.growth_target.is_some()
     }
 
+    #[cfg(feature = "runner")]
     pub(crate) fn begin_growth(&mut self, target: u64) -> Result<(), String> {
         let capacities = microsandbox_image::checkpoint::layer_capacities(
             self.state
@@ -186,6 +172,7 @@ impl RuntimeOwnedRootDisk {
         Ok(())
     }
 
+    #[cfg(feature = "runner")]
     pub(crate) fn finish_growth(&mut self) -> Result<(), String> {
         let mut next = self.state.clone();
         next.growth_target = None;
@@ -195,10 +182,12 @@ impl RuntimeOwnedRootDisk {
     }
 
     /// Open the authoritative chain journal or initialize it from a sandbox-owned root disk.
+    #[cfg(feature = "runner")]
     pub(crate) fn open(runtime_dir: &Path, vm: &VmConfig) -> Result<Option<Self>, String> {
         Self::open_with_admitted(runtime_dir, vm, None)
     }
 
+    #[cfg(feature = "runner")]
     fn open_with_admitted(
         runtime_dir: &Path,
         vm: &VmConfig,
@@ -265,13 +254,14 @@ impl RuntimeOwnedRootDisk {
     }
 
     /// Guest-visible block identity owned by this rollover provider.
+    #[cfg(feature = "runner")]
     pub(crate) fn device_id(&self) -> &str {
         &self.state.device_id
     }
 
     pub(crate) fn compact(
         &mut self,
-        vm: Option<&msb_krun::VmControl>,
+        #[cfg(feature = "runner")] vm: Option<&msb_krun::VmControl>,
         runtime: &tokio::runtime::Handle,
         layers: Option<usize>,
         dry_run: bool,
@@ -362,35 +352,61 @@ impl RuntimeOwnedRootDisk {
             next.layers.push(replacement);
         }
         sync_directory(stage.path()).map_err(RootDiskRolloverError::pre_rebind)?;
-        let paused_at = Instant::now();
-        let pause = vm
-            .map(|vm| vm.pause())
-            .transpose()
-            .map_err(RootDiskRolloverError::pre_rebind)?;
-        let prepared = prepare_backend(&next);
-        let backend = match prepared {
-            Ok(backend) => backend,
-            Err(error) => {
-                if let (Some(vm), Some(pause)) = (vm, pause) {
-                    vm.resume(pause)
-                        .map_err(RootDiskRolloverError::post_journal)?;
+        #[cfg(feature = "runner")]
+        let (pause, backend, paused_at) = {
+            let paused_at = Instant::now();
+            let pause = vm
+                .map(|vm| vm.pause())
+                .transpose()
+                .map_err(RootDiskRolloverError::pre_rebind)?;
+            let prepared = prepare_backend(&next);
+            let backend = match prepared {
+                Ok(backend) => backend,
+                Err(error) => {
+                    if let (Some(vm), Some(pause)) = (vm, pause) {
+                        vm.resume(pause)
+                            .map_err(RootDiskRolloverError::post_journal)?;
+                    }
+                    return Err(RootDiskRolloverError::pre_rebind(error));
                 }
-                return Err(RootDiskRolloverError::pre_rebind(error));
-            }
+            };
+
+            (pause, backend, paused_at)
         };
+        #[cfg(not(feature = "runner"))]
+        {
+            // Stopped SDK maintenance validates the same explicit closure without importing
+            // hypervisor types. No header-selected backing paths may be opened implicitly.
+            let layers = next
+                .layers
+                .iter()
+                .map(|layer| CompactLayer {
+                    path: layer.path.clone(),
+                    qcow2: layer.format == RootDiskFormat::Qcow2,
+                })
+                .collect::<Vec<_>>();
+            runtime
+                .block_on(microsandbox_image::checkpoint::validate_compact_chain(
+                    &layers,
+                ))
+                .map_err(RootDiskRolloverError::pre_rebind)?;
+        }
         // Preserve the files before attempting the durable commit. Even a directory fsync error
         // may occur after rename, so uncertain publication must retain data and recover forward.
         let _published_directory = stage.keep();
         write_state(&self.state_path, &next).map_err(RootDiskRolloverError::post_journal)?;
         let old = std::mem::replace(&mut self.state, next);
-        if let (Some(vm), Some(pause)) = (vm, pause) {
-            vm.replace_block_backend(&self.state.device_id, backend)
-                .map_err(RootDiskRolloverError::post_journal)?;
-            vm.resume(pause)
-                .map_err(RootDiskRolloverError::post_journal)?;
-            result.pause_us = paused_at.elapsed().as_micros() as u64;
-        } else {
-            drop(backend);
+        #[cfg(feature = "runner")]
+        {
+            if let (Some(vm), Some(pause)) = (vm, pause) {
+                vm.replace_block_backend(&self.state.device_id, backend)
+                    .map_err(RootDiskRolloverError::post_journal)?;
+                vm.resume(pause)
+                    .map_err(RootDiskRolloverError::post_journal)?;
+                result.pause_us = paused_at.elapsed().as_micros() as u64;
+            } else {
+                drop(backend);
+            }
         }
         // Only retire this sandbox's directory entries. Other snapshots/children keep their own
         // hardlinks. Failed unlinks are harmless retained storage, never a reason to undo commit.
@@ -404,6 +420,7 @@ impl RuntimeOwnedRootDisk {
     }
 
     /// Seal the current head, publish its closure, and switch the paused device to a fresh head.
+    #[cfg(feature = "runner")]
     pub(crate) fn rollover(
         &mut self,
         vm: &msb_krun::VmControl,
@@ -428,14 +445,10 @@ impl RuntimeOwnedRootDisk {
             .encode()
             .map_err(RootDiskRolloverError::pre_rebind)?;
 
-        for layer in &mut self.state.layers {
-            if layer.integrity_root.is_none() {
-                let integrity = sparse_file_integrity(&layer.path)
-                    .map_err(RootDiskRolloverError::pre_rebind)?;
-                layer.integrity_root = Some(integrity.root);
-            }
-        }
-        let published_integrities = publish_layer_closure(checkpoint_root, &self.state.layers)
+        // Hash only a tentative generation: preparation may fail and resume this same writable
+        // head. Its captured root becomes reusable only after the forward journal commits.
+        let mut next_state = self.state.sealed_generation()?;
+        let published_integrities = publish_layer_closure(checkpoint_root, &next_state.layers)
             .map_err(RootDiskRolloverError::pre_rebind)?;
 
         let generation = self
@@ -501,7 +514,6 @@ impl RuntimeOwnedRootDisk {
             ))
             .map_err(RootDiskRolloverError::pre_rebind)?;
 
-        let mut next_state = self.state.clone();
         next_state.published_generation = generation;
         next_state.layers.push(RootDiskLayer {
             layer_id: new_id("layer"),
@@ -514,7 +526,7 @@ impl RuntimeOwnedRootDisk {
         // This durable forward record is written before touching the running backend. Once it
         // exists, process restart always opens the new head whether the following rebind completed
         // or returned an uncertain error.
-        write_state(&self.state_path, &next_state).map_err(RootDiskRolloverError::pre_rebind)?;
+        write_state_with_sync(&self.state_path, &next_state, sync_directory)?;
         self.state = next_state;
         vm.replace_block_backend(&self.state.device_id, backend)
             .map_err(RootDiskRolloverError::post_journal)?;
@@ -527,6 +539,21 @@ impl RuntimeOwnedRootDisk {
 }
 
 impl RootDiskState {
+    #[cfg(feature = "runner")]
+    fn sealed_generation(&self) -> Result<Self, RootDiskRolloverError> {
+        let mut next = self.clone();
+        for layer in &mut next.layers {
+            if layer.integrity_root.is_none() {
+                layer.integrity_root = Some(
+                    sparse_file_integrity(&layer.path)
+                        .map_err(RootDiskRolloverError::pre_rebind)?
+                        .root,
+                );
+            }
+        }
+        Ok(next)
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.schema != ROOT_DISK_STATE_SCHEMA
             || !valid_id(&self.volume_id, "vol")
@@ -555,6 +582,7 @@ impl RootDiskState {
         Ok(())
     }
 
+    #[cfg(feature = "runner")]
     fn disk_spec(&self) -> UpperSpec {
         UpperSpec {
             layers: self
@@ -588,6 +616,7 @@ impl RootDiskFormat {
     }
 }
 
+#[cfg(feature = "runner")]
 impl TryFrom<msb_krun::DiskImageFormat> for RootDiskFormat {
     type Error = String;
 
@@ -602,6 +631,7 @@ impl TryFrom<msb_krun::DiskImageFormat> for RootDiskFormat {
     }
 }
 
+#[cfg(feature = "runner")]
 impl From<RootDiskFormat> for msb_krun::DiskImageFormat {
     fn from(value: RootDiskFormat) -> Self {
         match value {
@@ -611,6 +641,7 @@ impl From<RootDiskFormat> for msb_krun::DiskImageFormat {
     }
 }
 
+#[cfg(feature = "runner")]
 impl From<RootDiskFormat> for msb_krun::BlockImageFormat {
     fn from(value: RootDiskFormat) -> Self {
         match value {
@@ -624,6 +655,7 @@ impl RootDiskRolloverError {
     pub(super) fn pre_rebind(error: impl fmt::Display) -> Self {
         Self {
             message: error.to_string(),
+            #[cfg(feature = "runner")]
             keep_paused: false,
         }
     }
@@ -631,6 +663,7 @@ impl RootDiskRolloverError {
     pub(crate) fn post_journal(error: impl fmt::Display) -> Self {
         Self {
             message: error.to_string(),
+            #[cfg(feature = "runner")]
             keep_paused: true,
         }
     }
@@ -651,6 +684,7 @@ impl std::error::Error for RootDiskRolloverError {}
 /// Seed a new child's journal from disk admission already completed in this runtime process.
 /// The existing journal, when present, remains authoritative; transformed or copied files are
 /// hashed instead of inheriting an identity belonging to their source representation.
+#[cfg(feature = "runner")]
 pub(crate) fn seed_restored_root_disk(
     runtime_dir: &Path,
     vm: &VmConfig,
@@ -661,6 +695,7 @@ pub(crate) fn seed_restored_root_disk(
 }
 
 /// Apply the durable forward chain before VM construction after a runtime restart.
+#[cfg(feature = "runner")]
 pub(crate) fn recover_runtime_owned_root(
     runtime_dir: &Path,
     vm: &mut VmConfig,
@@ -860,14 +895,21 @@ pub fn compact_stopped_root(
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    disk.compact(None, runtime.handle(), layers, dry_run)
-        .map_err(|error| error.to_string())
+    disk.compact(
+        #[cfg(feature = "runner")]
+        None,
+        runtime.handle(),
+        layers,
+        dry_run,
+    )
+    .map_err(|error| error.to_string())
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "runner")]
 fn configured_layout(vm: &VmConfig) -> Option<RootDiskLayout> {
     if vm.rootfs_vmdk.is_some() {
         Some(RootDiskLayout::ManagedUpper)
@@ -878,6 +920,7 @@ fn configured_layout(vm: &VmConfig) -> Option<RootDiskLayout> {
     }
 }
 
+#[cfg(feature = "runner")]
 fn configured_layers(vm: &VmConfig, layout: RootDiskLayout) -> Result<Vec<UpperLayerSpec>, String> {
     let (spec, path, format) = match layout {
         RootDiskLayout::ManagedUpper => (
@@ -905,6 +948,7 @@ fn configured_layers(vm: &VmConfig, layout: RootDiskLayout) -> Result<Vec<UpperL
         .unwrap_or_default())
 }
 
+#[cfg(feature = "runner")]
 fn prepare_backend(state: &RootDiskState) -> Result<msb_krun::PreparedBlockBackend, String> {
     // Linux raw uppers use bounded buffered writeback. Their qcow2 successors must bypass the
     // page cache because raw guest offsets cannot account for qcow2 metadata and allocation I/O.
@@ -923,6 +967,7 @@ fn prepare_backend(state: &RootDiskState) -> Result<msb_krun::PreparedBlockBacke
         .map_err(|error| format!("prepare runtime-owned root backend: {error}"))
 }
 
+#[cfg(feature = "runner")]
 fn publish_layer_closure(root: &Path, layers: &[RootDiskLayer]) -> Result<Vec<String>, String> {
     let directory = root.join("layers");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -962,6 +1007,7 @@ fn publish_layer_closure(root: &Path, layers: &[RootDiskLayer]) -> Result<Vec<St
     Ok(integrities)
 }
 
+#[cfg(feature = "runner")]
 fn publish_sealed_layer(source: &Path, target: &Path, expected: &str) -> Result<(), String> {
     match std::fs::hard_link(source, target) {
         Ok(()) => Ok(()),
@@ -990,31 +1036,45 @@ fn read_state(path: &Path) -> Result<RootDiskState, String> {
 }
 
 fn write_state(path: &Path, state: &RootDiskState) -> Result<(), String> {
-    state.validate()?;
+    write_state_with_sync(path, state, sync_directory).map_err(|error| error.to_string())
+}
+
+fn write_state_with_sync(
+    path: &Path,
+    state: &RootDiskState,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), RootDiskRolloverError> {
+    state
+        .validate()
+        .map_err(RootDiskRolloverError::pre_rebind)?;
     let parent = path
         .parent()
-        .ok_or_else(|| "root-disk state path has no parent".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        .ok_or_else(|| RootDiskRolloverError::pre_rebind("root-disk state path has no parent"))?;
+    std::fs::create_dir_all(parent).map_err(RootDiskRolloverError::pre_rebind)?;
     let temporary = parent.join(format!(
         ".{ROOT_DISK_STATE_FILE}.{}.tmp",
         rand::random::<u64>()
     ));
-    let bytes = serde_json::to_vec(state).map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec(state).map_err(RootDiskRolloverError::pre_rebind)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)
-        .map_err(|error| error.to_string())?;
-    file.write_all(&bytes).map_err(|error| error.to_string())?;
-    file.sync_all().map_err(|error| error.to_string())?;
+        .map_err(RootDiskRolloverError::pre_rebind)?;
+    file.write_all(&bytes)
+        .map_err(RootDiskRolloverError::pre_rebind)?;
+    file.sync_all().map_err(RootDiskRolloverError::pre_rebind)?;
     drop(file);
     if let Err(error) = super::replace_file(&temporary, path) {
         let _ = std::fs::remove_file(&temporary);
-        return Err(error.to_string());
+        // Treat replacement failures conservatively across platforms: the visible journal may
+        // already have changed even when the platform reports uncertain durable completion.
+        return Err(RootDiskRolloverError::post_journal(error));
     }
-    sync_directory(parent).map_err(|error| error.to_string())
+    sync_parent(parent).map_err(RootDiskRolloverError::post_journal)
 }
 
+#[cfg(feature = "runner")]
 fn next_overlay_path(previous: &Path, layout: RootDiskLayout) -> PathBuf {
     let parent = previous.parent().unwrap_or_else(|| Path::new("."));
     let prefix = match layout {
@@ -1052,6 +1112,139 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "runner")]
+    #[tokio::test]
+    async fn failed_preparation_does_not_retain_a_writable_head_integrity() {
+        use std::io::{Seek, SeekFrom};
+
+        use super::*;
+
+        for qcow2 in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let base = directory.path().join("base.raw");
+            std::fs::write(&base, vec![17u8; 131072]).unwrap();
+            let mut layers = vec![RootDiskLayer {
+                layer_id: new_id("layer"),
+                path: base.clone(),
+                format: RootDiskFormat::Raw,
+                integrity_root: None,
+            }];
+            if qcow2 {
+                let head = directory.path().join("head.qcow2");
+                microsandbox_image::checkpoint::create_qcow2_overlay(&head, 131072, &base, "raw")
+                    .await
+                    .unwrap();
+                layers[0].integrity_root = Some(sparse_file_integrity(&base).unwrap().root);
+                layers.push(RootDiskLayer {
+                    layer_id: new_id("layer"),
+                    path: head,
+                    format: RootDiskFormat::Qcow2,
+                    integrity_root: None,
+                });
+            }
+            let state = RootDiskState {
+                schema: ROOT_DISK_STATE_SCHEMA.into(),
+                volume_id: new_id("vol"),
+                device_id: FLAT_ROOT_DEVICE_ID.into(),
+                layout: RootDiskLayout::FlatRoot,
+                published_generation: 0,
+                launch_base: None,
+                growth_target: None,
+                layers,
+            };
+            let tentative = state.sealed_generation().unwrap();
+            let blocked = directory.path().join("blocked");
+            std::fs::write(&blocked, b"not a directory").unwrap();
+            assert!(publish_layer_closure(&blocked, &tentative.layers).is_err());
+            assert!(state.layers.last().unwrap().integrity_root.is_none());
+
+            // Model a resumed guest changing the same head before a retry. The abandoned cut
+            // must not supply a reusable root to the next attempt, for raw or qcow2 heads.
+            let head = &state.layers.last().unwrap().path;
+            let mut writer = OpenOptions::new().write(true).open(head).unwrap();
+            writer.seek(SeekFrom::End(0)).unwrap();
+            writer.write_all(b"resumed write").unwrap();
+            writer.sync_all().unwrap();
+            drop(writer);
+            let retry = state.sealed_generation().unwrap();
+            assert_ne!(
+                retry.layers.last().unwrap().integrity_root,
+                tentative.layers.last().unwrap().integrity_root,
+            );
+            assert_eq!(
+                retry
+                    .layers
+                    .last()
+                    .unwrap()
+                    .integrity_root
+                    .as_ref()
+                    .unwrap(),
+                &sparse_file_integrity(head).unwrap().root,
+            );
+        }
+    }
+
+    #[cfg(feature = "runner")]
+    #[tokio::test]
+    async fn journal_sync_failure_is_fenced_after_forward_publication() {
+        use super::*;
+
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("base.raw");
+        std::fs::write(&base, vec![17u8; 4096]).unwrap();
+        let mut state = RootDiskState {
+            schema: ROOT_DISK_STATE_SCHEMA.into(),
+            volume_id: new_id("vol"),
+            device_id: FLAT_ROOT_DEVICE_ID.into(),
+            layout: RootDiskLayout::FlatRoot,
+            published_generation: 0,
+            launch_base: None,
+            growth_target: None,
+            layers: vec![RootDiskLayer {
+                layer_id: new_id("layer"),
+                path: base.clone(),
+                format: RootDiskFormat::Raw,
+                integrity_root: None,
+            }],
+        };
+        let path = directory.path().join(ROOT_DISK_STATE_FILE);
+        write_state(&path, &state).unwrap();
+        let successor = directory.path().join("successor.qcow2");
+        microsandbox_image::checkpoint::create_qcow2_overlay(&successor, 4096, &base, "raw")
+            .await
+            .unwrap();
+        state = state.sealed_generation().unwrap();
+        state.layers.push(RootDiskLayer {
+            layer_id: new_id("layer"),
+            path: successor.clone(),
+            format: RootDiskFormat::Qcow2,
+            integrity_root: None,
+        });
+        state.published_generation = 1;
+        let error = write_state_with_sync(&path, &state, |_| {
+            Err(std::io::Error::other("injected directory sync failure"))
+        })
+        .unwrap_err();
+        assert!(error.keep_paused);
+        assert_eq!(read_state(&path).unwrap().published_generation, 1);
+        let recovered = load_runtime_owned_root_chain(directory.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.layers.len(), 2);
+        assert_eq!(recovered.layers[1].path, successor);
+        assert_eq!(recovered.virtual_size, 4096);
+
+        let published = std::fs::read(&path).unwrap();
+        state.schema = "invalid".into();
+        let error = write_state_with_sync(&path, &state, |_| {
+            panic!("invalid state must fail before journal publication")
+        })
+        .unwrap_err();
+        assert!(!error.keep_paused);
+        assert_eq!(std::fs::read(&path).unwrap(), published);
+    }
+
+    #[cfg(feature = "runner")]
     fn admitted_fixture(
         root: &std::path::Path,
         sources: &[super::UpperLayerSpec],
@@ -1136,6 +1329,7 @@ mod tests {
         CheckpointClosure::open(root, Some(&id)).unwrap()
     }
 
+    #[cfg(feature = "runner")]
     fn root_vm(
         layout: super::RootDiskLayout,
         layers: Vec<super::UpperLayerSpec>,
@@ -1167,6 +1361,7 @@ mod tests {
             rootfs_upper: None,
             rootfs_upper_spec: None,
             mounts: Vec::new(),
+            file_mounts: Vec::new(),
             disks: Vec::new(),
             vsock: Vec::new(),
             #[cfg(unix)]
@@ -1197,6 +1392,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "runner")]
     async fn admitted_raw_hardlink_seeds_once_and_reopens_without_the_snapshot() {
         use super::*;
         for layout in [RootDiskLayout::ManagedUpper, RootDiskLayout::FlatRoot] {
@@ -1259,6 +1455,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "runner")]
     async fn copied_raw_and_relocated_qcow_seed_their_own_physical_integrities() {
         use super::*;
         use microsandbox_image::checkpoint::{create_qcow2_overlay, relocate_qcow2_backing};
@@ -1526,15 +1723,13 @@ mod tests {
         }
     }
 
-    use super::{
-        FLAT_ROOT_DEVICE_ID, MANAGED_ROOT_DEVICE_ID, ROOT_DISK_STATE_SCHEMA, RootDiskFormat,
-        RootDiskLayer, RootDiskLayout, RootDiskState, load_runtime_owned_root_chain, new_id,
-        next_overlay_path, read_state, write_state,
-    };
+    use super::*;
 
+    #[cfg(feature = "runner")]
     use crate::vm::UpperLayerSpec;
 
     #[test]
+    #[cfg(feature = "runner")]
     fn journal_round_trip_preserves_the_forward_chain() {
         let directory = tempfile::tempdir().unwrap();
         let base = directory.path().join("upper.ext4");
@@ -1584,6 +1779,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "runner")]
     fn flat_journal_uses_root_device_and_root_overlay_names() {
         let directory = tempfile::tempdir().unwrap();
         let base = directory.path().join("rootfs.raw");

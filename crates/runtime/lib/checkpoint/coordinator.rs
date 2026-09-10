@@ -16,7 +16,7 @@ use microsandbox_image::checkpoint::{
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::core::{
     CoreError, CoreErrorKind, Ready, WorkloadFailureDisposition, WorkloadFreeze, WorkloadFrozen,
-    WorkloadThaw, WorkloadThawed,
+    WorkloadThaw, WorkloadThawed, WorkloadTransportCredit, WorkloadTransportPosition,
 };
 use microsandbox_protocol::message::{Message, MessageType};
 use msb_krun::{IncrementalCaptureDecision, MemoryCaptureOptions, MemoryCapturePlan};
@@ -24,6 +24,7 @@ use msb_krun::{IncrementalCaptureDecision, MemoryCaptureOptions, MemoryCapturePl
 use super::capture_pipeline::{MEMORY_OBJECT_PACK_SIZE, MemoryObjectSink};
 use super::disk::RuntimeOwnedRootDisk;
 use super::local_memory::{LocalMemoryCapture, LocalMemoryPin};
+use crate::runner::workload_control::{InputGate, WorkloadControl};
 use crate::vm::VmConfig;
 
 //--------------------------------------------------------------------------------------------------
@@ -51,6 +52,7 @@ pub(crate) struct CheckpointCoordinator {
     store: LocalObjectStore,
     runtime: tokio::runtime::Handle,
     agent_sock: PathBuf,
+    workload_control: Arc<WorkloadControl>,
     root_disk: Option<RuntimeOwnedRootDisk>,
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
     network_resource_binding: Option<String>,
@@ -118,16 +120,21 @@ struct PausedCaptureTimings {
 }
 
 struct FrozenWorkload {
-    client: AgentClient,
+    gate: InputGate,
     attempt_id: String,
     protocol_generation: u8,
     ready: Ready,
+    host_input: WorkloadTransportPosition,
+    input_credit: WorkloadTransportCredit,
+    guest_bulk_bytes: u64,
 }
 
 /// Executor-owned resident pause. A recovery pause never acquires this public resume authority.
 pub(crate) struct UserPause {
     generation: msb_krun::VmPauseGeneration,
     workload: Option<FrozenWorkload>,
+    // A kernel-only resident pause still keeps unadmitted host input source-owned.
+    input_gate: Option<InputGate>,
     pub(crate) capture_unavailable: Option<String>,
 }
 
@@ -158,10 +165,19 @@ impl CheckpointCoordinator {
             Err(error) if error.freezer_unavailable => (None, Some(error.to_string())),
             Err(error) => return Err(error),
         };
+        let input_gate = if workload.is_none() {
+            Some(
+                self.gate_input(Instant::now() + WORKLOAD_CONTROL_TIMEOUT)?
+                    .0,
+            )
+        } else {
+            None
+        };
         match vm.pause() {
             Ok(generation) => Ok(UserPause {
                 generation,
                 workload,
+                input_gate,
                 capture_unavailable,
             }),
             Err(error) => {
@@ -172,6 +188,9 @@ impl CheckpointCoordinator {
                         || self.thaw_workload(&workload),
                         || vm.pause().map(|_| ()).map_err(|error| error.to_string()),
                     ));
+                }
+                if let Some(gate) = input_gate {
+                    gate.release();
                 }
                 Err(CheckpointFailure::before_pause(error))
             }
@@ -195,7 +214,12 @@ impl CheckpointCoordinator {
         {
             match &paused.workload {
                 Some(workload) => self.thaw_workload(workload),
-                None => Ok(()),
+                None => {
+                    if let Some(gate) = &paused.input_gate {
+                        gate.release();
+                    }
+                    Ok(())
+                }
             }
         } else {
             Err("guest did not acknowledge resident resume clock correction".into())
@@ -306,6 +330,7 @@ impl CheckpointCoordinator {
         guest_bootstrap: &GuestBootstrap,
         runtime: tokio::runtime::Handle,
         agent_sock: &Path,
+        workload_control: Arc<WorkloadControl>,
     ) -> Result<Self, String> {
         let root = runtime_dir.join("checkpoints");
         std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
@@ -326,6 +351,7 @@ impl CheckpointCoordinator {
             store,
             runtime,
             agent_sock: agent_sock.to_path_buf(),
+            workload_control,
             root_disk,
             fs_resource_bindings,
             network_resource_binding,
@@ -774,39 +800,46 @@ impl CheckpointCoordinator {
         vm: &msb_krun::VmControl,
         attempt_id: &str,
     ) -> Result<FrozenWorkload, CheckpointFailure> {
-        let client = self
-            .runtime
-            .block_on(AgentClient::connect_with_timeout(
-                &self.agent_sock,
-                WORKLOAD_CONTROL_TIMEOUT,
-            ))
-            .map_err(|error| {
-                CheckpointFailure::before_pause(format!("connect workload latch: {error}"))
-            })?;
-        // Gather identity before sending anything with side effects. From the first freeze
-        // request onward, a transport error is ambiguous and requires an acknowledged thaw.
-        let protocol_generation = client.negotiated_version();
-        let ready = client.ready().map_err(CheckpointFailure::before_pause)?;
-        client
-            .ensure_version_compat(MessageType::WorkloadFreeze)
+        // These are the bundled guest's capabilities, not a newly connected SDK client's
+        // generation. Internal lifecycle work must not join the FIFO it is about to gate.
+        let (protocol_generation, ready) = self
+            .workload_control
+            .ready()
             .map_err(CheckpointFailure::before_pause)?;
-        let workload = FrozenWorkload {
-            client,
+        if !MessageType::WorkloadFreeze.is_available_at(protocol_generation) {
+            return Err(CheckpointFailure::before_pause(
+                "guest protocol does not support workload freeze",
+            ));
+        }
+        let deadline = Instant::now() + WORKLOAD_CONTROL_TIMEOUT;
+        let (gate, host_input) = self.gate_input(deadline)?;
+        let mut workload = FrozenWorkload {
+            gate,
             attempt_id: attempt_id.to_string(),
             protocol_generation,
             ready,
+            host_input,
+            input_credit: WorkloadTransportCredit::default(),
+            guest_bulk_bytes: 0,
         };
         let request = WorkloadFreeze {
             attempt_id: attempt_id.to_string(),
+            host_input,
+        };
+        let message = match Message::with_payload(MessageType::WorkloadFreeze, 0, &request) {
+            Ok(message) => message,
+            Err(error) => {
+                // No lifecycle request has been admitted, so ordinary input can safely resume.
+                workload.gate.release();
+                return Err(CheckpointFailure::before_pause(error));
+            }
         };
         let reply = self
             .runtime
             .block_on(async {
-                tokio::time::timeout(
-                    WORKLOAD_CONTROL_TIMEOUT,
-                    workload
-                        .client
-                        .request(MessageType::WorkloadFreeze, &request),
+                tokio::time::timeout_at(
+                    deadline.into(),
+                    self.workload_control.request(message, attempt_id),
                 )
                 .await
             })
@@ -815,39 +848,83 @@ impl CheckpointCoordinator {
         if let Ok(reply) = &reply
             && let Some(reason) = unavailable_freezer_reason(reply, attempt_id)
         {
+            // Explicit guest evidence says the freezer was never attempted.
+            workload.gate.release();
             let mut error = CheckpointFailure::before_pause(reason);
             error.freezer_unavailable = true;
             return Err(error);
         }
         let result = reply.and_then(|reply| {
-            validate_workload_reply::<WorkloadFrozen>(
+            let frozen = validate_workload_reply::<WorkloadFrozen>(
                 reply,
                 MessageType::WorkloadFrozen,
                 attempt_id,
                 |payload| &payload.attempt_id,
-            )
+            )?;
+            self.workload_control.update_credit(frozen.input_credit)?;
+            self.runtime
+                .block_on(async {
+                    tokio::time::timeout_at(
+                        deadline.into(),
+                        self.workload_control
+                            .wait_bulk_cut(frozen.guest_bulk_bytes_target),
+                    )
+                    .await
+                })
+                .map_err(|_| {
+                    "guest output did not reach the frozen transport boundary".to_string()
+                })??;
+            Ok(frozen)
         });
-        if let Err(error) = result {
-            return Err(recover_failed_freeze(
+        let frozen = result.map_err(|error| {
+            recover_failed_freeze(
                 attempt_id,
                 error,
                 || self.thaw_workload(&workload),
                 || vm.pause().map(|_| ()).map_err(|error| error.to_string()),
-            ));
-        }
+            )
+        })?;
+        workload.input_credit = frozen.input_credit;
+        workload.guest_bulk_bytes = frozen.guest_bulk_bytes_target;
         Ok(workload)
+    }
+
+    /// Park both ordinary writers at complete records before taking their cumulative cut.
+    fn gate_input(
+        &self,
+        deadline: Instant,
+    ) -> Result<(InputGate, WorkloadTransportPosition), CheckpointFailure> {
+        let gate = self.workload_control.gate();
+        let result = self
+            .runtime
+            .block_on(async {
+                tokio::time::timeout_at(deadline.into(), self.workload_control.parked_position())
+                    .await
+            })
+            .map_err(|_| "host input did not reach a complete transport boundary".to_string())
+            .and_then(|result| result);
+        match result {
+            Ok(position) => Ok((gate, position)),
+            Err(error) => {
+                gate.release();
+                Err(CheckpointFailure::before_pause(error))
+            }
+        }
     }
 
     fn thaw_workload(&self, workload: &FrozenWorkload) -> Result<(), String> {
         let request = WorkloadThaw {
             attempt_id: workload.attempt_id.clone(),
+            mode: microsandbox_protocol::core::WorkloadThawMode::Continue,
         };
+        let message = Message::with_payload(MessageType::WorkloadThaw, 0, &request)
+            .map_err(|error| error.to_string())?;
         let reply = self
             .runtime
             .block_on(async {
                 tokio::time::timeout(
                     WORKLOAD_CONTROL_TIMEOUT,
-                    workload.client.request(MessageType::WorkloadThaw, &request),
+                    self.workload_control.request(message, &workload.attempt_id),
                 )
                 .await
             })
@@ -858,7 +935,11 @@ impl CheckpointCoordinator {
             MessageType::WorkloadThawed,
             &workload.attempt_id,
             |payload| &payload.attempt_id,
-        )
+        )?;
+        // Only acknowledged thaw releases the source-owned FIFO. Dropping a failed capture
+        // without reaching here leaves the helper fenced instead of implicitly flushing input.
+        workload.gate.release();
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1367,6 +1448,25 @@ impl FrozenWorkload {
                 ("boot_time_ns".into(), self.ready.boot_time_ns.to_string()),
                 ("init_time_ns".into(), self.ready.init_time_ns.to_string()),
                 ("ready_time_ns".into(), self.ready.ready_time_ns.to_string()),
+                // Restore the negotiated physical transport as well as the agent identity.
+                (
+                    "ready".into(),
+                    serde_json::to_string(&self.ready).expect("Ready is serializable"),
+                ),
+                (
+                    "transport_host_input".into(),
+                    serde_json::to_string(&self.host_input)
+                        .expect("input position is serializable"),
+                ),
+                (
+                    "transport_input_credit".into(),
+                    serde_json::to_string(&self.input_credit)
+                        .expect("input credit is serializable"),
+                ),
+                (
+                    "transport_guest_bulk_bytes".into(),
+                    self.guest_bulk_bytes.to_string(),
+                ),
             ]),
         }
     }
@@ -1453,7 +1553,7 @@ fn validate_workload_reply<T>(
     expected_type: MessageType,
     expected_attempt: &str,
     attempt_id: impl for<'a> Fn(&'a T) -> &'a str,
-) -> Result<(), String>
+) -> Result<T, String>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -1476,7 +1576,7 @@ where
     if attempt_id(&payload) != expected_attempt {
         return Err("workload control reply belongs to another checkpoint attempt".into());
     }
-    Ok(())
+    Ok(payload)
 }
 
 fn admit_resources(
@@ -1858,16 +1958,19 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MemoryObjectSink, PendingDeviceState, overlay_extents, persist_device_states,
-        publish_root_last, runtime_owned_fs_bindings, validate_vm_generation_state,
-        validate_workload_reply,
+        FrozenWorkload, MemoryObjectSink, PendingDeviceState, WorkloadControl, overlay_extents,
+        persist_device_states, publish_root_last, runtime_owned_fs_bindings,
+        validate_vm_generation_state, validate_workload_reply,
     };
 
     use microsandbox_image::checkpoint::{
         CaptureObjectBatch, ContentRef, LocalObjectStore, MemoryExtent, MemoryExtentContent,
         ObjectId,
     };
-    use microsandbox_protocol::core::{CoreError, CoreErrorKind, WorkloadFrozen};
+    use microsandbox_protocol::core::{
+        CoreError, CoreErrorKind, Ready, WorkloadFrozen, WorkloadTransportCredit,
+        WorkloadTransportPosition,
+    };
     use microsandbox_protocol::message::{Message, MessageType};
     use msb_krun::{GuestMemoryRange, MemoryCaptureSink};
     use std::sync::Arc;
@@ -2003,11 +2106,11 @@ mod tests {
                 while start < 256 {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
                     let length = (1 + (seed >> 32) % 17).min(256 - start);
-                    if seed % 5 != 0 {
+                    if !seed.is_multiple_of(5) {
                         ranges.push(MemoryExtent {
                             start,
                             length,
-                            content: if seed % 3 == 0 {
+                            content: if seed.is_multiple_of(3) {
                                 MemoryExtentContent::Zero
                             } else {
                                 MemoryExtentContent::Object(ContentRef {
@@ -2189,12 +2292,55 @@ mod tests {
     }
 
     #[test]
+    fn captured_agent_descriptor_retains_transport_debt() {
+        let control = WorkloadControl::new();
+        let workload = FrozenWorkload {
+            gate: control.gate(),
+            attempt_id: "checkpoint-42".into(),
+            protocol_generation: 9,
+            ready: Ready {
+                workload_transport_barrier_version: Some(1),
+                ..Ready::default()
+            },
+            host_input: WorkloadTransportPosition {
+                control_bytes: 90_000_000,
+                control_frames: 4_000,
+                bulk_bytes: 100_000_000,
+                bulk_frames: 5_000,
+            },
+            input_credit: WorkloadTransportCredit {
+                control_bytes: 90_000_128,
+                control_frames: 4_002,
+                bulk_bytes: 100_000_256,
+                bulk_frames: 5_003,
+            },
+            guest_bulk_bytes: 123_456_789,
+        };
+        let descriptor = workload.resource_descriptor();
+        let position: WorkloadTransportPosition =
+            serde_json::from_str(&descriptor.binding["transport_host_input"]).unwrap();
+        let credit: WorkloadTransportCredit =
+            serde_json::from_str(&descriptor.binding["transport_input_credit"]).unwrap();
+        assert_eq!(position, workload.host_input);
+        assert_eq!(credit, workload.input_credit);
+        assert_eq!(
+            descriptor.binding["transport_guest_bulk_bytes"],
+            "123456789"
+        );
+        // Publication does not release queued source input. Only confirmed thaw does.
+        assert!(control.gated());
+        workload.gate.release();
+    }
+
+    #[test]
     fn workload_reply_must_confirm_the_exact_attempt() {
         let reply = Message::with_payload(
             MessageType::WorkloadFrozen,
             7,
             &WorkloadFrozen {
                 attempt_id: "checkpoint-42".into(),
+                guest_bulk_bytes_target: 0,
+                input_credit: WorkloadTransportCredit::default(),
             },
         )
         .unwrap();
@@ -2212,6 +2358,8 @@ mod tests {
             7,
             &WorkloadFrozen {
                 attempt_id: "checkpoint-41".into(),
+                guest_bulk_bytes_target: 0,
+                input_credit: WorkloadTransportCredit::default(),
             },
         )
         .unwrap();

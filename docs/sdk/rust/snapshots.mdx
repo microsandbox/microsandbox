@@ -1,6 +1,7 @@
 ---
 title: Snapshots
 description: Rust SDK - Snapshot API reference
+keywords: ["Rust SDK", "Rust snapshots", "microsandbox snapshots"]
 ---
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -66,7 +67,7 @@ Snapshot::load_with_base(Path::new("changes.msb"), None, "worker:checkpoint-a").
 fn builder(name: impl Into<String>) -> SnapshotBuilder
 ```
 
-Start configuring a snapshot member named `name`, generated when empty. The default group is the source sandbox's name; `.group(name)` selects another group and [`dest_dir()`](#dest_dir) selects its parent directory. The source sandbox is set with [`from_sandbox()`](#from_sandbox), which is required; the other setters cover labels and whether to record content integrity before capturing. See [`SnapshotBuilder`](#snapshotbuilder) for all options.
+Start configuring a snapshot member named `name`, generated when empty. The default group is the source sandbox's name; `.group(name)` selects another group and [`dest_dir()`](#snapshot_builder-dest_dir) selects its parent directory. The source sandbox is set with [`from_sandbox()`](#snapshot_builder-from_sandbox), which is required; the other setters cover labels and whether to record content integrity before capturing. See [`SnapshotBuilder`](#snapshotbuilder) for all options.
 
 <p className="msb-label">Parameters</p>
 
@@ -456,7 +457,7 @@ println!("loaded {}", h.digest());
 
 ---
 
-<p className="msb-member-group">Instance methods</p>
+<p className="msb-member-group" id="instance-methods">Instance methods</p>
 
 Methods on an opened [`Snapshot`](#snapshotopen) artifact.
 
@@ -745,7 +746,7 @@ let sb = Sandbox::builder("api-restored")
 
 </Accordion>
 
-`SandboxBuilder` setter. Create a sandbox from a snapshot artifact. Disk snapshots cold-boot; full snapshots resume captured execution. The snapshot already pins the image reference and digest, so this is mutually exclusive with [`image()`](/sdk/rust/sandbox#image) and [`image_with()`](/sdk/rust/sandbox#image_with). The artifact is structurally opened at [`create()`](/sdk/rust/sandbox#create) time; persistent payload integrity is checked only through explicit [`Snapshot::verify()`](#snap-verify).
+`SandboxBuilder` setter. Create a sandbox from a snapshot artifact. Disk snapshots cold-boot; full snapshots resume captured execution. The snapshot already pins the image reference and digest, so this is mutually exclusive with [`image()`](/sdk/rust/sandbox#sandbox-image) and [`image_with()`](/sdk/rust/sandbox#sandbox-image_with). The artifact is structurally opened at [`create()`](/sdk/rust/sandbox#sandbox-create) time; persistent payload integrity is checked only through explicit [`Snapshot::verify()`](#snap-verify).
 
 <p className="msb-label">Parameters</p>
 
@@ -820,7 +821,7 @@ Builder for snapshot configuration.
 fn from_sandbox(self, source_sandbox: impl Into<String>) -> Self
 ```
 
-Set the sandbox to capture. Required; [`build()`](#build) and [`create()`](#create) fail without it.
+Set the sandbox to capture. Required; [`build()`](#snapshot_builder-build) and [`create()`](#snapshot_builder-create) fail without it.
 
 <p className="msb-label">Parameters</p>
 
@@ -905,7 +906,7 @@ Capture disk, memory, execution, and device state from a running sandbox. The ru
 fn build(self) -> MicrosandboxResult<SnapshotConfig>
 ```
 
-Materialize the [`SnapshotConfig`](#snapshotconfig) without creating the snapshot. Errors with `InvalidConfig` if [`from_sandbox`](#from_sandbox) was not called. For capturing, use [`create`](#create) instead; it calls `build` internally.
+Materialize the [`SnapshotConfig`](#snapshotconfig) without creating the snapshot. Errors with `InvalidConfig` if [`from_sandbox`](#snapshot_builder-from_sandbox) was not called. For capturing, use [`create`](#snapshot_builder-create) instead; it calls `build` internally.
 
 <p className="msb-label">Returns</p>
 
@@ -937,7 +938,7 @@ Build and execute the snapshot in one step. Equivalent to [`Snapshot::create(sel
 
 ### SnapshotConfig
 
-<p className="msb-backref">Used by <a href="#snapshotcreate">Snapshot::create()</a> · returned by <a href="#build">build()</a></p>
+<p className="msb-backref">Used by <a href="#snapshotcreate">Snapshot::create()</a> · returned by <a href="#snapshot_builder-build">build()</a></p>
 
 Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via [`SnapshotBuilder`](#snapshotbuilder) rather than constructed directly.
 
@@ -1064,8 +1065,6 @@ One member of the complete oldest-first file-layer closure. Re-exported as `micr
 
 Content integrity descriptor for the captured upper layer.
 
-| Field | Type | Description |
-|-------|------|-------------|
 | Variant | Serialized algorithm | Fields | Purpose |
 |---------|----------------------|--------|---------|
 | `Sha256` | `sha256` | `digest` | Exact released compatibility |

@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -99,6 +99,23 @@ impl CaptureLineage {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Serialize capture publication with removal/replacement of the same named source. The lock
+/// lives outside its removable directory and must never be unlinked. Callers that also own a
+/// transition or lifecycle guard acquire transition, then lineage, then lifecycle ownership.
+pub(crate) async fn lock_source(run_dir: &Path, name: &str) -> MicrosandboxResult<File> {
+    let path = microsandbox_runtime::ipc::snapshot_lineage_lock_path(run_dir, name);
+    tokio::fs::create_dir_all(path.parent().expect("lineage lock has a parent")).await?;
+    let lock = microsandbox_utils::process_lock::open_lock_file(&path)?;
+    // Waiting asynchronously keeps cancellation bounded and avoids occupying a blocking-pool
+    // thread for each capture queued behind a large archive publication.
+    loop {
+        if microsandbox_utils::process_lock::try_lock_exclusive(&lock)? {
+            return Ok(lock);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 pub(crate) async fn begin(local: &LocalBackend, name: &str) -> MicrosandboxResult<CaptureLineage> {
     let model = sandbox::Entity::find()
         .filter(sandbox::Column::Name.eq(name))
@@ -106,13 +123,16 @@ pub(crate) async fn begin(local: &LocalBackend, name: &str) -> MicrosandboxResul
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(name.into()))?;
     let expected_id = model.id;
+    let lock = lock_source(&local.config().run_dir(), name).await?;
     let directory = local.sandboxes_dir().join(name);
     let (lock, cursor) = tokio::task::spawn_blocking(move || -> MicrosandboxResult<_> {
-        // Never recreate a removed sandbox merely to record ancestry.
-        let lock = microsandbox_utils::process_lock::open_lock_file(
-            &directory.join(".snapshot-lineage.lock"),
-        )?;
-        microsandbox_utils::process_lock::lock_exclusive(&lock)?;
+        // Removal/replacement owns the same stable lock, so this path remains bound to the
+        // checked source until publication commits. Never recreate a missing source directory.
+        if !std::fs::symlink_metadata(&directory)?.is_dir() {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "snapshot source directory is not a directory".into(),
+            ));
+        }
         let path = directory.join("snapshot-lineage.json");
         let cursor = match std::fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_file() && meta.len() <= 4096 => {
@@ -274,6 +294,44 @@ mod tests {
         assert_eq!(
             begin(&local, "worker").await.unwrap().parent,
             Some(captured)
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_waits_for_cursor_publication_and_gets_independent_ancestry() {
+        let home = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        let original = source(&local, "worker", Some(&id(1))).await;
+        let capture = begin(&local, "worker").await.unwrap();
+        let run_dir = local.config().run_dir();
+        let mut replacement = Box::pin(lock_source(&run_dir, "worker"));
+        assert!(futures::poll!(&mut replacement).is_pending());
+
+        // Publication may be delayed arbitrarily after the source check; removal still cannot
+        // change the directory receiving this cursor while the capture owns its lineage pin.
+        capture.commit(&id(2)).await.unwrap();
+        assert!(futures::poll!(&mut replacement).is_pending());
+        drop(capture);
+        let replacement = replacement.await.unwrap();
+        std::fs::remove_dir_all(local.sandboxes_dir().join("worker")).unwrap();
+        sandbox::Entity::delete_by_id(original)
+            .exec(local.db().await.unwrap().write())
+            .await
+            .unwrap();
+        source(&local, "worker", Some(&id(3))).await;
+        drop(replacement);
+
+        let next = begin(&local, "worker").await.unwrap();
+        assert_eq!(next.parent, Some(id(3)));
+        assert!(
+            !local
+                .sandboxes_dir()
+                .join("worker/snapshot-lineage.json")
+                .exists()
         );
     }
 

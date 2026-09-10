@@ -131,17 +131,6 @@ All requested members are validated before publication. A batch with one tip fol
 ## Capture from the SDK
 
 <CodeGroup>
-```rust Rust
-use microsandbox::Sandbox;
-
-let h = Sandbox::get("baseline").await?;
-
-// Installs in baseline's group; snap.path() is the exact artifact directory.
-let snap = h.snapshot("after-pip-install").await?;
-
-println!("{}", snap.digest()); // sha256:...
-```
-
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
@@ -151,6 +140,17 @@ const h = await Sandbox.get("baseline");
 const snap = await h.snapshot("after-pip-install");
 
 console.log(snap.digest); // sha256:...
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let h = Sandbox::get("baseline").await?;
+
+// Installs in baseline's group; snap.path() is the exact artifact directory.
+let snap = h.snapshot("after-pip-install").await?;
+
+println!("{}", snap.digest()); // sha256:...
 ```
 
 ```python Python
@@ -183,7 +183,6 @@ msb snapshot create ready-with-label --from-sandbox baseline --label stage=ready
 # Use another group-store root: /mnt/big/baseline/snap_<id>/
 msb snapshot create after-pip-install --from-sandbox baseline --dest-dir /mnt/big
 ```
-
 </CodeGroup>
 
 The default disk mode captures only the owned managed or flat root disk. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Direct `--archive ./saved.msb` capture works in either mode without installing a snapshot directory.
@@ -193,19 +192,19 @@ The default disk mode captures only the owned managed or flat root disk. Live ca
 Use full mode when the child must continue the captured processes and memory instead of cold-booting from disk state:
 
 <CodeGroup>
+```typescript TypeScript
+const snap = await Snapshot.builder("worker-checkpoint")
+  .fromSandbox("worker")
+  .full()
+  .create();
+```
+
 ```rust Rust
 let snap = Snapshot::builder("worker-checkpoint")
     .from_sandbox("worker")
     .full()
     .create()
     .await?;
-```
-
-```typescript TypeScript
-const snap = await Snapshot.builder("worker-checkpoint")
-  .fromSandbox("worker")
-  .full()
-  .create();
 ```
 
 ```python Python
@@ -232,6 +231,8 @@ msb snapshot create worker-checkpoint --from-sandbox worker --full
 Capture briefly quiesces the VM, publishes one same-epoch checkpoint, and returns the source to running state. The first capture records a full memory generation; later captures may reuse unchanged objects through retained dirty tracking while every published manifest still describes complete logical memory.
 
 Creating a sandbox from the resulting snapshot restores into a child-owned disk generation and installs a fresh VM Generation ID. Before your processes continue, the guest kernel corrects its wall clock and acknowledges activation; the runtime then thaws the workload and publishes network access last. Full restore requires the matching clock-aware kernel. Older development full snapshots must be recaptured, or restored with `--disk-only` where supported. Restore is eager: the archive or installed artifact is no longer needed after construction succeeds.
+
+Full restore preserves captured processes, but not the host connections that controlled them. Open a new client connection after restore. Inherited process output is drained without being sent to new clients; host filesystem and TCP transfers must be restarted.
 
 ## Export changes and compact a disk chain
 
@@ -262,6 +263,14 @@ Current development limitation: successive disk-only captures reassign layer IDs
 When the archive is the desired result, capture straight into it instead of creating an installed snapshot directory and then saving a second copy:
 
 <CodeGroup>
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+const archive = await Snapshot.builder("after-pip-install")
+  .fromSandbox("baseline")
+  .createArchive("/tmp/after-pip-install.tar.zst");
+```
+
 ```rust Rust
 use microsandbox::Snapshot;
 
@@ -269,14 +278,6 @@ let archive = Snapshot::builder("after-pip-install")
     .from_sandbox("baseline")
     .create_archive("/tmp/after-pip-install.msb", false)
     .await?;
-```
-
-```typescript TypeScript
-import { Snapshot } from "microsandbox";
-
-const archive = await Snapshot.builder("after-pip-install")
-  .fromSandbox("baseline")
-  .createArchive("/tmp/after-pip-install.msb");
 ```
 
 ```python Python
@@ -325,6 +326,14 @@ Direct capture records the pinned image identity, but does not bundle the cached
 A snapshot already pins its image, so booting from one is mutually exclusive with the image source:
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const sb = await Sandbox.builder("worker")
+    .fromSnapshot("baseline:after-pip-install")
+    .create();
+```
+
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -332,14 +341,6 @@ let sb = Sandbox::builder("worker")
     .from_snapshot("baseline:after-pip-install")
     .create()
     .await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-const sb = await Sandbox.builder("worker")
-    .fromSnapshot("baseline:after-pip-install")
-    .create();
 ```
 
 ```python Python
@@ -358,7 +359,6 @@ sb, err := m.CreateSandbox(ctx, "worker",
 ```bash CLI
 msb run --name worker --from-snapshot baseline:after-pip-install -- python -V
 ```
-
 </CodeGroup>
 
 For disk state, creation cold-boots from a child-owned writable copy. For checkpoint state, creation eagerly restores the captured execution into child-owned state.
@@ -368,19 +368,19 @@ A full restore does not also run the image CMD: the processes in memory are alre
 To discard the captured execution and cold-boot only its filesystem state, select disk-only restore:
 
 <CodeGroup>
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+  .fromSnapshot("worker:worker-checkpoint")
+  .diskOnly()
+  .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .from_snapshot("worker:worker-checkpoint")
     .disk_only()
     .create()
     .await?;
-```
-
-```typescript TypeScript
-const sb = await Sandbox.builder("worker")
-  .fromSnapshot("worker:worker-checkpoint")
-  .diskOnly()
-  .create();
 ```
 
 ```python Python
@@ -408,17 +408,6 @@ Disk-only restore copies only the checkpoint's disk chain, creates a fresh writa
 ## List, inspect, and remove
 
 <CodeGroup>
-```rust Rust
-use microsandbox::Snapshot;
-
-let all = Snapshot::list().await?; // Indexed snapshots
-let h = Snapshot::get("baseline:after-pip-install").await?; // By group/member selector or explicit path
-println!("{} ({})", h.name().unwrap_or("-"), h.digest());
-
-Snapshot::remove("baseline:after-pip-install", false).await?;
-Snapshot::reindex("/data/snapshots").await?;
-```
-
 ```typescript TypeScript
 import { Snapshot } from "microsandbox";
 
@@ -428,6 +417,17 @@ console.log(`${h.name ?? "-"} (${h.digest})`);
 
 await Snapshot.remove("baseline:after-pip-install");
 await Snapshot.reindex();                               // Default snapshots directory
+```
+
+```rust Rust
+use microsandbox::Snapshot;
+
+let all = Snapshot::list().await?; // Indexed snapshots
+let h = Snapshot::get("baseline:after-pip-install").await?; // By group/member selector or explicit path
+println!("{} ({})", h.name().unwrap_or("-"), h.digest());
+
+Snapshot::remove("baseline:after-pip-install", false).await?;
+Snapshot::reindex("/data/snapshots").await?;
 ```
 
 ```python Python
@@ -466,7 +466,6 @@ msb snapshot rm baseline:after-pip-install --force
 # Rebuild the index from artifacts on disk
 msb snapshot reindex
 ```
-
 </CodeGroup>
 
 `list` uses a rebuildable local index; group/head selection comes from the artifacts on disk. If the index gets out of sync, `reindex` rebuilds it. Global ID or digest lookup refuses ambiguity when several local copies exist—use a group selector or explicit path. `--force` does not bypass the current-head removal guard.
@@ -515,6 +514,19 @@ snapshots/
 By default, snapshot creation records structural metadata without hashing the writable layer. Opt in when you need a persistent content check. Current snapshots use a fixed 64 KiB-leaf BLAKE3 Merkle tree: known sparse holes collapse into precomputed zero subtrees, while allocated bytes are read and hashed.
 
 <CodeGroup>
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+// Compute and record an integrity hash at create time
+const snap = await Snapshot.builder("after-pip-install")
+  .fromSandbox("baseline")
+  .recordIntegrity()
+  .create();
+
+// Verify a snapshot's recorded integrity on demand
+const report = await snap.verify();
+```
+
 ```rust Rust
 use microsandbox::Snapshot;
 
@@ -528,19 +540,6 @@ let snap = Snapshot::builder("after-pip-install")
 // Verify a snapshot's recorded integrity on demand
 let report = snap.verify().await?;
 
-```
-
-```typescript TypeScript
-import { Snapshot } from "microsandbox";
-
-// Compute and record an integrity hash at create time
-const snap = await Snapshot.builder("after-pip-install")
-  .fromSandbox("baseline")
-  .recordIntegrity()
-  .create();
-
-// Verify a snapshot's recorded integrity on demand
-const report = await snap.verify();
 ```
 
 ```python Python
@@ -579,7 +578,6 @@ msb snapshot create after-pip-install --from-sandbox baseline --integrity
 msb snapshot verify baseline:after-pip-install
 msb snapshot inspect baseline:after-pip-install --verify
 ```
-
 </CodeGroup>
 
 `msb snapshot save` and `msb snapshot load` preserve recorded integrity but do not silently execute it. They still enforce the archive grammar, path confinement, entry sizes, descriptor identities, and ordinary archive-entry hashes. Run `msb snapshot verify` explicitly after receiving a snapshot when your workflow requires an independent payload scan. Released `msb-sparse-sha256-v1` descriptors remain readable and verifiable, but ordinary open, boot, save, load, and upgrade paths do not pay their full logical-size SHA cost.
@@ -590,3 +588,7 @@ msb snapshot inspect baseline:after-pip-install --verify
 - **Portable scratch state.** Capture a sandbox after a long setup, hand the artifact to a teammate or push it to shared storage, and let them boot from the same starting point.
 - **Local fork-by-copy.** Multiple sandboxes from one snapshot are independent; each copy of the upper layer diverges on its own.
 - **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, `msb rm` the broken one and `msb run --from-snapshot` from the pre-migration artifact.
+
+## Reference
+
+For exact snapshot APIs, see [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), or [Go](/sdk/go/snapshots). The CLI examples above cover creating, inspecting, transferring, and verifying snapshots; run `msb snapshot --help` for the complete command surface.

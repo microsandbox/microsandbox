@@ -1,9 +1,18 @@
-export type SandboxStatus = "running" | "paused" | "stopped" | "crashed" | "draining";
+export type SandboxStatus =
+  | "created"
+  | "starting"
+  | "running"
+  | "draining"
+  | "paused"
+  | "stopped"
+  | "crashed";
 
 export const SandboxStatuses: readonly SandboxStatus[] = [
+  "created",
+  "starting",
   "running",
+  "draining",
   "paused",
   "stopped",
   "crashed",
-  "draining",
 ] as const;

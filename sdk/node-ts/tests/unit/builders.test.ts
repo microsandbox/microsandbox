@@ -12,6 +12,7 @@ import {
   RootDiskBuilder,
   Sandbox,
   SecretBuilder,
+  SecretSource,
   Stdin,
 } from "../../dist/index.js";
 
@@ -386,6 +387,60 @@ describe("SandboxBuilder.build", () => {
     expect((cfg.resources as { thp: string }).thp).toBe("always");
   });
 
+  it("renders a configured outbound proxy in canonical form", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .proxy((p) => p.socks5("127.0.0.1:1080"))
+      .network((n) => n.maxConnections(64))
+      .build();
+
+    expect(cfg.network).toMatchObject({
+      outboundProxy: {
+        protocol: "socks5",
+        address: "127.0.0.1:1080",
+      },
+      maxConnections: 64,
+    });
+  });
+
+  it("renders SOCKS5 credentials in canonical form", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .proxy((p) =>
+        p
+          .socks5("127.0.0.1:1080")
+          .credentials("sandbox", SecretSource.env("SOCKS5_PASSWORD")),
+      )
+      .build();
+
+    expect(cfg.network?.outboundProxy).toEqual({
+      protocol: "socks5",
+      address: "127.0.0.1:1080",
+      credentials: {
+        username: "sandbox",
+        password: {
+          kind: "env",
+          var: "SOCKS5_PASSWORD",
+        },
+      },
+    });
+  });
+
+  it("renders a SOCKS4 proxy with an optional user ID", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .proxy((p) => p.socks4("127.0.0.1:1080").userId("sandbox"))
+      .build();
+
+    expect(cfg.network).toMatchObject({
+      outboundProxy: {
+        protocol: "socks4",
+        address: "127.0.0.1:1080",
+        userId: "sandbox",
+      },
+    });
+  });
+
   it("collects volumes through the MountBuilder callback", async () => {
     const cfg = await Sandbox.builder("x")
       .image("alpine")
@@ -561,6 +616,13 @@ describe("InterfaceOverridesBuilder", () => {
     expect(cfg.interface.ipv4Pool).toBe("172.31.240.0/24");
     expect(cfg.interface.ipv6Pool).toBe("fd7a:115c:a1e0:100::/56");
   });
+
+  it("sets strict hostname policy mode", () => {
+    const cfg = new NetworkBuilder().strict(true).build() as {
+      strict: boolean;
+    };
+    expect(cfg.strict).toBe(true);
+  });
 });
 
 describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
@@ -580,44 +642,35 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
 });
 
 describe("NetworkBuilder secret passthrough", () => {
-  it("builds global passthrough violation policy", () => {
+  it("builds a global blocking action", () => {
     const cfg = new NetworkBuilder()
-      .onSecretViolation((v) =>
-        v
-          .blockAndTerminate()
-          .passthroughHost("api.anthropic.com")
-          .passthroughHostPattern("*.anthropic.com"),
-      )
+      .secretViolationAction("block-and-terminate")
       .build() as {
       secrets: {
-        onViolation: {
-          passthrough: unknown[];
-        };
+        violationAction: string;
       };
     };
 
-    expect(cfg.secrets.onViolation).toEqual({
-      passthrough: [
-        { exact: "api.anthropic.com" },
-        { wildcard: "*.anthropic.com" },
-      ],
-    });
+    expect(cfg.secrets.violationAction).toBe("block-and-terminate");
   });
 
-  it("builds per-secret passthrough violation policy", () => {
+  it("builds independent per-secret policies", () => {
     const secret = new SecretBuilder()
       .env("API_KEY")
       .value("sk-abc")
-      .allowHost("api.github.com")
-      .onViolation((v) =>
-        v
-          .blockAndLog()
-          .passthroughHost("api.anthropic.com")
-          .passthroughHostPattern("*.anthropic.com"),
-      )
+      .allow("api.github.com")
+      .allowPassthroughFor("api.anthropic.com")
+      .allowPassthroughFor("*.anthropic.com")
+      .substituteInBody(true)
+      .violationAction("block-and-log")
       .build();
 
     expect(secret.allowedHosts).toEqual(["api.github.com"]);
+    expect(secret.passthroughHosts).toEqual([
+      "api.anthropic.com",
+      "*.anthropic.com",
+    ]);
+    expect(secret.substitution.body).toBe(true);
   });
 });
 
@@ -654,6 +707,22 @@ describe("NetworkBuilder ports", () => {
       guestPort: 53,
       protocol: "udp",
     });
+  });
+});
+
+describe("SandboxBuilder outbound proxy", () => {
+  it("rejects invalid addresses", () => {
+    expect(() =>
+      Sandbox.builder("x").proxy((p) => p.socks5("not-an-address")),
+    ).toThrow(/invalid SOCKS5 proxy address/);
+  });
+
+  it("rejects invalid SOCKS4 user IDs", () => {
+    expect(() =>
+      Sandbox.builder("x").proxy((p) =>
+        p.socks4("127.0.0.1:1080").userId(""),
+      ),
+    ).toThrow(/invalid SOCKS4 user ID/);
   });
 });
 

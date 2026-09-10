@@ -774,6 +774,7 @@ async fn capture_full_snapshot(
 
 /// Build the artifact contents (upper copy, integrity, descriptor) into
 /// `dir`. Pure staging: the caller promotes or discards the directory.
+#[allow(clippy::too_many_arguments)]
 async fn build_artifact(
     dir: &std::path::Path,
     disk: &SnapshotDiskClosure,

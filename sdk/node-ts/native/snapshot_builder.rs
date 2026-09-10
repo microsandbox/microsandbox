@@ -17,6 +17,8 @@ pub struct JsSnapshotConfig {
     pub group: Option<String>,
     pub source_sandbox: Option<String>,
     pub dest_dir: Option<String>,
+    // Keep the public name stable when napi-rs renders this renamed nested object.
+    #[napi(ts_type = "Array<SnapshotLabel>")]
     pub labels: Vec<JsSnapshotLabel>,
     pub force: bool,
     pub record_integrity: bool,
