@@ -1,6 +1,7 @@
 """Opt-in live CoW lifecycle check using a matching runtime/kernel bundle."""
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -24,10 +25,12 @@ async def test_cow_resident_capture_and_child_isolation():
         branched = await paused.branch(f"{name}-paused-branch")
         branches.append(branched)
         assert (await branched.exec("cat", ["/dev/shm/sdk-marker"])).stdout_text.strip() == "source"
-        await Snapshot.create(f"{name}-full", from_sandbox=name, full=True)
+        snapshot = await Snapshot.create(f"{name}-full", from_sandbox=name, full=True)
+        assert (Path(snapshot.path) / "snapshot.json").is_file()
         await paused.resume()
+        # The returned artifact path selects the exact member in its snapshot group.
         child = await Sandbox.create(
-            f"{name}-child", from_snapshot=f"{name}-full", forked=True
+            f"{name}-child", from_snapshot=snapshot.path, forked=True
         )
         result = await child.exec("cat", ["/dev/shm/sdk-marker"])
         assert result.stdout_text.strip() == "source"

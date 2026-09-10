@@ -40,6 +40,14 @@ def branch(source, child, label):
     assert exec_guest(child, "cat /dev/shm/branch-marker", label + "-ready") == "source"
 
 
+def capture(source, member, label):
+    result = run(label, "snapshot", "create", member, "--from-sandbox", source, "--full")
+    # A member's bare alias no longer identifies its installed group; use the returned path.
+    path = Path(result.stdout.strip().splitlines()[-1])
+    assert (path / "snapshot.json").is_file(), path
+    return str(path)
+
+
 def benchmark(source):
     # One source and at most one measured child: do not let accumulating VMs distort later
     # samples. Each CLI return includes activation; first guest command is recorded separately.
@@ -52,12 +60,12 @@ def benchmark(source):
     saved = prefix + "-warm"
     if os.environ.get("STACK8_BENCH_COMPACT") == "1":
         run("setup-compact-snapshot", "modify", source, "--compact", "--format", "json")
-    run("capture-warm-source", "snapshot", "create", saved, "--from-sandbox", source, "--full")
+    saved_path = capture(source, saved, "capture-warm-source")
     for mode in ("forked", "eager"):
         for i in range(8):
             child = prefix + f"-{mode}-{i}"
             names.append(child)
-            run(f"{mode}-restore-{i}", "create", "--name", child, "--from-snapshot", saved,
+            run(f"{mode}-restore-{i}", "create", "--name", child, "--from-snapshot", saved_path,
                 *(["--forked"] if mode == "forked" else []))
             assert exec_guest(child, "cat /dev/shm/branch-marker", f"{mode}-ready-{i}") == "source"
             run(f"stop-{mode}-{i}", "stop", child)
@@ -67,8 +75,8 @@ def benchmark(source):
         saved = prefix + f"-full-{i}"
         child = prefix + f"-durable-{i}"
         names.append(child)
-        run(f"pipeline-capture-{i}", "snapshot", "create", saved, "--from-sandbox", source, "--full")
-        run(f"pipeline-restore-{i}", "create", "--name", child, "--from-snapshot", saved, "--forked")
+        saved_path = capture(source, saved, f"pipeline-capture-{i}")
+        run(f"pipeline-restore-{i}", "create", "--name", child, "--from-snapshot", saved_path, "--forked")
         assert exec_guest(child, "cat /dev/shm/branch-marker", f"pipeline-ready-{i}") == "source"
         run(f"stop-pipeline-{i}", "stop", child)
 
@@ -113,10 +121,10 @@ try:
     # Compare durable capture+forked-child against the same source and readiness endpoint.
     for i in range(3):
         snap = prefix + f"-saved-{i}"
-        run(f"full-capture-{i}", "snapshot", "create", snap, "--from-sandbox", source, "--full")
+        snap_path = capture(source, snap, f"full-capture-{i}")
         name = prefix + f"-restored-{i}"
         names.append(name)
-        run(f"forked-restore-{i}", "create", "--name", name, "--from-snapshot", snap, "--forked")
+        run(f"forked-restore-{i}", "create", "--name", name, "--from-snapshot", snap_path, "--forked")
         assert exec_guest(name, "cat /dev/shm/branch-marker", f"restore-ready-{i}") == "source"
     if os.environ.get("STACK8_MAINTENANCE") == "1" and not layout.startswith("tmpfs"):
         run("grow-source", "modify", source, "--root-disk", "768M", "--format", "json")

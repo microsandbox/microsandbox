@@ -1392,6 +1392,40 @@ jobs:
           scripts/smoke/cli/image-archive.sh
           scripts/smoke/cli/split-irqchip-bind-net.sh
 
+      - name: Snapshot smoke runner unit tests
+        run: python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
+
+      - name: Snapshot and branch live smoke
+        # The short operation deadline excludes image setup and bounded cleanup.
+        # Leave both layouts enough failure-path time to stop VMs and save evidence.
+        timeout-minutes: 15
+        env:
+          MSB_LIBKRUNFW_PATH: ${{ github.workspace }}/build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
+          MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
+          LD_LIBRARY_PATH: ${{ github.workspace }}/build
+        run: |
+          status=0
+          # Short isolated homes avoid Unix socket limits and cross-layout reuse.
+          # Run both even if one fails so the artifact reports retain both outcomes.
+          for layout in managed flat; do
+            python3 scripts/smoke/cli/snapshot-branch.py \
+              --binary "${{ github.workspace }}/build/msb" \
+              --output "/tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-$layout" \
+              --layout "$layout" || status=$?
+          done
+          exit "$status"
+
+      - name: Upload snapshot smoke reports and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: snapshot-branch-smoke-linux-x86_64
+          # Keep text evidence, not the potentially large guest RAM/disk artifacts.
+          path: |
+            /tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-*/report.json
+            /tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-*/logs/*.log
+          if-no-files-found: warn
+
       - name: Disk usage
         if: always()
         run: scripts/ci/clean-runner-disk.sh

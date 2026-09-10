@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -58,13 +59,18 @@ func TestCowResidentCapture(t *testing.T) {
 	if strings.TrimSpace(branchResult.Stdout()) != "source" {
 		t.Fatal("branch lost captured RAM")
 	}
-	if _, err := Snapshot.Create(ctx, SnapshotCreateOptions{Name: name + "-full", FromSandbox: name, Full: true}); err != nil {
+	snapshot, err := Snapshot.Create(ctx, SnapshotCreateOptions{Name: name + "-full", FromSandbox: name, Full: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(snapshot.Path(), "snapshot.json")); err != nil {
 		t.Fatal(err)
 	}
 	if err := paused.Resume(ctx); err != nil {
 		t.Fatal(err)
 	}
-	child, err := CreateSandbox(ctx, name+"-child", WithFromSnapshot(name+"-full"), WithForked())
+	// The returned artifact path selects the exact member in its snapshot group.
+	child, err := CreateSandbox(ctx, name+"-child", WithFromSnapshot(snapshot.Path()), WithForked())
 	if err != nil {
 		t.Fatal(err)
 	}

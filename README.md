@@ -307,7 +307,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 > ```
 >
 > ```sh
-> # Fork a running sandbox. Take a new path.
+> # Fork a running sandbox.
 > msb branch app --name experiment
 > msb exec experiment -- python -c "print('An independent copy!')"
 > msb branch experiment --name another-experiment
