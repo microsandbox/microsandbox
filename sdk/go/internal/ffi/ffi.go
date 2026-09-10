@@ -1163,11 +1163,31 @@ const fsStreamBufSize = 6 << 20
 const logsBufSize = 48 << 20
 
 // Error is the typed error surfaced across the FFI boundary. The Rust side
-// serialises {kind, message} JSON; this type unmarshals it. The public SDK
+// serialises {kind, message} JSON with optional recovery metadata; this type unmarshals it. The public SDK
 // maps Kind back into microsandbox.ErrorKind.
 type Error struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
+	Kind     string                         `json:"kind"`
+	Message  string                         `json:"message"`
+	Recovery *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+}
+
+// SnapshotSourceRecoveryDetails preserves native recovery metadata across the FFI.
+type SnapshotSourceRecoveryDetails struct {
+	SourceSandbox    string                     `json:"source_sandbox"`
+	CheckpointID     string                     `json:"checkpoint_id"`
+	CheckpointRoot   string                     `json:"checkpoint_root"`
+	CheckpointPath   string                     `json:"checkpoint_path"`
+	Artifact         *PublishedSnapshotArtifact `json:"artifact"`
+	Detail           string                     `json:"detail"`
+	PublicationError *string                    `json:"publication_error"`
+}
+
+// PublishedSnapshotArtifact names a completed installed snapshot or archive.
+type PublishedSnapshotArtifact struct {
+	Kind       string `json:"kind"`
+	Path       string `json:"path"`
+	SnapshotID string `json:"snapshot_id"`
+	Digest     string `json:"digest"`
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -1197,6 +1217,7 @@ const (
 	KindSnapshotImageMissing   = "snapshot_image_missing"
 	KindSnapshotIntegrity      = "snapshot_integrity"
 	KindSnapshotMigration      = "snapshot_migration"
+	KindSnapshotSourceRecovery = "snapshot_source_recovery"
 	KindPatchFailed            = "patch_failed"
 	KindMetricsDisabled        = "metrics_disabled"
 	KindMetricsUnavailable     = "metrics_unavailable"

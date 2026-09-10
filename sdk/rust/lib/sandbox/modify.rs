@@ -102,6 +102,12 @@ struct LiveControl {
     secrets: bool,
 }
 
+/// A published runtime checkpoint and the independent outcome of source recovery.
+pub(crate) struct CheckpointCaptureOutcome {
+    pub(crate) checkpoint: microsandbox_runtime::control::CheckpointControlState,
+    pub(crate) recovery_error: Option<String>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -992,14 +998,13 @@ pub(crate) async fn control_disk_compact(
 
 /// Capture one full checkpoint through the running sandbox's existing control endpoint.
 ///
-/// A post-publication source-resume failure still returns the immutable checkpoint so the caller
-/// can finish publishing the requested snapshot. The runtime diagnostic is logged and the source
-/// remains visibly non-running rather than losing the completed capture.
+/// A published checkpoint may coexist with failed source recovery. Preserve both facts so the
+/// snapshot caller can publish the artifact before reporting a typed partial failure.
 pub(crate) async fn control_checkpoint_create(
     local: &crate::backend::LocalBackend,
     name: &str,
     checkpoint_id: String,
-) -> MicrosandboxResult<microsandbox_runtime::control::CheckpointControlState> {
+) -> MicrosandboxResult<CheckpointCaptureOutcome> {
     let capabilities =
         control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
     if !capabilities
@@ -1023,22 +1028,21 @@ pub(crate) async fn control_checkpoint_create(
         format!("{}\n", serde_json::to_string(&request)?),
     )
     .await?;
-    checkpoint_response(name, response)
+    checkpoint_response(response)
 }
 
 fn checkpoint_response(
-    name: &str,
     response: microsandbox_runtime::control::ControlResponse,
-) -> MicrosandboxResult<microsandbox_runtime::control::CheckpointControlState> {
+) -> MicrosandboxResult<CheckpointCaptureOutcome> {
     if let Some(checkpoint) = response.checkpoint {
-        if !response.ok {
-            tracing::warn!(
-                sandbox = name,
-                error = response.error.as_deref().unwrap_or("source resume failed"),
-                "checkpoint published but the source runtime did not return to running"
-            );
-        }
-        return Ok(checkpoint);
+        return Ok(CheckpointCaptureOutcome {
+            checkpoint,
+            recovery_error: (!response.ok).then(|| {
+                response
+                    .error
+                    .unwrap_or_else(|| "source recovery failed without a runtime diagnostic".into())
+            }),
+        });
     }
     Err(crate::MicrosandboxError::Runtime(format!(
         "full checkpoint refused: {}",
@@ -2709,8 +2713,19 @@ mod tests {
             control_checkpoint_create(&second, "worker", "second-checkpoint".into())
                 .await
                 .unwrap();
-        assert_eq!(first_capture.path, std::path::Path::new("/capture/first"));
-        assert_eq!(second_capture.path, std::path::Path::new("/capture/second"));
+        assert_eq!(
+            first_capture.checkpoint.path,
+            std::path::Path::new("/capture/first")
+        );
+        assert!(first_capture.recovery_error.is_none());
+        assert_eq!(
+            second_capture.checkpoint.path,
+            std::path::Path::new("/capture/second")
+        );
+        assert_eq!(
+            second_capture.recovery_error.as_deref(),
+            Some("source resume failed")
+        );
         for server in servers {
             server.await.unwrap();
         }
@@ -2739,6 +2754,57 @@ mod tests {
             assert_eq!(patch.max_memory_mib, Some(8192));
             assert_eq!(patch.root_disk_size_mib, Some(4096));
         }
+    }
+
+    fn checkpoint_reply(ok: bool) -> microsandbox_runtime::control::ControlResponse {
+        microsandbox_runtime::control::ControlResponse {
+            ok,
+            checkpoint: Some(microsandbox_runtime::control::CheckpointControlState {
+                checkpoint_id: "checkpoint_test".into(),
+                checkpoint_root: format!("sha256:{}", "a".repeat(64)),
+                path: "/runtime/checkpoint_test".into(),
+                memory_mode: "full".into(),
+                memory_logical_bytes: 4096,
+                memory_emitted_bytes: 4096,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn checkpoint_reply_preserves_publication_and_failed_source_recovery() {
+        for detail in ["resume failed", "thaw timed out; re-pause failed"] {
+            let mut response = checkpoint_reply(false);
+            response.error = Some(detail.into());
+            let outcome = checkpoint_response(response).unwrap();
+            assert_eq!(outcome.checkpoint.checkpoint_id, "checkpoint_test");
+            assert_eq!(outcome.recovery_error.as_deref(), Some(detail));
+        }
+    }
+
+    #[test]
+    fn checkpoint_reply_preserves_success_without_requesting_another_resume() {
+        // The runtime alone restores the prior execution state. This also covers its successful
+        // capture of an intentionally paused source; the SDK must not initiate another resume.
+        let outcome = checkpoint_response(checkpoint_reply(true)).unwrap();
+        assert!(outcome.recovery_error.is_none());
+    }
+
+    #[test]
+    fn checkpoint_reply_never_invents_a_published_artifact() {
+        for ok in [false, true] {
+            let mut response = checkpoint_reply(ok);
+            response.checkpoint = None;
+            assert!(matches!(
+                checkpoint_response(response),
+                Err(crate::MicrosandboxError::Runtime(_))
+            ));
+        }
+        let outcome = checkpoint_response(checkpoint_reply(false)).unwrap();
+        assert_eq!(
+            outcome.recovery_error.as_deref(),
+            Some("source recovery failed without a runtime diagnostic")
+        );
     }
 
     #[test]
@@ -3258,7 +3324,9 @@ mod tests {
         let base = sandbox.path().join("rootfs.raw");
         let head = sandbox.path().join("root-active.qcow2");
         std::fs::write(&base, vec![0; 4096]).unwrap();
+        // Checkpoint chains can grow here; malformed heads must still fail before any write.
         std::fs::write(&head, b"qcow").unwrap();
+        let head_before = std::fs::read(&head).unwrap();
         let state = serde_json::json!({
             "schema": "microsandbox.runtime-root-disk/1",
             "volume_id": "vol_00000000000000000000000000000000",
@@ -3270,7 +3338,7 @@ mod tests {
                     "layer_id": "layer_00000000000000000000000000000001",
                     "path": base,
                     "format": "raw",
-                    "integrity_root": "blake3:sealed"
+                    "integrity_root": microsandbox_image::checkpoint::sparse_file_integrity(&base).unwrap().root
                 },
                 {
                     "layer_id": "layer_00000000000000000000000000000002",
@@ -3286,12 +3354,21 @@ mod tests {
         )
         .unwrap();
 
-        assert!(microsandbox_runtime::checkpoint::grow_stopped_root(&runtime, 8192).is_err());
+        let error =
+            microsandbox_runtime::checkpoint::grow_stopped_root(&runtime, 8192).unwrap_err();
+        let expected = microsandbox_image::checkpoint::layer_capacities(vec![
+            microsandbox_image::checkpoint::CompactLayer {
+                path: head.clone(),
+                qcow2: true,
+            },
+        ])
+        .unwrap_err();
+        assert_eq!(error, expected.to_string());
+        assert_eq!(std::fs::read(&base).unwrap(), vec![0; 4096]);
+        assert_eq!(std::fs::read(&head).unwrap(), head_before);
         assert_eq!(
-            std::fs::metadata(sandbox.path().join("rootfs.raw"))
-                .unwrap()
-                .len(),
-            4096
+            std::fs::read(runtime.join("root-disk.json")).unwrap(),
+            serde_json::to_vec(&state).unwrap()
         );
     }
 

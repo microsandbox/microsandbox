@@ -11,7 +11,7 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
 #[cfg(target_os = "macos")]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(target_os = "macos")]
 use std::{
     ffi::{CStr, CString, OsStr},
@@ -242,8 +242,7 @@ fn capture_inodes(fs: &PassthroughFs) -> io::Result<Vec<InodeState>> {
             Vec::new()
         } else {
             let fd = open_macos_inode_for_path(fs, inode_id)?;
-            let path = fd_path(fd)?;
-            unsafe { libc::close(fd) };
+            let path = fd_path(fd.as_raw_fd())?;
             relative_components(&root_path, &path)?
         };
         states.push(InodeState {
@@ -615,17 +614,52 @@ fn fd_path(fd: RawFd) -> io::Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_macos_inode_for_path(fs: &PassthroughFs, inode_id: u64) -> io::Result<RawFd> {
+fn open_macos_inode_for_path(fs: &PassthroughFs, inode_id: u64) -> io::Result<OwnedFd> {
+    let (dev, ino) = {
+        let inodes = fs.inodes.read().unwrap();
+        let data = inodes.get(&inode_id).ok_or_else(platform::ebadf)?;
+        (data.dev, data.ino)
+    };
+    let mut failures = Vec::new();
     for flags in [
         libc::O_RDONLY,
         libc::O_RDONLY | libc::O_DIRECTORY,
         libc::O_SYMLINK,
     ] {
-        if let Ok(fd) = inode::open_inode_fd(fs, inode_id, flags) {
-            return Ok(fd);
+        let opened = if flags == libc::O_SYMLINK {
+            // Open the link object, never its target. Darwin's no-follow flags can
+            // conflict with O_SYMLINK; this trusted /.vol identity path has no
+            // guest-provided components (as in inode's metadata-stat reopen).
+            let path = inode::vol_path(dev, ino);
+            let fd = unsafe { libc::open(path.as_ptr(), flags | libc::O_CLOEXEC) };
+            if fd < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(fd)
+            }
+        } else {
+            inode::open_inode_fd(fs, inode_id, flags)
+        };
+        match opened {
+            Ok(fd) => {
+                // Own the descriptor before any fallible identity/path checks.
+                let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                let stat = platform::fstat(fd.as_raw_fd())?;
+                if stat.st_dev as u64 != dev || stat.st_ino != ino {
+                    return Err(invalid_state("reopened passthrough inode identity changed"));
+                }
+                return Ok(fd);
+            }
+            Err(error) => failures.push(format!("flags {flags:#x}: {error}")),
         }
     }
-    Err(invalid_state("cannot reopen tracked passthrough inode"))
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "cannot reopen tracked passthrough inode {inode_id} ({dev}:{ino}): {}",
+            failures.join("; ")
+        ),
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -748,6 +782,53 @@ mod tests {
         assert!(destination.dir_handles.read().unwrap().is_empty());
         assert_eq!(destination.next_inode.load(Ordering::Acquire), 3);
         assert_eq!(destination.next_handle.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn capture_preserves_symlink_objects_without_following_their_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("nested")).unwrap();
+        std::fs::write(root.path().join("nested/file"), b"inside").unwrap();
+        std::fs::write(outside.path().join("file"), b"outside").unwrap();
+        let targets = [
+            ("relative", std::path::PathBuf::from("file")),
+            ("dangling", std::path::PathBuf::from("missing")),
+            ("external", outside.path().join("file")),
+        ];
+        for (name, target) in &targets {
+            std::os::unix::fs::symlink(target, root.path().join("nested").join(name)).unwrap();
+        }
+        let source = backend(root.path());
+        source.init(FsOptions::empty()).unwrap();
+        let nested = source
+            .lookup(context(), 1, &CString::new("nested").unwrap())
+            .unwrap();
+        let links = targets
+            .iter()
+            .map(|(name, _)| {
+                source
+                    .lookup(context(), nested.inode, &CString::new(*name).unwrap())
+                    .unwrap()
+                    .inode
+            })
+            .collect::<Vec<_>>();
+        let encoded = capture(&source).unwrap();
+        let destination = backend(root.path());
+        restore(&destination, &encoded).unwrap();
+        assert_eq!(capture(&destination).unwrap(), encoded);
+        for (inode, (_, target)) in links.iter().zip(&targets) {
+            use std::os::unix::ffi::OsStrExt;
+
+            assert_eq!(
+                destination.readlink(context(), *inode).unwrap(),
+                target.as_os_str().as_bytes()
+            );
+        }
+        assert_eq!(
+            std::fs::read(outside.path().join("file")).unwrap(),
+            b"outside"
+        );
     }
 
     #[test]

@@ -43,6 +43,26 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             Err(_) => return pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
         };
 
+        if let SnapshotSourceRecovery(recovery) = &err {
+            // Keep the structured recovery locator across the native boundary. The Python class
+            // turns this internal payload into typed attributes; callers never parse the message.
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let payload = serde_json::to_string(recovery).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let details = py.import("json")?.call_method1("loads", (payload,))?;
+                let details = details.downcast::<pyo3::types::PyDict>()?;
+                errors_mod
+                    .getattr("SnapshotSourceRecoveryError")?
+                    .call((err.to_string(),), Some(details))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                // The textual fallback still contains the saved artifact locator.
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
         // Unsupported gets a Python-idiom message (`sandbox.kill()` instead of
         // `Sandbox::kill`) plus structured `operation` / `hint` attributes.
         if let Unsupported { op, reason } = &err {

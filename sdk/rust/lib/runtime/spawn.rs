@@ -4300,7 +4300,9 @@ mod tests {
         let base = temp.path().join("rootfs.raw");
         let head = temp.path().join("root-active.qcow2");
         std::fs::write(&base, vec![0; 4096]).unwrap();
+        // Valid checkpoint chains support growth; a corrupt head must fail before any write.
         std::fs::write(&head, b"qcow").unwrap();
+        let head_before = std::fs::read(&head).unwrap();
         let state = serde_json::json!({
             "schema": "microsandbox.runtime-root-disk/1",
             "volume_id": "vol_00000000000000000000000000000000",
@@ -4312,7 +4314,7 @@ mod tests {
                     "layer_id": "layer_00000000000000000000000000000001",
                     "path": base,
                     "format": "raw",
-                    "integrity_root": "blake3:sealed"
+                    "integrity_root": microsandbox_image::checkpoint::sparse_file_integrity(&base).unwrap().root
                 },
                 {
                     "layer_id": "layer_00000000000000000000000000000002",
@@ -4341,8 +4343,20 @@ mod tests {
         let error = super::prepare_oci_upper(&config, temp.path())
             .await
             .unwrap_err();
-        assert!(!error.to_string().is_empty());
-        assert_eq!(std::fs::metadata(base).unwrap().len(), 4096);
+        let expected = microsandbox_image::checkpoint::layer_capacities(vec![
+            microsandbox_image::checkpoint::CompactLayer {
+                path: head.clone(),
+                qcow2: true,
+            },
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains(&expected.to_string()));
+        assert_eq!(std::fs::read(&base).unwrap(), vec![0; 4096]);
+        assert_eq!(std::fs::read(&head).unwrap(), head_before);
+        assert_eq!(
+            std::fs::read(runtime.join("root-disk.json")).unwrap(),
+            serde_json::to_vec(&state).unwrap()
+        );
     }
 
     #[tokio::test]
