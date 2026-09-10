@@ -32,11 +32,14 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv("MSB_HOME", filepath.Join(dir, "home"))
-	guestBinary = filepath.Join(dir, "guest")
-	cmd := exec.Command("go", "build", "-o", guestBinary, "./guest")
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		panic(fmt.Sprintf("guest build: %v %s", err, out))
+	guestBinary = os.Getenv("MSB_GUEST_BINARY")
+	if guestBinary == "" {
+		guestBinary = filepath.Join(dir, "guest")
+		cmd := exec.Command("go", "build", "-o", guestBinary, "./guest")
+		cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			panic(fmt.Sprintf("guest build: %v %s", err, out))
+		}
 	}
 	fmt.Println("TEST_HOME=" + dir)
 	code := m.Run()

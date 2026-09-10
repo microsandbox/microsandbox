@@ -7,6 +7,10 @@ on:
         description: Completed Check run whose Go and runtime artifacts to validate.
         required: true
         type: string
+      go_sdk_revision:
+        description: Optional published Go SDK commit to test inside its runtime image.
+        required: false
+        type: string
   push:
     branches: [main, "releases/**"]
   pull_request:
@@ -1986,6 +1990,7 @@ jobs:
     uses: ./.github/workflows/check-go-full-snapshot.yml
     with:
       run_id: ${{ inputs.go_snapshot_run }}
+      sdk_revision: ${{ inputs.go_sdk_revision }}
     permissions:
       actions: read
       contents: read

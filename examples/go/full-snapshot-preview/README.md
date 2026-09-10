@@ -29,3 +29,10 @@ go test -v -count=1 -timeout=25m ./...
 Linux requires writable KVM access. On macOS use Apple Silicon, macOS 15+, a
 codesigned runtime and `libkrunfw.5.dylib`. The guest Go program is cross-compiled
 by `TestMain` for Linux on the host architecture. The host needs Go installed.
+
+To qualify an already published Go revision inside its matching runtime image,
+use the helper branch's manual Check workflow with `go_snapshot_run` and
+`go_sdk_revision`. It removes the local module replacement, fetches the public
+Go revision, compares the embedded FFI with the source CI artifact, and runs the
+same test matrix in Docker with KVM. The guest binary is compiled beforehand
+and supplied through `MSB_GUEST_BINARY`, so the runtime image needs no Go compiler.

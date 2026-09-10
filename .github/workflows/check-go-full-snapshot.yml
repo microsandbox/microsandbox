@@ -7,6 +7,11 @@ on:
         required: true
         type: string
 
+      sdk_revision:
+        required: false
+        type: string
+        default: ""
+
 permissions:
   actions: read
   contents: read
@@ -29,6 +34,7 @@ jobs:
           CHECK_RUN: ${{ inputs.run_id }}
         run: |
           set -euo pipefail
+          rm -f "$GITHUB_WORKSPACE/go-full-snapshot.log" "$GITHUB_WORKSPACE/go-full-snapshot-cleanup.json"
           [[ "$CHECK_RUN" =~ ^[0-9]+$ ]]
           python3 - <<'PYCODE'
           import json, os, urllib.request
@@ -102,13 +108,15 @@ jobs:
           install -m644 ffi/libmicrosandbox_go_ffi.so \
             checked/sdk/go/internal/bundle/bundles/libmicrosandbox_go_ffi-linux-amd64.so
           python3 - <<'PY'
-          import os
+          import os, re
           from pathlib import Path
           path = Path('checked/sdk/go/setup.go')
           source = path.read_text()
-          old = '"v"+sdkVersion'
-          assert source.count(old) == 1, 'Unexpected FFI cache layout'
-          path.write_text(source.replace(old, '"preview-' + os.environ['SOURCE_COMMIT'] + '"'))
+          pattern = r'libDir := filepath.Join\(dir, "lib", (?:"v"\+sdkVersion|"preview-[0-9a-f]{40}")\)'
+          source, count = re.subn(pattern,
+              'libDir := filepath.Join(dir, "lib", "preview-' + os.environ['SOURCE_COMMIT'] + '")', source)
+          assert count == 1, 'Unexpected FFI cache layout'
+          path.write_text(source)
           PY
 
       - name: Run the standalone Go project
@@ -117,17 +125,48 @@ jobs:
           MSB_PATH: ${{ github.workspace }}/runtime/msb
           MSB_LIBKRUNFW_PATH: ${{ github.workspace }}/runtime/libkrunfw.so.5.6.1
           LD_LIBRARY_PATH: ${{ github.workspace }}/runtime
+          SDK_REVISION: ${{ inputs.sdk_revision }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
         run: |
           set -euo pipefail
-          go mod edit -replace "github.com/superradcompany/microsandbox/sdk/go=$GITHUB_WORKSPACE/checked/sdk/go"
-          go test -v -count=1 -timeout=25m ./... 2>&1 | tee "$GITHUB_WORKSPACE/go-full-snapshot.log"
+          if [[ -z "$SDK_REVISION" ]]; then
+            go mod edit -replace "github.com/superradcompany/microsandbox/sdk/go=$GITHUB_WORKSPACE/checked/sdk/go"
+            go test -v -count=1 -timeout=25m ./... 2>&1 | tee "$GITHUB_WORKSPACE/go-full-snapshot.log"
+          else
+            [[ "$SDK_REVISION" =~ ^[0-9a-f]{40}$ ]]
+            go mod edit -dropreplace github.com/superradcompany/microsandbox/sdk/go
+            go get "github.com/superradcompany/microsandbox/sdk/go@$SDK_REVISION"
+            sdk_dir=$(go list -m -f '{{.Dir}}' github.com/superradcompany/microsandbox/sdk/go)
+            jq -e --arg sha "$SOURCE_COMMIT" '.source_commit == $sha' "$sdk_dir/preview.json"
+            cmp "$GITHUB_WORKSPACE/ffi/libmicrosandbox_go_ffi.so" \
+              "$sdk_dir/internal/bundle/bundles/libmicrosandbox_go_ffi-linux-amd64.so"
+            image=$(jq -r .runtime_image "$sdk_dir/preview.json")
+            container_dir=$(mktemp -d "$RUNNER_TEMP/go-snapshot-container-XXXXXX")
+            go test -c -o "$container_dir/snapshot.test" .
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$container_dir/guest" ./guest
+            mkdir "$container_dir/data"
+            docker run --rm --device /dev/kvm \
+              -v "$container_dir:/preview" -v "$container_dir/data:/tmp" \
+              -e MSB_PATH=/usr/local/bin/msb \
+              -e MSB_LIBKRUNFW_PATH=/usr/local/lib/libkrunfw.so.5.6.1 \
+              -e MSB_GUEST_BINARY=/preview/guest \
+              --entrypoint /preview/snapshot.test "$image" \
+              -test.v -test.timeout=25m 2>&1 | tee "$GITHUB_WORKSPACE/go-full-snapshot.log"
+            test_root=$(sed -n 's/^TEST_HOME=//p' "$GITHUB_WORKSPACE/go-full-snapshot.log" | head -1)
+            docker run --rm -v "$container_dir/data:/tmp" \
+              -e "MSB_HOME=$test_root/home" --entrypoint /usr/local/bin/msb "$image" \
+              list --format json | tee "$GITHUB_WORKSPACE/go-full-snapshot-cleanup.json"
+
+          fi
 
       - name: Check test VM cleanup
         if: always()
         run: |
           set -euo pipefail
           log="$GITHUB_WORKSPACE/go-full-snapshot.log"
-          if [[ -f "$log" ]]; then
+          if [[ -f "$GITHUB_WORKSPACE/go-full-snapshot-cleanup.json" ]]; then
+            jq -e 'length == 0' "$GITHUB_WORKSPACE/go-full-snapshot-cleanup.json"
+          elif [[ -f "$log" ]]; then
             test_root=$(sed -n 's/^TEST_HOME=//p' "$log" | head -1)
             if [[ -n "$test_root" ]]; then
               MSB_HOME="$test_root/home" "$GITHUB_WORKSPACE/runtime/msb" list --format json \
@@ -146,6 +185,7 @@ jobs:
           if-no-files-found: warn
 
   build-runtime-image:
+    if: inputs.sdk_revision == ''
     name: Package runtime (${{ matrix.arch }})
     needs: snapshot-project
     runs-on: ${{ matrix.runner }}
