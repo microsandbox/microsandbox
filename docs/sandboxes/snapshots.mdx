@@ -351,7 +351,7 @@ msb run --name worker --from-snapshot worker-checkpoint --disk-only
 ```
 </CodeGroup>
 
-Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The full capture freezes workloads and syncs guest filesystems before pausing the VM, so this cold-boot view is filesystem-clean.
+Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. Like a live disk snapshot, this disk-only view is crash-consistent: recent writes still buffered in guest RAM may be absent, and filesystem journal recovery may run during boot. Full restore preserves those buffers in captured RAM. Pause and full capture do not automatically sync guest filesystems; host disk flushes and durable snapshot publication are still enforced.
 
 ## List, inspect, and remove
 

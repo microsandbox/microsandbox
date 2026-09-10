@@ -640,7 +640,7 @@ impl LocalBackend {
     }
 
     /// Extract a live PID from a run record, if the process is still alive.
-    fn pid_from_run(run: Option<&run_entity::Model>) -> Option<i32> {
+    pub(super) fn pid_from_run(run: Option<&run_entity::Model>) -> Option<i32> {
         run.and_then(|model| model.pid)
             .filter(|pid| Self::pid_is_alive(*pid))
     }
@@ -792,7 +792,7 @@ impl LocalBackend {
     }
 
     /// Whether `pid` refers to a live process.
-    fn pid_is_alive(pid: i32) -> bool {
+    pub(super) fn pid_is_alive(pid: i32) -> bool {
         microsandbox_utils::process::pid_is_alive(pid)
     }
 

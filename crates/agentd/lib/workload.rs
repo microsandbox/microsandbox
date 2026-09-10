@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/microsandbox-workload";
 const FREEZE_TIMEOUT: Duration = Duration::from_secs(5);
 const FREEZE_STATE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
+const FREEZE_FAST_RECHECK_INTERVAL: Duration = Duration::from_micros(100);
+const FREEZE_FAST_RECHECK_WINDOW: Duration = Duration::from_millis(1);
 const MAX_ATTEMPT_ID_BYTES: usize = 128;
 
 //--------------------------------------------------------------------------------------------------
@@ -150,10 +152,9 @@ impl WorkloadLatch {
             attempt_id: attempt_id.to_string(),
         };
         self.freezer()?.set_frozen(true)?;
-        // Agentd itself remains outside the workload cgroup, so it can flush every mounted
-        // filesystem after user processes stop mutating them and before the host pauses the VM.
-        // `sync(2)` has no error return; completion is the durability boundary exposed by Linux.
-        unsafe { libc::sync() };
+        // This latch stops execution, not guest writeback. Full captures preserve dirty guest
+        // cache pages in RAM alongside the matching device/disk cut; disk-only extraction is
+        // crash-consistent. Host block draining and durable publication remain separate gates.
         self.state = LatchState::Frozen {
             attempt_id: attempt_id.to_string(),
         };
@@ -326,6 +327,7 @@ fn wait_for_frozen_event(
     mut wait: impl FnMut(Duration) -> io::Result<()>,
     mut now: impl FnMut() -> Instant,
 ) -> io::Result<()> {
+    let fast_until = now() + FREEZE_FAST_RECHECK_WINDOW;
     loop {
         let interrupted = match read_state() {
             Ok(state) if state == expected => return Ok(()),
@@ -333,7 +335,8 @@ fn wait_for_frozen_event(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => true,
             Err(error) => return Err(error),
         };
-        let remaining = deadline.saturating_duration_since(now());
+        let observed_at = now();
+        let remaining = deadline.saturating_duration_since(observed_at);
         if remaining.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -346,7 +349,14 @@ fn wait_for_frozen_event(
         if interrupted {
             continue;
         }
-        match wait(remaining.min(FREEZE_STATE_RECHECK_INTERVAL)) {
+        // Cgroup notifications can be delayed even after frozen=1. Brief sleeping rechecks
+        // avoid a whole millisecond of observation lag without spinning for the deadline.
+        let interval = if observed_at < fast_until {
+            FREEZE_FAST_RECHECK_INTERVAL
+        } else {
+            FREEZE_STATE_RECHECK_INTERVAL
+        };
+        match wait(remaining.min(interval)) {
             Ok(()) => {}
             // Recheck state and the original deadline after interruptions or spurious events.
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -361,13 +371,24 @@ fn wait_for_cgroup_event(fd: RawFd, remaining: Duration) -> io::Result<()> {
         events: libc::POLLPRI | libc::POLLERR,
         revents: 0,
     };
-    // A notification can wake poll immediately. The one-millisecond timeout ceiling also
-    // covers transitions whose cgroup notification is deferred by the kernel's rate limit.
-    let timeout = remaining
-        .as_nanos()
-        .div_ceil(1_000_000)
-        .min(i32::MAX as u128) as i32;
-    let result = unsafe { libc::poll(&mut event, 1, timeout) };
+    // Linux guests use ppoll so sub-millisecond waits are not rounded back up to 1 ms.
+    // Non-Linux builds only exercise the portable unit-test fallback, never a guest freezer.
+    #[cfg(target_os = "linux")]
+    let result = {
+        let timeout = libc::timespec {
+            tv_sec: remaining.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
+            tv_nsec: remaining.subsec_nanos().into(),
+        };
+        unsafe { libc::ppoll(&mut event, 1, &timeout, std::ptr::null()) }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let result = {
+        let timeout = remaining
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u128) as i32;
+        unsafe { libc::poll(&mut event, 1, timeout) }
+    };
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -486,7 +507,7 @@ mod tests {
             start + FREEZE_TIMEOUT,
             || Ok(frozen.get()),
             |remaining| {
-                assert_eq!(remaining, Duration::from_millis(1));
+                assert_eq!(remaining, FREEZE_FAST_RECHECK_INTERVAL);
                 // The state is ready but cgroup_file_notify defers its notification by
                 // roughly 10 ms. A bounded timeout observes readiness without that event.
                 frozen.set(true);
@@ -498,7 +519,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(waits.get(), 1);
-        assert_eq!(elapsed.get(), Duration::from_millis(1));
+        assert_eq!(elapsed.get(), FREEZE_FAST_RECHECK_INTERVAL);
     }
 
     #[test]
@@ -512,7 +533,13 @@ mod tests {
             |remaining| {
                 assert_eq!(
                     remaining,
-                    (Duration::from_millis(3) - elapsed.get()).min(FREEZE_STATE_RECHECK_INTERVAL)
+                    (Duration::from_millis(3) - elapsed.get()).min(
+                        if elapsed.get() < FREEZE_FAST_RECHECK_WINDOW {
+                            FREEZE_FAST_RECHECK_INTERVAL
+                        } else {
+                            FREEZE_STATE_RECHECK_INTERVAL
+                        }
+                    )
                 );
                 elapsed.set(elapsed.get() + Duration::from_millis(1));
                 Err(io::ErrorKind::Interrupted.into())
@@ -522,6 +549,35 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert_eq!(elapsed.get(), Duration::from_millis(3));
+    }
+
+    #[test]
+    fn freezer_fast_rechecks_back_off_and_respect_short_final_wait() {
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let waits = Cell::new(0);
+        let timeout = Duration::from_micros(2_050);
+        let error = wait_for_frozen_event(
+            true,
+            start + timeout,
+            || Ok(false),
+            |duration| {
+                let expected = if elapsed.get() < FREEZE_FAST_RECHECK_WINDOW {
+                    FREEZE_FAST_RECHECK_INTERVAL
+                } else {
+                    FREEZE_STATE_RECHECK_INTERVAL
+                };
+                assert_eq!(duration, expected.min(timeout - elapsed.get()));
+                elapsed.set(elapsed.get() + duration);
+                waits.set(waits.get() + 1);
+                Ok(())
+            },
+            || start + elapsed.get(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(waits.get(), 12);
+        assert_eq!(elapsed.get(), timeout);
     }
 
     #[test]

@@ -297,7 +297,9 @@ fn main() {
 
     // Handle --tree before Cli::parse() so it works even when
     // required arguments (e.g. `msb run --tree`) are missing.
-    if let Some(tree) = microsandbox_cli::tree::try_show_tree(&Cli::command()) {
+    if std::env::args_os().any(|arg| arg == "--tree")
+        && let Some(tree) = microsandbox_cli::tree::try_show_tree(&Cli::command())
+    {
         println!("{tree}");
         return;
     }
@@ -640,13 +642,19 @@ fn run_async_command_anyhow(
     // Pull and create can overlap network I/O, decompression, and progress UI.
     // Use a small-but-not-tiny worker pool so foreground UI tasks still get
     // scheduled while multiple layers are downloading and materializing.
-    let worker_threads = std::thread::available_parallelism()
-        .map(|count| count.get().clamp(4, 8))
-        .unwrap_or(4);
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_threads)
-        .enable_all()
-        .build()?;
+    // Resident control performs one IPC exchange. It needs I/O and timers, not the image
+    // pipeline's worker pool. Blocking filesystem/SQLite work keeps its normal executor.
+    let mut builder = if matches!(command, Commands::Pause(_) | Commands::Resume(_)) {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        let worker_threads = std::thread::available_parallelism()
+            .map(|count| count.get().clamp(4, 8))
+            .unwrap_or(4);
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.worker_threads(worker_threads);
+        builder
+    };
+    let runtime = builder.enable_all().build()?;
 
     runtime.block_on(async move {
         // Stale-sandbox reaping and ephemeral cleanup are owned by host

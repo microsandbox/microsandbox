@@ -21,7 +21,10 @@ impl Sandbox {
     pub async fn get_for_control(name: &str) -> MicrosandboxResult<SandboxHandle> {
         let backend = crate::backend::default_backend();
         if let Some(local) = backend.as_local() {
-            let (model, pid) = local.sandbox_handle_state(name).await?;
+            let (model, pid) = match local.try_control_handle_state(name).await? {
+                Some(target) => target,
+                None => local.sandbox_handle_state(name).await?,
+            };
             return Ok(SandboxHandle::from_local_model(backend, model, pid));
         }
         backend.sandboxes().get(backend.clone(), name).await

@@ -2615,7 +2615,9 @@ pub unsafe extern "C" fn msb_sandbox_handle_pause(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let sb = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let sb = Sandbox::get_for_control(&name)
+                .await
+                .map_err(FfiError::from)?;
             sb.pause().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
@@ -2632,7 +2634,9 @@ pub unsafe extern "C" fn msb_sandbox_handle_resume(
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
-            let sb = Sandbox::get(&name).await.map_err(FfiError::from)?;
+            let sb = Sandbox::get_for_control(&name)
+                .await
+                .map_err(FfiError::from)?;
             sb.resume().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))

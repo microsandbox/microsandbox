@@ -27,7 +27,8 @@ use microsandbox_db::entity::{
 };
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ColumnTrait, Condition, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 
 use crate::{RuntimeError, RuntimeResult};
@@ -655,7 +656,7 @@ pub async fn clear_install_exclusive_lease_idempotent(
 /// migration yet. In that case startup continues so normal migrations can
 /// create it. Once the table exists, the install-exclusive row becomes a hard
 /// refusal while unexpired.
-pub async fn refuse_if_install_exclusive_held(db: &DbWriteConnection) -> RuntimeResult<()> {
+pub async fn refuse_if_install_exclusive_held<C: ConnectionTrait>(db: &C) -> RuntimeResult<()> {
     let now = chrono::Utc::now().naive_utc();
     let lease = match lease_entity::Entity::find_by_id(lease_entity::INSTALL_EXCLUSIVE)
         .one(db)
