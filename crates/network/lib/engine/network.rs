@@ -758,8 +758,13 @@ mod tests {
 
     #[test]
     fn deferred_activation_blocks_until_released() {
-        let mut network =
-            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, false).unwrap();
+        let mut network = SmoltcpNetwork::build(
+            resolved(NetworkConfig::default()),
+            0,
+            DeploymentProfile::SingleTenant,
+            routes(true, false),
+        )
+        .unwrap();
         let handle = network.defer_activation();
         let gate = Arc::clone(network.activation_gate.as_ref().unwrap());
         let (released_tx, released_rx) = std::sync::mpsc::channel();

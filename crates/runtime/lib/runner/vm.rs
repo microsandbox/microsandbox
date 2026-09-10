@@ -2240,6 +2240,9 @@ fn publish_control_endpoint(
     run_dir: &Path,
     sandbox_name: &str,
 ) -> RuntimeResult<()> {
+    // Only Unix publishes the legacy socket symlink; Windows uses the named pipe directly.
+    #[cfg(not(unix))]
+    let _ = (run_dir, sandbox_name);
     match super::control::spawn_control_listener(control_sock_path.clone(), context) {
         Ok(()) => {
             #[cfg(unix)]
