@@ -3418,13 +3418,15 @@ mod tests {
 
     #[test]
     fn secret_plan_never_contains_secret_values() {
+        const VALUE_SENTINEL: &str = "modify-plan-secret-sentinel";
+
+        // Put real material into the input: an empty value would make the
+        // absence assertion pass even if planning accidentally copied it.
         let patch = SandboxModificationPatch {
             secrets: vec![SecretModificationPatch {
                 name: "API_KEY".to_string(),
-                source: Some(SecretSource::Env {
-                    var: "API_KEY".to_string(),
-                }),
-                value: zeroize::Zeroizing::new(String::new()),
+                source: None,
+                value: zeroize::Zeroizing::new(VALUE_SENTINEL.to_string()),
                 placeholder: None,
                 allowed_hosts: vec!["api.example.com".to_string()],
                 ..SecretModificationPatch::default()
@@ -3445,7 +3447,9 @@ mod tests {
 
         assert!(json.contains("$MSB_API_KEY"));
         assert!(json.contains("api.example.com"));
-        assert!(!json.contains("real-secret-value"));
+        assert!(!json.contains(VALUE_SENTINEL));
+        assert!(!format!("{plan:?}").contains(VALUE_SENTINEL));
+        assert_eq!(plan.sandbox, "api");
 
         let PlannedChange::Secret(change) = &plan.changes[0] else {
             panic!("expected secret change");
