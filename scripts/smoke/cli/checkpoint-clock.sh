@@ -17,10 +17,10 @@ for _ in $(seq 1 30); do
   if msb exec "$source_name" -- test -s /tmp/clock-records.csv; then break; fi
   sleep 0.05
 done
-msb snapshot create "$CLOCK_PREFIX-full" --from "$source_name" --full --info >"$CLOCK_OUT/capture.out" 2>"$CLOCK_OUT/capture.err"
+msb snapshot create "$CLOCK_PREFIX-full" --from-sandbox "$source_name" --full --info >"$CLOCK_OUT/capture.out" 2>"$CLOCK_OUT/capture.err"
 snapshot="$CLOCK_PREFIX-full"
 if [ "${CLOCK_INCREMENTAL:-0}" = 1 ]; then
-  msb snapshot create "$CLOCK_PREFIX-next" --from "$source_name" --full --info >"$CLOCK_OUT/capture-next.out" 2>"$CLOCK_OUT/capture-next.err"
+  msb snapshot create "$CLOCK_PREFIX-next" --from-sandbox "$source_name" --full --info >"$CLOCK_OUT/capture-next.out" 2>"$CLOCK_OUT/capture-next.err"
   snapshot="$CLOCK_PREFIX-next"
 fi
 if [ "${CLOCK_ARCHIVE:-0}" = 1 ]; then

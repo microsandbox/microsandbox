@@ -34,7 +34,7 @@ try {
   Measure-Msb "$layout-seed" @('exec',$name,'--','sh','-c','dd if=/dev/urandom of=/payload bs=1048576 count=8 2>/dev/null; sha256sum /payload >/expected; mkdir -p /dev/shm; echo volatile >/dev/shm/ram-marker; sync')
   foreach ($generation in 1..4) {
     Measure-Msb "$layout-write-$generation" @('exec',$name,'--','sh','-c',"echo $generation >/version; sync")
-    Measure-Msb "$layout-checkpoint-$generation" @('snapshot','create',"$name-$generation",'--from',$name,'--full')
+    Measure-Msb "$layout-checkpoint-$generation" @('snapshot','create',"$name-$generation",'--from-sandbox',$name,'--full')
   }
   Measure-Msb "$layout-dry-run" @('modify',$name,'--compact','--layers','3','--dry-run','--format','json')
   $plan = Get-Content "$output\logs\$layout-dry-run.out" -Raw | ConvertFrom-Json
@@ -53,11 +53,11 @@ try {
   Measure-Msb "$layout-data-after" @('exec',$name,'--','sh','-c','sha256sum -c /expected && test $(cat /version) = 4 && echo after >/after && sync')
   Measure-Msb "$layout-stop" @('stop',$name)
   Measure-Msb "$layout-offline-compact" @('modify',$name,'--compact','--format','json')
-  Measure-Msb "$layout-stopped-snapshot" @('snapshot','create',"$name-stopped",'--from',$name,'--integrity')
+  Measure-Msb "$layout-stopped-snapshot" @('snapshot','create',"$name-stopped",'--from-sandbox',$name,'--integrity')
   Measure-Msb "$layout-stopped-verify" @('snapshot','verify',"$name-stopped")
   Measure-Msb "$layout-restart" @('start',$name)
   Measure-Msb "$layout-restarted-data" @('exec',$name,'--','sh','-c','sha256sum -c /expected && test $(cat /version) = 4 && test $(cat /after) = after')
-  Measure-Msb "$layout-post-compact-checkpoint" @('snapshot','create',"$name-new",'--from',$name,'--full')
+  Measure-Msb "$layout-post-compact-checkpoint" @('snapshot','create',"$name-new",'--from-sandbox',$name,'--full')
   Measure-Msb "$layout-old-prefix-rejected" @('snapshot','save',"$name-new","$output\invalid.tar",'--since',"$name-4") $true
   Measure-Msb "$layout-stop-source" @('stop',$name)
   foreach ($variant in @('old','full','disk','stopped')) {

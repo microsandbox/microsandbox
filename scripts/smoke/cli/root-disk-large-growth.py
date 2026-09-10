@@ -90,7 +90,7 @@ def case(layout, backing, mode, target):
               "cat /proc/sys/kernel/random/boot_id >/boot-before; sync")
         if backing == "qcow2":
             run(label + "-old-snapshot", "snapshot", "create", name + "-old",
-                "--from", name, "--full")
+                "--from-sandbox", name, "--full")
         before = state(name)
         check(label + "-initial-capacity", capacity(before["layers"][-1]) == 512 * MIB)
         check(label + "-initial-format",
@@ -133,7 +133,7 @@ def case(layout, backing, mode, target):
               f"dd if=/far bs=1048576 skip={target - 256} count=8 2>/dev/null | cmp - /payload; "
               "df -k /; du -k /large")
         # Snapshot the allocated file, not just metadata or an empty resized filesystem.
-        run(label + "-new-snapshot", "snapshot", "create", name + "-new", "--from", name, "--full")
+        run(label + "-new-snapshot", "snapshot", "create", name + "-new", "--from-sandbox", name, "--full")
         run(label + "-source-stop", "stop", name)
         for suffix, expected in [("new", target)] + ([("old", 512)] if backing == "qcow2" else []):
             child = name + "-" + suffix + "-child"
