@@ -179,6 +179,14 @@ The base can also be a standalone snapshot archive. Restore copies the required 
 When the archive is the desired result, capture straight into it instead of creating an installed snapshot directory and then saving a second copy:
 
 <CodeGroup>
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+const archive = await Snapshot.builder("after-pip-install")
+  .fromSandbox("baseline")
+  .createArchive("/tmp/after-pip-install.tar.zst");
+```
+
 ```rust Rust
 use microsandbox::Snapshot;
 
@@ -186,14 +194,6 @@ let archive = Snapshot::builder("after-pip-install")
     .from_sandbox("baseline")
     .create_archive("/tmp/after-pip-install.tar.zst", false)
     .await?;
-```
-
-```typescript TypeScript
-import { Snapshot } from "microsandbox";
-
-const archive = await Snapshot.builder("after-pip-install")
-  .fromSandbox("baseline")
-  .createArchive("/tmp/after-pip-install.tar.zst");
 ```
 
 ```python Python
