@@ -206,6 +206,10 @@ Unreleased #8 incremental exports use `completeness: "dependent"` and the must-u
 
 Full checkpoints and local branches now retain `transport_host_input`, `transport_input_credit`, and `transport_guest_bulk_bytes` in the existing `guest:agentd` resource binding. These are complete-frame cumulative positions and absolute grants, including credit still owned by pending captured input. Restore validates and seeds them before guest activation; resetting them would incorrectly grant capacity twice. Older unreleased development full snapshots missing this state are refused, and new full captures require their matching host/guest implementation. This is an approved replacement of unreleased state, not a snapshot schema bump or migration; released disk-only snapshots are unaffected.
 
+The finalized private transport-credit contract charges stdin, inline filesystem/TCP payloads, and ordered EOF to the existing logical data (`bulk_*`) counters on either physical port. Command/control counters remain available when captured input is still awaiting consumption. Ready advertises barrier contract `2`; the superseded development contract `1` is not translated or restored. The outer frame, generation-8 data format, snapshot descriptor schema, and public SDK requests are unchanged. The ordinary writer retains bounded admission permits until physical delivery, permits unrelated metadata to pass credit-blocked payloads, and preserves per-correlation and client-disconnect ordering. Guest input processing also yields to the runtime after bounded actual reads, including partial records; this does not shrink wire records or change snapshot boundaries.
+
+Routine host clock maintenance is independent of unrelated correlation input, but stays ordered with other clocks and true global lifecycle fences. Its timestamp is sampled at console admission, not when queued; disconnect cleanup signals fence their own session only. Maintenance remains subject to the pause gate. This bounds host-queue timestamp age, not subsequent aging of already-admitted bytes during arbitrary host suspension or the kernel-only pause fallback when the workload freezer is unavailable.
+
 Evolution rules:
 
 - Do not make semantically harmless serialization changes to identity-bearing bytes without treating them as an identity format change.
@@ -296,6 +300,8 @@ Compatibility-sensitive ordering includes:
 - Persisting a recovery journal before the first mutation and clearing it only after durable completion.
 
 Sources: [`crates/runtime/lib/client/ipc.rs`](crates/runtime/lib/client/ipc.rs), [`sdk/rust/lib/backend/local/mod.rs`](sdk/rust/lib/backend/local/mod.rs), [`sdk/rust/lib/runtime/handle.rs`](sdk/rust/lib/runtime/handle.rs), and artifact-specific migration and publication modules.
+
+TCP completion follows both ordered half-closes; the first EOF alone keeps the opposite direction usable. In combined-port mode, validated guest-to-host TCP credit may pass queued host-to-guest raw data and its finish marker: it services the opposite direction without reordering input data or EOF. Opening, cancellation, ownership, and global lifecycle fences still constrain it. Raw TCP output may still be draining on the dedicated lane after its producer finishes. Decoded credit updates for a finished producer or absent TCP session are therefore no-ops, not cancellation: they cannot enable further output, and must not discard the queued tail or create a second terminal response. Active producers retain credit validation; data and finish messages retain their existing validation.
 
 Review concurrency and crash points explicitly. A same-version happy-path test does not establish cross-version or crash compatibility.
 

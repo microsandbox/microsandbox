@@ -22,8 +22,8 @@ pub use microsandbox_protocol::{AGENT_BULK_PORT_NAME, AGENT_PORT_NAME};
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// The frame class whose complete wire bytes consume admission capacity. Raw records use Bulk
-/// even on a combined physical port, while ordinary CBOR messages and leases use Control.
+/// Logical admission class, independent of the physical port. Raw records, stdin and inline
+/// FS/TCP payloads use Bulk; command metadata and leases retain separate Control capacity.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum InputLane {
     Control,
@@ -256,20 +256,23 @@ mod tests {
     #[test]
     fn inherited_input_refunds_the_same_cumulative_ledger_after_restore() {
         let window = window();
-        let inherited = window.admit(InputLane::Control, 7).unwrap();
+        let inherited = window.admit(InputLane::Bulk, 15).unwrap();
         let source_position = window.position();
         let restored_view = window.clone();
         // Moving a retained session to the detached table must not grant a fresh window.
         assert_eq!(restored_view.position(), source_position);
-        assert!(restored_view.admit(InputLane::Control, 2).is_err());
+        assert!(restored_view.admit(InputLane::Bulk, 2).is_err());
+        // Captured input keeps its debt, but cannot prevent the fresh host from starting an exec.
+        let command = restored_view.admit(InputLane::Control, 8).unwrap();
+        drop(command);
         drop(inherited);
-        let fresh = restored_view.admit(InputLane::Control, 8).unwrap();
-        assert_eq!(restored_view.position().control_bytes, 15);
+        let fresh = restored_view.admit(InputLane::Bulk, 16).unwrap();
+        assert_eq!(restored_view.position().bulk_bytes, 31);
         drop(fresh);
     }
 
     #[test]
-    fn physical_lanes_are_independent_and_counter_overflow_fails_closed() {
+    fn logical_classes_are_independent_and_counter_overflow_fails_closed() {
         let window = window();
         let control = window.admit(InputLane::Control, 8).unwrap();
         let bulk = window.admit(InputLane::Bulk, 16).unwrap();

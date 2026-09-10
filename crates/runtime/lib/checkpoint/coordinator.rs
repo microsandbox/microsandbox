@@ -2299,7 +2299,9 @@ mod tests {
             attempt_id: "checkpoint-42".into(),
             protocol_generation: 9,
             ready: Ready {
-                workload_transport_barrier_version: Some(1),
+                workload_transport_barrier_version: Some(
+                    microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION,
+                ),
                 ..Ready::default()
             },
             host_input: WorkloadTransportPosition {

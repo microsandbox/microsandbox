@@ -90,6 +90,11 @@ const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
 /// Dedicated records additionally carry the transport-level client incarnation.
 const MAX_BULK_INPUT_BUF_SIZE: usize = MAX_INPUT_BUF_SIZE + CLIENT_INCARNATION_SIZE;
 
+/// Bound actual console work between runtime scheduling points, independently of wire records.
+/// Partial records count too: a readable bulk port must not hide fresh primary/PTY readiness.
+const AGENT_READ_QUANTUM_BYTES: usize = 256 * 1024;
+const AGENT_READ_QUANTUM_CALLS: usize = 64;
+
 /// Maximum time to wait for the host to acknowledge the init context.
 const INIT_ACK_TIMEOUT_SECS: u64 = 60;
 
@@ -229,6 +234,13 @@ struct BulkInputState {
     input: BytesMut,
 }
 
+/// Shared primary/bulk work retained across select turns, including incomplete wire records.
+#[derive(Default)]
+struct AgentReadBudget {
+    bytes: usize,
+    calls: usize,
+}
+
 /// One correlation's pending records in the guest-to-host DRR scheduler.
 struct BulkWriteFlow {
     queue: VecDeque<SessionOutputEnvelope>,
@@ -362,14 +374,19 @@ impl BulkInputState {
     }
 
     /// Read at most once, then return one bounded batch already available to the actor.
-    async fn read_turn(&mut self) -> AgentdResult<Vec<IncarnatedBulkFrame>> {
+    async fn read_turn(
+        &mut self,
+        read_budget: &mut AgentReadBudget,
+    ) -> AgentdResult<Vec<IncarnatedBulkFrame>> {
         let buffered = self.drain_turn()?;
         if !buffered.is_empty() {
             return Ok(buffered);
         }
 
         let mut guard = self.port.readable().await?;
-        match guard.try_io(|inner| read_from_fd(inner.get_ref().as_raw_fd(), &mut self.read_buf)) {
+        match guard
+            .try_io(|inner| read_budget.read_fd(inner.get_ref().as_raw_fd(), &mut self.read_buf))
+        {
             Ok(Ok(0)) => {
                 return Err(AgentdError::ExecSession(
                     "dedicated bulk port closed".into(),
@@ -414,6 +431,33 @@ impl BulkInputState {
             frames.push(frame);
         }
         Ok(frames)
+    }
+}
+
+impl AgentReadBudget {
+    fn read_fd(&mut self, fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
+        let result = read_from_fd(fd, buf);
+        self.record_read(result.as_ref().copied().unwrap_or(0));
+        result
+    }
+
+    fn record_read(&mut self, bytes: usize) {
+        self.calls = self.calls.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+
+    fn exhausted(&self) -> bool {
+        self.bytes >= AGENT_READ_QUANTUM_BYTES || self.calls >= AGENT_READ_QUANTUM_CALLS
+    }
+
+    /// Call outside the competing select futures, after decoded records have an owning queue.
+    /// AsyncFd::readable can stay immediately ready without spending Tokio's cooperative budget;
+    /// returning to select alone does not let the driver discover a writable PTY or new control IO.
+    async fn yield_if_exhausted(&mut self) {
+        if self.exhausted() {
+            tokio::task::yield_now().await;
+            *self = Self::default();
+        }
     }
 }
 
@@ -534,9 +578,13 @@ pub async fn run(
     let input_refunds = state.input_window.clone();
     let mut credit_deadline = None;
     let mut last_input_credit = state.input_window.credit()?;
+    let mut read_budget = AgentReadBudget::default();
 
     // Main loop.
     'agent: loop {
+        // All consumed bytes are now in persistent input buffers or destination-owned records.
+        // Never yield after decoding inside read_turn: select cancellation could drop its frames.
+        read_budget.yield_if_exhausted().await;
         if state.resume_output_after_flush {
             // The private Thawed reply crosses the primary lane before either ordinary writer
             // becomes eligible again. A partial old record is never abandoned by this release.
@@ -733,7 +781,7 @@ pub async fn run(
                 bulk_input
                     .as_mut()
                     .expect("guarded dedicated bulk input")
-                    .read_turn()
+                    .read_turn(&mut read_budget)
                     .await
             }, if bulk_input.is_some() && pending_bulk_inputs.is_empty() => {
                 let frames = match turn {
@@ -830,7 +878,9 @@ pub async fn run(
                 let mut combined_turn_exhausted = false;
 
                 loop {
-                    match guard.try_io(|inner| read_from_fd(inner.get_ref().as_raw_fd(), &mut read_buf)) {
+                    match guard.try_io(|inner| {
+                        read_budget.read_fd(inner.get_ref().as_raw_fd(), &mut read_buf)
+                    }) {
                         Ok(Ok(0)) => {
                             // EOF on serial — host disconnected.
                             if !handoff::is_pid_1() {
@@ -944,7 +994,12 @@ pub async fn run(
                                     if state.output_parked {
                                         return Err(AgentdError::ExecSession("ordinary input crossed the frozen transport cut".into()));
                                     }
-                                    Some(state.input_window.admit(InputLane::Control, wire_bytes)?)
+                                    let lane = if msg.t.uses_workload_data_credit() {
+                                        InputLane::Bulk
+                                    } else {
+                                        InputLane::Control
+                                    };
+                                    Some(state.input_window.admit(lane, wire_bytes)?)
                                 };
                                 if msg.flags != msg.t.flags() {
                                     let out_before = serial_out_buf.len();
@@ -1002,11 +1057,19 @@ pub async fn run(
                             // Thawed has now crossed the wire. A host can immediately resume
                             // ordinary input, so release our parked writers at the outer-loop
                             // boundary before draining another readable batch.
-                            if combined_turn_exhausted || state.resume_output_after_flush {
+                            if combined_turn_exhausted
+                                || state.resume_output_after_flush
+                                || read_budget.exhausted()
+                            {
                                 break;
                             }
                         }
-                        Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => {
+                            if read_budget.exhausted() {
+                                break;
+                            }
+                            continue;
+                        }
                         Ok(Err(_)) if !handoff::is_pid_1() => {
                             guard.clear_ready();
                             drop(guard);
@@ -2841,7 +2904,10 @@ async fn handle_message_with_charge(
                 BulkKind::Tcp => {
                     let result = match state.tcp_sessions.get(&msg.id) {
                         Some(session) => session.apply_credit(credit).await,
-                        None => Err(format!("unknown TCP session: {}", msg.id)),
+                        // A terminal may retire the producer before the other physical lane
+                        // finishes delivering its output. Late credit has no recipient and must
+                        // not cancel that tail or manufacture a second terminal response.
+                        None => Ok(()),
                     };
                     if let Err(error) = result {
                         encode_bulk_tcp_failure(msg.id, error, out_buf)?;
@@ -4247,6 +4313,345 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mixed_primary_data_cut_waits_for_the_complete_dedicated_prefix() {
+        let mut state = AgentState::default();
+        let (mut sender, _output) = SessionOutputSender::channel();
+        let mut activity = ActivityTracker::new();
+        let config = AgentdConfig {
+            user: None,
+            security_profile: Default::default(),
+            default_cwd: None,
+            default_env: Vec::new(),
+        };
+        let heartbeat = heartbeat::HeartbeatControl::default();
+        let mut workload = crate::workload::tests::fake_latch();
+
+        // Primary stdin and its empty EOF share the logical data ledger with the dedicated
+        // port. Retain every charge to model a consumer that has not accepted any input yet.
+        let mut charges = Vec::new();
+        for data in [vec![0x31; 1024], Vec::new()] {
+            let message =
+                Message::with_payload(MessageType::ExecStdin, 1, &ExecStdin { data }).unwrap();
+            assert!(message.t.uses_workload_data_credit());
+            let mut wire = Vec::new();
+            codec::encode_to_buf(&message, &mut wire).unwrap();
+            charges.push(
+                state
+                    .input_window
+                    .admit(InputLane::Bulk, wire.len())
+                    .unwrap(),
+            );
+        }
+        let primary_position = state.input_window.position();
+        assert_eq!(primary_position.control_bytes, 0);
+        assert_eq!(primary_position.control_frames, 0);
+        assert_eq!(primary_position.bulk_frames, 2);
+
+        let incarnation = [0x43; CLIENT_INCARNATION_SIZE];
+        let record = BulkRecord {
+            id: 2,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            offset: 0,
+            payload: Bytes::from(vec![0x52; 512]),
+        };
+        let mut dedicated_wire = incarnation.to_vec();
+        codec::encode_bulk_to_buf(&record, &mut dedicated_wire).unwrap();
+        let target = WorkloadTransportPosition {
+            bulk_bytes: primary_position.bulk_bytes + dedicated_wire.len() as u64,
+            bulk_frames: primary_position.bulk_frames + 1,
+            ..primary_position
+        };
+        let freeze = Message::with_payload(
+            MessageType::WorkloadFreeze,
+            u32::MAX,
+            &WorkloadFreeze {
+                attempt_id: "mixed-prefix".into(),
+                host_input: target,
+            },
+        )
+        .unwrap();
+
+        let mut dedicated_input = BytesMut::new();
+        for prefix in [
+            &dedicated_wire[..0],
+            &dedicated_wire[..dedicated_wire.len() - 1],
+        ] {
+            dedicated_input.extend_from_slice(prefix);
+            assert!(
+                try_decode_incarnated_bulk_from_bytes(&mut dedicated_input)
+                    .unwrap()
+                    .is_none()
+            );
+            let mut out = Vec::new();
+            handle_message(
+                freeze.clone(),
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut out,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            assert!(
+                out.is_empty(),
+                "primary data cannot cover missing dedicated bytes"
+            );
+            assert!(!workload.is_frozen());
+            assert!(!state.output_parked);
+            assert!(state.pending_freeze.is_some());
+            assert_eq!(state.input_window.position(), primary_position);
+        }
+
+        dedicated_input.extend_from_slice(&dedicated_wire[dedicated_wire.len() - 1..]);
+        let decoded = try_decode_incarnated_bulk_from_bytes(&mut dedicated_input)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.incarnation, incarnation);
+        assert_eq!(decoded.record, record);
+        assert!(dedicated_input.is_empty());
+        charges.push(
+            state
+                .input_window
+                .admit(InputLane::Bulk, bulk_wire_bytes(&decoded.record, true))
+                .unwrap(),
+        );
+        assert_eq!(state.input_window.position(), target);
+
+        // Resume the retained request as the outer actor does once both cumulative counters
+        // reach the cut. Decoding suffices; none of the primary or dedicated data is consumed.
+        let pending = state.pending_freeze.take().unwrap();
+        let mut out = Vec::new();
+        handle_message(
+            pending,
+            &mut state,
+            &mut activity,
+            &mut sender,
+            &mut out,
+            &config,
+            &mut workload,
+            &heartbeat,
+        )
+        .await
+        .unwrap();
+        let mut bytes = BytesMut::from(out.as_slice());
+        let reply = decode_reply_skipping_credit(&mut bytes);
+        let frozen = reply.payload::<WorkloadFrozen>().unwrap();
+        assert_eq!(reply.t, MessageType::WorkloadFrozen);
+        assert_eq!(reply.id, u32::MAX);
+        assert_eq!(frozen.attempt_id, "mixed-prefix");
+        assert_eq!(frozen.input_credit, initial_input_credit());
+        assert_eq!(state.frozen_host_input, Some(target));
+        assert!(workload.is_frozen());
+        assert!(state.output_parked);
+        assert!(state.pending_freeze.is_none());
+        assert!(bytes.is_empty());
+        drop(charges);
+    }
+
+    #[tokio::test]
+    async fn late_tcp_credit_preserves_raw_tail_before_and_after_terminal_retirement() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+
+        use microsandbox_protocol::bulk::BulkOffer;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut state = AgentState::default();
+            let incarnation = [0x57; CLIENT_INCARNATION_SIZE];
+            establish_relay_client(
+                &mut state,
+                RelayClientConnected {
+                    id_start: 1,
+                    id_end_exclusive: microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP,
+                    incarnation,
+                },
+            )
+            .unwrap();
+            // Leave the dedicated scheduler's input queued: primary completion is allowed to
+            // overtake these bytes, but no late credit may send DropFlow to discard their tail.
+            let (mut sender, mut control, mut bulk, mut scheduler_commands) =
+                SessionOutputSender::split_channel();
+            let producer = sender.with_incarnation(Some(incarnation));
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            state.tcp_sessions.insert(
+                1,
+                TcpSession::open(
+                    1,
+                    TcpConnect {
+                        host: "127.0.0.1".into(),
+                        port: listener.local_addr().unwrap().port(),
+                        bulk: Some(BulkOffer::tcp()),
+                    },
+                    &producer,
+                ),
+            );
+            let (mut peer, _) = listener.accept().await.unwrap();
+            for expected in [MessageType::TcpConnected, MessageType::BulkAccepted] {
+                let envelope = control.recv().await.unwrap();
+                let SessionOutput::Raw(mut output) = envelope.output else {
+                    panic!()
+                };
+                assert_eq!(
+                    codec::try_decode_from_buf(&mut output.frame)
+                        .unwrap()
+                        .unwrap()
+                        .t,
+                    expected
+                );
+            }
+            state
+                .tcp_sessions
+                .get(&1)
+                .unwrap()
+                .finish_bulk(BulkFinish {
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::HostToGuest,
+                    final_offset: 0,
+                })
+                .await
+                .unwrap();
+            assert_eq!(peer.read(&mut [0]).await.unwrap(), 0);
+            let payload = Bytes::from(
+                (0..6 * 1024 * 1024)
+                    .map(|index| (index % 251) as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let peer_payload = payload.clone();
+            let peer_task = tokio::spawn(async move {
+                peer.write_all(&peer_payload).await.unwrap();
+                peer.shutdown().await.unwrap();
+            });
+            let mut received = Vec::new();
+            let mut consumed = 0;
+            while consumed < 4 * 1024 * 1024 {
+                let envelope = bulk.recv().await.unwrap();
+                let SessionOutput::Bulk(output) = &envelope.output else {
+                    panic!()
+                };
+                consumed += output.record.payload.len();
+                received.push(envelope);
+            }
+            peer_task.await.unwrap();
+            while !state.tcp_sessions.get(&1).unwrap().is_finished() {
+                tokio::task::yield_now().await;
+            }
+            assert!(consumed < payload.len());
+            assert!(
+                !bulk.is_empty(),
+                "the dedicated output tail must still be queued"
+            );
+            let credit = BulkCredit {
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::GuestToHost,
+                consumed_offset: consumed as u64,
+                credit_limit: consumed as u64 + DEFAULT_BULK_WINDOW,
+            };
+            let mut activity = ActivityTracker::new();
+            let config = AgentdConfig {
+                user: None,
+                security_profile: Default::default(),
+                default_cwd: None,
+                default_env: Vec::new(),
+            };
+            let mut workload = crate::workload::tests::fake_latch();
+            let heartbeat = heartbeat::HeartbeatControl::default();
+            for retired in [false, true] {
+                if retired {
+                    for expected in [MessageType::BulkFinish, MessageType::TcpClosed] {
+                        let envelope = control.try_recv().unwrap();
+                        let SessionOutput::Raw(mut output) = envelope.output else {
+                            panic!()
+                        };
+                        let message = codec::try_decode_from_buf(&mut output.frame)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(message.t, expected);
+                        if expected == MessageType::BulkFinish {
+                            assert_eq!(
+                                message.payload::<BulkFinish>().unwrap().final_offset,
+                                payload.len() as u64
+                            );
+                        } else {
+                            assert_ne!(
+                                message.flags & microsandbox_protocol::message::FLAG_TERMINAL,
+                                0
+                            );
+                            assert!(matches!(output.completion, Some(RawSessionCompletion::Tcp)));
+                            complete_raw_session(
+                                1,
+                                output.completion,
+                                &mut state.read_sessions,
+                                &mut state.tcp_sessions,
+                            );
+                            clear_bulk_receive_state(&mut state, 1);
+                        }
+                    }
+                }
+                assert_eq!(state.tcp_sessions.contains_key(&1), !retired);
+                let mut out = Vec::new();
+                handle_message(
+                    Message::with_payload(MessageType::BulkCredit, 1, &credit).unwrap(),
+                    &mut state,
+                    &mut activity,
+                    &mut sender,
+                    &mut out,
+                    &config,
+                    &mut workload,
+                    &heartbeat,
+                )
+                .await
+                .unwrap();
+                assert!(
+                    out.is_empty(),
+                    "late credit must not emit cancellation or another terminal"
+                );
+                assert!(
+                    matches!(
+                        scheduler_commands.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    ),
+                    "late credit must not purge raw output"
+                );
+                assert!(!bulk.is_empty());
+            }
+            assert!(matches!(
+                control.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            while let Ok(envelope) = bulk.try_recv() {
+                received.push(envelope);
+            }
+            let mut offset = 0;
+            let mut actual_hash = DefaultHasher::new();
+            let mut expected_hash = DefaultHasher::new();
+            expected_hash.write(&payload);
+            for envelope in received {
+                assert_eq!(envelope.id, 1);
+                assert_eq!(envelope.incarnation, Some(incarnation));
+                let SessionOutput::Bulk(output) = envelope.output else {
+                    panic!()
+                };
+                let record = output.record;
+                assert_eq!(record.offset, offset as u64);
+                let end = offset + record.payload.len();
+                assert_eq!(record.payload.as_ref(), &payload[offset..end]);
+                actual_hash.write(&record.payload);
+                offset = end;
+            }
+            assert_eq!(offset, payload.len());
+            assert_eq!(actual_hash.finish(), expected_hash.finish());
+        })
+        .await
+        .expect("late-credit TCP tail did not complete");
+    }
+
+    #[tokio::test]
     async fn dedicated_bulk_park_finishes_one_record_and_retains_the_next() {
         use std::os::fd::OwnedFd;
         use tokio::io::AsyncReadExt;
@@ -4479,6 +4884,208 @@ mod tests {
             1,
             BULK_READER_MAX_BYTES_PER_TURN
         ));
+    }
+
+    #[test]
+    fn agent_read_budget_counts_bytes_and_calls_independently() {
+        let mut bytes = AgentReadBudget::default();
+        bytes.record_read(AGENT_READ_QUANTUM_BYTES - 1);
+        assert!(!bytes.exhausted());
+        bytes.record_read(1);
+        assert!(bytes.exhausted());
+
+        let mut calls = AgentReadBudget::default();
+        for _ in 1..AGENT_READ_QUANTUM_CALLS {
+            assert!(calls.read_fd(-1, &mut [0]).is_err());
+            assert!(!calls.exhausted());
+        }
+        assert!(calls.read_fd(-1, &mut [0]).is_err());
+        assert!(calls.exhausted(), "failed reads also bound a retry loop");
+        assert_eq!(calls.bytes, 0);
+
+        let mut large = AgentReadBudget::default();
+        large.record_read(BULK_SERIAL_READ_BUF_SIZE);
+        assert!(
+            large.exhausted(),
+            "a large read is not a smaller wire record"
+        );
+        assert_eq!(large.bytes, BULK_SERIAL_READ_BUF_SIZE);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_read_budget_services_driver_during_partial_bulk_records() {
+        // The control demonstrates the failure without relying on wall-clock delays: cached
+        // readable bulk input never lets the runtime observe the newly readable/writable peers.
+        assert!(!observe_driver_during_partial_bulk(false).await);
+        assert!(observe_driver_during_partial_bulk(true).await);
+    }
+
+    async fn observe_driver_during_partial_bulk(yield_at_boundary: bool) -> bool {
+        use std::io::Write;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+        use std::sync::atomic::AtomicUsize;
+
+        let incarnation = [0x42; CLIENT_INCARNATION_SIZE];
+        let first = BulkRecord {
+            id: 1,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            offset: 0,
+            payload: Bytes::from(vec![0xa5; 512]),
+        };
+        let second = BulkRecord {
+            offset: first.payload.len() as u64,
+            payload: Bytes::from(vec![0x5a; 512]),
+            ..first.clone()
+        };
+        let mut wire = Vec::new();
+        for record in [&first, &second] {
+            wire.extend_from_slice(&incarnation);
+            codec::encode_bulk_to_buf(record, &mut wire).unwrap();
+        }
+        let (mut source, input) = UnixStream::pair().unwrap();
+        input.set_nonblocking(true).unwrap();
+        source.write_all(&wire).unwrap();
+        let mut input = BulkInputState::new(File::from(OwnedFd::from(input))).unwrap();
+        // Model fragmented console reads while keeping the complete wire records unchanged.
+        input.read_buf.truncate(1);
+
+        let (mut control_source, control) = UnixStream::pair().unwrap();
+        control.set_nonblocking(true).unwrap();
+        let control = AsyncFd::new(control).unwrap();
+        let (pipe_reader, pipe_writer) = nix::unistd::pipe2(nix::fcntl::OFlag::O_NONBLOCK).unwrap();
+        let pipe_writer = AsyncFd::new(pipe_writer).unwrap();
+        // Prime the reactor, then clear the pipe's cached writable event with a real EAGAIN.
+        let mut writable = pipe_writer.writable().await.unwrap();
+        loop {
+            match writable.try_io(|fd| write_to_fd(fd.get_ref().as_raw_fd(), &[0; 4096])) {
+                Ok(Ok(count)) => assert!(count > 0),
+                Ok(Err(error)) => panic!("fill stdin pipe: {error}"),
+                Err(_) => break,
+            }
+        }
+        drop(writable);
+        let mut drained = [0; 4096];
+        loop {
+            match read_from_fd(pipe_reader.as_raw_fd(), &mut drained) {
+                Ok(count) => assert!(count > 0),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("drain stdin pipe: {error}"),
+            }
+        }
+        control_source.write_all(b"c").unwrap();
+        let serviced = Arc::new(AtomicUsize::new(0));
+        let control_serviced = Arc::clone(&serviced);
+        let control_task = tokio::spawn(async move {
+            loop {
+                let mut ready = control.readable().await.unwrap();
+                let mut byte = [0];
+                match ready.try_io(|fd| read_from_fd(fd.get_ref().as_raw_fd(), &mut byte)) {
+                    Ok(Ok(1)) => {
+                        assert_eq!(byte, *b"c");
+                        control_serviced.fetch_or(1, Ordering::Relaxed);
+                        break;
+                    }
+                    Ok(result) => panic!("read control marker: {result:?}"),
+                    Err(_) => continue,
+                }
+            }
+        });
+        let stdin_serviced = Arc::clone(&serviced);
+        let stdin_task = tokio::spawn(async move {
+            std::future::poll_fn(|cx| {
+                loop {
+                    let mut ready = std::task::ready!(pipe_writer.poll_write_ready(cx)).unwrap();
+                    match ready.try_io(|fd| write_to_fd(fd.get_ref().as_raw_fd(), b"i")) {
+                        Ok(result) => return Poll::Ready(result),
+                        Err(_) => continue,
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            stdin_serviced.fetch_or(2, Ordering::Relaxed);
+        });
+
+        let mut budget = AgentReadBudget::default();
+        let mut received = Vec::new();
+        let mut serviced_before_first_record = false;
+        while received.len() < 2 {
+            let frames = tokio::select! {
+                frames = input.read_turn(&mut budget) => frames.unwrap(),
+                _ = std::future::pending::<()>() => unreachable!(),
+            };
+            for frame in frames {
+                assert_eq!(frame.incarnation, incarnation);
+                received.push(frame.record);
+            }
+            // This is the production cancellation-safe boundary: no decoded frames are local to
+            // a competing select future, and even partial-record reads have spent the budget.
+            if yield_at_boundary {
+                budget.yield_if_exhausted().await;
+            }
+            if received.is_empty() && serviced.load(Ordering::Relaxed) == 3 {
+                serviced_before_first_record = true;
+            }
+        }
+        assert_eq!(
+            received,
+            [first, second],
+            "yield preserves record bytes and FIFO"
+        );
+        assert!(input.input.is_empty());
+        control_task.await.unwrap();
+        stdin_task.await.unwrap();
+        let mut marker = [0];
+        assert_eq!(
+            read_from_fd(pipe_reader.as_raw_fd(), &mut marker).unwrap(),
+            1
+        );
+        assert_eq!(marker, *b"i");
+        serviced_before_first_record
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_bulk_read_keeps_partial_record_and_read_budget() {
+        use std::io::Write;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        let incarnation = [0x29; CLIENT_INCARNATION_SIZE];
+        let record = BulkRecord {
+            id: 1,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            offset: 0,
+            payload: Bytes::from(vec![0x51; 512]),
+        };
+        let mut wire = incarnation.to_vec();
+        codec::encode_bulk_to_buf(&record, &mut wire).unwrap();
+        let (mut source, input) = UnixStream::pair().unwrap();
+        input.set_nonblocking(true).unwrap();
+        let mut input = BulkInputState::new(File::from(OwnedFd::from(input))).unwrap();
+        let mut budget = AgentReadBudget::default();
+        source.write_all(&wire[..40]).unwrap();
+        assert!(input.read_turn(&mut budget).await.unwrap().is_empty());
+        // Consume the stale readable hint so the following select truly cancels a pending read.
+        assert!(input.read_turn(&mut budget).await.unwrap().is_empty());
+        let calls = budget.calls;
+        tokio::select! {
+            biased;
+            result = input.read_turn(&mut budget) => panic!("unexpected read: {result:?}"),
+            _ = std::future::ready(()) => {},
+        }
+        assert_eq!(input.input.as_ref(), &wire[..40]);
+        assert_eq!(budget.bytes, 40);
+        assert_eq!(budget.calls, calls);
+        source.write_all(&wire[40..]).unwrap();
+        let frames = input.read_turn(&mut budget).await.unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].record, record);
+        assert_eq!(frames[0].incarnation, incarnation);
+        assert!(input.input.is_empty());
+        assert_eq!(budget.bytes, wire.len());
     }
 
     #[test]
@@ -5059,10 +5666,10 @@ mod tests {
             let ledger = state.input_window.clone();
             let initial = ledger.credit().unwrap();
             let data = vec![0x61; 1024 * 1024];
-            let charge = ledger.admit(InputLane::Control, data.len() + 32).unwrap();
+            let charge = ledger.admit(InputLane::Bulk, data.len() + 32).unwrap();
             let mut stdin =
                 Message::with_payload(MessageType::ExecStdin, 1, &ExecStdin { data }).unwrap();
-            // A generation-8 SDK still travels over the bundled capability-1 host transport.
+            // A generation-8 SDK still travels over the bundled private transport contract.
             // Dispatch must not fall back to blocking writes based on the client message version.
             stdin.v = 8;
             time::timeout(
@@ -5085,7 +5692,7 @@ mod tests {
             assert!(encoded.is_empty());
             assert!(state.sessions[&1].has_pending_stdin());
             if accepted_eof {
-                let charge = ledger.admit(InputLane::Control, 32).unwrap();
+                let charge = ledger.admit(InputLane::Bulk, 32).unwrap();
                 let mut eof = Message::with_payload(
                     MessageType::ExecStdin,
                     1,
@@ -5177,8 +5784,8 @@ mod tests {
             .expect("accepted stdin or ordered EOF did not drain");
             assert_eq!(received, vec![0x61; 1024 * 1024]);
             assert_eq!(
-                ledger.credit().unwrap().control_bytes,
-                initial.control_bytes + position.control_bytes
+                ledger.credit().unwrap().bulk_bytes,
+                initial.bulk_bytes + position.bulk_bytes
             );
             if !tty && mode == Continue && !accepted_eof {
                 // Source Continue must not synthesize EOF. The same owner can still send input.

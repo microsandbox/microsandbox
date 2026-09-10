@@ -321,6 +321,18 @@ impl Message {
 }
 
 impl MessageType {
+    /// Whether host-to-guest delivery can retain payload credit behind a workload consumer.
+    ///
+    /// The bundled workload barrier uses logical classes, not physical console ports. Payload
+    /// messages (including ordered EOF) share data credit with raw bulk records, leaving control
+    /// capacity available for fresh commands when restored stdin has not yet been consumed.
+    pub fn uses_workload_data_credit(self) -> bool {
+        matches!(
+            self,
+            Self::ExecStdin | Self::FsData | Self::TcpData | Self::TcpEof
+        )
+    }
+
     /// Computes the frame flags byte for this message type.
     pub fn flags(&self) -> u8 {
         match self {
@@ -458,6 +470,35 @@ impl<'de> Deserialize<'de> for MessageType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_payload_and_eof_use_data_credit_without_changing_frame_flags() {
+        for message in [
+            MessageType::ExecStdin,
+            MessageType::FsData,
+            MessageType::TcpData,
+            MessageType::TcpEof,
+        ] {
+            assert!(message.uses_workload_data_credit());
+            assert_eq!(
+                message.flags(),
+                0,
+                "logical admission must not change the wire header"
+            );
+        }
+        for message in [
+            MessageType::ExecRequest,
+            MessageType::Ping,
+            MessageType::FsRequest,
+            MessageType::TcpConnect,
+            MessageType::ExecSignal,
+            MessageType::BulkFinish,
+            MessageType::BulkCancel,
+            MessageType::RelayClientDisconnected,
+        ] {
+            assert!(!message.uses_workload_data_credit());
+        }
+    }
 
     #[test]
     fn test_message_type_roundtrip() {

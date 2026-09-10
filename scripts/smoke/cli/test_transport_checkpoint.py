@@ -127,6 +127,66 @@ class TransportCheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "overlap unproven"):
             HARNESS.verify_gate_timing(dict(unix_ns=4600), before, after, operations)
 
+    def test_fresh_source_and_child_exec_must_finish_before_autonomous_gate(self):
+        before = dict(host_before_ns=1000, guest_ns=1500, host_after_ns=1200)
+        after = dict(host_before_ns=9000, guest_ns=9600, host_after_ns=9300)
+        operations = [dict(kind="restore_ready", wall_end_ns=4000)]
+        opened = dict(unix_ns=5000)
+        HARNESS.verify_gate_timing(opened, before, after, operations)
+        # A fast restore followed by control credit starvation is not a passing restore:
+        # the first independent exec must complete while inherited input is still blocked.
+        for kind in ("child-ready-exec", "source-ready-exec"):
+            with self.subTest(kind=kind), self.assertRaisesRegex(RuntimeError, "overlap unproven"):
+                HARNESS.verify_gate_timing(opened, before, after,
+                    [*operations, dict(kind=kind, wall_end_ns=4500)])
+
+    def test_child_ready_records_first_exec_in_gate_deadline_operations(self):
+        smoke = self.smoke()
+        row = dict(case="full-pipe-0", operations=[dict(kind="restore_ready")])
+        with mock.patch.object(smoke, "guest", return_value="CHILD_FRAME_OK") as guest, \
+                mock.patch.object(HARNESS.time, "monotonic", side_effect=[1.25, 1.5]), \
+                mock.patch.object(HARNESS.time, "time_ns", side_effect=[1000, 1250]):
+            smoke.child_ready(row, "child")
+        self.assertEqual(guest.call_args.args[:2], ("full-pipe-0-child-ready-exec", "child"))
+        self.assertNotIn("touch ", guest.call_args.args[2])
+        self.assertTrue(row["child_exec_independent"])
+        self.assertEqual(row["child_ready_exec_ms"], 250)
+        self.assertEqual(row["operations"], [dict(kind="restore_ready"),
+            dict(kind="child-ready-exec", start=1.25, end=1.5,
+                 wall_start_ns=1000, wall_end_ns=1250)])
+
+    def test_source_ready_records_fresh_exec_without_opening_consumer_gate(self):
+        smoke = self.smoke()
+        row = dict(case="full-pipe-0", operations=[dict(kind="capture")])
+        with mock.patch.object(smoke, "guest", return_value="SOURCE_FRAME_OK") as guest, \
+                mock.patch.object(HARNESS.time, "monotonic", side_effect=[2.0, 2.125]), \
+                mock.patch.object(HARNESS.time, "time_ns", side_effect=[2000, 2125]):
+            smoke.source_ready(row)
+        guest.assert_called_once_with("full-pipe-0-source-ready-exec", "source",
+                                      "printf 'SOURCE_FRAME_OK\\n'")
+        self.assertTrue(row["source_exec_independent"])
+        self.assertEqual(row["source_ready_exec_ms"], 125)
+        self.assertEqual(row["operations"], [dict(kind="capture"),
+            dict(kind="source-ready-exec", start=2.0, end=2.125,
+                 wall_start_ns=2000, wall_end_ns=2125)])
+
+    def test_source_ready_rejects_corrupt_marker_and_keeps_timing_evidence(self):
+        smoke = self.smoke()
+        row = dict(case="paused-pipe-0")
+        with mock.patch.object(smoke, "guest", return_value="SOURCE_FRAME_OK extra"):
+            with self.assertRaisesRegex(RuntimeError, "source framing mismatch"):
+                smoke.source_ready(row)
+        self.assertNotIn("source_exec_independent", row)
+        self.assertEqual(row["operations"][0]["kind"], "source-ready-exec")
+        self.assertGreaterEqual(row["source_ready_exec_ms"], 0)
+
+    def test_source_ready_latency_is_summarized_only_for_passing_samples(self):
+        samples = [dict(kind="full", tty=False, status="passed", source_ready_exec_ms=12),
+                   dict(kind="full", tty=False, status="passed", source_ready_exec_ms=18),
+                   dict(kind="full", tty=False, status="failed", source_ready_exec_ms=900)]
+        self.assertEqual(HARNESS.summarize(samples)["full/pipe/source_ready_exec_ms"],
+                         dict(n=2, p50=12, p95=18))
+
     def test_regression_timer_opens_without_an_ordinary_control_exec(self):
         stream = self.stream(arguments=[str(self.root / "absent-gate"), str(self.root / "receipt"),
                                         "0", str(HARNESS.PREFIX_BYTES), ".35"])
@@ -368,6 +428,87 @@ class TransportCheckpointTests(unittest.TestCase):
         self.assertEqual(sample["bulk"], {})
         self.assertNotIn("control_stdout", sample)
 
+    def test_source_exec_precedes_post_cut_release_and_source_stdin_finish(self):
+        smoke = self.smoke()
+        size = smoke.args.stdin_mib * HARNESS.MIB
+        receipt = dict(bytes=size, sha256=HARNESS.input_digest(size, size - HARNESS.LATE_BYTES),
+                       eof=True, eof_kind="pipe-close")
+        stream = mock.Mock(size=size, expected_digest=receipt["sha256"])
+        stream.after_cut = threading.Event()
+        stream.await_prefix.return_value = dict(bytes=HARNESS.PREFIX_BYTES)
+        stream.await_pressure.return_value = dict(eagain_count=1)
+        events = []
+
+        def guest(_label, _name, command):
+            if command == "printf 'SOURCE_FRAME_OK\\n'":
+                self.assertFalse(stream.after_cut.is_set())
+                self.assertEqual(events, ["pause", "resume"])
+                events.append("source-ready-exec")
+                return "SOURCE_FRAME_OK"
+            return json.dumps(receipt) if command.startswith("cat ") else "POST_FRAME_OK"
+
+        def finish():
+            self.assertTrue(stream.after_cut.is_set())
+            self.assertEqual(events[-1], "source-ready-exec")
+            events.append("stdin-finish")
+            return dict(bytes=size, seconds=1, receipt=receipt)
+
+        def gate_proof(row, _receipt):
+            self.assertEqual(row["operations"][-1]["kind"], "source-ready-exec")
+            self.assertTrue(row["source_exec_independent"])
+
+        stream.finish.side_effect = finish
+        with mock.patch.object(HARNESS, "Stream", return_value=stream), \
+                mock.patch.object(smoke, "guest", side_effect=guest), \
+                mock.patch.object(smoke, "run", side_effect=lambda _label, kind, *args: events.append(kind)), \
+                mock.patch.object(smoke, "clock_probe", return_value={}), \
+                mock.patch.object(smoke, "check_status"), \
+                mock.patch.object(smoke, "gate_proof", side_effect=gate_proof), \
+                contextlib.redirect_stdout(io.StringIO()):
+            smoke.scenario("paused", False, 0)
+        self.assertEqual(events, ["pause", "resume", "source-ready-exec", "stdin-finish"])
+        self.assertEqual(smoke.report["samples"][0]["status"], "passed")
+
+    def test_tcp_source_exec_follows_child_probe_and_precedes_input_finish(self):
+        smoke = self.smoke()
+        smoke.args.tcp_mib = 1
+        receipt = dict(bytes=HARNESS.MIB, sha256=HARNESS.input_digest(HARNESS.MIB, HARNESS.MIB),
+                       eof=True, eof_kind="pipe-close")
+        server, client = mock.Mock(), mock.Mock()
+        server.finish.return_value = dict(receipt=receipt)
+        client.await_pressure.return_value = dict(eagain_count=1)
+        events = []
+
+        def guest(_label, _name, command):
+            if command == "printf 'SOURCE_FRAME_OK\\n'":
+                self.assertEqual(events, ["child-ready-exec"])
+                events.append("source-ready-exec")
+                return "SOURCE_FRAME_OK"
+            return "TCP_POST_FRAME_OK"
+
+        def finish():
+            self.assertEqual(events, ["child-ready-exec", "source-ready-exec"])
+            events.append("tcp-finish")
+            return receipt
+
+        def gate_proof(row, _receipt):
+            self.assertEqual(row["operations"][-1]["kind"], "source-ready-exec")
+            self.assertTrue(row["source_exec_independent"])
+
+        client.finish.side_effect = finish
+        with mock.patch.object(HARNESS, "Stream", return_value=server), \
+                mock.patch.object(HARNESS.TCP, "InlineTcp", return_value=client), \
+                mock.patch.object(smoke, "guest", side_effect=guest), \
+                mock.patch.object(smoke, "run"), \
+                mock.patch.object(smoke, "clock_probe", return_value={}), \
+                mock.patch.object(smoke, "child_ready", side_effect=lambda *args: events.append("child-ready-exec")), \
+                mock.patch.object(smoke, "gate_proof", side_effect=gate_proof), \
+                mock.patch.object(smoke, "stop"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            smoke.tcp_scenario("tcp-branch", 0)
+        self.assertEqual(events, ["child-ready-exec", "source-ready-exec", "tcp-finish"])
+        self.assertEqual(smoke.report["samples"][0]["status"], "passed")
+
     def test_failed_samples_and_failed_baselines_do_not_generate_performance_claims(self):
         sample = dict(kind="full", tty=False, status="failed", capture_ms=12)
         self.assertEqual(HARNESS.summarize([sample]), {})
@@ -381,7 +522,15 @@ class TransportCheckpointTests(unittest.TestCase):
         for report in reports.values():
             report["image_manifest_digest"] = "sha256:fixture"
             report["parameters"] = {"samples": 1}
+            report["firmware_sha256"] = "same-firmware"
+            report["host"] = "same-host"
+            report["host_node"] = "same-machine"
         self.assertEqual(HARNESS.compare(reports)["full/pipe/capture_ms"]["candidate_over_baseline_p50"], 1)
+        for field in ("firmware_sha256", "host", "host_node"):
+            previous = reports["candidate"][field]
+            reports["candidate"][field] = "different"
+            self.assertEqual(HARNESS.compare(reports), {})
+            reports["candidate"][field] = previous
         reports["candidate"]["image_manifest_digest"] = "sha256:different-image"
         self.assertEqual(HARNESS.compare(reports), {})
 

@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use microsandbox_protocol::codec;
 use microsandbox_protocol::core::{
-    CoreError, Ready, WORKLOAD_TRANSPORT_BULK_BYTES, WORKLOAD_TRANSPORT_BULK_FRAMES,
-    WORKLOAD_TRANSPORT_CONTROL_BYTES, WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFrozen,
-    WorkloadThawed, WorkloadTransportCredit, WorkloadTransportPosition,
+    CoreError, Ready, WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
+    WORKLOAD_TRANSPORT_BULK_FRAMES, WORKLOAD_TRANSPORT_CONTROL_BYTES,
+    WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFrozen, WorkloadThawed, WorkloadTransportCredit,
+    WorkloadTransportPosition,
 };
 use microsandbox_protocol::message::{Message, MessageType};
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -48,7 +49,7 @@ struct State {
     guest_bulk_bytes: u64,
     bulk_tail: usize,
     pending: Vec<PendingReply>,
-    ordinary_writer: Option<mpsc::Sender<super::relay::ControlWrite>>,
+    ordinary_writer: Option<super::relay::ControlWriter>,
 }
 
 /// Shared by the trusted coordinator and relay, never exposed through the SDK socket.
@@ -97,7 +98,9 @@ impl WorkloadControl {
 
     pub(crate) fn install_ready(&self, version: u8, ready: Ready, dual_port: bool) {
         let mut state = self.state.lock().unwrap();
-        if ready.workload_transport_barrier_version == Some(1) && state.ready.is_none() {
+        if ready.workload_transport_barrier_version == Some(WORKLOAD_TRANSPORT_BARRIER_VERSION)
+            && state.ready.is_none()
+        {
             state.credit = WorkloadTransportCredit {
                 control_bytes: WORKLOAD_TRANSPORT_CONTROL_BYTES,
                 control_frames: WORKLOAD_TRANSPORT_CONTROL_FRAMES,
@@ -119,17 +122,12 @@ impl WorkloadControl {
             .expect("one lifecycle writer")
     }
 
-    pub(crate) fn register_ordinary_writer(
-        &self,
-        writer: mpsc::Sender<super::relay::ControlWrite>,
-    ) {
+    pub(crate) fn register_ordinary_writer(&self, writer: super::relay::ControlWriter) {
         self.state.lock().unwrap().ordinary_writer = Some(writer);
     }
 
     /// Bootstrap may write directly before Ready. Every later ordinary write joins the same FIFO.
-    pub(crate) fn ordinary_writer(
-        &self,
-    ) -> Result<Option<mpsc::Sender<super::relay::ControlWrite>>, String> {
+    pub(crate) fn ordinary_writer(&self) -> Result<Option<super::relay::ControlWriter>, String> {
         let state = self.state.lock().unwrap();
         if state.closed {
             return Err("workload transport closed".into());
@@ -153,8 +151,10 @@ impl WorkloadControl {
             return Err("workload control transport is not running".into());
         }
         let (version, ready) = state.ready.clone().ok_or("guest readiness unavailable")?;
-        if ready.workload_transport_barrier_version != Some(1) {
-            return Err("guest lacks workload transport barrier version 1".into());
+        if ready.workload_transport_barrier_version != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) {
+            return Err(format!(
+                "guest lacks workload transport barrier version {WORKLOAD_TRANSPORT_BARRIER_VERSION}"
+            ));
         }
         Ok((version, ready))
     }
@@ -229,12 +229,18 @@ impl WorkloadControl {
         if state.gates != 0 || state.fenced {
             return Ok(false);
         }
-        if !state
+        match state
             .ready
             .as_ref()
-            .is_some_and(|(_, ready)| ready.workload_transport_barrier_version == Some(1))
+            .and_then(|(_, ready)| ready.workload_transport_barrier_version)
         {
-            return Ok(true);
+            None => return Ok(true),
+            Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) => {}
+            Some(version) => {
+                return Err(format!(
+                    "unsupported workload transport barrier version {version}"
+                ));
+            }
         }
         let (sent_bytes, sent_frames, byte_limit, frame_limit) = if bulk {
             (
@@ -508,7 +514,7 @@ mod tests {
         control.install_ready(
             9,
             Ready {
-                workload_transport_barrier_version: Some(1),
+                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
                 ..Ready::default()
             },
             false,
@@ -527,6 +533,23 @@ mod tests {
         assert!(control.admit(false, 1).unwrap());
         drop(control.gate());
         assert!(!control.admit(false, 1).unwrap());
+    }
+
+    #[test]
+    fn unsupported_private_contract_fails_instead_of_disabling_admission() {
+        let control = WorkloadControl::new();
+        control.install_ready(8, Ready::default(), false);
+        assert!(control.admit(false, usize::MAX).unwrap());
+        control.install_ready(
+            9,
+            Ready {
+                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION - 1),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(control.admit(false, 1).unwrap_err().contains("unsupported"));
+        assert!(control.admit(true, 1).unwrap_err().contains("unsupported"));
     }
 
     #[tokio::test]

@@ -8,7 +8,9 @@ use std::time::Instant;
 use microsandbox_image::checkpoint::{
     CheckpointClosure, MemoryExtentContent, ObjectId, ResourceDescriptor, ResourceTreatment,
 };
-use microsandbox_protocol::core::{Ready, WorkloadTransportCredit, WorkloadTransportPosition};
+use microsandbox_protocol::core::{
+    Ready, WORKLOAD_TRANSPORT_BARRIER_VERSION, WorkloadTransportCredit, WorkloadTransportPosition,
+};
 use microsandbox_protocol::message::{MessageType, PROTOCOL_VERSION};
 
 use super::coordinator::TYPE_FS;
@@ -422,8 +424,8 @@ fn parse_restored_agent_resource(
 
     let ready: Ready = serde_json::from_str(value("ready")?)
         .map_err(|error| format!("checkpoint guest readiness is invalid: {error}"))?;
-    if ready.workload_transport_barrier_version != Some(1) {
-        return Err("checkpoint guest lacks a complete-frame transport barrier".into());
+    if ready.workload_transport_barrier_version != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) {
+        return Err("checkpoint guest has an unsupported development transport-credit contract; recreate the full snapshot with a matching build".into());
     }
     let host_input: WorkloadTransportPosition =
         serde_json::from_str(value("transport_host_input")?)
@@ -496,7 +498,9 @@ mod tests {
                         boot_time_ns: 10,
                         init_time_ns: 20,
                         ready_time_ns: 30,
-                        workload_transport_barrier_version: Some(1),
+                        workload_transport_barrier_version: Some(
+                            WORKLOAD_TRANSPORT_BARRIER_VERSION,
+                        ),
                         ..Default::default()
                     })
                     .unwrap(),
@@ -526,6 +530,20 @@ mod tests {
             .unwrap();
 
         assert!(error.contains("protocol generation 8 is unsupported"));
+    }
+
+    #[test]
+    fn rejects_development_snapshot_with_stdin_charged_to_control() {
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        let mut ready: Ready = serde_json::from_str(&resource.binding["ready"]).unwrap();
+        ready.workload_transport_barrier_version = Some(1);
+        resource
+            .binding
+            .insert("ready".into(), serde_json::to_string(&ready).unwrap());
+        let error = parse_restored_agent_resource(&resource, "old-development-cut")
+            .err()
+            .unwrap();
+        assert!(error.contains("unsupported development transport-credit contract"));
     }
 
     #[test]

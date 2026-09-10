@@ -56,7 +56,7 @@ LATE_BYTES = 64 * 1024
 CONTROL_SUFFIX = b"0123456789abcdef" * 14 + b"abcdef\n"
 
 # Regression consumers acknowledge a prefix, then wait behind an autonomous timer gate.
-# This fills forwarding queues without requiring a fresh exec to escape the saturated FIFO.
+# The independent gate timestamp proves fresh metadata exec completed without draining input.
 # Throughput and VM-free fixture modes can still open a file gate explicitly.
 INPUT_PROGRAM = r'''
 import hashlib, json, os, select, sys, termios, time
@@ -564,10 +564,10 @@ class TransportSmoke(BASE.Smoke):
                            firmware_sha256=file_digest(Path(self.env["MSB_LIBKRUNFW_PATH"])),
                            agentd_sha256=(file_digest(Path(self.env["MSB_AGENTD_PATH"]))
                                           if "MSB_AGENTD_PATH" in self.env else None),
-                           host=platform.platform(), harness_python=sys.version,
+                           host=platform.platform(), host_node=platform.node(), harness_python=sys.version,
                            parameters={key: getattr(args, key) for key in
                                        ("samples", "stdin_mib", "bulk_mib", "image", "cases", "input_modes")},
-                           latency_scope="CLI completion; independent child exec verifies readiness afterward",
+                           latency_scope="CLI completion; independent source/child exec verifies readiness before input drains",
                            throughput_scope="end-to-end CLI streams including startup/gating, not raw device throughput",
                            cpu_scope="source runtime ps TIME; CLI children rusage; harness process_time; not total guest CPU",
                            bulk_overlap_scope="checksum-verified CLI operation lifetimes, not guest-frame instrumentation")
@@ -672,14 +672,37 @@ class TransportSmoke(BASE.Smoke):
             raise
 
     def child_ready(self, row, name):
-        actual = self.guest(row["case"] + "-child-private", name,
+        started, wall_start = time.monotonic(), time.time_ns()
+        actual = self.guest(row["case"] + "-child-ready-exec", name,
                    "test \"$(cat /transport-marker)\" = source; "
                    "test \"$(cat /dev/shm/transport-marker)\" = source; "
                    "echo child > /transport-marker; echo child > /dev/shm/transport-marker; "
                    "printf 'CHILD_FRAME_OK\\n'")
+        ended = time.monotonic()
+        row["child_ready_exec_ms"] = (ended - started) * 1000
+        # Restore completion alone cannot prove fresh control traffic escapes inherited
+        # input debt. This command must also finish before the autonomous read gate opens;
+        # child_input deliberately opens the child's gate only after this check returns.
+        row.setdefault("operations", []).append(dict(kind="child-ready-exec", start=started,
+            end=ended, wall_start_ns=wall_start, wall_end_ns=time.time_ns()))
         if actual != "CHILD_FRAME_OK":
             raise RuntimeError(f"child framing mismatch: {actual!r}")
         row["child_exec_independent"] = True
+
+    def source_ready(self, row):
+        started, wall_start = time.monotonic(), time.time_ns()
+        actual = self.guest(row["case"] + "-source-ready-exec", "source",
+                            "printf 'SOURCE_FRAME_OK\\n'")
+        ended = time.monotonic()
+        row["source_ready_exec_ms"] = (ended - started) * 1000
+        # Unlike the restored child's empty host queue, this source still owns queued input.
+        # Do not open its gate: completion before the autonomous timestamp must prove that
+        # fresh metadata can pass credit-blocked data while the input consumer stays blocked.
+        row.setdefault("operations", []).append(dict(kind="source-ready-exec", start=started,
+            end=ended, wall_start_ns=wall_start, wall_end_ns=time.time_ns()))
+        if actual != "SOURCE_FRAME_OK":
+            raise RuntimeError(f"source framing mismatch: {actual!r}")
+        row["source_exec_independent"] = True
 
     def child_input(self, row, name, gate, receipt, stream):
         # This read happens before the host releases AFTER! bytes. The source's closed gate
@@ -782,9 +805,10 @@ class TransportSmoke(BASE.Smoke):
             self.child_ready(row, child)
             self.child_input(row, child, gate, receipt, stream)
         if regression:
+            self.source_ready(row)
             stream.after_cut.set()
-            # Ordinary exec uses the same saturated FIFO. The prearranged guest timer must
-            # open this gate autonomously; sending `exec touch` here would deadlock the test.
+            # The timer remains independent evidence, not a metadata-progress workaround.
+            # Neither readiness exec opens the source gate before its queued input drains.
         row["stdin"] = stream.finish()
         stream.close()
         verify_receipt(json.loads(self.guest(label + "-source-receipt", "source", f"cat {receipt}")),
@@ -802,6 +826,8 @@ class TransportSmoke(BASE.Smoke):
             # Require a verified operation interval covering the *start* of every checkpoint
             # action. A transfer that starts only after thaw is not counted as overlap.
             for operation in row["operations"]:
+                if operation["kind"] in ("child-ready-exec", "source-ready-exec"):
+                    continue  # This probes control readiness, not checkpoint/bulk overlap.
                 for direction, samples in row["bulk"].items():
                     overlaps = [s for s in samples if s["start"] <= operation["start"] < s["end"]]
                     if not overlaps:
@@ -867,6 +893,7 @@ class TransportSmoke(BASE.Smoke):
         if child:
             self.child_ready(row, child)
             row["child_tcp_expectation"] = "old connection detached; only fresh child exec asserted"
+        self.source_ready(row)
         row["tcp_receipt"] = client.finish()
         verify_receipt(row["tcp_receipt"], size, server.expected_digest, False)
         row["server"] = server.finish()
@@ -961,6 +988,7 @@ def summarize(samples):
             continue
         prefix = row["kind"] + ("/pty" if row.get("tty") else "/pipe")
         for key in ("pause_ms", "resume_ms", "capture_ms", "branch_ready_ms", "restore_ready_ms",
+                    "child_ready_exec_ms", "source_ready_exec_ms",
                     "elapsed_ms", "harness_cpu_seconds", "cli_cpu_seconds", "source_runtime_cpu_seconds"):
             if row.get(key) is not None:
                 groups.setdefault(prefix + "/" + key, []).append(row[key])
@@ -982,8 +1010,12 @@ def compare(reports):
     baseline, candidate = reports["baseline"], reports["candidate"]
     if (not baseline.get("image_manifest_digest")
             or baseline["image_manifest_digest"] != candidate.get("image_manifest_digest")
-            or baseline.get("parameters") != candidate.get("parameters")):
-        return {}  # A moving image tag or different workload is not a binary performance delta.
+            or baseline.get("parameters") != candidate.get("parameters")
+            or not baseline.get("firmware_sha256")
+            or baseline["firmware_sha256"] != candidate.get("firmware_sha256")
+            or not baseline.get("host") or baseline["host"] != candidate.get("host")
+            or not baseline.get("host_node") or baseline["host_node"] != candidate.get("host_node")):
+        return {}  # Changed image, workload, firmware, or host is not an isolated binary delta.
     before = reports.get("baseline", {}).get("statistics", {})
     after = reports.get("candidate", {}).get("statistics", {})
     return {key: {"baseline": before[key], "candidate": after[key],
@@ -1044,7 +1076,7 @@ def main():
             break  # Do not benchmark the next binary alongside an unverified surviving runtime.
     result = dict(reports={key: str(root / key / "report.json") for key in reports},
                   comparison=compare(reports), status="failed" if failed else "passed",
-                  comparison_requirement="two completely passing runs with identical pinned image and workload parameters")
+                  comparison_requirement="two completely passing runs with identical host, firmware, pinned image, and workload parameters")
     (root / "comparison.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"Comparison: {root / 'comparison.json'}", flush=True)
     return int(failed)
