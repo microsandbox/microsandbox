@@ -212,10 +212,19 @@ func TestFullSnapshot(t *testing.T) {
 					t.Fatal("branch lost private RAM")
 				}
 				check(t, child.Resume(ctx))
+				// Assert eventual progress, allowing the hosted runner to schedule the guest.
 				before := dv.Ticks
-				time.Sleep(300 * time.Millisecond)
-				if call(t, ctx, desc, "get").Ticks <= before {
-					t.Fatal("restored workload stopped progressing")
+				started := time.Now()
+				for {
+					after := call(t, ctx, desc, "get")
+					if after.Ticks > before {
+						t.Logf("branch progress forked=%v: ticks %d -> %d after %s", forked, before, after.Ticks, time.Since(started))
+						break
+					}
+					if time.Since(started) >= 5*time.Second {
+						t.Fatalf("restored workload did not progress: ticks %d -> %d after %s", before, after.Ticks, time.Since(started))
+					}
+					time.Sleep(100 * time.Millisecond)
 				}
 			}
 			// Export/import and direct-archive restore must preserve the same live process.
