@@ -5,8 +5,8 @@
 //! network layer) cannot go through agentd: the guest is untrusted and the
 //! knobs live host-side. The sandbox process serves them instead next to the
 //! agent endpoint — a unix socket on unix hosts, a named pipe on Windows.
-//! The protocol is deliberately tiny: one JSON request line in, one JSON
-//! response line out, per connection.
+//! Each connection carries one JSON request and response line. Legacy requests
+//! and versioned envelopes both enter the same runtime-owned executor.
 //!
 //! Secret requests may carry raw secret values (rotation needs the new
 //! material), so request lines are never logged and [`SecretValue`] redacts
@@ -24,12 +24,15 @@ use serde::{Deserialize, Serialize};
 /// `<sandbox>.control.sock`). Canonical sockets use sibling `control.sock`.
 pub const CONTROL_SOCKET_EXTENSION: &str = "control.sock";
 
+/// Initial version of the fenced runtime-control envelope.
+pub const CONTROL_PROTOCOL_VERSION: u16 = 1;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
 /// A control request from the SDK.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
     /// Report which live-control operations this sandbox process supports.
@@ -61,6 +64,27 @@ pub enum ControlRequest {
         /// Ordered changes to apply. The first failure aborts the batch.
         changes: Vec<SecretLiveChange>,
     },
+
+    /// Produce one same-epoch resumable checkpoint and return the source to its prior running
+    /// state after root-last publication.
+    CheckpointCreate {
+        /// Caller-selected safe checkpoint identity.
+        checkpoint_id: String,
+        /// Why this checkpoint is being captured.
+        intent: CheckpointCaptureIntent,
+    },
+}
+
+/// Purpose of a runtime checkpoint capture.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointCaptureIntent {
+    /// User-requested resumable snapshot.
+    ResumableSnapshot,
+    /// Local idle/park continuation.
+    Park,
+    /// Transparent continuity operation.
+    TransparentTransfer,
 }
 
 /// One live secret change carried by [`ControlRequest::SecretsUpdate`].
@@ -99,7 +123,7 @@ pub enum SecretLiveChange {
 pub struct SecretValue(pub String);
 
 /// The reply to any control request.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlResponse {
     /// Whether the request was accepted.
     pub ok: bool,
@@ -107,6 +131,10 @@ pub struct ControlResponse {
     /// Failure detail when `ok` is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+
+    /// Stable machine-readable failure class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 
     /// Memory sizing, present for memory requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +147,28 @@ pub struct ControlResponse {
     /// Supported operations, present for capability requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<ControlCapabilities>,
+
+    /// Published checkpoint result, present for checkpoint operations and for a post-publication
+    /// failure such as an unsuccessful source resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<CheckpointControlState>,
+}
+
+/// Published checkpoint information returned by the runtime control executor.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckpointControlState {
+    /// Stable checkpoint identity.
+    pub checkpoint_id: String,
+    /// Content-addressed composite checkpoint root.
+    pub checkpoint_root: String,
+    /// Runtime-local installed closure path.
+    pub path: PathBuf,
+    /// Whether capture emitted a complete or incremental physical memory generation.
+    pub memory_mode: String,
+    /// Logical memory bytes represented by the capture.
+    pub memory_logical_bytes: u64,
+    /// Non-zero memory bytes written during this capture.
+    pub memory_emitted_bytes: u64,
 }
 
 /// Live-control operations supported by this sandbox process, carried in
@@ -135,6 +185,10 @@ pub struct ControlCapabilities {
 
     /// Live secret rotation, removal, and allowed-host updates are available.
     pub secrets_update: bool,
+
+    /// Same-epoch composite checkpoint capture is available.
+    #[serde(default)]
+    pub checkpoint_create: bool,
 }
 
 /// Memory sizing carried in [`ControlResponse`], all in MiB.
@@ -167,6 +221,62 @@ pub struct CpuControlState {
 
     /// Online count the VMM currently enforces.
     pub enforced: u32,
+}
+
+/// Fenced control request carried by the versioned host-control protocol.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlEnvelope {
+    /// Runtime-control protocol version.
+    pub protocol_version: u16,
+    /// Caller-generated idempotency key.
+    pub request_id: String,
+    /// Immutable identity of the intended runtime process boot.
+    pub runtime_boot_id: String,
+    /// Optional compare-and-swap revision.
+    pub expected_revision: Option<u64>,
+    /// Stable operation identity when this request belongs to longer work.
+    pub operation_id: Option<String>,
+    /// Typed control command.
+    pub command: ControlRequest,
+}
+
+/// Runtime lifecycle projected through control responses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeLifecycle {
+    /// Guest vCPUs and admitted workers may run.
+    Running,
+    /// One executor-owned operation is establishing a quiesced boundary.
+    Quiescing,
+    /// Execution is paused and externally visible writers remain fenced.
+    Quiesced,
+    /// Runtime is permanently fenced from further work.
+    Retiring,
+}
+
+/// Identity and concurrency state returned with fenced responses.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeControlState {
+    /// Immutable identity of this process boot.
+    pub runtime_boot_id: String,
+    /// Monotonic successful-mutation revision.
+    pub revision: u64,
+    /// Current lifecycle projection.
+    pub lifecycle: RuntimeLifecycle,
+}
+
+/// Reply to a [`ControlEnvelope`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlEnvelopeResponse {
+    /// Correlated request id.
+    pub request_id: String,
+    /// Runtime identity/revision observed after executing the command.
+    pub runtime: RuntimeControlState,
+    /// Existing command response payload.
+    pub response: ControlResponse,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -250,6 +360,7 @@ mod tests {
                 cpu_resize: true,
                 memory_resize: false,
                 secrets_update: true,
+                checkpoint_create: true,
             }),
             ..Default::default()
         };

@@ -18,6 +18,9 @@ runner = [
     "client",
     "dep:bytes",
     "dep:crossbeam-queue",
+    "dep:clap",
+    "dep:hex",
+    "dep:microsandbox-image",
     "dep:microsandbox-agent-client",
     "dep:microsandbox-filesystem",
     "dep:microsandbox-metrics",
@@ -36,10 +39,13 @@ net = ["dep:microsandbox-network", "msb_krun?/net"]
 [dependencies]
 bytes = { workspace = true, optional = true }
 chrono.workspace = true
+clap = { workspace = true, features = ["derive"], optional = true }
+hex = { workspace = true, optional = true }
 crossbeam-queue = { workspace = true, optional = true }
 libc.workspace = true
 microsandbox-agent-client = { workspace = true, optional = true }
 microsandbox-db.workspace = true
+microsandbox-image = { workspace = true, optional = true }
 microsandbox-filesystem = { workspace = true, optional = true }
 microsandbox-metrics = { workspace = true, optional = true }
 microsandbox-network = { workspace = true, default-features = false, optional = true }

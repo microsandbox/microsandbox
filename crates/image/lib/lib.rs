@@ -18,6 +18,7 @@
 
 mod archive;
 mod cache;
+pub mod checkpoint;
 mod config;
 pub(crate) mod crc32c;
 mod digest;

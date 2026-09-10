@@ -6,6 +6,8 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "runner")]
+pub(crate) mod checkpoint;
 #[cfg(feature = "client")]
 mod client;
 mod error;

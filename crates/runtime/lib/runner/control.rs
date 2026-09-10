@@ -1,13 +1,26 @@
-//! Host-side runtime control listener and VM mutation handlers.
+//! Host-side runtime control socket.
+//!
+//! Live VM mutations that are host/VMM-owned (memory resize through
+//! virtio-mem, CPU online targets, and secret reconfiguration in the host
+//! network layer) cannot go through agentd: the guest is untrusted and the
+//! knobs live host-side. The sandbox process serves them instead next to the
+//! agent endpoint — a unix socket on unix hosts, a named pipe on Windows.
+//! Existing one-line JSON clients remain supported. New callers may use a
+//! versioned request envelope carrying boot identity, revision fencing, and
+//! request correlation; both paths enter one runtime-owned executor.
+//!
+//! Secret requests may carry raw secret values (rotation needs the new
+//! material), so request lines are never logged and [`SecretValue`] redacts
+//! itself in `Debug` output; errors carry secret names only.
 
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
-use crate::control::{
-    ControlCapabilities, ControlRequest, ControlResponse, CpuControlState, MemoryControlState,
-    SecretLiveChange,
-};
+use crate::control::*;
+
+mod executor;
+pub use executor::RuntimeControlExecutor;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -15,31 +28,10 @@ use crate::control::{
 
 /// Everything the control listener can reach: the VMM control handle plus the
 /// host network secrets layer when this build carries one.
+#[derive(Clone)]
 pub struct ControlContext {
-    /// Live VM resource control handle.
-    pub vm: msb_krun::VmControl,
-
-    /// Live secrets view of the sandbox's network stack, when networking is
-    /// enabled and the sandbox booted with secrets.
-    #[cfg(feature = "net")]
-    pub secrets: Option<microsandbox_network::secrets::handle::SecretsHandle>,
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods
-//--------------------------------------------------------------------------------------------------
-
-impl ControlContext {
-    fn secrets_update_supported(&self) -> bool {
-        #[cfg(feature = "net")]
-        {
-            self.secrets.is_some()
-        }
-        #[cfg(not(feature = "net"))]
-        {
-            false
-        }
-    }
+    /// Single authority for reads and mutations.
+    pub executor: std::sync::Arc<RuntimeControlExecutor>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -94,7 +86,7 @@ fn serve_connection(
 /// probes from the SDK open and immediately close the pipe.
 #[cfg(windows)]
 pub fn spawn_control_listener(pipe_name: PathBuf, context: ControlContext) -> std::io::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -129,7 +121,7 @@ pub fn spawn_control_listener(pipe_name: PathBuf, context: ControlContext) -> st
                     let mut reader = BufReader::new(server);
                     let mut line = String::new();
                     match reader.read_line(&mut line).await {
-                        Ok(0) => continue,
+                        Ok(0) => continue, // existence probe: opened and closed
                         Ok(_) => {}
                         Err(e) => {
                             tracing::debug!("control: connection error: {e}");
@@ -137,16 +129,28 @@ pub fn spawn_control_listener(pipe_name: PathBuf, context: ControlContext) -> st
                         }
                     }
 
-                    let payload = respond_to_line(line.trim(), &context);
-                    let mut server = reader.into_inner();
-                    if let Err(e) = server.write_all(&payload).await {
+                    // Checkpoint capture and other host mutations are intentionally synchronous
+                    // under one executor lock. Run them outside the current-thread pipe reactor,
+                    // matching the dedicated blocking listener used on Unix and allowing capture
+                    // code to drive the separate VM runtime without nesting Tokio runtimes.
+                    let request = line.trim().to_owned();
+                    let request_context = context.clone();
+                    let payload = match tokio::task::spawn_blocking(move || {
+                        respond_to_line(&request, &request_context)
+                    })
+                    .await
+                    {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            tracing::error!(%error, "control: request executor failed");
+                            continue;
+                        }
+                    };
+                    let server = reader.into_inner();
+                    if let Err(e) = write_windows_control_response(server, &payload).await {
                         tracing::debug!("control: response write error: {e}");
                         continue;
                     }
-                    // Flush before this instance drops, or the client can lose
-                    // the unread reply when the handle closes.
-                    let _ = server.flush().await;
-                    let _ = server.disconnect();
                 }
             });
         })?;
@@ -154,142 +158,191 @@ pub fn spawn_control_listener(pipe_name: PathBuf, context: ControlContext) -> st
     Ok(())
 }
 
+/// Write one Windows control response and close the connected pipe instance.
+///
+/// `NamedPipeServer::disconnect` discards unread pipe data, so calling it immediately after an
+/// asynchronous flush can erase a fast response before the client consumes it. Dropping the
+/// connected handle preserves the written bytes while the listener creates a fresh instance.
+#[cfg(windows)]
+async fn write_windows_control_response(
+    mut server: tokio::net::windows::named_pipe::NamedPipeServer,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    server.write_all(payload).await?;
+    server.flush().await
+}
+
 /// Parse one request line and produce the newline-terminated JSON reply.
 fn respond_to_line(line: &str, context: &ControlContext) -> Vec<u8> {
-    let response = match serde_json::from_str::<ControlRequest>(line) {
-        Ok(request) => handle_request(request, context),
-        Err(e) => ControlResponse {
-            ok: false,
-            error: Some(format!("invalid control request: {e}")),
-            ..Default::default()
+    let value = serde_json::from_str::<serde_json::Value>(line);
+    let mut payload = match value {
+        Ok(value) if value.get("protocol_version").is_some() => {
+            match serde_json::from_value::<ControlEnvelope>(value) {
+                Ok(envelope) => serde_json::to_vec(&context.executor.execute(envelope)),
+                Err(error) => serde_json::to_vec(&ControlResponse {
+                    ok: false,
+                    error_code: Some("invalid_envelope".into()),
+                    error: Some(format!("invalid control envelope: {error}")),
+                    ..Default::default()
+                }),
+            }
+        }
+        Ok(value) => match serde_json::from_value::<ControlRequest>(value) {
+            Ok(request) => serde_json::to_vec(&context.executor.execute_legacy(request)),
+            Err(error) => serde_json::to_vec(&ControlResponse {
+                ok: false,
+                error_code: Some("invalid_request".into()),
+                error: Some(format!("invalid control request: {error}")),
+                ..Default::default()
+            }),
         },
-    };
-
-    let mut payload = serde_json::to_vec(&response).unwrap_or_default();
+        Err(error) => serde_json::to_vec(&ControlResponse {
+            ok: false,
+            error_code: Some("invalid_json".into()),
+            error: Some(format!("invalid control request: {error}")),
+            ..Default::default()
+        }),
+    }
+    .unwrap_or_default();
     payload.push(b'\n');
     payload
 }
 
-fn handle_request(request: ControlRequest, context: &ControlContext) -> ControlResponse {
-    let control = &context.vm;
-    let memory = |state: Option<msb_krun::VmMemoryState>| match state {
-        Some(state) => ControlResponse {
-            ok: true,
-            memory: Some(MemoryControlState {
-                boot_mib: state.boot_mib,
-                target_mib: state.target_mib,
-                current_mib: state.current_mib,
-                max_mib: state.max_mib,
-            }),
-            ..Default::default()
-        },
-        None => ControlResponse {
-            ok: false,
-            error: Some("this VM booted without memory hotplug capacity".to_string()),
-            ..Default::default()
-        },
-    };
-    let cpu = |state: Option<msb_krun::VmCpuState>| match state {
-        Some(state) => ControlResponse {
-            ok: true,
-            cpu: Some(CpuControlState {
-                possible: state.possible,
-                requested_online: state.requested_online,
-                actual_online: state.actual_online,
-                enforced: state.enforced,
-            }),
-            ..Default::default()
-        },
-        None => ControlResponse {
-            ok: false,
-            error: Some("this VM booted without CPU capacity".to_string()),
-            ..Default::default()
-        },
-    };
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
 
-    match request {
-        ControlRequest::Capabilities => ControlResponse {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn immediate_windows_control_response_survives_server_close() {
+        use std::time::Duration;
+
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::net::windows::named_pipe::{ClientOptions, PipeMode, ServerOptions};
+
+        let pipe_name = format!(r"\\.\pipe\msb-control-response-test-{}", std::process::id());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .pipe_mode(PipeMode::Byte)
+            .create(&pipe_name)
+            .unwrap();
+        let client = ClientOptions::new().open(&pipe_name).unwrap();
+
+        let writer = tokio::spawn(async move {
+            server.connect().await.unwrap();
+            write_windows_control_response(server, b"{\"ok\":false}\n")
+                .await
+                .unwrap();
+        });
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            BufReader::new(client).read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        writer.await.unwrap();
+
+        assert_eq!(line, "{\"ok\":false}\n");
+    }
+
+    #[test]
+    fn secret_value_debug_is_redacted() {
+        let request = ControlRequest::SecretsUpdate {
+            changes: vec![SecretLiveChange::Rotate {
+                name: "API_KEY".into(),
+                value: SecretValue("sentinel-secret-value".into()),
+            }],
+        };
+
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("sentinel-secret-value"));
+        assert!(debug.contains("[redacted]"));
+        assert!(debug.contains("API_KEY"));
+    }
+
+    #[test]
+    fn secrets_update_round_trips_through_json() {
+        let request = ControlRequest::SecretsUpdate {
+            changes: vec![
+                SecretLiveChange::Rotate {
+                    name: "API_KEY".into(),
+                    value: SecretValue("new-material".into()),
+                },
+                SecretLiveChange::Remove {
+                    name: "OLD_KEY".into(),
+                },
+                SecretLiveChange::SetAllowedHosts {
+                    name: "API_KEY".into(),
+                    hosts: vec!["api.example.com".into(), "*".into()],
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
+        let ControlRequest::SecretsUpdate { changes } = parsed else {
+            panic!("expected secrets_update");
+        };
+        assert_eq!(changes.len(), 3);
+        let SecretLiveChange::Rotate { name, value } = &changes[0] else {
+            panic!("expected rotate");
+        };
+        assert_eq!(name, "API_KEY");
+        assert_eq!(value.0, "new-material");
+    }
+
+    #[test]
+    fn checkpoint_request_round_trips_through_json() {
+        let request = ControlRequest::CheckpointCreate {
+            checkpoint_id: "checkpoint_0123456789abcdef".into(),
+            intent: CheckpointCaptureIntent::ResumableSnapshot,
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
+
+        assert!(matches!(
+            parsed,
+            ControlRequest::CheckpointCreate {
+                checkpoint_id,
+                intent: CheckpointCaptureIntent::ResumableSnapshot,
+            } if checkpoint_id == "checkpoint_0123456789abcdef"
+        ));
+    }
+
+    #[test]
+    fn capabilities_response_serializes_flags() {
+        let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
-                cpu_resize: control.cpu_resize_supported(),
-                memory_resize: control.memory_resize_supported(),
-                secrets_update: context.secrets_update_supported(),
+                cpu_resize: true,
+                memory_resize: false,
+                secrets_update: true,
+                checkpoint_create: true,
             }),
             ..Default::default()
-        },
-        ControlRequest::MemoryTarget { total_mib } => {
-            if control.set_memory_target_mib(total_mib).is_none() {
-                return memory(None);
-            }
-            memory(control.memory_state())
-        }
-        ControlRequest::MemoryState => memory(control.memory_state()),
-        ControlRequest::CpuTarget { online } => {
-            if control.set_cpu_target(online).is_none() {
-                return cpu(None);
-            }
-            cpu(control.cpu_state())
-        }
-        ControlRequest::CpuState => cpu(control.cpu_state()),
-        ControlRequest::SecretsUpdate { changes } => handle_secrets_update(context, changes),
-    }
-}
-
-#[cfg(feature = "net")]
-fn handle_secrets_update(
-    context: &ControlContext,
-    changes: Vec<SecretLiveChange>,
-) -> ControlResponse {
-    let Some(secrets) = &context.secrets else {
-        return ControlResponse {
-            ok: false,
-            error: Some(
-                "live secret reconfiguration is not available for this sandbox".to_string(),
-            ),
-            ..Default::default()
         };
-    };
 
-    for change in changes {
-        let result = match change {
-            // `value` owns its plaintext and zeroizes on drop; clone the inner
-            // string into the rotation call (the wrapper cannot be moved out of
-            // a `Drop` type) and let the original wipe itself at arm's end.
-            SecretLiveChange::Rotate { name, value } => {
-                secrets.rotate_value(&name, value.0.clone())
-            }
-            SecretLiveChange::Remove { name } => {
-                secrets.remove(&name);
-                Ok(())
-            }
-            SecretLiveChange::SetAllowedHosts { name, hosts } => {
-                secrets.set_allowed_hosts(&name, &hosts)
-            }
-        };
-        if let Err(e) = result {
-            // SecretsUpdateError carries secret names only, never values.
-            return ControlResponse {
-                ok: false,
-                error: Some(e.to_string()),
-                ..Default::default()
-            };
-        }
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"secrets_update\":true"));
+        assert!(json.contains("\"memory_resize\":false"));
+
+        let parsed: ControlResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.capabilities.unwrap().secrets_update);
     }
 
-    ControlResponse {
-        ok: true,
-        ..Default::default()
-    }
-}
-
-#[cfg(not(feature = "net"))]
-fn handle_secrets_update(
-    _context: &ControlContext,
-    _changes: Vec<SecretLiveChange>,
-) -> ControlResponse {
-    ControlResponse {
-        ok: false,
-        error: Some("this runtime was built without network support".to_string()),
-        ..Default::default()
+    #[test]
+    fn legacy_responses_without_capabilities_still_parse() {
+        let parsed: ControlResponse = serde_json::from_str(r#"{"ok":true}"#).unwrap();
+        assert!(parsed.ok);
+        assert!(parsed.capabilities.is_none());
     }
 }

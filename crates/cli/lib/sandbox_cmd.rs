@@ -18,7 +18,10 @@ use clap::Args;
 use microsandbox_runtime::{
     launch::LaunchConfig,
     logging::LogLevel,
-    vm::{AgentTransportProfile, Config, DiskMountSpec, UpperSpec, VmConfig, validate_disk_format},
+    vm::{
+        AgentTransportProfile, Config, DiskMountSpec, UpperLayerSpec, UpperSpec, VmConfig,
+        validate_disk_format,
+    },
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -211,9 +214,10 @@ pub fn run(args: SandboxArgs) -> ! {
                 }
             };
             Some(UpperSpec {
-                primary: upper.clone(),
-                format,
-                backing: Vec::new(),
+                layers: vec![UpperLayerSpec {
+                    path: upper.clone(),
+                    format,
+                }],
                 read_only: false,
             })
         }
