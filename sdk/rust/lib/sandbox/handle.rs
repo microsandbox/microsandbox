@@ -90,7 +90,7 @@ enum RestartAction {
 /// [`connect`](SandboxHandle::connect) when the sandbox is already running, or
 /// [`start`](SandboxHandle::start) to boot a stopped sandbox.
 pub struct SandboxHandle {
-    backend: Arc<dyn Backend>,
+    pub(super) backend: Arc<dyn Backend>,
     inner: SandboxHandleInner,
     name: String,
 }
@@ -405,7 +405,10 @@ impl SandboxHandle {
             .local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleMetrics))?;
 
-        if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
+        if !matches!(
+            local.status,
+            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+        ) {
             return Err(MicrosandboxError::SandboxNotRunning(format!(
                 "'{}' is not running (status: {:?})",
                 self.name, local.status
@@ -647,9 +650,9 @@ impl SandboxHandle {
     /// Snapshot this sandbox to a bare name under the default snapshots
     /// directory (`~/.microsandbox/snapshots/<name>/`).
     ///
-    /// The sandbox must be stopped (or crashed); running sandboxes are
-    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. **Local
-    /// handles only** — cloud snapshot semantics are deferred.
+    /// Captures disk only, including running and paused sources. A live cut is
+    /// crash-consistent and preserves the source's running/paused state.
+    /// **Local handles only** — cloud snapshot semantics are deferred.
     #[cfg(feature = "local")]
     pub async fn snapshot(
         &self,

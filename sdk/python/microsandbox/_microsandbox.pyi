@@ -94,6 +94,7 @@ class Sandbox:
         from_snapshot: str | os.PathLike[str] | None = None,
         disk_only: bool = False,
         snapshot_base: str | None = None,
+        forked: bool = False,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -136,6 +137,7 @@ class Sandbox:
         from_snapshot: str | os.PathLike[str] | None = None,
         disk_only: bool = False,
         snapshot_base: str | None = None,
+        forked: bool = False,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -193,6 +195,7 @@ class Sandbox:
         from_snapshot: str | os.PathLike[str] | None = None,
         disk_only: bool = False,
         snapshot_base: str | None = None,
+        forked: bool = False,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -366,6 +369,9 @@ class Sandbox:
         follow: bool = False,
     ) -> LogStream: ...
     async def stop(self, timeout: float | None = None) -> None: ...
+    async def branch(self, name: str) -> Sandbox: ...
+    async def pause(self) -> None: ...
+    async def resume(self) -> None: ...
     async def request_stop(self) -> None: ...
     async def kill(self, timeout: float | None = None) -> None: ...
     async def request_kill(self) -> None: ...
@@ -475,6 +481,9 @@ class SandboxHandle:
     async def connect(self, timeout: float | None = None) -> Sandbox: ...
     async def connect_or_start(self, *, detached: bool = False) -> Sandbox: ...
     async def stop(self, timeout: float | None = None) -> None: ...
+    async def branch(self, name: str) -> Sandbox: ...
+    async def pause(self) -> None: ...
+    async def resume(self) -> None: ...
     async def request_stop(self) -> None: ...
     async def kill(self, timeout: float | None = None) -> None: ...
     async def request_kill(self) -> None: ...
@@ -888,9 +897,10 @@ class ImagePruneReport:
 class Snapshot:
     @staticmethod
     async def create(
-        name: str,
+        name: str = "",
         *,
         from_sandbox: str,
+        group: str | None = None,
         dest_dir: str | os.PathLike[str] | None = None,
         labels: dict[str, str] | None = None,
         force: bool = False,
@@ -903,6 +913,7 @@ class Snapshot:
         archive: str | os.PathLike[str],
         *,
         from_sandbox: str,
+        group: str | None = None,
         labels: dict[str, str] | None = None,
         force: bool = False,
         record_integrity: bool = False,
@@ -938,7 +949,22 @@ class Snapshot:
         *,
         dest: str | os.PathLike[str] | None = None,
         base: str | None = None,
+        group: str | None = None,
+        set_head: bool = False,
     ) -> SnapshotHandle: ...
+    @staticmethod
+    async def load_many(
+        archives: Sequence[str | os.PathLike[str]],
+        *,
+        dest: str | os.PathLike[str] | None = None,
+        base: str | None = None,
+        group: str | None = None,
+        set_head: bool = False,
+    ) -> list[SnapshotHandle]: ...
+    @staticmethod
+    async def group_head(selector: str) -> dict[str, str | bool | None]: ...
+    @property
+    def head_update(self) -> dict[str, str | bool | None] | None: ...
     @property
     def id(self) -> str: ...
     @property
@@ -982,6 +1008,10 @@ class SnapshotArchive:
     def path(self) -> str: ...
 
 class SnapshotHandle:
+    @property
+    def group(self) -> str | None: ...
+    @property
+    def head_update(self) -> dict[str, str | bool | None] | None: ...
     @property
     def id(self) -> str: ...
     @property

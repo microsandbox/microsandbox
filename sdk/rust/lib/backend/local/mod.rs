@@ -15,6 +15,7 @@
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
 //! backends can hold different configurations for tests / migrations.
 
+mod control_lookup;
 mod sandbox;
 
 use std::{
@@ -129,6 +130,15 @@ impl LocalBackend {
         profile: Option<String>,
     ) -> Self {
         let config = load_persisted_config_or_default().unwrap_or_default();
+        Self::lazy_with_config(config, selection_source, profile)
+    }
+
+    /// Reuse the configuration document already read by ambient profile resolution.
+    pub(crate) fn lazy_with_config(
+        config: GlobalConfig,
+        selection_source: BackendSelectionSource,
+        profile: Option<String>,
+    ) -> Self {
         Self {
             config: Arc::new(config),
             db: OnceCell::new(),

@@ -6,6 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::BytesMut;
@@ -25,8 +26,11 @@ use microsandbox_protocol::bulk::{
 use microsandbox_protocol::codec::{self, DecodedFrame, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
     ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ping, Pong, Ready,
-    RelayClientDisconnected, ResolvedUser, Touch, Touched, WorkloadFreeze, WorkloadFrozen,
-    WorkloadThaw, WorkloadThawed,
+    RelayClientDisconnected, ResolvedUser, Touch, Touched, WORKLOAD_TRANSPORT_BARRIER_VERSION,
+    WORKLOAD_TRANSPORT_BULK_BYTES, WORKLOAD_TRANSPORT_BULK_FRAMES,
+    WORKLOAD_TRANSPORT_CONTROL_BYTES, WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFailure,
+    WorkloadFailureDisposition, WorkloadFreeze, WorkloadFrozen, WorkloadThaw, WorkloadThawed,
+    WorkloadTransportCredit, WorkloadTransportPosition,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
@@ -50,7 +54,7 @@ use crate::config::{AgentdConfig, scripts_path};
 use crate::error::{AgentdError, AgentdResult};
 use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
 use crate::process::ProcessManager;
-use crate::serial::{AGENT_BULK_PORT_NAME, AGENT_PORT_NAME};
+use crate::serial::{AGENT_BULK_PORT_NAME, AGENT_PORT_NAME, InputCharge, InputLane, InputWindow};
 use crate::session::{
     BulkOutputCommand, ExecSession, RawActivity, RawSessionCompletion, RawSessionOutput,
     SessionOutput, SessionOutputEnvelope, SessionOutputSender, resolve_default_user,
@@ -85,6 +89,11 @@ const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
 
 /// Dedicated records additionally carry the transport-level client incarnation.
 const MAX_BULK_INPUT_BUF_SIZE: usize = MAX_INPUT_BUF_SIZE + CLIENT_INCARNATION_SIZE;
+
+/// Bound actual console work between runtime scheduling points, independently of wire records.
+/// Partial records count too: a readable bulk port must not hide fresh primary/PTY readiness.
+const AGENT_READ_QUANTUM_BYTES: usize = 256 * 1024;
+const AGENT_READ_QUANTUM_CALLS: usize = 64;
 
 /// Maximum time to wait for the host to acknowledge the init context.
 const INIT_ACK_TIMEOUT_SECS: u64 = 60;
@@ -135,8 +144,16 @@ const BULK_FAILURE_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 //--------------------------------------------------------------------------------------------------
 
 struct AgentState {
+    input_window: InputWindow,
+    pending_freeze: Option<Message>,
+    aborted_transport_attempt: Option<String>,
+    output_parked: bool,
+    resume_output_after_flush: bool,
+    frozen_host_input: Option<WorkloadTransportPosition>,
+    frozen_guest_bulk_bytes: u64,
     // Retain stdin/PTY and process registrations until inherited output readers finish.
     detached_sessions: HashMap<(u64, u32), ExecSession>,
+    stdin_poll_offset: usize,
     restored_attempt: Option<String>,
     client_incarnations: HashMap<u32, ClientIncarnation>,
     bulk_input_budget: Arc<Semaphore>,
@@ -162,12 +179,20 @@ struct FsBulkWriteWorker {
 pub(crate) struct AdmittedBulkRecord {
     record: BulkRecord,
     _permit: OwnedSemaphorePermit,
+    _transport_charge: Option<InputCharge>,
+}
+
+/// Both budgets follow the payload all the way into asynchronous TCP/filesystem consumption.
+pub(crate) struct BulkInputPermit {
+    _payload: OwnedSemaphorePermit,
+    _transport: Option<InputCharge>,
 }
 
 /// Dedicated-lane input waiting for aggregate client capacity while the control actor stays live.
 struct PendingBulkInput {
     frame: IncarnatedBulkFrame,
     budget: Arc<Semaphore>,
+    charge: InputCharge,
 }
 
 struct ActivityTracker {
@@ -209,6 +234,13 @@ struct BulkInputState {
     input: BytesMut,
 }
 
+/// Shared primary/bulk work retained across select turns, including incomplete wire records.
+#[derive(Default)]
+struct AgentReadBudget {
+    bytes: usize,
+    calls: usize,
+}
+
 /// One correlation's pending records in the guest-to-host DRR scheduler.
 struct BulkWriteFlow {
     queue: VecDeque<SessionOutputEnvelope>,
@@ -218,11 +250,21 @@ struct BulkWriteFlow {
 
 /// Deferred acknowledgement after the scheduler has discarded already-queued producer output.
 enum BulkOutputCleanup {
+    Park {
+        completion: tokio::sync::oneshot::Sender<u64>,
+        wire_bytes: u64,
+    },
     Flow(tokio::sync::oneshot::Sender<()>),
     Incarnation {
         incarnation: ClientIncarnation,
         completion: tokio::sync::oneshot::Sender<()>,
     },
+}
+
+#[derive(Default)]
+struct BulkOutputPosition {
+    parked: bool,
+    wire_bytes: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -232,7 +274,15 @@ enum BulkOutputCleanup {
 impl Default for AgentState {
     fn default() -> Self {
         Self {
+            input_window: InputWindow::new(initial_input_credit()),
+            pending_freeze: None,
+            aborted_transport_attempt: None,
+            output_parked: false,
+            resume_output_after_flush: false,
+            frozen_host_input: None,
+            frozen_guest_bulk_bytes: 0,
             detached_sessions: HashMap::new(),
+            stdin_poll_offset: 0,
             restored_attempt: None,
             client_incarnations: HashMap::new(),
             bulk_input_budget: Arc::new(Semaphore::new(BULK_INPUT_BYTE_CAPACITY)),
@@ -253,8 +303,14 @@ impl AdmittedBulkRecord {
         &self.record
     }
 
-    pub(crate) fn into_parts(self) -> (BulkRecord, OwnedSemaphorePermit) {
-        (self.record, self._permit)
+    pub(crate) fn into_parts(self) -> (BulkRecord, BulkInputPermit) {
+        (
+            self.record,
+            BulkInputPermit {
+                _payload: self._permit,
+                _transport: self._transport_charge,
+            },
+        )
     }
 
     #[cfg(test)]
@@ -267,6 +323,7 @@ impl AdmittedBulkRecord {
         Self {
             record,
             _permit: permit,
+            _transport_charge: None,
         }
     }
 }
@@ -317,14 +374,19 @@ impl BulkInputState {
     }
 
     /// Read at most once, then return one bounded batch already available to the actor.
-    async fn read_turn(&mut self) -> AgentdResult<Vec<IncarnatedBulkFrame>> {
+    async fn read_turn(
+        &mut self,
+        read_budget: &mut AgentReadBudget,
+    ) -> AgentdResult<Vec<IncarnatedBulkFrame>> {
         let buffered = self.drain_turn()?;
         if !buffered.is_empty() {
             return Ok(buffered);
         }
 
         let mut guard = self.port.readable().await?;
-        match guard.try_io(|inner| read_from_fd(inner.get_ref().as_raw_fd(), &mut self.read_buf)) {
+        match guard
+            .try_io(|inner| read_budget.read_fd(inner.get_ref().as_raw_fd(), &mut self.read_buf))
+        {
             Ok(Ok(0)) => {
                 return Err(AgentdError::ExecSession(
                     "dedicated bulk port closed".into(),
@@ -369,6 +431,33 @@ impl BulkInputState {
             frames.push(frame);
         }
         Ok(frames)
+    }
+}
+
+impl AgentReadBudget {
+    fn read_fd(&mut self, fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
+        let result = read_from_fd(fd, buf);
+        self.record_read(result.as_ref().copied().unwrap_or(0));
+        result
+    }
+
+    fn record_read(&mut self, bytes: usize) {
+        self.calls = self.calls.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+
+    fn exhausted(&self) -> bool {
+        self.bytes >= AGENT_READ_QUANTUM_BYTES || self.calls >= AGENT_READ_QUANTUM_CALLS
+    }
+
+    /// Call outside the competing select futures, after decoded records have an owning queue.
+    /// AsyncFd::readable can stay immediately ready without spending Tokio's cooperative budget;
+    /// returning to select alone does not let the driver discover a writable PTY or new control IO.
+    async fn yield_if_exhausted(&mut self) {
+        if self.exhausted() {
+            tokio::task::yield_now().await;
+            *self = Self::default();
+        }
     }
 }
 
@@ -461,6 +550,7 @@ pub async fn run(
             // Shared arenas are negotiated only on the local SDK-to-runtime hop. Agentd speaks to
             // the runtime over the guest consoles, so the runtime injects this capability later.
             local_transport: None,
+            workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -485,9 +575,58 @@ pub async fn run(
     let mut pending_bulk_inputs = VecDeque::<PendingBulkInput>::new();
     let mut bulk_input_bytes_since_snapshot = 0usize;
     let mut last_bulk_input_snapshot = Instant::now();
+    let input_refunds = state.input_window.clone();
+    let mut credit_deadline = None;
+    let mut last_input_credit = state.input_window.credit()?;
+    let mut read_budget = AgentReadBudget::default();
 
     // Main loop.
     'agent: loop {
+        // All consumed bytes are now in persistent input buffers or destination-owned records.
+        // Never yield after decoding inside read_turn: select cancellation could drop its frames.
+        read_budget.yield_if_exhausted().await;
+        if state.resume_output_after_flush {
+            // The private Thawed reply crosses the primary lane before either ordinary writer
+            // becomes eligible again. A partial old record is never abandoned by this release.
+            flush_write_buf(&async_port, &mut serial_out_buf).await?;
+            session_tx
+                .resume_bulk_output()
+                .await
+                .map_err(|error| AgentdError::ExecSession(error.into()))?;
+            state.resume_output_after_flush = false;
+            state.output_parked = false;
+        }
+        if state.pending_freeze.as_ref().is_some_and(|message| {
+            message.payload::<WorkloadFreeze>().is_ok_and(|request| {
+                let position = state.input_window.position();
+                position.bulk_bytes >= request.host_input.bulk_bytes
+                    && position.bulk_frames >= request.host_input.bulk_frames
+            })
+        }) {
+            let message = state.pending_freeze.take().expect("ready pending freeze");
+            handle_message_with_charge(
+                message,
+                &mut state,
+                &mut activity,
+                &mut session_tx,
+                &mut serial_out_buf,
+                config,
+                &mut workload,
+                &heartbeat_control,
+                None,
+            )
+            .await?;
+            flush_write_buf(&async_port, &mut serial_out_buf).await?;
+        }
+        if !state.output_parked {
+            let credit = state.input_window.credit()?;
+            if input_credit_update_due(&last_input_credit, &credit) {
+                encode_input_credit(credit, &mut serial_out_buf)?;
+                flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                last_input_credit = credit;
+                credit_deadline = None;
+            }
+        }
         // A control-lane disconnect cancels the pending acquire future at the select boundary.
         // Remove its stale record before rebuilding that future against the global budget.
         pending_bulk_inputs.retain(|pending| {
@@ -502,6 +641,29 @@ pub async fn run(
         });
         let has_pending_bulk_admission = pending_bulk_admission.is_some();
         tokio::select! {
+            _ = input_refunds.refunded(), if !state.output_parked && credit_deadline.is_none() => {
+                if state.input_window.credit()? != last_input_credit {
+                    credit_deadline = Some(time::Instant::now() + Duration::from_millis(5));
+                }
+            }
+
+            _ = wait_input_credit_deadline(credit_deadline), if !state.output_parked => {
+                credit_deadline = None;
+                let credit = state.input_window.credit()?;
+                if credit != last_input_credit {
+                    encode_input_credit(credit, &mut serial_out_buf)?;
+                    flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                    last_input_credit = credit;
+                }
+            }
+
+            (id, inherited, result) = std::future::poll_fn(|cx| poll_pending_stdin(&mut state, cx)),
+                if !state.output_parked && !workload.is_frozen() => {
+                if !inherited && let Err(error) = result {
+                    encode_stdin_error(id, &AgentdError::Io(error), &mut serial_out_buf)?;
+                    flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                }
+            }
             failure = process_manager_failure.changed() => {
                 let error = match failure {
                     Ok(()) => process_manager_failure
@@ -514,6 +676,11 @@ pub async fn run(
             }
 
             Some(error) = recv_optional(&mut bulk_failure_rx) => {
+                if state.output_parked {
+                    return Err(AgentdError::ExecSession(format!(
+                        "dedicated bulk transport failed while frozen: {error}"
+                    )));
+                }
                 cancel_all_bulk_correlations(
                     &mut state,
                     &session_tx,
@@ -567,6 +734,7 @@ pub async fn run(
                     AdmittedBulkRecord {
                         record: pending.frame.record,
                         _permit: permit,
+                        _transport_charge: Some(pending.charge),
                     },
                     &mut state,
                     &mut activity,
@@ -587,7 +755,7 @@ pub async fn run(
                 }
             }
 
-            Some(envelope) = recv_optional(&mut combined_bulk_rx) => {
+            Some(envelope) = recv_optional(&mut combined_bulk_rx), if !state.output_parked => {
                 if discard_inherited_output(&mut state, &envelope, session_tx.generation()) {
                     continue;
                 }
@@ -613,7 +781,7 @@ pub async fn run(
                 bulk_input
                     .as_mut()
                     .expect("guarded dedicated bulk input")
-                    .read_turn()
+                    .read_turn(&mut read_budget)
                     .await
             }, if bulk_input.is_some() && pending_bulk_inputs.is_empty() => {
                 let frames = match turn {
@@ -635,7 +803,13 @@ pub async fn run(
                     }
                 };
                 let mut capacity_deferred = false;
+                if state.output_parked && !frames.is_empty() {
+                    return Err(AgentdError::ExecSession("bulk input crossed the frozen transport cut".into()));
+                }
                 for frame in frames {
+                    let charge = state.input_window.admit(
+                        InputLane::Bulk, bulk_wire_bytes(&frame.record, true),
+                    )?;
                     if !validate_bulk_client_incarnation(
                         &state,
                         frame.record.id,
@@ -647,7 +821,7 @@ pub async fn run(
                     }
                     let budget = Arc::clone(&state.bulk_input_budget);
                     if capacity_deferred {
-                        pending_bulk_inputs.push_back(PendingBulkInput { frame, budget });
+                        pending_bulk_inputs.push_back(PendingBulkInput { frame, budget, charge });
                         continue;
                     }
                     let payload_len = frame.record.payload.len();
@@ -658,7 +832,7 @@ pub async fn run(
                         Ok(permit) => permit,
                         Err(_) if !budget.is_closed() => {
                             capacity_deferred = true;
-                            pending_bulk_inputs.push_back(PendingBulkInput { frame, budget });
+                            pending_bulk_inputs.push_back(PendingBulkInput { frame, budget, charge });
                             continue;
                         }
                         Err(error) => {
@@ -672,6 +846,7 @@ pub async fn run(
                         AdmittedBulkRecord {
                             record: frame.record,
                             _permit: permit,
+                            _transport_charge: Some(charge),
                         },
                         &mut state,
                         &mut activity,
@@ -703,7 +878,9 @@ pub async fn run(
                 let mut combined_turn_exhausted = false;
 
                 loop {
-                    match guard.try_io(|inner| read_from_fd(inner.get_ref().as_raw_fd(), &mut read_buf)) {
+                    match guard.try_io(|inner| {
+                        read_budget.read_fd(inner.get_ref().as_raw_fd(), &mut read_buf)
+                    }) {
                         Ok(Ok(0)) => {
                             // EOF on serial — host disconnected.
                             if !handoff::is_pid_1() {
@@ -729,12 +906,19 @@ pub async fn run(
                             // correlation ID with `core.error`; unrecoverable
                             // frame-level failures still close the agent loop.
                             loop {
+                                let input_before = serial_in_buf.len();
                                 if let Some(connected) =
                                         try_decode_relay_client_connected_from_bytes(&mut serial_in_buf)
                                             .map_err(|e| AgentdError::ExecSession(format!(
                                                 "decode relay client lease: {e}"
                                             )))?
                                 {
+                                    if state.output_parked {
+                                        return Err(AgentdError::ExecSession("relay lease crossed the frozen transport cut".into()));
+                                    }
+                                    let _charge = state.input_window.admit(
+                                        InputLane::Control, input_before - serial_in_buf.len(),
+                                    )?;
                                     establish_relay_client(&mut state, connected)?;
                                     continue;
                                 }
@@ -743,6 +927,7 @@ pub async fn run(
                                 else {
                                     break;
                                 };
+                                let wire_bytes = input_before - serial_in_buf.len();
                                 let DecodedFrame::Control(msg) = frame else {
                                     let DecodedFrame::Bulk(record) = frame else {
                                         unreachable!();
@@ -753,10 +938,14 @@ pub async fn run(
                                                 .into(),
                                         ));
                                     }
+                                    if state.output_parked {
+                                        return Err(AgentdError::ExecSession("raw input crossed the frozen transport cut".into()));
+                                    }
                                     let bulk_session_tx = session_tx.with_incarnation(
                                         client_incarnation_for_id(&state, record.id),
                                     );
                                     let payload_len = record.payload.len();
+                                    let charge = state.input_window.admit(InputLane::Bulk, wire_bytes)?;
                                     let budget = Arc::clone(&state.bulk_input_budget);
                                     let permit = acquire_bulk_input_permit(Some((
                                         budget,
@@ -766,6 +955,7 @@ pub async fn run(
                                         AdmittedBulkRecord {
                                             record,
                                             _permit: permit,
+                                            _transport_charge: Some(charge),
                                         },
                                         &mut state,
                                         &mut activity,
@@ -798,6 +988,19 @@ pub async fn run(
                                     }
                                     continue;
                                 };
+                                let charge = if private_lifecycle_message(&msg) {
+                                    None
+                                } else {
+                                    if state.output_parked {
+                                        return Err(AgentdError::ExecSession("ordinary input crossed the frozen transport cut".into()));
+                                    }
+                                    let lane = if msg.t.uses_workload_data_credit() {
+                                        InputLane::Bulk
+                                    } else {
+                                        InputLane::Control
+                                    };
+                                    Some(state.input_window.admit(lane, wire_bytes)?)
+                                };
                                 if msg.flags != msg.t.flags() {
                                     let out_before = serial_out_buf.len();
                                     encode_core_error_if_supported(
@@ -828,7 +1031,7 @@ pub async fn run(
                                 }
 
                                 let out_before = serial_out_buf.len();
-                                handle_message(
+                                handle_message_with_charge(
                                     msg,
                                     &mut state,
                                     &mut activity,
@@ -837,6 +1040,7 @@ pub async fn run(
                                     config,
                                     &mut workload,
                                     &heartbeat_control,
+                                    charge,
                                 ).await?;
                                 record_encoded_guest_messages(
                                     &serial_out_buf,
@@ -850,11 +1054,22 @@ pub async fn run(
                             if !serial_out_buf.is_empty() {
                                 flush_write_buf(&async_port, &mut serial_out_buf).await?;
                             }
-                            if combined_turn_exhausted {
+                            // Thawed has now crossed the wire. A host can immediately resume
+                            // ordinary input, so release our parked writers at the outer-loop
+                            // boundary before draining another readable batch.
+                            if combined_turn_exhausted
+                                || state.resume_output_after_flush
+                                || read_budget.exhausted()
+                            {
                                 break;
                             }
                         }
-                        Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => {
+                            if read_budget.exhausted() {
+                                break;
+                            }
+                            continue;
+                        }
                         Ok(Err(_)) if !handoff::is_pid_1() => {
                             guard.clear_ready();
                             drop(guard);
@@ -868,7 +1083,7 @@ pub async fn run(
             }
 
             // Receive output events from session reader tasks.
-            Some(envelope) = session_rx.recv() => {
+            Some(envelope) = session_rx.recv(), if !state.output_parked => {
                 if discard_inherited_output(&mut state, &envelope, session_tx.generation()) {
                     continue;
                 }
@@ -1024,6 +1239,7 @@ async fn bulk_writer_task(
     let mut retired = HashMap::<ClientIncarnation, Vec<u64>>::new();
     let mut retiring_incarnations = HashSet::<ClientIncarnation>::new();
     let mut pending_activity = RawActivity::default();
+    let mut transport = BulkOutputPosition::default();
 
     loop {
         let mut cleanups = Vec::new();
@@ -1037,9 +1253,10 @@ async fn bulk_writer_task(
                     &mut active,
                     &mut retired,
                     &mut retiring_incarnations,
+                    &mut transport,
                 )?);
             }
-            Some(envelope) = output_rx.recv() => {
+            Some(envelope) = output_rx.recv(), if !transport.parked => {
                 enqueue_bulk_output(
                     envelope,
                     generation,
@@ -1059,6 +1276,7 @@ async fn bulk_writer_task(
                 &mut active,
                 &mut retired,
                 &mut retiring_incarnations,
+                &mut transport,
             )?);
         }
         while let Ok(envelope) = output_rx.try_recv() {
@@ -1073,7 +1291,7 @@ async fn bulk_writer_task(
         }
         complete_bulk_output_cleanups(cleanups, &mut retired, &mut retiring_incarnations);
 
-        while !active.is_empty() {
+        while !transport.parked && !active.is_empty() {
             let round_len = active.len();
             let quantum = if round_len == 1 {
                 BULK_SCHEDULER_MAX_BURST
@@ -1081,6 +1299,9 @@ async fn bulk_writer_task(
                 BULK_SCHEDULER_QUANTUM
             };
             for _ in 0..round_len {
+                if transport.parked || active.is_empty() {
+                    break;
+                }
                 let key = active.pop_front().expect("active flow exists");
                 if let Some(flow) = flows.get_mut(&key) {
                     flow.deficit = flow
@@ -1124,6 +1345,12 @@ async fn bulk_writer_task(
                     let output_activity = output.activity;
                     write_incarnated_bulk_record_async_fd(&async_port, incarnation, &output.record)
                         .await?;
+                    transport.wire_bytes = transport
+                        .wire_bytes
+                        .checked_add(bulk_wire_bytes(&output.record, true) as u64)
+                        .ok_or_else(|| {
+                            AgentdError::ExecSession("bulk output counter exhausted".into())
+                        })?;
                     pending_activity.guest_messages = pending_activity
                         .guest_messages
                         .saturating_add(output_activity.guest_messages);
@@ -1141,11 +1368,43 @@ async fn bulk_writer_task(
                         publish_bulk_activity(&activity_tx, &mut pending_activity)?;
                     }
                     burst = burst.saturating_add(next_len);
+                    // Lifecycle commands cut only between complete wire records. In particular,
+                    // never wait for the rest of this flow's burst before acknowledging Park.
+                    let mut cleanups = Vec::new();
+                    while let Ok(command) = command_rx.try_recv() {
+                        cleanups.push(apply_bulk_output_command(
+                            command,
+                            &mut generation,
+                            &mut flows,
+                            &mut active,
+                            &mut retired,
+                            &mut retiring_incarnations,
+                            &mut transport,
+                        )?);
+                    }
+                    while let Ok(envelope) = output_rx.try_recv() {
+                        enqueue_bulk_output(
+                            envelope,
+                            generation,
+                            &mut flows,
+                            &mut active,
+                            &retired,
+                            &retiring_incarnations,
+                        )?;
+                    }
+                    complete_bulk_output_cleanups(
+                        cleanups,
+                        &mut retired,
+                        &mut retiring_incarnations,
+                    );
+                    if transport.parked {
+                        break;
+                    }
                 }
 
                 if flows.get(&key).is_some_and(|flow| flow.queue.is_empty()) {
                     flows.remove(&key);
-                } else {
+                } else if flows.contains_key(&key) && !active.contains(&key) {
                     active.push_back(key);
                 }
             }
@@ -1159,6 +1418,7 @@ async fn bulk_writer_task(
                     &mut active,
                     &mut retired,
                     &mut retiring_incarnations,
+                    &mut transport,
                 )?);
             }
             while let Ok(envelope) = output_rx.try_recv() {
@@ -1206,8 +1466,20 @@ fn apply_bulk_output_command(
     active: &mut VecDeque<(ClientIncarnation, u32)>,
     retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
     retiring_incarnations: &mut HashSet<ClientIncarnation>,
+    transport: &mut BulkOutputPosition,
 ) -> AgentdResult<BulkOutputCleanup> {
     match command {
+        BulkOutputCommand::Park { completion } => {
+            transport.parked = true;
+            Ok(BulkOutputCleanup::Park {
+                completion,
+                wire_bytes: transport.wire_bytes,
+            })
+        }
+        BulkOutputCommand::Resume { completion } => {
+            transport.parked = false;
+            Ok(BulkOutputCleanup::Flow(completion))
+        }
         BulkOutputCommand::Restore {
             generation: next,
             completion,
@@ -1253,6 +1525,12 @@ fn complete_bulk_output_cleanups(
 ) {
     for cleanup in cleanups {
         match cleanup {
+            BulkOutputCleanup::Park {
+                completion,
+                wire_bytes,
+            } => {
+                let _ = completion.send(wire_bytes);
+            }
             BulkOutputCleanup::Flow(completion) => {
                 let _ = completion.send(());
             }
@@ -2095,11 +2373,16 @@ async fn restore_client_state(
     sender: &mut SessionOutputSender,
 ) -> AgentdResult<()> {
     let generation = sender.generation();
-    state.detached_sessions.extend(
-        std::mem::take(&mut state.sessions)
-            .into_iter()
-            .map(|(id, session)| ((generation, id), session)),
-    );
+    state
+        .detached_sessions
+        .extend(
+            std::mem::take(&mut state.sessions)
+                .into_iter()
+                .map(|(id, mut session)| {
+                    session.detach_stdin();
+                    ((generation, id), session)
+                }),
+        );
     state.client_incarnations.clear();
     for (_, session) in state.read_sessions.drain() {
         session.abort();
@@ -2147,7 +2430,7 @@ fn discard_inherited_output(
 // Keep the loop-owned latch and output generation explicit at this dispatch boundary; merging
 // them into AgentState would obscure the ownership needed by restore and background producers.
 #[allow(clippy::too_many_arguments)]
-async fn handle_message(
+async fn handle_message_with_charge(
     msg: Message,
     state: &mut AgentState,
     activity: &mut ActivityTracker,
@@ -2156,6 +2439,7 @@ async fn handle_message(
     config: &AgentdConfig,
     workload: &mut WorkloadLatch,
     heartbeat_control: &heartbeat::HeartbeatControl,
+    mut input_charge: Option<InputCharge>,
 ) -> AgentdResult<()> {
     // Background producers retain the range owner that opened them. The main loop can then drop
     // queued output after a disconnect instead of relabelling it with a recycled correlation ID.
@@ -2183,6 +2467,7 @@ async fn handle_message(
                         kind: CoreErrorKind::CapabilityUnavailable,
                         message,
                         offending_type: Some(msg.t.as_str().into()),
+                        workload_failure: None,
                     },
                 ),
             }
@@ -2224,6 +2509,61 @@ async fn handle_message(
             else {
                 return Ok(());
             };
+            let position = state.input_window.position();
+            if state.pending_freeze.as_ref().is_some_and(|pending| {
+                pending
+                    .payload::<WorkloadFreeze>()
+                    .is_ok_and(|old| old != request)
+            }) {
+                encode_workload_error(
+                    &msg,
+                    &request.attempt_id,
+                    WorkloadLatchError::Conflict("another transport cut is pending".into()),
+                    out_buf,
+                )?;
+                return Ok(());
+            }
+            if workload.is_frozen() {
+                if let Err(error) = workload.require_frozen_attempt(&request.attempt_id) {
+                    encode_workload_error(&msg, &request.attempt_id, error, out_buf)?;
+                    return Ok(());
+                }
+                if state
+                    .frozen_host_input
+                    .is_some_and(|cut| cut != request.host_input)
+                {
+                    encode_workload_error(
+                        &msg,
+                        &request.attempt_id,
+                        WorkloadLatchError::Conflict("frozen transport cut cannot change".into()),
+                        out_buf,
+                    )?;
+                    return Ok(());
+                }
+            }
+            if request.host_input.control_bytes != position.control_bytes
+                || request.host_input.control_frames != position.control_frames
+                || request.host_input.bulk_bytes < position.bulk_bytes
+                || request.host_input.bulk_frames < position.bulk_frames
+            {
+                encode_workload_error(
+                    &msg,
+                    &request.attempt_id,
+                    WorkloadLatchError::Conflict(
+                        "transport input cut differs from received complete frames".into(),
+                    ),
+                    out_buf,
+                )?;
+                return Ok(());
+            }
+            state.aborted_transport_attempt = None;
+            if request.host_input != position {
+                // Retain the private request while the independently ordered bulk prefix
+                // arrives. Decoding owns its bytes; application consumption is not required.
+                state.pending_freeze = Some(msg);
+                return Ok(());
+            }
+            state.pending_freeze = None;
             let was_frozen = workload.is_frozen();
             match workload.freeze(&request.attempt_id) {
                 Ok(()) => {
@@ -2241,15 +2581,24 @@ async fn handle_message(
                         };
                         encode_workload_error(
                             &msg,
+                            &request.attempt_id,
                             WorkloadLatchError::Io(std::io::Error::other(message)),
                             out_buf,
                         )?;
                     } else {
+                        state.output_parked = true;
+                        state.frozen_host_input = Some(position);
+                        state.frozen_guest_bulk_bytes = root_session_tx
+                            .park_bulk_output()
+                            .await
+                            .map_err(|error| AgentdError::ExecSession(error.into()))?;
                         let reply = Message::with_payload(
                             MessageType::WorkloadFrozen,
                             msg.id,
                             &WorkloadFrozen {
                                 attempt_id: request.attempt_id,
+                                guest_bulk_bytes_target: state.frozen_guest_bulk_bytes,
+                                input_credit: state.input_window.credit()?,
                             },
                         )
                         .map_err(|error| {
@@ -2264,7 +2613,7 @@ async fn handle_message(
                         })?;
                     }
                 }
-                Err(error) => encode_workload_error(&msg, error, out_buf)?,
+                Err(error) => encode_workload_error(&msg, &request.attempt_id, error, out_buf)?,
             }
         }
 
@@ -2272,11 +2621,67 @@ async fn handle_message(
             let Some(request) = decode_payload_or_core_error::<WorkloadThaw>(&msg, out_buf)? else {
                 return Ok(());
             };
+            if state.pending_freeze.as_ref().is_some_and(|pending| {
+                pending
+                    .payload::<WorkloadFreeze>()
+                    .is_ok_and(|freeze| freeze.attempt_id != request.attempt_id)
+            }) {
+                encode_workload_error(
+                    &msg,
+                    &request.attempt_id,
+                    WorkloadLatchError::Conflict("another transport cut is pending".into()),
+                    out_buf,
+                )?;
+                return Ok(());
+            }
+            if state.pending_freeze.as_ref().is_some_and(|pending| {
+                pending
+                    .payload::<WorkloadFreeze>()
+                    .is_ok_and(|freeze| freeze.attempt_id == request.attempt_id)
+            }) && !workload.is_frozen()
+                || (!workload.is_frozen()
+                    && state.aborted_transport_attempt.as_deref() == Some(&request.attempt_id))
+            {
+                if request.mode != microsandbox_protocol::core::WorkloadThawMode::Continue {
+                    encode_workload_error(
+                        &msg,
+                        &request.attempt_id,
+                        WorkloadLatchError::Conflict(
+                            "restore requires a completed transport cut".into(),
+                        ),
+                        out_buf,
+                    )?;
+                    return Ok(());
+                }
+                if let Some(pending) = state.pending_freeze.take() {
+                    // The abandoned Freeze RPC still owns a private host reply slot. Complete
+                    // it explicitly before acknowledging the independent recovery Thaw RPC.
+                    encode_workload_error(
+                        &pending,
+                        &request.attempt_id,
+                        WorkloadLatchError::Conflict(
+                            "transport cut aborted by source continuation".into(),
+                        ),
+                        out_buf,
+                    )?;
+                }
+                state.aborted_transport_attempt = Some(request.attempt_id.clone());
+                encode_input_credit(state.input_window.credit()?, out_buf)?;
+                let reply = Message::with_payload(
+                    MessageType::WorkloadThawed,
+                    msg.id,
+                    &WorkloadThawed {
+                        attempt_id: request.attempt_id,
+                    },
+                )?;
+                codec::encode_to_buf(&reply, out_buf)?;
+                return Ok(());
+            }
             if request.mode == microsandbox_protocol::core::WorkloadThawMode::Restore
                 && state.restored_attempt.as_deref() != Some(&request.attempt_id)
             {
                 if let Err(error) = workload.require_frozen_attempt(&request.attempt_id) {
-                    encode_workload_error(&msg, error, out_buf)?;
+                    encode_workload_error(&msg, &request.attempt_id, error, out_buf)?;
                     return Ok(());
                 }
                 // Never call ordinary disconnect here: it kills the very processes we captured.
@@ -2286,6 +2691,11 @@ async fn handle_message(
             match workload.thaw(&request.attempt_id) {
                 Ok(()) => {
                     heartbeat_control.resume();
+                    // Cumulative grants include refunds from detached transfer cleanup; accepted
+                    // stdin remains charged until its inherited process consumes it after thaw.
+                    encode_input_credit(state.input_window.credit()?, out_buf)?;
+                    state.resume_output_after_flush = true;
+                    state.frozen_host_input = None;
                     let reply = Message::with_payload(
                         MessageType::WorkloadThawed,
                         msg.id,
@@ -2302,7 +2712,7 @@ async fn handle_message(
                         AgentdError::ExecSession(format!("encode workload-thawed frame: {error}"))
                     })?;
                 }
-                Err(error) => encode_workload_error(&msg, error, out_buf)?,
+                Err(error) => encode_workload_error(&msg, &request.attempt_id, error, out_buf)?,
             }
         }
 
@@ -2395,22 +2805,10 @@ async fn handle_message(
             let Some(stdin) = decode_payload_or_core_error::<ExecStdin>(&msg, out_buf)? else {
                 return Ok(());
             };
-            if let Some(session) = state.sessions.get_mut(&msg.id) {
-                if stdin.data.is_empty() {
-                    // Empty data signals EOF — close stdin.
-                    session.close_stdin();
-                } else if let Err(e) = session.write_stdin(&stdin.data).await {
-                    let payload = stdin_error_payload(&e);
-                    eprintln!("stdin write error on session {}: {e}", msg.id);
-                    let reply =
-                        Message::with_payload(MessageType::ExecStdinError, msg.id, &payload)
-                            .map_err(|e| {
-                                AgentdError::ExecSession(format!("encode stdin error: {e}"))
-                            })?;
-                    codec::encode_to_buf(&reply, out_buf).map_err(|e| {
-                        AgentdError::ExecSession(format!("encode stdin error frame: {e}"))
-                    })?;
-                }
+            if let Some(session) = state.sessions.get_mut(&msg.id)
+                && let Err(error) = session.enqueue_stdin(stdin.data, input_charge.take())
+            {
+                encode_stdin_error(msg.id, &AgentdError::Io(error), out_buf)?;
             }
         }
 
@@ -2506,7 +2904,10 @@ async fn handle_message(
                 BulkKind::Tcp => {
                     let result = match state.tcp_sessions.get(&msg.id) {
                         Some(session) => session.apply_credit(credit).await,
-                        None => Err(format!("unknown TCP session: {}", msg.id)),
+                        // A terminal may retire the producer before the other physical lane
+                        // finishes delivering its output. Late credit has no recipient and must
+                        // not cancel that tail or manufacture a second terminal response.
+                        None => Ok(()),
                     };
                     if let Err(error) = result {
                         encode_bulk_tcp_failure(msg.id, error, out_buf)?;
@@ -2589,7 +2990,10 @@ async fn handle_message(
             };
             let len = data.data.len();
             if let Some(session) = state.tcp_sessions.get(&msg.id) {
-                if let Err(e) = session.write_data(data.data).await {
+                if let Err(e) = session
+                    .write_data_charged(data.data, input_charge.take())
+                    .await
+                {
                     state.tcp_sessions.remove(&msg.id);
                     clear_bulk_receive_state(state, msg.id);
                     encode_tcp_failed(msg.id, e, out_buf)?;
@@ -2606,7 +3010,7 @@ async fn handle_message(
                 return Ok(());
             };
             if let Some(session) = state.tcp_sessions.get(&msg.id)
-                && let Err(e) = session.close_write().await
+                && let Err(e) = session.close_write_charged(input_charge.take()).await
             {
                 state.tcp_sessions.remove(&msg.id);
                 clear_bulk_receive_state(state, msg.id);
@@ -2749,6 +3153,7 @@ fn guest_message_refreshes_idle_timer(t: &MessageType) -> bool {
             | MessageType::Touched
             | MessageType::WorkloadFrozen
             | MessageType::WorkloadThawed
+            | MessageType::WorkloadTransportCredit
             | MessageType::CoreError
     )
 }
@@ -2829,6 +3234,106 @@ fn heartbeat_snapshot(state: &AgentState, activity: &ActivityTracker) -> Heartbe
         active_tcp_streams: state.tcp_sessions.len() as u32,
         counters: activity.counters,
     }
+}
+
+fn initial_input_credit() -> WorkloadTransportCredit {
+    WorkloadTransportCredit {
+        control_bytes: WORKLOAD_TRANSPORT_CONTROL_BYTES,
+        control_frames: WORKLOAD_TRANSPORT_CONTROL_FRAMES,
+        bulk_bytes: WORKLOAD_TRANSPORT_BULK_BYTES,
+        bulk_frames: WORKLOAD_TRANSPORT_BULK_FRAMES,
+    }
+}
+
+fn bulk_wire_bytes(record: &BulkRecord, dedicated: bool) -> usize {
+    // The counter follows complete wire records, not destination payload consumption. Combined
+    // raw frames use the same bulk allowance without the dedicated lane's incarnation prefix.
+    4 + FRAME_HEADER_SIZE
+        + BULK_HEADER_SIZE
+        + record.payload.len()
+        + if dedicated {
+            CLIENT_INCARNATION_SIZE
+        } else {
+            0
+        }
+}
+
+fn private_lifecycle_message(message: &Message) -> bool {
+    message.id == u32::MAX
+        && matches!(
+            message.t,
+            MessageType::WorkloadFreeze | MessageType::WorkloadThaw
+        )
+        && message.flags == message.t.flags()
+}
+
+fn input_credit_update_due(
+    previous: &WorkloadTransportCredit,
+    current: &WorkloadTransportCredit,
+) -> bool {
+    current.control_bytes.saturating_sub(previous.control_bytes) >= 64 * 1024
+        || current.bulk_bytes.saturating_sub(previous.bulk_bytes) >= 64 * 1024
+        || current
+            .control_frames
+            .saturating_sub(previous.control_frames)
+            >= 16
+        || current.bulk_frames.saturating_sub(previous.bulk_frames) >= 16
+}
+
+async fn wait_input_credit_deadline(deadline: Option<time::Instant>) {
+    match deadline {
+        Some(deadline) => time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn encode_input_credit(credit: WorkloadTransportCredit, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
+    // The host intercepts the reserved runtime correlation before SDK output admission, so a
+    // stalled client cannot stop refunds needed by unrelated stdin and bulk producers.
+    let message = Message::with_payload(MessageType::WorkloadTransportCredit, u32::MAX, &credit)?;
+    codec::encode_to_buf(&message, out_buf)?;
+    Ok(())
+}
+
+fn poll_pending_stdin(
+    state: &mut AgentState,
+    cx: &mut Context<'_>,
+) -> Poll<(u32, bool, std::io::Result<()>)> {
+    // Rotate the first descriptor considered so a continuously writable active session cannot
+    // starve inherited input. The cursor needs no per-payload task or additional ownership queue.
+    let total = state.sessions.len() + state.detached_sessions.len();
+    let start = state.stdin_poll_offset.checked_rem(total).unwrap_or(0);
+    for pass in 0..2 {
+        let sessions = state
+            .sessions
+            .iter_mut()
+            .map(|(id, session)| (*id, false, session))
+            .chain(
+                state
+                    .detached_sessions
+                    .iter_mut()
+                    .map(|((_, id), session)| (*id, true, session)),
+            );
+        for (index, (id, inherited, session)) in sessions.enumerate() {
+            if (pass == 0 && index < start) || (pass == 1 && index >= start) {
+                continue;
+            }
+            if session.has_pending_stdin()
+                && let Poll::Ready(result) = session.poll_pending_stdin(cx)
+            {
+                state.stdin_poll_offset = index + 1;
+                return Poll::Ready((id, inherited, result));
+            }
+        }
+    }
+    Poll::Pending
+}
+
+fn encode_stdin_error(id: u32, error: &AgentdError, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
+    let message =
+        Message::with_payload(MessageType::ExecStdinError, id, &stdin_error_payload(error))?;
+    codec::encode_to_buf(&message, out_buf)?;
+    Ok(())
 }
 
 fn publish_heartbeat_snapshot(
@@ -3098,6 +3603,7 @@ fn encode_core_error(
             kind,
             message,
             offending_type,
+            workload_failure: None,
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode core error: {e}")))?;
@@ -3108,6 +3614,7 @@ fn encode_core_error(
 
 fn encode_workload_error(
     source: &Message,
+    attempt_id: &str,
     error: WorkloadLatchError,
     out_buf: &mut Vec<u8>,
 ) -> AgentdResult<()> {
@@ -3118,14 +3625,33 @@ fn encode_workload_error(
         WorkloadLatchError::InvalidAttempt(_) => CoreErrorKind::InvalidPayload,
         WorkloadLatchError::Conflict(_) => CoreErrorKind::InvalidSession,
     };
-    encode_core_error_if_supported(
-        source,
+    // Keep the existing error category readable by older hosts. Only the additive,
+    // attempt-scoped detail proves that a basic-pause fallback is safe.
+    let disposition = match &error {
+        WorkloadLatchError::Unavailable(_) => WorkloadFailureDisposition::Unavailable,
+        _ => WorkloadFailureDisposition::RecoveryRequired,
+    };
+    if !MessageType::CoreError.is_available_at(source.v) {
+        return Err(AgentdError::ExecSession(
+            "peer cannot receive workload errors".into(),
+        ));
+    }
+    let reply = Message::with_payload(
+        MessageType::CoreError,
         source.id,
-        kind,
-        error.to_string(),
-        Some(source.t.as_str().to_string()),
-        out_buf,
+        &CoreError {
+            kind,
+            message: error.to_string(),
+            offending_type: Some(source.t.as_str().to_string()),
+            workload_failure: Some(WorkloadFailure {
+                attempt_id: attempt_id.to_string(),
+                disposition,
+            }),
+        },
     )
+    .map_err(|error| AgentdError::ExecSession(format!("encode workload error: {error}")))?;
+    codec::encode_to_buf(&reply, out_buf)
+        .map_err(|error| AgentdError::ExecSession(format!("encode workload error frame: {error}")))
 }
 
 fn encode_exec_failed(id: u32, payload: ExecFailed, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
@@ -3568,6 +4094,667 @@ mod tests {
     use bytes::Bytes;
     use microsandbox_protocol::message::PROTOCOL_VERSION;
 
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_message(
+        msg: Message,
+        state: &mut AgentState,
+        activity: &mut ActivityTracker,
+        sender: &mut SessionOutputSender,
+        out_buf: &mut Vec<u8>,
+        config: &AgentdConfig,
+        workload: &mut WorkloadLatch,
+        heartbeat: &heartbeat::HeartbeatControl,
+    ) -> AgentdResult<()> {
+        handle_message_with_charge(
+            msg, state, activity, sender, out_buf, config, workload, heartbeat, None,
+        )
+        .await
+    }
+
+    fn decode_reply_skipping_credit(bytes: &mut BytesMut) -> Message {
+        loop {
+            let Some(DecodedFrame::Control(reply)) =
+                codec::try_decode_frame_from_bytes(bytes).unwrap()
+            else {
+                panic!("missing control reply");
+            };
+            if reply.t != MessageType::WorkloadTransportCredit {
+                return reply;
+            }
+            assert_eq!(reply.id, u32::MAX);
+        }
+    }
+
+    #[test]
+    fn admitted_transport_window_fits_each_filesystem_input_queue() {
+        // Each accepted raw record occupies one queue slot until consumed. Even if one flow
+        // receives the whole allowance from both lanes, admission cannot stall the serial actor.
+        assert!(
+            WORKLOAD_TRANSPORT_CONTROL_FRAMES + WORKLOAD_TRANSPORT_BULK_FRAMES
+                <= FS_BULK_INPUT_ITEM_CAPACITY as u64
+        );
+        assert!(WORKLOAD_TRANSPORT_CONTROL_BYTES <= BULK_INPUT_BYTE_CAPACITY as u64);
+        assert!(WORKLOAD_TRANSPORT_BULK_BYTES <= BULK_INPUT_BYTE_CAPACITY as u64);
+    }
+
+    #[test]
+    fn private_admission_and_credit_batching_use_the_complete_wire_contract() {
+        let mut request = Message::with_payload(
+            MessageType::WorkloadFreeze,
+            u32::MAX,
+            &WorkloadFreeze {
+                attempt_id: "cut".into(),
+                host_input: Default::default(),
+            },
+        )
+        .unwrap();
+        assert!(private_lifecycle_message(&request));
+        request.id = 0;
+        assert!(!private_lifecycle_message(&request));
+        request.id = u32::MAX;
+        request.t = MessageType::ClockSync;
+        assert!(!private_lifecycle_message(&request));
+        let record = BulkRecord {
+            id: 1,
+            kind: BulkKind::Tcp,
+            flow: BulkFlow::HostToGuest,
+            offset: 0,
+            payload: Bytes::from_static(b"payload"),
+        };
+        let mut encoded = codec::encode_bulk_header(&record).unwrap().to_vec();
+        encoded.extend_from_slice(&record.payload);
+        assert_eq!(bulk_wire_bytes(&record, false), encoded.len());
+        assert_eq!(
+            bulk_wire_bytes(&record, true),
+            encoded.len() + CLIENT_INCARNATION_SIZE
+        );
+        let previous = initial_input_credit();
+        let mut current = previous;
+        current.control_frames += 15;
+        assert!(!input_credit_update_due(&previous, &current));
+        current.control_frames += 1;
+        assert!(input_credit_update_due(&previous, &current));
+        let mut credit = Vec::new();
+        encode_input_credit(current, &mut credit).unwrap();
+        let mut bytes = BytesMut::from(credit.as_slice());
+        let Some(DecodedFrame::Control(reply)) =
+            codec::try_decode_frame_from_bytes(&mut bytes).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(reply.id, u32::MAX);
+        assert_eq!(reply.payload::<WorkloadTransportCredit>().unwrap(), current);
+        assert!(!guest_message_refreshes_idle_timer(&reply.t));
+    }
+
+    #[tokio::test]
+    async fn transport_cut_waits_for_decoded_prefix_and_abort_is_owned_and_repeatable() {
+        use microsandbox_protocol::core::WorkloadThawMode::{Continue, Restore};
+        let mut state = AgentState::default();
+        let (mut sender, _output) = SessionOutputSender::channel();
+        let mut activity = ActivityTracker::new();
+        let config = AgentdConfig {
+            user: None,
+            security_profile: Default::default(),
+            default_cwd: None,
+            default_env: Vec::new(),
+        };
+        let heartbeat = heartbeat::HeartbeatControl::default();
+        let mut workload = crate::workload::tests::fake_latch();
+        let target = WorkloadTransportPosition {
+            bulk_bytes: 80,
+            bulk_frames: 1,
+            ..Default::default()
+        };
+        let freeze = || {
+            Message::with_payload(
+                MessageType::WorkloadFreeze,
+                u32::MAX,
+                &WorkloadFreeze {
+                    attempt_id: "prefix".into(),
+                    host_input: target,
+                },
+            )
+            .unwrap()
+        };
+        for _ in 0..2 {
+            let mut out = Vec::new();
+            handle_message(
+                freeze(),
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut out,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            assert!(out.is_empty());
+            assert!(!workload.is_frozen());
+            assert!(state.pending_freeze.is_some());
+        }
+        for (attempt, mode, expected) in [
+            ("other", Continue, MessageType::CoreError),
+            ("prefix", Restore, MessageType::CoreError),
+            ("prefix", Continue, MessageType::WorkloadThawed),
+            ("prefix", Continue, MessageType::WorkloadThawed),
+        ] {
+            let thaw = Message::with_payload(
+                MessageType::WorkloadThaw,
+                u32::MAX,
+                &WorkloadThaw {
+                    attempt_id: attempt.into(),
+                    mode,
+                },
+            )
+            .unwrap();
+            let aborts_pending =
+                expected == MessageType::WorkloadThawed && state.pending_freeze.is_some();
+            let mut out = Vec::new();
+            handle_message(
+                thaw,
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut out,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            let mut bytes = BytesMut::from(out.as_slice());
+            if aborts_pending {
+                let cancelled = decode_reply_skipping_credit(&mut bytes);
+                let error = cancelled.payload::<CoreError>().unwrap();
+                assert_eq!(cancelled.id, u32::MAX);
+                assert_eq!(
+                    error.offending_type.as_deref(),
+                    Some(MessageType::WorkloadFreeze.as_str())
+                );
+                assert_eq!(error.workload_failure.unwrap().attempt_id, "prefix");
+            }
+            assert_eq!(decode_reply_skipping_credit(&mut bytes).t, expected);
+            assert_eq!(
+                state.pending_freeze.is_some(),
+                expected == MessageType::CoreError
+            );
+        }
+        let charge = state.input_window.admit(InputLane::Bulk, 80).unwrap();
+        for _ in 0..2 {
+            let mut out = Vec::new();
+            handle_message(
+                freeze(),
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut out,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            let reply = decode_reply_skipping_credit(&mut BytesMut::from(out.as_slice()));
+            let frozen = reply.payload::<WorkloadFrozen>().unwrap();
+            assert_eq!(reply.t, MessageType::WorkloadFrozen);
+            assert!(workload.is_frozen());
+            assert!(state.output_parked);
+            assert_eq!(
+                frozen.input_credit,
+                initial_input_credit(),
+                "decode is not consumption"
+            );
+            assert_eq!(state.input_window.position(), target);
+        }
+        drop(charge);
+    }
+
+    #[tokio::test]
+    async fn mixed_primary_data_cut_waits_for_the_complete_dedicated_prefix() {
+        let mut state = AgentState::default();
+        let (mut sender, _output) = SessionOutputSender::channel();
+        let mut activity = ActivityTracker::new();
+        let config = AgentdConfig {
+            user: None,
+            security_profile: Default::default(),
+            default_cwd: None,
+            default_env: Vec::new(),
+        };
+        let heartbeat = heartbeat::HeartbeatControl::default();
+        let mut workload = crate::workload::tests::fake_latch();
+
+        // Primary stdin and its empty EOF share the logical data ledger with the dedicated
+        // port. Retain every charge to model a consumer that has not accepted any input yet.
+        let mut charges = Vec::new();
+        for data in [vec![0x31; 1024], Vec::new()] {
+            let message =
+                Message::with_payload(MessageType::ExecStdin, 1, &ExecStdin { data }).unwrap();
+            assert!(message.t.uses_workload_data_credit());
+            let mut wire = Vec::new();
+            codec::encode_to_buf(&message, &mut wire).unwrap();
+            charges.push(
+                state
+                    .input_window
+                    .admit(InputLane::Bulk, wire.len())
+                    .unwrap(),
+            );
+        }
+        let primary_position = state.input_window.position();
+        assert_eq!(primary_position.control_bytes, 0);
+        assert_eq!(primary_position.control_frames, 0);
+        assert_eq!(primary_position.bulk_frames, 2);
+
+        let incarnation = [0x43; CLIENT_INCARNATION_SIZE];
+        let record = BulkRecord {
+            id: 2,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            offset: 0,
+            payload: Bytes::from(vec![0x52; 512]),
+        };
+        let mut dedicated_wire = incarnation.to_vec();
+        codec::encode_bulk_to_buf(&record, &mut dedicated_wire).unwrap();
+        let target = WorkloadTransportPosition {
+            bulk_bytes: primary_position.bulk_bytes + dedicated_wire.len() as u64,
+            bulk_frames: primary_position.bulk_frames + 1,
+            ..primary_position
+        };
+        let freeze = Message::with_payload(
+            MessageType::WorkloadFreeze,
+            u32::MAX,
+            &WorkloadFreeze {
+                attempt_id: "mixed-prefix".into(),
+                host_input: target,
+            },
+        )
+        .unwrap();
+
+        let mut dedicated_input = BytesMut::new();
+        for prefix in [
+            &dedicated_wire[..0],
+            &dedicated_wire[..dedicated_wire.len() - 1],
+        ] {
+            dedicated_input.extend_from_slice(prefix);
+            assert!(
+                try_decode_incarnated_bulk_from_bytes(&mut dedicated_input)
+                    .unwrap()
+                    .is_none()
+            );
+            let mut out = Vec::new();
+            handle_message(
+                freeze.clone(),
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut out,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            assert!(
+                out.is_empty(),
+                "primary data cannot cover missing dedicated bytes"
+            );
+            assert!(!workload.is_frozen());
+            assert!(!state.output_parked);
+            assert!(state.pending_freeze.is_some());
+            assert_eq!(state.input_window.position(), primary_position);
+        }
+
+        dedicated_input.extend_from_slice(&dedicated_wire[dedicated_wire.len() - 1..]);
+        let decoded = try_decode_incarnated_bulk_from_bytes(&mut dedicated_input)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.incarnation, incarnation);
+        assert_eq!(decoded.record, record);
+        assert!(dedicated_input.is_empty());
+        charges.push(
+            state
+                .input_window
+                .admit(InputLane::Bulk, bulk_wire_bytes(&decoded.record, true))
+                .unwrap(),
+        );
+        assert_eq!(state.input_window.position(), target);
+
+        // Resume the retained request as the outer actor does once both cumulative counters
+        // reach the cut. Decoding suffices; none of the primary or dedicated data is consumed.
+        let pending = state.pending_freeze.take().unwrap();
+        let mut out = Vec::new();
+        handle_message(
+            pending,
+            &mut state,
+            &mut activity,
+            &mut sender,
+            &mut out,
+            &config,
+            &mut workload,
+            &heartbeat,
+        )
+        .await
+        .unwrap();
+        let mut bytes = BytesMut::from(out.as_slice());
+        let reply = decode_reply_skipping_credit(&mut bytes);
+        let frozen = reply.payload::<WorkloadFrozen>().unwrap();
+        assert_eq!(reply.t, MessageType::WorkloadFrozen);
+        assert_eq!(reply.id, u32::MAX);
+        assert_eq!(frozen.attempt_id, "mixed-prefix");
+        assert_eq!(frozen.input_credit, initial_input_credit());
+        assert_eq!(state.frozen_host_input, Some(target));
+        assert!(workload.is_frozen());
+        assert!(state.output_parked);
+        assert!(state.pending_freeze.is_none());
+        assert!(bytes.is_empty());
+        drop(charges);
+    }
+
+    #[tokio::test]
+    async fn late_tcp_credit_preserves_raw_tail_before_and_after_terminal_retirement() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+
+        use microsandbox_protocol::bulk::BulkOffer;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut state = AgentState::default();
+            let incarnation = [0x57; CLIENT_INCARNATION_SIZE];
+            establish_relay_client(
+                &mut state,
+                RelayClientConnected {
+                    id_start: 1,
+                    id_end_exclusive: microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP,
+                    incarnation,
+                },
+            )
+            .unwrap();
+            // Leave the dedicated scheduler's input queued: primary completion is allowed to
+            // overtake these bytes, but no late credit may send DropFlow to discard their tail.
+            let (mut sender, mut control, mut bulk, mut scheduler_commands) =
+                SessionOutputSender::split_channel();
+            let producer = sender.with_incarnation(Some(incarnation));
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            state.tcp_sessions.insert(
+                1,
+                TcpSession::open(
+                    1,
+                    TcpConnect {
+                        host: "127.0.0.1".into(),
+                        port: listener.local_addr().unwrap().port(),
+                        bulk: Some(BulkOffer::tcp()),
+                    },
+                    &producer,
+                ),
+            );
+            let (mut peer, _) = listener.accept().await.unwrap();
+            for expected in [MessageType::TcpConnected, MessageType::BulkAccepted] {
+                let envelope = control.recv().await.unwrap();
+                let SessionOutput::Raw(mut output) = envelope.output else {
+                    panic!()
+                };
+                assert_eq!(
+                    codec::try_decode_from_buf(&mut output.frame)
+                        .unwrap()
+                        .unwrap()
+                        .t,
+                    expected
+                );
+            }
+            state
+                .tcp_sessions
+                .get(&1)
+                .unwrap()
+                .finish_bulk(BulkFinish {
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::HostToGuest,
+                    final_offset: 0,
+                })
+                .await
+                .unwrap();
+            assert_eq!(peer.read(&mut [0]).await.unwrap(), 0);
+            let payload = Bytes::from(
+                (0..6 * 1024 * 1024)
+                    .map(|index| (index % 251) as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let peer_payload = payload.clone();
+            let peer_task = tokio::spawn(async move {
+                peer.write_all(&peer_payload).await.unwrap();
+                peer.shutdown().await.unwrap();
+            });
+            let mut received = Vec::new();
+            let mut consumed = 0;
+            while consumed < 4 * 1024 * 1024 {
+                let envelope = bulk.recv().await.unwrap();
+                let SessionOutput::Bulk(output) = &envelope.output else {
+                    panic!()
+                };
+                consumed += output.record.payload.len();
+                received.push(envelope);
+            }
+            peer_task.await.unwrap();
+            while !state.tcp_sessions.get(&1).unwrap().is_finished() {
+                tokio::task::yield_now().await;
+            }
+            assert!(consumed < payload.len());
+            assert!(
+                !bulk.is_empty(),
+                "the dedicated output tail must still be queued"
+            );
+            let credit = BulkCredit {
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::GuestToHost,
+                consumed_offset: consumed as u64,
+                credit_limit: consumed as u64 + DEFAULT_BULK_WINDOW,
+            };
+            let mut activity = ActivityTracker::new();
+            let config = AgentdConfig {
+                user: None,
+                security_profile: Default::default(),
+                default_cwd: None,
+                default_env: Vec::new(),
+            };
+            let mut workload = crate::workload::tests::fake_latch();
+            let heartbeat = heartbeat::HeartbeatControl::default();
+            for retired in [false, true] {
+                if retired {
+                    for expected in [MessageType::BulkFinish, MessageType::TcpClosed] {
+                        let envelope = control.try_recv().unwrap();
+                        let SessionOutput::Raw(mut output) = envelope.output else {
+                            panic!()
+                        };
+                        let message = codec::try_decode_from_buf(&mut output.frame)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(message.t, expected);
+                        if expected == MessageType::BulkFinish {
+                            assert_eq!(
+                                message.payload::<BulkFinish>().unwrap().final_offset,
+                                payload.len() as u64
+                            );
+                        } else {
+                            assert_ne!(
+                                message.flags & microsandbox_protocol::message::FLAG_TERMINAL,
+                                0
+                            );
+                            assert!(matches!(output.completion, Some(RawSessionCompletion::Tcp)));
+                            complete_raw_session(
+                                1,
+                                output.completion,
+                                &mut state.read_sessions,
+                                &mut state.tcp_sessions,
+                            );
+                            clear_bulk_receive_state(&mut state, 1);
+                        }
+                    }
+                }
+                assert_eq!(state.tcp_sessions.contains_key(&1), !retired);
+                let mut out = Vec::new();
+                handle_message(
+                    Message::with_payload(MessageType::BulkCredit, 1, &credit).unwrap(),
+                    &mut state,
+                    &mut activity,
+                    &mut sender,
+                    &mut out,
+                    &config,
+                    &mut workload,
+                    &heartbeat,
+                )
+                .await
+                .unwrap();
+                assert!(
+                    out.is_empty(),
+                    "late credit must not emit cancellation or another terminal"
+                );
+                assert!(
+                    matches!(
+                        scheduler_commands.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    ),
+                    "late credit must not purge raw output"
+                );
+                assert!(!bulk.is_empty());
+            }
+            assert!(matches!(
+                control.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            while let Ok(envelope) = bulk.try_recv() {
+                received.push(envelope);
+            }
+            let mut offset = 0;
+            let mut actual_hash = DefaultHasher::new();
+            let mut expected_hash = DefaultHasher::new();
+            expected_hash.write(&payload);
+            for envelope in received {
+                assert_eq!(envelope.id, 1);
+                assert_eq!(envelope.incarnation, Some(incarnation));
+                let SessionOutput::Bulk(output) = envelope.output else {
+                    panic!()
+                };
+                let record = output.record;
+                assert_eq!(record.offset, offset as u64);
+                let end = offset + record.payload.len();
+                assert_eq!(record.payload.as_ref(), &payload[offset..end]);
+                actual_hash.write(&record.payload);
+                offset = end;
+            }
+            assert_eq!(offset, payload.len());
+            assert_eq!(actual_hash.finish(), expected_hash.finish());
+        })
+        .await
+        .expect("late-credit TCP tail did not complete");
+    }
+
+    #[tokio::test]
+    async fn dedicated_bulk_park_finishes_one_record_and_retains_the_next() {
+        use std::os::fd::OwnedFd;
+        use tokio::io::AsyncReadExt;
+
+        let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let send_buffer: libc::c_int = 4096;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    writer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&send_buffer as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&send_buffer) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let file = File::from(OwnedFd::from(writer));
+        let mut reader = tokio::net::UnixStream::from_std(reader).unwrap();
+        let (sender, _control, bulk, commands) = SessionOutputSender::split_channel();
+        let (activity, _activities) = tokio::sync::mpsc::channel(8);
+        let writer = tokio::spawn(bulk_writer_task(file, bulk, commands, activity));
+        let sender = sender.with_incarnation(Some([0x62; CLIENT_INCARNATION_SIZE]));
+        let first = BulkRecord {
+            id: 1,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::GuestToHost,
+            offset: 0,
+            payload: Bytes::from(vec![0x6a; 1024 * 1024]),
+        };
+        let first_len = bulk_wire_bytes(&first, true);
+        let second = BulkRecord {
+            offset: first.payload.len() as u64,
+            payload: Bytes::from_static(b"next"),
+            ..first.clone()
+        };
+        let second_len = bulk_wire_bytes(&second, true);
+        for record in [first, second] {
+            assert!(
+                sender
+                    .send(
+                        1,
+                        SessionOutput::Bulk(crate::session::BulkSessionOutput::new(
+                            record,
+                            RawActivity::default()
+                        ))
+                    )
+                    .await
+            );
+        }
+        let mut bytes = vec![0; first_len];
+        time::timeout(Duration::from_secs(5), reader.read_exact(&mut bytes[..37]))
+            .await
+            .unwrap()
+            .unwrap();
+        let park_sender = sender.clone();
+        let mut park = tokio::spawn(async move { park_sender.park_bulk_output().await });
+        assert!(
+            time::timeout(Duration::from_millis(20), &mut park)
+                .await
+                .is_err(),
+            "park cut a partial record"
+        );
+        time::timeout(Duration::from_secs(5), reader.read_exact(&mut bytes[37..]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            time::timeout(Duration::from_secs(5), park)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            first_len as u64
+        );
+        let mut decoded = BytesMut::from(bytes.as_slice());
+        let frame = try_decode_incarnated_bulk_from_bytes(&mut decoded)
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.record.payload, Bytes::from(vec![0x6a; 1024 * 1024]));
+        assert!(decoded.is_empty());
+        assert!(
+            time::timeout(Duration::from_millis(20), reader.read(&mut [0; 1]))
+                .await
+                .is_err()
+        );
+        sender.resume_bulk_output().await.unwrap();
+        let mut bytes = vec![0; second_len];
+        time::timeout(Duration::from_secs(5), reader.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sender.park_bulk_output().await.unwrap(),
+            (first_len + second_len) as u64
+        );
+        writer.abort();
+        let _ = writer.await;
+    }
+
     #[test]
     fn coalesced_bootstrap_and_init_ack_retain_the_second_frame() {
         let bootstrap = GuestBootstrap::default();
@@ -3697,6 +4884,208 @@ mod tests {
             1,
             BULK_READER_MAX_BYTES_PER_TURN
         ));
+    }
+
+    #[test]
+    fn agent_read_budget_counts_bytes_and_calls_independently() {
+        let mut bytes = AgentReadBudget::default();
+        bytes.record_read(AGENT_READ_QUANTUM_BYTES - 1);
+        assert!(!bytes.exhausted());
+        bytes.record_read(1);
+        assert!(bytes.exhausted());
+
+        let mut calls = AgentReadBudget::default();
+        for _ in 1..AGENT_READ_QUANTUM_CALLS {
+            assert!(calls.read_fd(-1, &mut [0]).is_err());
+            assert!(!calls.exhausted());
+        }
+        assert!(calls.read_fd(-1, &mut [0]).is_err());
+        assert!(calls.exhausted(), "failed reads also bound a retry loop");
+        assert_eq!(calls.bytes, 0);
+
+        let mut large = AgentReadBudget::default();
+        large.record_read(BULK_SERIAL_READ_BUF_SIZE);
+        assert!(
+            large.exhausted(),
+            "a large read is not a smaller wire record"
+        );
+        assert_eq!(large.bytes, BULK_SERIAL_READ_BUF_SIZE);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_read_budget_services_driver_during_partial_bulk_records() {
+        // The control demonstrates the failure without relying on wall-clock delays: cached
+        // readable bulk input never lets the runtime observe the newly readable/writable peers.
+        assert!(!observe_driver_during_partial_bulk(false).await);
+        assert!(observe_driver_during_partial_bulk(true).await);
+    }
+
+    async fn observe_driver_during_partial_bulk(yield_at_boundary: bool) -> bool {
+        use std::io::Write;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+        use std::sync::atomic::AtomicUsize;
+
+        let incarnation = [0x42; CLIENT_INCARNATION_SIZE];
+        let first = BulkRecord {
+            id: 1,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            offset: 0,
+            payload: Bytes::from(vec![0xa5; 512]),
+        };
+        let second = BulkRecord {
+            offset: first.payload.len() as u64,
+            payload: Bytes::from(vec![0x5a; 512]),
+            ..first.clone()
+        };
+        let mut wire = Vec::new();
+        for record in [&first, &second] {
+            wire.extend_from_slice(&incarnation);
+            codec::encode_bulk_to_buf(record, &mut wire).unwrap();
+        }
+        let (mut source, input) = UnixStream::pair().unwrap();
+        input.set_nonblocking(true).unwrap();
+        source.write_all(&wire).unwrap();
+        let mut input = BulkInputState::new(File::from(OwnedFd::from(input))).unwrap();
+        // Model fragmented console reads while keeping the complete wire records unchanged.
+        input.read_buf.truncate(1);
+
+        let (mut control_source, control) = UnixStream::pair().unwrap();
+        control.set_nonblocking(true).unwrap();
+        let control = AsyncFd::new(control).unwrap();
+        let (pipe_reader, pipe_writer) = nix::unistd::pipe2(nix::fcntl::OFlag::O_NONBLOCK).unwrap();
+        let pipe_writer = AsyncFd::new(pipe_writer).unwrap();
+        // Prime the reactor, then clear the pipe's cached writable event with a real EAGAIN.
+        let mut writable = pipe_writer.writable().await.unwrap();
+        loop {
+            match writable.try_io(|fd| write_to_fd(fd.get_ref().as_raw_fd(), &[0; 4096])) {
+                Ok(Ok(count)) => assert!(count > 0),
+                Ok(Err(error)) => panic!("fill stdin pipe: {error}"),
+                Err(_) => break,
+            }
+        }
+        drop(writable);
+        let mut drained = [0; 4096];
+        loop {
+            match read_from_fd(pipe_reader.as_raw_fd(), &mut drained) {
+                Ok(count) => assert!(count > 0),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("drain stdin pipe: {error}"),
+            }
+        }
+        control_source.write_all(b"c").unwrap();
+        let serviced = Arc::new(AtomicUsize::new(0));
+        let control_serviced = Arc::clone(&serviced);
+        let control_task = tokio::spawn(async move {
+            loop {
+                let mut ready = control.readable().await.unwrap();
+                let mut byte = [0];
+                match ready.try_io(|fd| read_from_fd(fd.get_ref().as_raw_fd(), &mut byte)) {
+                    Ok(Ok(1)) => {
+                        assert_eq!(byte, *b"c");
+                        control_serviced.fetch_or(1, Ordering::Relaxed);
+                        break;
+                    }
+                    Ok(result) => panic!("read control marker: {result:?}"),
+                    Err(_) => continue,
+                }
+            }
+        });
+        let stdin_serviced = Arc::clone(&serviced);
+        let stdin_task = tokio::spawn(async move {
+            std::future::poll_fn(|cx| {
+                loop {
+                    let mut ready = std::task::ready!(pipe_writer.poll_write_ready(cx)).unwrap();
+                    match ready.try_io(|fd| write_to_fd(fd.get_ref().as_raw_fd(), b"i")) {
+                        Ok(result) => return Poll::Ready(result),
+                        Err(_) => continue,
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            stdin_serviced.fetch_or(2, Ordering::Relaxed);
+        });
+
+        let mut budget = AgentReadBudget::default();
+        let mut received = Vec::new();
+        let mut serviced_before_first_record = false;
+        while received.len() < 2 {
+            let frames = tokio::select! {
+                frames = input.read_turn(&mut budget) => frames.unwrap(),
+                _ = std::future::pending::<()>() => unreachable!(),
+            };
+            for frame in frames {
+                assert_eq!(frame.incarnation, incarnation);
+                received.push(frame.record);
+            }
+            // This is the production cancellation-safe boundary: no decoded frames are local to
+            // a competing select future, and even partial-record reads have spent the budget.
+            if yield_at_boundary {
+                budget.yield_if_exhausted().await;
+            }
+            if received.is_empty() && serviced.load(Ordering::Relaxed) == 3 {
+                serviced_before_first_record = true;
+            }
+        }
+        assert_eq!(
+            received,
+            [first, second],
+            "yield preserves record bytes and FIFO"
+        );
+        assert!(input.input.is_empty());
+        control_task.await.unwrap();
+        stdin_task.await.unwrap();
+        let mut marker = [0];
+        assert_eq!(
+            read_from_fd(pipe_reader.as_raw_fd(), &mut marker).unwrap(),
+            1
+        );
+        assert_eq!(marker, *b"i");
+        serviced_before_first_record
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_bulk_read_keeps_partial_record_and_read_budget() {
+        use std::io::Write;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        let incarnation = [0x29; CLIENT_INCARNATION_SIZE];
+        let record = BulkRecord {
+            id: 1,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            offset: 0,
+            payload: Bytes::from(vec![0x51; 512]),
+        };
+        let mut wire = incarnation.to_vec();
+        codec::encode_bulk_to_buf(&record, &mut wire).unwrap();
+        let (mut source, input) = UnixStream::pair().unwrap();
+        input.set_nonblocking(true).unwrap();
+        let mut input = BulkInputState::new(File::from(OwnedFd::from(input))).unwrap();
+        let mut budget = AgentReadBudget::default();
+        source.write_all(&wire[..40]).unwrap();
+        assert!(input.read_turn(&mut budget).await.unwrap().is_empty());
+        // Consume the stale readable hint so the following select truly cancels a pending read.
+        assert!(input.read_turn(&mut budget).await.unwrap().is_empty());
+        let calls = budget.calls;
+        tokio::select! {
+            biased;
+            result = input.read_turn(&mut budget) => panic!("unexpected read: {result:?}"),
+            _ = std::future::ready(()) => {},
+        }
+        assert_eq!(input.input.as_ref(), &wire[..40]);
+        assert_eq!(budget.bytes, 40);
+        assert_eq!(budget.calls, calls);
+        source.write_all(&wire[40..]).unwrap();
+        let frames = input.read_turn(&mut budget).await.unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].record, record);
+        assert_eq!(frames[0].incarnation, incarnation);
+        assert!(input.input.is_empty());
+        assert_eq!(budget.bytes, wire.len());
     }
 
     #[test]
@@ -3890,6 +5279,7 @@ mod tests {
             &mut active,
             &mut retired,
             &mut retiring_incarnations,
+            &mut BulkOutputPosition::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -4126,11 +5516,7 @@ mod tests {
             .await
             .unwrap();
             let mut bytes = BytesMut::from(encoded.as_slice());
-            let Some(DecodedFrame::Control(reply)) =
-                codec::try_decode_frame_from_bytes(&mut bytes).unwrap()
-            else {
-                panic!("missing thaw response");
-            };
+            let reply = decode_reply_skipping_credit(&mut bytes);
             assert_eq!(reply.t, expected);
             assert_eq!(sender.generation(), 0);
             assert_eq!(client_incarnation_for_id(&state, 1), Some(owner));
@@ -4143,6 +5529,7 @@ mod tests {
                 0,
                 &WorkloadFreeze {
                     attempt_id: "capture".into(),
+                    host_input: WorkloadTransportPosition::default(),
                 },
             )
             .unwrap();
@@ -4182,11 +5569,7 @@ mod tests {
                 .await
                 .unwrap();
                 let mut bytes = BytesMut::from(encoded.as_slice());
-                let Some(DecodedFrame::Control(reply)) =
-                    codec::try_decode_frame_from_bytes(&mut bytes).unwrap()
-                else {
-                    panic!("missing restored thaw response");
-                };
+                let reply = decode_reply_skipping_credit(&mut bytes);
                 assert_eq!(reply.t, MessageType::WorkloadThawed);
                 assert!(!workload.is_frozen());
                 assert_eq!(sender.generation(), generation);
@@ -4195,6 +5578,231 @@ mod tests {
                     // A retry must not detach clients which connected after the first success.
                     connect(&mut state);
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn saturated_stdin_allows_thaw_and_preserves_input_and_eof() {
+        use microsandbox_protocol::core::WorkloadThawMode::{Continue, Restore};
+
+        // SIGSTOP provides a deterministic blocked pipe/PTY without a privileged cgroup mount.
+        // Thaw must complete before external consumer progress, then accepted data drains exactly
+        // once. Restore closes inherited pipe input after data even when no EOF was accepted.
+        struct StoppedProcessGuard(i32);
+        impl Drop for StoppedProcessGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::kill(-self.0, libc::SIGCONT);
+                    libc::kill(-self.0, libc::SIGKILL);
+                }
+            }
+        }
+
+        for (tty, mode, accepted_eof) in [
+            (false, Continue, false),
+            (false, Continue, true),
+            (false, Restore, false),
+            (false, Restore, true),
+            (true, Continue, true),
+            (true, Restore, true),
+        ] {
+            let mut state = AgentState::default();
+            let (mut sender, mut output) = SessionOutputSender::channel();
+            let mut activity = ActivityTracker::new();
+            let heartbeat = heartbeat::HeartbeatControl::default();
+            let config = AgentdConfig {
+                user: None,
+                security_profile: Default::default(),
+                default_cwd: None,
+                default_env: Vec::new(),
+            };
+            let mut workload = crate::workload::tests::fake_latch();
+            workload.freeze("stdin-cut").unwrap();
+            let request = ExecRequest {
+                cmd: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    if tty {
+                        "stty raw -echo; kill -STOP $$; exec cat"
+                    } else {
+                        "kill -STOP $$; exec cat"
+                    }
+                    .into(),
+                ],
+                env: vec![],
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: vec![],
+            };
+            let session = ExecSession::spawn(
+                1,
+                &request,
+                sender.clone(),
+                None,
+                crate::config::SecurityProfile::Default,
+                None,
+            )
+            .unwrap();
+            let pid = session.pid() as i32;
+            state.sessions.insert(1, session);
+            let _cleanup = StoppedProcessGuard(pid);
+            time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+                    if status.lines().any(|line| line.starts_with("State:\tT")) {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("workload should stop before stdin is admitted");
+
+            let mut encoded = Vec::new();
+            let ledger = state.input_window.clone();
+            let initial = ledger.credit().unwrap();
+            let data = vec![0x61; 1024 * 1024];
+            let charge = ledger.admit(InputLane::Bulk, data.len() + 32).unwrap();
+            let mut stdin =
+                Message::with_payload(MessageType::ExecStdin, 1, &ExecStdin { data }).unwrap();
+            // A generation-8 SDK still travels over the bundled private transport contract.
+            // Dispatch must not fall back to blocking writes based on the client message version.
+            stdin.v = 8;
+            time::timeout(
+                Duration::from_millis(100),
+                handle_message_with_charge(
+                    stdin,
+                    &mut state,
+                    &mut activity,
+                    &mut sender,
+                    &mut encoded,
+                    &config,
+                    &mut workload,
+                    &heartbeat,
+                    Some(charge),
+                ),
+            )
+            .await
+            .expect("stdin dispatch waited on its blocked consumer")
+            .unwrap();
+            assert!(encoded.is_empty());
+            assert!(state.sessions[&1].has_pending_stdin());
+            if accepted_eof {
+                let charge = ledger.admit(InputLane::Bulk, 32).unwrap();
+                let mut eof = Message::with_payload(
+                    MessageType::ExecStdin,
+                    1,
+                    &ExecStdin { data: Vec::new() },
+                )
+                .unwrap();
+                eof.v = 8;
+                time::timeout(
+                    Duration::from_millis(100),
+                    handle_message_with_charge(
+                        eof,
+                        &mut state,
+                        &mut activity,
+                        &mut sender,
+                        &mut encoded,
+                        &config,
+                        &mut workload,
+                        &heartbeat,
+                        Some(charge),
+                    ),
+                )
+                .await
+                .expect("EOF dispatch waited on preceding blocked data")
+                .unwrap();
+            }
+            assert_eq!(
+                ledger.credit().unwrap(),
+                initial,
+                "blocked input refunded before consumption"
+            );
+            let position = ledger.position();
+            let thaw = Message::with_payload(
+                MessageType::WorkloadThaw,
+                u32::MAX,
+                &WorkloadThaw {
+                    attempt_id: "stdin-cut".into(),
+                    mode,
+                },
+            )
+            .unwrap();
+            time::timeout(
+                Duration::from_millis(100),
+                handle_message(
+                    thaw,
+                    &mut state,
+                    &mut activity,
+                    &mut sender,
+                    &mut encoded,
+                    &config,
+                    &mut workload,
+                    &heartbeat,
+                ),
+            )
+            .await
+            .expect("thaw waited on saturated stdin")
+            .unwrap();
+            assert!(!workload.is_frozen());
+            let mut bytes = BytesMut::from(encoded.as_slice());
+            let reply = decode_reply_skipping_credit(&mut bytes);
+            assert_eq!(reply.t, MessageType::WorkloadThawed);
+            assert_eq!(
+                ledger.position(),
+                position,
+                "restore reset cumulative input position"
+            );
+            assert_eq!(
+                ledger.credit().unwrap(),
+                initial,
+                "restore discarded accepted input"
+            );
+            assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+            let mut received = Vec::new();
+            let mut exited = false;
+            time::timeout(Duration::from_secs(5), async {
+                while received.len() < 1024 * 1024
+                    || state.sessions.values().chain(state.detached_sessions.values()).any(ExecSession::has_pending_stdin)
+                    || (!tty && (accepted_eof || mode == Restore) && !exited) {
+                    tokio::select! {
+                        (_, _, result) = std::future::poll_fn(|cx| poll_pending_stdin(&mut state, cx)) => result.unwrap(),
+                        envelope = output.recv() => match envelope.unwrap().output {
+                            SessionOutput::Stdout(data) => received.extend(data),
+                            SessionOutput::Exited(code) => { assert_eq!(code, 0); exited = true; },
+                            _ => {},
+                        },
+                    }
+                }
+            })
+            .await
+            .expect("accepted stdin or ordered EOF did not drain");
+            assert_eq!(received, vec![0x61; 1024 * 1024]);
+            assert_eq!(
+                ledger.credit().unwrap().bulk_bytes,
+                initial.bulk_bytes + position.bulk_bytes
+            );
+            if !tty && mode == Continue && !accepted_eof {
+                // Source Continue must not synthesize EOF. The same owner can still send input.
+                assert!(!exited);
+                state
+                    .sessions
+                    .get_mut(&1)
+                    .unwrap()
+                    .enqueue_stdin(b"tail".to_vec(), None)
+                    .unwrap();
+                let envelope = time::timeout(Duration::from_secs(5), output.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    matches!(envelope.output, SessionOutput::Stdout(ref data) if data == b"tail")
+                );
             }
         }
     }
@@ -4478,6 +6086,7 @@ mod tests {
             &mut active,
             &mut retired,
             &mut retiring,
+            &mut BulkOutputPosition::default(),
         )
         .unwrap();
         enqueue_bulk_output(

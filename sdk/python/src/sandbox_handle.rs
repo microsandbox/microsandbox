@@ -394,6 +394,37 @@ impl PySandboxHandle {
         })
     }
 
+    /// Create an independent local CoW child without a durable full snapshot.
+    fn branch<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            Ok(PySandbox::from_rust(
+                guard.branch(name).await.map_err(to_py_err)?,
+            ))
+        })
+    }
+
+    /// Suspend this resident VM without releasing RAM.
+    fn pause<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            guard.pause().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    /// Resume the same resident VM and its workloads.
+    fn resume<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            guard.resume().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
     /// Request graceful shutdown without waiting.
     fn request_stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
@@ -525,7 +556,7 @@ impl PySandboxHandle {
         })
     }
 
-    /// Snapshot this (stopped) sandbox under a bare name. Resolves
+    /// Snapshot this sandbox's disk under a bare name, preserving its running/paused state. Resolves
     /// under `~/.microsandbox/snapshots/<name>/`. Move artifacts with
     /// `Snapshot.save`/`Snapshot.load`.
     fn snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {

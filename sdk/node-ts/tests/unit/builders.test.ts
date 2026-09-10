@@ -352,6 +352,11 @@ describe("PatchBuilder", () => {
 });
 
 describe("SandboxBuilder.build", () => {
+  it("rejects forked for a fresh boot", async () => {
+    await expect(Sandbox.builder("forked-policy").image("alpine").forked().build())
+      .rejects.toThrow("forked requires a full snapshot");
+  });
+
   it("requires .image()", async () => {
     await expect(Sandbox.builder("x").build()).rejects.toThrow(
       InvalidConfigError,

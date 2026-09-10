@@ -104,9 +104,15 @@ enum BackendSelection {
 /// Missing file → `Ok(SdkConfig::default())`. Malformed JSON → `Err`.
 /// Honours `MSB_CONFIG_PATH` env override for the file path.
 pub fn load_sdk_config() -> MicrosandboxResult<SdkConfig> {
+    load_sdk_config_document().map(|(config, _)| config)
+}
+
+/// Keep the source document for the local half of ambient backend resolution. Local field
+/// errors retain the lazy backend's existing default fallback; SDK profile errors remain fatal.
+fn load_sdk_config_document() -> MicrosandboxResult<(SdkConfig, Option<String>)> {
     let path = sdk_config_path();
     if !path.exists() {
-        return Ok(SdkConfig::default());
+        return Ok((SdkConfig::default(), None));
     }
     let raw = fs::read_to_string(&path).map_err(|e| {
         MicrosandboxError::InvalidConfig(format!(
@@ -123,7 +129,7 @@ pub fn load_sdk_config() -> MicrosandboxResult<SdkConfig> {
             path.display()
         ))
     })?;
-    Ok(cfg)
+    Ok((cfg, Some(raw)))
 }
 
 /// Resolve the default backend according to the Q1 precedence ladder.
@@ -161,7 +167,16 @@ pub fn resolve_default_backend() -> MicrosandboxResult<Arc<dyn Backend>> {
         }
     }
 
-    let cfg = load_sdk_config()?;
+    let (cfg, document) = load_sdk_config_document()?;
+    #[cfg(not(feature = "local"))]
+    let _ = &document;
+    #[cfg(feature = "local")]
+    let local_config = || {
+        document
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<crate::config::GlobalConfig>(raw).ok())
+            .unwrap_or_default()
+    };
     let env_profile = std::env::var("MSB_PROFILE").ok();
     let selection = select_backend(
         backend_kind.as_deref(),
@@ -171,7 +186,16 @@ pub fn resolve_default_backend() -> MicrosandboxResult<Arc<dyn Backend>> {
     )?;
 
     match selection {
-        BackendSelection::Local => local_backend(BackendSelectionSource::Default, None),
+        BackendSelection::Local => {
+            #[cfg(not(feature = "local"))]
+            return Err(feature_disabled("local"));
+            #[cfg(feature = "local")]
+            Ok(Arc::new(LocalBackend::lazy_with_config(
+                local_config(),
+                BackendSelectionSource::Default,
+                None,
+            )))
+        }
         BackendSelection::DirectCloud => {
             #[cfg(not(feature = "cloud"))]
             return Err(feature_disabled("cloud"));
@@ -213,7 +237,18 @@ pub fn resolve_default_backend() -> MicrosandboxResult<Arc<dyn Backend>> {
             } else {
                 BackendSelectionSource::ActiveProfile
             };
-            backend_from_profile(&name, profile, source)
+            if profile.backend == ProfileBackend::Local {
+                #[cfg(not(feature = "local"))]
+                return Err(feature_disabled("local"));
+                #[cfg(feature = "local")]
+                Ok(Arc::new(LocalBackend::lazy_with_config(
+                    local_config(),
+                    source,
+                    Some(name),
+                )))
+            } else {
+                backend_from_profile(&name, profile, source)
+            }
         }
     }
 }

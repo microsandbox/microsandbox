@@ -54,6 +54,9 @@ pub const MOUNT_OWNER_CONFIG_MIGRATION_ID: &str = "m20260824_000001_mount_owner_
 /// Migration that separates stable snapshot identity from descriptor integrity.
 pub const SNAPSHOT_IDENTITY_MIGRATION_ID: &str = "m20260829_000001_split_snapshot_identity";
 
+/// Migration that separates local group membership from portable snapshot identity.
+pub const SNAPSHOT_GROUPS_MIGRATION_ID: &str = "m20260910_000001_snapshot_groups";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -265,6 +268,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: true,
         summary: "reverse final snapshot descriptors before dropping identity projections",
     },
+    MigrationMetadata {
+        id: SNAPSHOT_GROUPS_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: true,
+        summary: "restore the flat snapshot index only when no groups or duplicate identities remain",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -351,6 +361,7 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            SNAPSHOT_GROUPS_MIGRATION_ID,
             SNAPSHOT_IDENTITY_MIGRATION_ID,
             MOUNT_OWNER_CONFIG_MIGRATION_ID,
             SANDBOX_NETWORK_SLOT_MIGRATION_ID,

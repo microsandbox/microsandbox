@@ -11,7 +11,8 @@ use tokio::task::JoinHandle;
 
 // Constants
 
-const ALPINE_IMAGE: &str = "alpine";
+// Match the mirrored fixture used by the other SDK integration tests.
+const ALPINE_IMAGE: &str = "mirror.gcr.io/library/alpine:latest";
 const REAL_SECRET: &str = "real-secret-plain-http";
 /// Placeholder the guest sees for the `API_KEY` secret: the env var name with
 /// the `MSB_` prefix the runtime injects.

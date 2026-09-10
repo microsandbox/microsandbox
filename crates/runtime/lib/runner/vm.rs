@@ -272,6 +272,9 @@ pub struct VmConfig {
     /// Guest transparent huge-page policy selected at boot.
     pub thp: microsandbox_types::TransparentHugePagePolicy,
 
+    /// Protected memory cache resolved by the sandbox's owning local backend.
+    pub memory_cache_dir: Option<PathBuf>,
+
     /// Number of virtual CPUs online at boot.
     pub vcpus: u8,
 
@@ -1048,6 +1051,8 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
             &resolved_bootstrap,
             tokio_rt.handle().clone(),
             &config.agent_sock_path,
+            Arc::clone(&shared.workload_control),
+            Arc::clone(&shared.resident_paused),
         );
         let context = super::control::ControlContext {
             executor: match executor {
@@ -1292,6 +1297,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     {
         let shutdown_exit_handle = exit_handle.clone();
         let shutdown_reason = Arc::clone(&exit_reason);
+        let shutdown_paused = Arc::clone(&shared.resident_paused);
         tokio_rt.spawn(async move {
             if relay_drain_rx.recv().await.is_some() {
                 shutdown_reason.store(
@@ -1301,7 +1307,9 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
                 tracing::info!(
                     "core.shutdown forwarded to agentd, allowing flush window before host fallback"
                 );
-                tokio::time::sleep(shutdown_flush_timeout).await;
+                if !shutdown_paused.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::time::sleep(shutdown_flush_timeout).await;
+                }
                 tracing::info!("flush window elapsed, triggering host exit");
                 shutdown_exit_handle.trigger();
             }
@@ -1353,6 +1361,13 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
                 }
             }
 
+            if startup_shared
+                .resident_paused
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                startup_exit_handle.trigger();
+                return;
+            }
             match request_guest_shutdown(&startup_shared) {
                 Ok(()) => {
                     tokio::time::sleep(startup_shutdown_flush_timeout).await;
@@ -1384,6 +1399,12 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
+                if heartbeat_shared
+                    .resident_paused
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    continue;
+                }
                 let decision = heartbeat_reader.check(idle_timeout);
 
                 match decision {
@@ -2192,12 +2213,39 @@ fn build_vm(
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
     let restored_agent = if let Some(restore) = &config.vm.checkpoint_restore {
-        let prepared = crate::checkpoint::PreparedCheckpointRestore::open(
-            restore.closure.clone(),
-            &restore.checkpoint_root,
-        )
+        let prepared = if restore.local_branch {
+            crate::checkpoint::PreparedCheckpointRestore::open_local(
+                restore.closure.clone(),
+                &restore.checkpoint_id,
+            )
+        } else {
+            crate::checkpoint::PreparedCheckpointRestore::open(
+                restore.closure.clone(),
+                &restore.checkpoint_root,
+            )
+        }
         .map_err(|error| RuntimeError::Custom(format!("prepare checkpoint restore: {error}")))?;
-        Some(prepared.install(&mut vm))
+        if let Some(admitted) = prepared.disk_closure() {
+            // Reuse this process's exact admitted file bindings before the closure is moved
+            // into RAM restoration. The later coordinator opens the completed journal.
+            crate::checkpoint::seed_restored_root_disk(&config.runtime_dir, &config.vm, admitted)
+                .map_err(RuntimeError::Custom)?;
+        }
+        let cache_root = restore
+            .forked
+            .then(|| {
+                config.vm.memory_cache_dir.clone().ok_or_else(|| {
+                    RuntimeError::Custom(
+                        "CoW memory requires its backend-resolved cache directory".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        Some(
+            prepared
+                .install(&mut vm, cache_root)
+                .map_err(RuntimeError::Custom)?,
+        )
     } else {
         None
     };
@@ -2240,9 +2288,10 @@ fn publish_control_endpoint(
     run_dir: &Path,
     sandbox_name: &str,
 ) -> RuntimeResult<()> {
-    // Only Unix publishes the legacy socket symlink; Windows uses the named pipe directly.
+    // Windows uses named pipes and has no legacy Unix socket link to publish.
     #[cfg(not(unix))]
     let _ = (run_dir, sandbox_name);
+
     match super::control::spawn_control_listener(control_sock_path.clone(), context) {
         Ok(()) => {
             #[cfg(unix)]
@@ -2755,6 +2804,15 @@ fn spawn_parent_watchdog(
                 Ok(ParentWatchdogSignal::ParentExited) => {
                     tracing::info!("creator process exited; stopping attached sandbox");
                     exit_reason.store(EXIT_REASON_PARENT_EXIT, std::sync::atomic::Ordering::SeqCst);
+                    // A suspended guest cannot process shutdown. Release the resident VM
+                    // directly without thawing user workloads merely to stop them.
+                    if shared
+                        .resident_paused
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        exit_handle.trigger();
+                        return;
+                    }
                     if let Err(err) = request_guest_shutdown(&shared) {
                         tracing::warn!(error = %err, "parent-watch shutdown request failed");
                     } else {

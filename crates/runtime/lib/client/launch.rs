@@ -77,7 +77,11 @@ pub struct StartupCommand {
 
 /// The bulk `msb sandbox` configuration delivered over the config fd.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LaunchConfig {
+    /// Required execution intent. Restore intent must never be inferred from optional hints.
+    pub execution: ExecutionIntent,
+
     /// Path to the sandbox database file.
     pub db_path: PathBuf,
 
@@ -123,6 +127,10 @@ pub struct LaunchConfig {
     /// Guest transparent huge-page policy selected at boot.
     #[serde(default)]
     pub thp: TransparentHugePagePolicy,
+
+    /// Backend-resolved protected cache for explicit memory captures and restores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_cache_dir: Option<PathBuf>,
 
     /// Per-writable-raw-disk hard budget for buffered host dirty data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -192,12 +200,28 @@ pub struct LaunchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointRestoreConfig {
+    /// Restore a local branch handoff instead of a durable checkpoint closure.
+    pub local_branch: bool,
+    /// Require private CoW memory rather than eager restoration.
+    /// Kept inside the strict restore contract: an unsupported mode must not become a boot.
+    pub forked: bool,
     /// Path to the complete eager checkpoint closure.
     pub closure: PathBuf,
     /// Expected algorithm-qualified composite checkpoint root.
     pub checkpoint_root: String,
     /// Stable source checkpoint identifier retained for diagnostics.
     pub checkpoint_id: String,
+}
+
+/// Required process-construction intent, independent of any guest startup command.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionIntent {
+    /// Construct a fresh guest from its disk/image state.
+    #[default]
+    Boot,
+    /// Continue captured execution; a complete recognized restore source is mandatory.
+    Restore,
 }
 
 /// Lifetime bounds for the sandbox.
@@ -296,12 +320,129 @@ pub struct FileMountConfig {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl LaunchConfig {
+    /// Decode and validate execution intent before allocating or starting a VM.
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let config: Self = serde_json::from_slice(bytes)
+            .map_err(|error| format!("invalid launch config: {error}"))?;
+        match (config.execution, config.checkpoint_restore.as_ref()) {
+            (ExecutionIntent::Boot, None) => {}
+            (ExecutionIntent::Restore, Some(restore)) => {
+                if restore.closure.as_os_str().is_empty()
+                    || (!restore.local_branch && restore.checkpoint_root.is_empty())
+                    || restore.checkpoint_id.is_empty()
+                {
+                    return Err("restore requires a complete checkpoint source".into());
+                }
+                if restore.local_branch && (!restore.forked || !restore.checkpoint_root.is_empty())
+                {
+                    return Err(
+                        "local branch requires private memory and no durable checkpoint root"
+                            .into(),
+                    );
+                }
+                if config.startup.is_some() {
+                    return Err("restore cannot execute a fresh startup command".into());
+                }
+            }
+            _ => return Err("execution intent and checkpoint restore source disagree".into()),
+        }
+        Ok(config)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::{FileMountConfig, LaunchConfig};
+    use super::*;
+
+    fn restore_request() -> serde_json::Value {
+        serde_json::to_value(LaunchConfig {
+            execution: ExecutionIntent::Restore,
+            checkpoint_restore: Some(CheckpointRestoreConfig {
+                local_branch: false,
+                forked: true,
+                closure: "/owned/child/restore".into(),
+                checkpoint_root: "blake3:captured-root".into(),
+                checkpoint_id: "captured".into(),
+            }),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn decode(value: serde_json::Value) -> Result<LaunchConfig, String> {
+        LaunchConfig::decode(&serde_json::to_vec(&value).unwrap())
+    }
+
+    #[test]
+    fn matching_boot_and_restore_intents_are_accepted() {
+        assert!(decode(serde_json::to_value(LaunchConfig::default()).unwrap()).is_ok());
+        let restored = decode(restore_request()).unwrap();
+        assert!(restored.checkpoint_restore.unwrap().forked);
+    }
+
+    #[test]
+    fn unsupported_or_missing_restore_never_becomes_boot() {
+        for mutation in [
+            "missing",
+            "null",
+            "unknown_outer",
+            "unknown_nested",
+            "unknown_intent",
+            "boot",
+        ] {
+            let mut request = restore_request();
+            match mutation {
+                "missing" => {
+                    request
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("checkpoint_restore");
+                }
+                "null" => request["checkpoint_restore"] = serde_json::Value::Null,
+                "unknown_outer" => request["branch_restore"] = serde_json::json!({}),
+                "unknown_nested" => request["checkpoint_restore"]["unsupported"] = true.into(),
+                "unknown_intent" => request["execution"] = "future_restore".into(),
+                "boot" => request["execution"] = "boot".into(),
+                _ => unreachable!(),
+            }
+            assert!(decode(request).is_err(), "{mutation}");
+        }
+    }
+
+    #[test]
+    fn launch_requires_explicit_intent_and_memory_policy() {
+        let mut request = restore_request();
+        request.as_object_mut().unwrap().remove("execution");
+        assert!(decode(request).is_err());
+        let mut request = restore_request();
+        request["checkpoint_restore"]
+            .as_object_mut()
+            .unwrap()
+            .remove("forked");
+        assert!(decode(request).is_err());
+    }
+
+    #[test]
+    fn local_branch_requires_restore_and_private_memory_without_a_fake_root() {
+        let mut request = restore_request();
+        request["checkpoint_restore"]["local_branch"] = true.into();
+        assert!(decode(request.clone()).is_err());
+        request["checkpoint_restore"]["checkpoint_root"] = "".into();
+        assert!(decode(request.clone()).is_ok());
+        request["checkpoint_restore"]["forked"] = false.into();
+        assert!(decode(request.clone()).is_err());
+        request["checkpoint_restore"]["forked"] = true.into();
+        request["execution"] = "boot".into();
+        assert!(decode(request).is_err());
+    }
 
     #[test]
     fn isolated_file_mount_survives_the_client_runner_handoff() {

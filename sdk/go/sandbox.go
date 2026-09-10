@@ -101,6 +101,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		CPUPlacement:      string(o.CPUPlacement),
 		PlacementProfile:  o.PlacementProfile,
 		THP:               string(o.THP),
+		Forked:            o.Forked,
 		Workdir:           o.Workdir,
 		Shell:             o.Shell,
 		SecurityProfile:   string(o.SecurityProfile),
@@ -922,6 +923,25 @@ func (h *SandboxHandle) RequestStop(ctx context.Context) error {
 	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_stop", ffi.SandboxHandleLifecycleOptions{}))
 }
 
+// Branch creates an independent local CoW child without publishing a durable full snapshot.
+func (h *SandboxHandle) Branch(ctx context.Context, name string) (*Sandbox, error) {
+	inner, err := ffi.BranchSandboxByName(ctx, h.name, name)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+}
+
+// Pause controls resident execution without creating a snapshot.
+func (h *SandboxHandle) Pause(ctx context.Context) error {
+	return wrapFFI(ffi.PauseSandboxByName(ctx, h.name))
+}
+
+// Resume controls resident execution without creating a snapshot.
+func (h *SandboxHandle) Resume(ctx context.Context) error {
+	return wrapFFI(ffi.ResumeSandboxByName(ctx, h.name))
+}
+
 // Kill force-kills the sandbox and waits until stopped state is observed.
 func (h *SandboxHandle) Kill(ctx context.Context, opts ...KillOption) error {
 	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "kill", ffi.SandboxHandleLifecycleOptions{TimeoutMs: killTimeoutMillis(opts)}))
@@ -994,7 +1014,7 @@ func (h *SandboxHandle) Destroy(ctx context.Context, opts ...DestroyOption) erro
 	}))
 }
 
-// Snapshot captures this stopped sandbox under a bare name in the default
+// Snapshot captures this sandbox's disk under a bare name in the default
 // snapshots directory.
 func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error) {
 	info, err := ffi.SandboxHandleSnapshot(ctx, h.name, name)
@@ -1026,6 +1046,25 @@ func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
 // RequestStop requests graceful shutdown and returns once the request is sent.
 func (s *Sandbox) RequestStop(ctx context.Context) error {
 	return wrapFFI(s.inner.RequestStop(ctx))
+}
+
+// Pause controls resident execution without creating a snapshot.
+func (s *Sandbox) Pause(ctx context.Context) error {
+	return wrapFFI(s.inner.Pause(ctx))
+}
+
+// Branch creates an independent local CoW child without publishing a durable full snapshot.
+func (s *Sandbox) Branch(ctx context.Context, name string) (*Sandbox, error) {
+	inner, err := s.inner.Branch(ctx, name)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+}
+
+// Resume controls resident execution without creating a snapshot.
+func (s *Sandbox) Resume(ctx context.Context) error {
+	return wrapFFI(s.inner.Resume(ctx))
 }
 
 // Kill force-kills the sandbox and waits until stopped state is observed.

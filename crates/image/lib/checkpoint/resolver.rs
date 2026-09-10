@@ -4,12 +4,14 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use sha2::{Digest as _, Sha256};
 
+use super::admitted_disk::AdmittedDiskLayers;
 use super::{
     CheckpointManifest, DiskGenerationManifest, DiskLayerRef, MemoryExtentContent, MemoryManifest,
-    ObjectId, sparse_file_integrity,
+    ObjectId,
 };
 use crate::error::{ImageError, ImageResult};
 
@@ -38,6 +40,16 @@ pub struct CheckpointClosure {
     checkpoint: CheckpointManifest,
     memory: MemoryManifest,
     disks: Vec<DiskGenerationManifest>,
+    admitted_disks: AdmittedDiskLayers,
+}
+
+/// Separate wall times for loading and verifying one checkpoint object.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CheckpointObjectReadTiming {
+    /// File open, allocation or buffer growth, and read time in microseconds.
+    pub read_us: u128,
+    /// Identity verification time in microseconds.
+    pub hash_us: u128,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -45,6 +57,15 @@ pub struct CheckpointClosure {
 //--------------------------------------------------------------------------------------------------
 
 impl CheckpointClosure {
+    /// Inspect the bounded, identity-verified root for construction planning, not payload admission.
+    /// The child closure must still be fully opened before its contents are consumed.
+    pub fn inspect_manifest(
+        root: &Path,
+        expected_root: Option<&ObjectId>,
+    ) -> ImageResult<CheckpointManifest> {
+        read_checkpoint_root(root, expected_root).map(|(_, manifest)| manifest)
+    }
+
     /// Open and validate a checkpoint closure for restore on this host architecture.
     pub fn open(root: impl Into<PathBuf>, expected_root: Option<&ObjectId>) -> ImageResult<Self> {
         Self::open_inner(root.into(), expected_root, true)
@@ -66,22 +87,7 @@ impl CheckpointClosure {
         expected_root: Option<&ObjectId>,
         require_host_architecture: bool,
     ) -> ImageResult<Self> {
-        let metadata = std::fs::symlink_metadata(&root)?;
-        if !metadata.file_type().is_dir() {
-            return checkpoint_error("checkpoint root is not a directory");
-        }
-
-        let root_bytes =
-            read_regular_bounded(&root.join(CHECKPOINT_ROOT_FILE), MAX_MANIFEST_BYTES)?;
-        let root_id = ObjectId::from_bytes(&root_bytes)?;
-        if expected_root.is_some_and(|expected| expected != &root_id) {
-            return Err(ImageError::DigestMismatch {
-                digest: root_id.to_string(),
-                expected: expected_root.expect("checked Some").to_string(),
-                actual: root_id.to_string(),
-            });
-        }
-        let checkpoint = CheckpointManifest::from_bytes(&root_bytes)?;
+        let (root_id, checkpoint) = read_checkpoint_root(&root, expected_root)?;
         if require_host_architecture && checkpoint.architecture != std::env::consts::ARCH {
             return checkpoint_error(format!(
                 "checkpoint architecture {} cannot restore on {}",
@@ -111,6 +117,7 @@ impl CheckpointClosure {
         }
 
         let mut disks = Vec::with_capacity(checkpoint.disks.len());
+        let mut admitted_disks = AdmittedDiskLayers::default();
         let mut volumes = BTreeSet::new();
         for disk_id in &checkpoint.disks {
             let bytes = read_object_verified(&root, disk_id, MAX_MANIFEST_BYTES)?;
@@ -121,7 +128,11 @@ impl CheckpointClosure {
             if !volumes.insert(disk.volume_id.clone()) {
                 return checkpoint_error("checkpoint repeats a logical disk volume");
             }
-            validate_disk_layers(&root, &disk)?;
+            for layer in &disk.layers {
+                let path = disk_layer_path(&root, layer);
+                open_regular(&path)?;
+                admitted_disks.admit(&path, &layer.integrity_root)?;
+            }
             disks.push(disk);
         }
 
@@ -131,6 +142,7 @@ impl CheckpointClosure {
             checkpoint,
             memory,
             disks,
+            admitted_disks,
         })
     }
 
@@ -159,11 +171,29 @@ impl CheckpointClosure {
         read_object_verified(&self.root, id, max_len)
     }
 
+    /// Load and verify one object into reusable storage, without changing its identity contract.
+    /// The buffer must not be consumed when this method fails.
+    pub fn read_object_into(
+        &self,
+        id: &ObjectId,
+        max_len: u64,
+        bytes: &mut Vec<u8>,
+    ) -> ImageResult<CheckpointObjectReadTiming> {
+        read_object_verified_into(&self.root, id, max_len, bytes)
+    }
+
     /// Return the confined path of a validated disk layer.
     pub fn disk_layer_path(&self, layer: &DiskLayerRef) -> PathBuf {
-        self.root
-            .join("layers")
-            .join(format!("{}.{}", layer.layer_id, layer.format))
+        disk_layer_path(&self.root, layer)
+    }
+
+    /// Reuse a disk root only while the candidate is the exact unchanged admitted file.
+    /// Copies, rewritten qcow headers, replaced names, and uncached layers require a new integrity
+    /// computation. Retained file handles are bounded independently of admitted chain depth.
+    pub fn reused_disk_integrity(&self, path: &Path) -> ImageResult<Option<String>> {
+        self.admitted_disks
+            .reuse_for(path)
+            .map(|root| root.map(str::to_owned))
     }
 
     /// Stream and verify every immutable memory payload referenced by the logical generation.
@@ -187,6 +217,25 @@ impl CheckpointClosure {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn read_checkpoint_root(
+    root: &Path,
+    expected_root: Option<&ObjectId>,
+) -> ImageResult<(ObjectId, CheckpointManifest)> {
+    if !std::fs::symlink_metadata(root)?.file_type().is_dir() {
+        return checkpoint_error("checkpoint root is not a directory");
+    }
+    let bytes = read_regular_bounded(&root.join(CHECKPOINT_ROOT_FILE), MAX_MANIFEST_BYTES)?;
+    let id = ObjectId::from_bytes(&bytes)?;
+    if let Some(expected) = expected_root.filter(|expected| *expected != &id) {
+        return Err(ImageError::DigestMismatch {
+            digest: id.to_string(),
+            expected: expected.to_string(),
+            actual: id.to_string(),
+        });
+    }
+    Ok((id, CheckpointManifest::from_bytes(&bytes)?))
+}
 
 fn validate_memory_objects(root: &Path, memory: &MemoryManifest) -> ImageResult<()> {
     let mut verified = BTreeSet::new();
@@ -212,28 +261,24 @@ fn validate_memory_objects(root: &Path, memory: &MemoryManifest) -> ImageResult<
     Ok(())
 }
 
-fn validate_disk_layers(root: &Path, disk: &DiskGenerationManifest) -> ImageResult<()> {
-    for layer in &disk.layers {
-        let path = root
-            .join("layers")
-            .join(format!("{}.{}", layer.layer_id, layer.format));
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if !metadata.file_type().is_file() {
-            return checkpoint_error("checkpoint disk layer is not a regular file");
-        }
-        let integrity = sparse_file_integrity(&path)?;
-        if integrity.root != layer.integrity_root {
-            return Err(ImageError::DigestMismatch {
-                digest: layer.layer_id.clone(),
-                expected: layer.integrity_root.clone(),
-                actual: integrity.root,
-            });
-        }
-    }
-    Ok(())
+fn disk_layer_path(root: &Path, layer: &DiskLayerRef) -> PathBuf {
+    root.join("layers")
+        .join(format!("{}.{}", layer.layer_id, layer.format))
 }
 
 fn read_object_verified(root: &Path, id: &ObjectId, max_len: u64) -> ImageResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    read_object_verified_into(root, id, max_len, &mut bytes)?;
+    Ok(bytes)
+}
+
+fn read_object_verified_into(
+    root: &Path,
+    id: &ObjectId,
+    max_len: u64,
+    bytes: &mut Vec<u8>,
+) -> ImageResult<CheckpointObjectReadTiming> {
+    let started = Instant::now();
     let path = object_path(root, id);
     let mut file = open_regular(&path)?;
     let length = file.metadata()?.len();
@@ -242,9 +287,17 @@ fn read_object_verified(root: &Path, id: &ObjectId, max_len: u64) -> ImageResult
     }
     let length = usize::try_from(length)
         .map_err(|_| checkpoint_error_value("checkpoint object exceeds host limits"))?;
-    let mut bytes = Vec::with_capacity(length);
-    file.read_to_end(&mut bytes)?;
-    let actual = ObjectId::from_bytes(&bytes)?;
+    // Keep the initialized buffer between packs. Unlike clear + resize this does not zero
+    // an entire reused pack before the file read overwrites it. A growing file cannot make
+    // read_to_end allocate beyond the admitted object bound.
+    bytes.resize(length, 0);
+    file.read_exact(bytes)?;
+    if file.read(&mut [0u8; 1])? != 0 {
+        return checkpoint_error("checkpoint object changed length during read");
+    }
+    let read_us = started.elapsed().as_micros();
+    let hash_started = Instant::now();
+    let actual = ObjectId::from_bytes(bytes)?;
     if &actual != id {
         return Err(ImageError::DigestMismatch {
             digest: id.to_string(),
@@ -252,7 +305,10 @@ fn read_object_verified(root: &Path, id: &ObjectId, max_len: u64) -> ImageResult
             actual: actual.to_string(),
         });
     }
-    Ok(bytes)
+    Ok(CheckpointObjectReadTiming {
+        read_us,
+        hash_us: hash_started.elapsed().as_micros(),
+    })
 }
 
 fn verify_object_streaming(root: &Path, id: &ObjectId) -> ImageResult<()> {
@@ -332,6 +388,27 @@ mod tests {
         ResourceDescriptor, ResourceTreatment,
     };
 
+    #[test]
+    fn reusable_object_reader_checks_each_identity_and_reuses_allocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = super::super::LocalObjectStore::open(directory.path()).unwrap();
+        let first = store.put_bytes(b"first payload").unwrap();
+        let second = store.put_bytes(b"next payload!").unwrap();
+        let mut buffer = Vec::with_capacity(64);
+        let allocation = buffer.as_ptr();
+        read_object_verified_into(directory.path(), &first, 64, &mut buffer).unwrap();
+        assert_eq!(buffer, b"first payload");
+        read_object_verified_into(directory.path(), &second, 64, &mut buffer).unwrap();
+        assert_eq!(buffer, b"next payload!");
+        assert_eq!(buffer.as_ptr(), allocation);
+        assert!(read_object_verified_into(directory.path(), &first, 4, &mut buffer).is_err());
+        std::fs::write(store.object_path(&second), b"bad payload!!").unwrap();
+        assert!(matches!(
+            read_object_verified_into(directory.path(), &second, 64, &mut buffer),
+            Err(ImageError::DigestMismatch { .. })
+        ));
+    }
+
     fn fixture() -> (tempfile::TempDir, ObjectId) {
         let directory = tempfile::tempdir().unwrap();
         let store = super::super::LocalObjectStore::open(directory.path()).unwrap();
@@ -388,6 +465,21 @@ mod tests {
     }
 
     #[test]
+    fn manifest_inspection_does_not_substitute_for_payload_admission() {
+        let (directory, root) = fixture();
+        let manifest = CheckpointClosure::inspect_manifest(directory.path(), Some(&root)).unwrap();
+        std::fs::remove_file(super::object_path(
+            directory.path(),
+            &manifest.execution_state,
+        ))
+        .unwrap();
+        assert!(CheckpointClosure::inspect_manifest(directory.path(), Some(&root)).is_ok());
+        assert!(CheckpointClosure::open(directory.path(), Some(&root)).is_err());
+        let wrong = ObjectId::from_bytes(b"wrong root").unwrap();
+        assert!(CheckpointClosure::inspect_manifest(directory.path(), Some(&wrong)).is_err());
+    }
+
+    #[test]
     fn opens_complete_valid_closure() {
         let (directory, expected) = fixture();
 
@@ -395,6 +487,115 @@ mod tests {
 
         assert_eq!(closure.root_id(), &expected);
         assert_eq!(closure.memory().pause_generation, 7);
+    }
+
+    #[test]
+    fn deep_closure_admission_keeps_file_handles_bounded() {
+        #[cfg(unix)]
+        if std::env::var_os("MSB_TEST_DEEP_ADMISSION_LOW_FD").is_none() {
+            use std::os::unix::process::CommandExt;
+
+            // Isolate the process-wide limit from concurrently running tests. The old one-FD-
+            // per-layer implementation cannot admit these 512 files with only 64 descriptors.
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "checkpoint::resolver::tests::deep_closure_admission_keeps_file_handles_bounded",
+                    "--nocapture",
+                ])
+                .env("MSB_TEST_DEEP_ADMISSION_LOW_FD", "1");
+            // SAFETY: the pre-exec callback only invokes async-signal-safe libc resource-limit
+            // operations; it does not allocate or acquire locks in the forked child.
+            unsafe {
+                child.pre_exec(|| {
+                    let mut limit = std::mem::zeroed::<libc::rlimit>();
+                    if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    limit.rlim_cur = limit.rlim_max.min(64);
+                    if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "low-FD admission failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+
+        let (directory, _) = fixture();
+        let store = super::super::LocalObjectStore::open(directory.path()).unwrap();
+        let root_path = directory.path().join(CHECKPOINT_ROOT_FILE);
+        let mut checkpoint =
+            CheckpointManifest::from_bytes(&std::fs::read(&root_path).unwrap()).unwrap();
+        std::fs::create_dir_all(directory.path().join("layers")).unwrap();
+        let mut paths = Vec::new();
+        // Each volume stays inside the existing 256-layer manifest limit. Disk header codecs
+        // are runtime concerns: this resolver fixture exercises byte admission and membership.
+        for volume in 0..2 {
+            let mut layers = Vec::new();
+            for index in 0..256 {
+                let layer_id = format!("volume_{volume}_layer_{index}");
+                let format = if index == 0 { "raw" } else { "qcow2" };
+                let path = directory
+                    .path()
+                    .join("layers")
+                    .join(format!("{layer_id}.{format}"));
+                std::fs::write(&path, [0x55]).unwrap();
+                let integrity_root = super::super::sparse_file_integrity(&path).unwrap().root;
+                layers.push(DiskLayerRef {
+                    layer_id,
+                    format: format.into(),
+                    virtual_size: 4096,
+                    predecessor: (index > 0)
+                        .then(|| format!("volume_{volume}_layer_{}", index - 1)),
+                    integrity_root,
+                });
+                paths.push(path);
+            }
+            let disk = DiskGenerationManifest {
+                schema: "microsandbox.disk-generation/1".into(),
+                volume_id: format!("volume_{volume}"),
+                device_id: format!("device_{volume}"),
+                generation: 1,
+                head: layers.last().unwrap().layer_id.clone(),
+                layers,
+                pause_generation: checkpoint.pause_generation,
+            };
+            checkpoint.disks.push(
+                store
+                    .put_bytes(&disk.to_canonical_bytes().unwrap())
+                    .unwrap(),
+            );
+        }
+        let bytes = checkpoint.to_canonical_bytes().unwrap();
+        let root = ObjectId::from_bytes(&bytes).unwrap();
+        std::fs::write(&root_path, bytes).unwrap();
+
+        let closure = CheckpointClosure::open(directory.path(), Some(&root)).unwrap();
+        assert_eq!(closure.disks().len(), 2);
+        assert!(closure.disks().iter().all(|disk| disk.layers.len() == 256));
+        let reusable = paths
+            .iter()
+            .filter(|path| closure.reused_disk_integrity(path).unwrap().is_some())
+            .count();
+        assert_eq!(reusable, 32);
+        drop(closure);
+
+        // A layer outside the retained receipt set must still be verified during admission.
+        std::fs::write(paths.last().unwrap(), [0xAA]).unwrap();
+        assert!(matches!(
+            CheckpointClosure::open(directory.path(), Some(&root)),
+            Err(ImageError::DigestMismatch { .. })
+        ));
     }
 
     #[test]

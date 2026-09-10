@@ -1108,6 +1108,15 @@ async fn run_downgrade_with_db(
         }
 
         if ctx.operation.phase() < DowngradePhase::DatabaseReverted {
+            if fresh_plan
+                .rollback
+                .iter()
+                .any(|migration| migration.id == schema_metadata::SNAPSHOT_GROUPS_MIGRATION_ID)
+            {
+                // Refuse before any artifact rewrite. A grouped tree cannot be represented
+                // by the target's flat namespace, even if its rebuildable index is missing.
+                refuse_snapshot_group_downgrade(ctx.db.inner(), ctx.snapshots_dir).await?;
+            }
             let reverses_legacy_snapshots = fresh_plan.rollback.iter().any(|migration| {
                 migration.id == schema_metadata::SNAPSHOT_ARTIFACT_TRANSITION_MIGRATION_ID
             });
@@ -2528,6 +2537,34 @@ async fn applied_migrations(db: &DatabaseConnection) -> anyhow::Result<Vec<Strin
         .collect())
 }
 
+async fn refuse_snapshot_group_downgrade(
+    db: &DatabaseConnection,
+    snapshots_dir: &Path,
+) -> anyhow::Result<()> {
+    let grouped = optional_count(
+        db,
+        "SELECT COUNT(*) FROM snapshot_index WHERE group_path IS NOT NULL OR group_name IS NOT NULL",
+    ).await?;
+    let mut grouped_on_disk = false;
+    if snapshots_dir.exists() {
+        for entry in fs::read_dir(snapshots_dir)? {
+            let path = entry?.path();
+            // The metadata file is the on-disk namespace marker. Refuse even an empty or
+            // unindexed group rather than making it disappear from the older CLI.
+            if path.join("group.json").exists() {
+                grouped_on_disk = true;
+                break;
+            }
+        }
+    }
+    if grouped > 0 || grouped_on_disk {
+        anyhow::bail!(
+            "snapshot groups prevent downgrade: retain this version or export and remove snapshot groups before retrying"
+        );
+    }
+    Ok(())
+}
+
 async fn user_data_warnings(db: &DatabaseConnection) -> anyhow::Result<Vec<String>> {
     let snapshot_count = optional_count(db, "SELECT COUNT(*) FROM snapshot_index").await?;
     let disk_volume_count = optional_count(
@@ -3514,6 +3551,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn downgrade_refuses_unindexed_group_before_artifact_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let snapshots = dir.path().join("snapshots");
+        let group = snapshots.join("unindexed");
+        fs::create_dir_all(&group).unwrap();
+        let state = br#"{"schema":"microsandbox.snapshot-group/1","head":null}"#;
+        fs::write(group.join("group.json"), state).unwrap();
+        let error = refuse_snapshot_group_downgrade(&db, &snapshots)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot groups prevent downgrade")
+        );
+        assert_eq!(fs::read(group.join("group.json")).unwrap(), state);
+    }
+
+    #[tokio::test]
     async fn rollback_schema_steps_through_latest_migrations() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("msb.db");
@@ -3526,7 +3584,10 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // Stable snapshot identity is the newest migration. With no snapshot
+        // Empty databases can drop grouped addressing without discarding any instances.
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        // With no snapshot
         // artifacts to translate, rollback removes its two rebuildable index
         // projections before touching any migration from the released prefix.
         rollback_schema(db.inner(), 1).await.unwrap();

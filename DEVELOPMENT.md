@@ -182,6 +182,28 @@ Run a specific test:
 cargo test -p microsandbox test_name
 ```
 
+### Snapshot and branch checks
+
+Run the focused logic suite without starting VMs:
+
+```bash
+just test-snapshot
+```
+
+This covers snapshot archives/groups, dependency validation, checkpoint logic, snapshot CLI parsing, and the live-smoke runner's own unit tests. The Rust tests already run in the normal Linux workspace CI lane. Cached test execution is much shorter than a first build; Cargo compilation and dependency setup are additional costs, not snapshot-operation timings.
+
+For a compact end-to-end check, build a matching runtime bundle with `just build`, then run:
+
+```bash
+just test-snapshot-live
+just test-snapshot-live --layout flat
+just test-snapshot-live --binary /path/to/msb --output /tmp/snapshot-smoke-new
+```
+
+The live check requires working virtualization and Python (`python3` on Linux/macOS, `python` on Windows). macOS binaries must be codesigned with `msb-entitlements.plist`; `just build` does this. It uses a new isolated `MSB_HOME`, stops its own VMs, verifies host-process exit, and retains a report and logs in the printed output directory. Successful runs remove their temporary RAM/disk artifacts; failed runs retain their home for investigation. An explicit `--output` directory must not exist; choose a short path under `/tmp` on Unix to stay within socket-path limits. Use `--help` for image and timeout options.
+
+The warm live target is under 60 seconds per layout, excluding compilation and image-pull setup; this is a target, not a guarantee or a performance benchmark. Per-command and suite deadlines bound failures separately. The existing Linux/KVM CLI smoke CI job runs managed and flat layouts and uploads reports/logs even on failure. This compact check complements, rather than replaces, the larger live invariant and benchmark matrices under `scripts/smoke/cli/`.
+
 ## Benchmarking
 
 The benchmark suite lives in its own repository:

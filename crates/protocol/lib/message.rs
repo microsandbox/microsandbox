@@ -153,6 +153,10 @@ pub enum MessageType {
     #[strum(serialize = "core.workload.thawed")]
     WorkloadThawed,
 
+    /// Guest grants cumulative ordinary input capacity to its host relay.
+    #[strum(serialize = "core.workload.transport.credit")]
+    WorkloadTransportCredit,
+
     /// Host checks mounted root-filesystem growth before changing block capacity.
     #[strum(serialize = "core.root_disk.prepare")]
     RootDiskPrepare,
@@ -317,6 +321,18 @@ impl Message {
 }
 
 impl MessageType {
+    /// Whether host-to-guest delivery can retain payload credit behind a workload consumer.
+    ///
+    /// The bundled workload barrier uses logical classes, not physical console ports. Payload
+    /// messages (including ordered EOF) share data credit with raw bulk records, leaving control
+    /// capacity available for fresh commands when restored stdin has not yet been consumed.
+    pub fn uses_workload_data_credit(self) -> bool {
+        matches!(
+            self,
+            Self::ExecStdin | Self::FsData | Self::TcpData | Self::TcpEof
+        )
+    }
+
     /// Computes the frame flags byte for this message type.
     pub fn flags(&self) -> u8 {
         match self {
@@ -382,7 +398,8 @@ impl MessageType {
             Self::WorkloadFreeze
             | Self::WorkloadFrozen
             | Self::WorkloadThaw
-            | Self::WorkloadThawed => 9,
+            | Self::WorkloadThawed
+            | Self::WorkloadTransportCredit => 9,
             Self::RootDiskPrepare | Self::RootDiskGrow | Self::RootDiskState => 9,
             Self::BulkAccepted | Self::BulkCredit | Self::BulkFinish | Self::BulkCancel => 8,
             Self::TcpConnect
@@ -455,6 +472,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_payload_and_eof_use_data_credit_without_changing_frame_flags() {
+        for message in [
+            MessageType::ExecStdin,
+            MessageType::FsData,
+            MessageType::TcpData,
+            MessageType::TcpEof,
+        ] {
+            assert!(message.uses_workload_data_credit());
+            assert_eq!(
+                message.flags(),
+                0,
+                "logical admission must not change the wire header"
+            );
+        }
+        for message in [
+            MessageType::ExecRequest,
+            MessageType::Ping,
+            MessageType::FsRequest,
+            MessageType::TcpConnect,
+            MessageType::ExecSignal,
+            MessageType::BulkFinish,
+            MessageType::BulkCancel,
+            MessageType::RelayClientDisconnected,
+        ] {
+            assert!(!message.uses_workload_data_credit());
+        }
+    }
+
+    #[test]
     fn test_message_type_roundtrip() {
         let types = [
             (MessageType::Bootstrap, "core.bootstrap"),
@@ -475,6 +521,10 @@ mod tests {
             (MessageType::WorkloadFrozen, "core.workload.frozen"),
             (MessageType::WorkloadThaw, "core.workload.thaw"),
             (MessageType::WorkloadThawed, "core.workload.thawed"),
+            (
+                MessageType::WorkloadTransportCredit,
+                "core.workload.transport.credit",
+            ),
             (MessageType::CoreError, "core.error"),
             (MessageType::BulkAccepted, "core.bulk.accepted"),
             (MessageType::BulkCredit, "core.bulk.credit"),
@@ -526,6 +576,7 @@ mod tests {
             MessageType::WorkloadFrozen,
             MessageType::WorkloadThaw,
             MessageType::WorkloadThawed,
+            MessageType::WorkloadTransportCredit,
             MessageType::CoreError,
             MessageType::BulkAccepted,
             MessageType::BulkCredit,
@@ -743,6 +794,7 @@ mod tests {
             MessageType::WorkloadFrozen,
             MessageType::WorkloadThaw,
             MessageType::WorkloadThawed,
+            MessageType::WorkloadTransportCredit,
         ] {
             assert_eq!(mt.min_protocol_version(), 9, "{mt:?} should require gen 9");
         }

@@ -31,6 +31,12 @@ pub fn local_only(name: &str) -> PyErr {
 pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
     use microsandbox::MicrosandboxError::*;
 
+    // Missing snapshot selectors are resolved when the create future is awaited, like explicit
+    // artifact paths. Retain Python's useful missing-file exception without duplicating resolution.
+    if let SnapshotNotFound(_) = &err {
+        return pyo3::exceptions::PyFileNotFoundError::new_err(err.to_string());
+    }
+
     Python::with_gil(|py| {
         let errors_mod = match py.import("microsandbox.errors") {
             Ok(m) => m,

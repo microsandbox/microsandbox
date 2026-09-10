@@ -18,4 +18,5 @@ pub mod policy;
 pub mod relay;
 pub(crate) mod startup;
 pub mod vm;
+pub(crate) mod workload_control;
 pub(crate) mod writeback;

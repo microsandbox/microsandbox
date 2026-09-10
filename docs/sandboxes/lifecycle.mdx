@@ -52,6 +52,45 @@ msb create python --name worker
 
 An attached local SDK handle normally stops its sandbox when the client process exits. See [Keep a sandbox running](#keep-a-sandbox-running) when the sandbox should outlive that process.
 
+## Pause and resume
+
+Pause keeps the local VM and its RAM allocated without creating a snapshot. Resume continues the same processes and corrects guest wall clock before releasing prepared workloads. New guest commands fail while paused; host inspection and stop remain available. Network peers may time out during a long pause.
+
+<CodeGroup>
+```typescript TypeScript
+const worker = await Sandbox.get("worker");
+await worker.pause();
+await worker.resume();
+```
+
+```rust Rust
+let worker = Sandbox::get("worker").await?;
+worker.pause().await?;
+worker.resume().await?;
+```
+
+```python Python
+worker = await Sandbox.get("worker")
+await worker.pause()
+await worker.resume()
+```
+
+```go Go
+worker, err := m.GetSandbox(ctx, "worker")
+if err != nil { return err }
+if err := worker.Pause(ctx); err != nil { return err }
+if err := worker.Resume(ctx); err != nil { return err }
+```
+
+```bash CLI
+msb pause worker
+msb snapshot create paused-state --from-sandbox worker --full
+msb resume worker
+```
+</CodeGroup>
+
+Pausing an already-paused VM and resuming an already-running VM are no-ops. Full snapshots taken while paused leave it paused. A stopped VM has no resident execution state: use `start` to boot it again. Pause/resume requires a matching runtime and guest kernel; cloud sandboxes are not supported.
+
 ## Stop and start again
 
 Stopping gracefully terminates guest processes and shuts down the VM. The sandbox moves to `Stopped`, but its configuration and filesystem remain available for the next start.
@@ -536,11 +575,12 @@ Most applications only need to distinguish between `Running` and `Stopped`. The 
 | **Created** | Configuration has been saved, but the sandbox has not started yet. |
 | **Starting** | The VM and guest agent are starting. Commands are not ready yet. |
 | **Running** | The sandbox is ready for `exec`, `shell`, and filesystem operations. |
+| **Paused** | The local VM and its RAM remain resident. Resume continues the same processes. |
 | **Draining** | Existing commands may finish, but new commands are rejected. The sandbox stops when the drain completes. |
 | **Stopped** | The VM is off. Configuration and sandbox state are preserved for a later start. |
 | **Crashed** | The VM exited unexpectedly and can be started again. |
 
-Some backends can also report `Paused`. Resume is not currently exposed through the SDKs, so start and connect operations do not treat a paused sandbox as stopped.
+A paused sandbox is not stopped: use `resume`, not `start`, to continue it. Pause and resume are available through the local CLI and SDKs.
 
 ## Names, handles, and concurrent callers
 

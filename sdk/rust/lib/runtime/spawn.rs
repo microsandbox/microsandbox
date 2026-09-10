@@ -354,9 +354,6 @@ pub async fn spawn_sandbox(
         }
     };
 
-    #[cfg(not(unix))]
-    let _ = lifecycle_guard;
-
     // Lifecycle callers prove any previous owner dead before reaching spawn.
     // With ownership now serialized, remove exact leftovers from that prior
     // generation so compatibility-link publication cannot be masked by them.
@@ -674,16 +671,14 @@ pub async fn spawn_sandbox(
 
     ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
 
-    // Spawn the sandbox process.
+    // Spawn and Windows lock release form one handoff, before waiting for startup JSON.
     let mut child = {
-        #[cfg(windows)]
-        let _stdio_inherit_guard = if matches!(mode, SpawnMode::Detached) {
-            Some(StdioInheritGuard::new()?)
-        } else {
-            None
-        };
-
-        match cmd.spawn() {
+        match spawn_runtime_command(
+            &mut cmd,
+            mode,
+            #[cfg(not(unix))]
+            lifecycle_guard,
+        ) {
             Ok(child) => child,
             Err(err) => {
                 release_metrics_reservation(config, metrics_reservation.as_ref());
@@ -802,6 +797,25 @@ pub async fn spawn_sandbox(
     );
 
     Ok((handle, agent_sock_path))
+}
+
+/// Start the process after releasing ownership that cannot be inherited on Windows.
+fn spawn_runtime_command(
+    cmd: &mut Command,
+    _mode: SpawnMode,
+    #[cfg(not(unix))] lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
+) -> std::io::Result<tokio::process::Child> {
+    // The caller retains its transition guard through readiness; only the runtime ownership
+    // moves to the child. Keeping this handle during startup creates a parent/child deadlock.
+    #[cfg(not(unix))]
+    drop(lifecycle_guard);
+    #[cfg(windows)]
+    let _stdio_inherit_guard = if matches!(_mode, SpawnMode::Detached) {
+        Some(StdioInheritGuard::new()?)
+    } else {
+        None
+    };
+    cmd.spawn()
 }
 
 fn block_writeback_policy(
@@ -2472,6 +2486,12 @@ fn sandbox_cli_args(
     // typed `LaunchConfig`, delivered over the config fd. See issue #997.
     let mut visible = vec![OsString::from("sandbox")];
 
+    // An old binary might ignore unknown JSON fields, including the whole restore source.
+    // An explicit argv requirement instead fails in its command parser, before any VM exists.
+    if config.checkpoint_restore.is_some() {
+        visible.push(OsString::from("--restore"));
+    }
+
     if let Some(log_level) = config.spec.runtime.log_level {
         visible.push(OsString::from(sandbox_log_level_cli_flag(log_level)));
     }
@@ -2528,13 +2548,22 @@ fn sandbox_cli_args(
         agent_sock: agent_sock_path.to_path_buf(),
         libkrunfw_path: libkrunfw_path.to_path_buf(),
         thp: config.spec.resources.thp,
+        memory_cache_dir: Some(local.cache_dir().join("memory")),
         startup: startup_command(config),
         lifecycle: Lifecycle {
             max_duration_secs: config.spec.lifecycle.max_duration_secs,
             idle_timeout_secs: config.spec.lifecycle.idle_timeout_secs,
         },
         vsock: config.spec.vsock.routes.clone(),
-        checkpoint_restore: config.checkpoint_restore.clone(),
+        execution: if config.checkpoint_restore.is_some() {
+            microsandbox_runtime::launch::ExecutionIntent::Restore
+        } else {
+            microsandbox_runtime::launch::ExecutionIntent::Boot
+        },
+        checkpoint_restore: config.checkpoint_restore.clone().map(|mut restore| {
+            restore.forked = config.forked;
+            restore
+        }),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
         bootstrap: GuestBootstrap {
@@ -2936,6 +2965,64 @@ mod tests {
         },
         volume::VolumeKind,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lifecycle_handoff_child() {
+        use std::io::Write;
+        let Some(run_dir) = std::env::var_os("MSB_TEST_LIFECYCLE_RUN_DIR") else {
+            return;
+        };
+        let _guard = microsandbox_runtime::ipc::acquire_lifecycle_guard(
+            std::path::Path::new(&run_dir),
+            "handoff",
+        )
+        .unwrap();
+        let pipe = std::env::var_os("MSB_TEST_LIFECYCLE_STARTUP_PIPE").unwrap();
+        let mut writer = std::fs::OpenOptions::new().write(true).open(pipe).unwrap();
+        writeln!(writer, "{{\"pid\":{}}}", std::process::id()).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_spawn_handoff_releases_lifecycle_before_startup_reply() {
+        let directory = tempfile::tempdir().unwrap();
+        let run_dir = directory.path().join("run");
+        let _transition =
+            microsandbox_runtime::ipc::try_acquire_transition_guard(&run_dir, "handoff")
+                .unwrap()
+                .unwrap();
+        let guard =
+            microsandbox_runtime::ipc::acquire_lifecycle_guard(&run_dir, "handoff").unwrap();
+        let pipe = super::create_startup_pipe("handoff", 1).unwrap();
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "runtime::spawn::tests::windows_lifecycle_handoff_child",
+                "--nocapture",
+            ])
+            .env("MSB_TEST_LIFECYCLE_RUN_DIR", &run_dir)
+            .env("MSB_TEST_LIFECYCLE_STARTUP_PIPE", &pipe.name)
+            .kill_on_drop(true);
+        let mut child =
+            super::spawn_runtime_command(&mut command, super::SpawnMode::Attached, Some(guard))
+                .unwrap();
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            super::read_startup_line(&mut child, Some(pipe)),
+        )
+        .await;
+        if reply.is_err() {
+            let _ = child.kill().await;
+        }
+        let reply = reply
+            .expect("child waited on a lifecycle lock retained by its parent")
+            .unwrap();
+        let info: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(info["pid"].as_u64(), child.id().map(u64::from));
+        assert!(child.wait().await.unwrap().success());
+    }
 
     #[cfg(windows)]
     fn windows_handle_flags(handle: super::HANDLE) -> u32 {
@@ -4104,6 +4191,8 @@ mod tests {
             },
         ];
         config.checkpoint_restore = Some(CheckpointRestoreConfig {
+            local_branch: false,
+            forked: false,
             closure: PathBuf::from("/tmp/checkpoint"),
             checkpoint_root:
                 "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
@@ -4113,6 +4202,11 @@ mod tests {
         let launch = render_launch(&config);
 
         assert!(launch.rootfs.upper.is_none());
+        assert_eq!(
+            launch.execution,
+            microsandbox_runtime::launch::ExecutionIntent::Restore
+        );
+        assert!(render_args(&config).contains(&"--restore".to_string()));
         assert_eq!(launch.rootfs.upper_layers.len(), 2);
         assert_eq!(launch.rootfs.upper_layers[0].format, "raw");
         assert_eq!(launch.rootfs.upper_layers[1].format, "qcow2");

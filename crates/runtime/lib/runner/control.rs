@@ -319,16 +319,37 @@ mod tests {
     }
 
     #[test]
+    fn disk_only_capture_has_a_distinct_wire_operation() {
+        let request = ControlRequest::DiskCheckpointCreate {
+            checkpoint_id: "disk_test".into(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()["op"],
+            "disk_checkpoint_create"
+        );
+        assert!(
+            matches!(serde_json::from_str::<ControlRequest>(&json).unwrap(), ControlRequest::DiskCheckpointCreate { checkpoint_id } if checkpoint_id == "disk_test")
+        );
+        // An older runtime's capability response cannot accidentally opt into this operation.
+        let old: ControlCapabilities = serde_json::from_str(r#"{"cpu_resize":false,"memory_resize":false,"secrets_update":false,"checkpoint_create":true}"#).unwrap();
+        assert!(!old.disk_checkpoint_create);
+    }
+
+    #[test]
     fn capabilities_response_serializes_flags() {
         let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
+                branch_create: true,
+                pause_resume: true,
                 root_disk_grow: true,
                 disk_compact: true,
                 cpu_resize: true,
                 memory_resize: false,
                 secrets_update: true,
                 checkpoint_create: true,
+                disk_checkpoint_create: true,
             }),
             ..Default::default()
         };

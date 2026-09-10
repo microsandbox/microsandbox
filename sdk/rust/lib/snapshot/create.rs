@@ -1,4 +1,4 @@
-//! Snapshot creation from a stopped sandbox.
+//! Disk-only and full snapshot creation with source lifecycle preservation.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,13 @@ struct CapturedFullSnapshot {
     source_recovery: Option<SnapshotSourceRecoveryError>,
 }
 
+/// A complete operation-owned artifact, not yet a durable group member.
+#[derive(Debug)]
+struct StagedSnapshot {
+    snapshot: Snapshot,
+    source_recovery: Option<SnapshotSourceRecoveryError>,
+}
+
 /// Non-identity publication options shared by the full-capture entry point.
 #[derive(Clone, Copy)]
 struct SnapshotDestination<'a> {
@@ -67,6 +74,22 @@ struct SnapshotDiskSource {
 struct SnapshotDiskClosure {
     sources: Vec<SnapshotDiskSource>,
     virtual_size: u64,
+    /// A live capture owns immutable runtime staging until artifact publication completes.
+    capture_root: Option<PathBuf>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for SnapshotDiskClosure {
+    fn drop(&mut self) {
+        if let Some(path) = &self.capture_root
+            && let Err(error) = std::fs::remove_dir_all(path)
+        {
+            tracing::warn!(%error, "failed to remove consumed disk-only capture staging");
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -75,11 +98,144 @@ struct SnapshotDiskClosure {
 
 pub(super) async fn create_snapshot(
     local: &LocalBackend,
-    config: SnapshotConfig,
+    mut config: SnapshotConfig,
 ) -> MicrosandboxResult<Snapshot> {
+    if config.force {
+        return Err(MicrosandboxError::InvalidConfig(
+            "grouped snapshots are immutable; choose another member name or remove the existing member explicitly".into(),
+        ));
+    }
+    let generated_name = config.name.is_empty();
+    if generated_name {
+        config.name = format!("msb-{:08x}", rand::random::<u32>());
+    }
+    validate_snapshot_name(&config.name)?;
+    let lineage = super::lineage::begin(local, &config.source_sandbox).await?;
+    let root = config
+        .dest_dir
+        .take()
+        .unwrap_or_else(|| local.snapshots_dir());
+    let group_name = config
+        .group
+        .take()
+        .unwrap_or_else(|| config.source_sandbox.clone());
+    let group_dir = super::group::ensure(&root, Some(&group_name)).await?;
+    let staging = tempfile::Builder::new()
+        .prefix(".capture-")
+        .tempdir_in(&group_dir)?;
+    let name = config.name.clone();
+    let source_sandbox = config.source_sandbox.clone();
+    config.dest_dir = Some(staging.path().to_path_buf());
+    let captured = capture_installed(local, config, lineage.sandbox_id()).await?;
+    publish_snapshot_group(
+        local,
+        captured,
+        staging,
+        lineage,
+        name,
+        generated_name,
+        &source_sandbox,
+    )
+    .await
+}
+
+/// Source failure is reported only after the outer group and ancestry commit. Staging never
+/// becomes the artifact locator, and source recovery does not cause a second capture or thaw.
+async fn publish_snapshot_group(
+    local: &LocalBackend,
+    captured: StagedSnapshot,
+    staging: tempfile::TempDir,
+    lineage: super::lineage::CaptureLineage,
+    name: String,
+    generated_name: bool,
+    source_sandbox: &str,
+) -> MicrosandboxResult<Snapshot> {
+    let StagedSnapshot {
+        snapshot: mut captured,
+        source_recovery,
+    } = captured;
+    let group_dir = staging
+        .path()
+        .parent()
+        .expect("group staging has a parent")
+        .to_path_buf();
+    let published = async {
+    lineage.validate_source(local, source_sandbox).await?;
+    // Ancestry belongs to the immutable descriptor, not to the group head or export base.
+    captured.manifest.parent = lineage.parent.clone();
+    captured.digest = captured
+        .manifest
+        .digest()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let descriptor = captured
+        .manifest
+        .to_canonical_bytes()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    write_descriptor(captured.path(), &descriptor).await?;
+    // Publication owns its staging and ancestry sequencer. Dropping an SDK future must not
+    // release the source lock while a blocking group commit is still running in the background.
+    let captured = tokio::spawn(async move {
+        let update = publish_with_name_retry(
+            &group_dir,
+            staging.path(),
+            captured.id(),
+            name,
+            generated_name,
+            || format!("msb-{:08x}", rand::random::<u32>()),
+        ).await?;
+        captured.path = group_dir.join(captured.id().as_str());
+        lineage.commit(captured.id()).await?;
+        tracing::info!(group = %update.group, head = %update.head, reason = ?update.reason, "snapshot group publication");
+        captured.head_update = Some(update);
+        Ok::<_, MicrosandboxError>(captured)
+    }).await.map_err(|error| MicrosandboxError::Runtime(format!("snapshot publication task: {error}")))??;
+    if let Err(error) = index_upsert(
+        local,
+        captured.path(),
+        captured.digest(),
+        captured.manifest(),
+    )
+    .await
+    {
+        tracing::warn!(%error, "snapshot index update failed after group publication");
+    }
+    Ok(captured)
+    }.await;
+    finish_capture(published, source_recovery, installed_artifact)
+}
+
+/// Retry generated local names against the same captured artifact; explicit names remain strict.
+pub(super) async fn publish_with_name_retry(
+    group_dir: &Path,
+    staged: &Path,
+    snapshot_id: &SnapshotId,
+    mut name: String,
+    generated_name: bool,
+    mut next_name: impl FnMut() -> String,
+) -> MicrosandboxResult<super::group::HeadUpdate> {
+    loop {
+        let aliases = BTreeMap::from([(snapshot_id.to_string(), name)]);
+        match super::group::publish(group_dir, staged, &aliases, snapshot_id, false).await {
+            Err(MicrosandboxError::SnapshotAlreadyExists(_)) if generated_name => {
+                // Alias conflicts are preflight errors: no staged payload was moved and the
+                // descriptor's identity/ancestry remain unchanged, so no recapture is needed.
+                name = next_name();
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Build a complete artifact in operation-owned staging; group publication happens afterward.
+async fn capture_installed(
+    local: &LocalBackend,
+    config: SnapshotConfig,
+    expected_source_id: i32,
+) -> MicrosandboxResult<StagedSnapshot> {
     let total_started = Instant::now();
     let SnapshotConfig {
         name,
+        group: _,
         dest_dir,
         source_sandbox,
         labels,
@@ -106,6 +262,11 @@ pub(super) async fn create_snapshot(
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
 
+    if model.id != expected_source_id {
+        return Err(MicrosandboxError::InvalidConfig(
+            "source sandbox changed before snapshot capture".into(),
+        ));
+    }
     if full {
         return create_full_snapshot(
             local,
@@ -121,33 +282,39 @@ pub(super) async fn create_snapshot(
         .await;
     }
 
-    if matches!(
-        model.status,
-        SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
-    ) {
+    if model.status == SandboxStatus::Draining {
         return Err(MicrosandboxError::SnapshotSandboxRunning(
             source_sandbox.clone(),
         ));
     }
 
-    // Reuse the runtime's existing lifecycle ownership lock so start,
-    // replacement, and removal cannot race the upper copy.
-    let _lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
-        &local.config().run_dir(),
-        &source_sandbox,
-        std::time::Duration::from_secs(5),
-    )
-    .await?;
+    // Resident runtimes own the lifecycle lock and serialize the disk cut through control.
+    // Stopped copies acquire it here; the SDK never reads a live writable head.
+    let live = matches!(model.status, SandboxStatus::Running | SandboxStatus::Paused);
+    let _lifecycle_guard = if live {
+        None
+    } else {
+        Some(
+            crate::runtime::acquire_sandbox_lifecycle_guard(
+                &local.config().run_dir(),
+                &source_sandbox,
+                std::time::Duration::from_secs(5),
+            )
+            .await?,
+        )
+    };
     let current = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
         .one(local.db().await?.read())
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
     if current.id != model.id
-        || matches!(
-            current.status,
-            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
-        )
+        || current.status == SandboxStatus::Draining
+        || live
+            != matches!(
+                current.status,
+                SandboxStatus::Running | SandboxStatus::Paused
+            )
     {
         return Err(MicrosandboxError::SnapshotSandboxRunning(
             source_sandbox.clone(),
@@ -155,6 +322,7 @@ pub(super) async fn create_snapshot(
     }
 
     let sandbox_config: SandboxConfig = serde_json::from_str(&current.config)?;
+    LocalBackend::validate_completed_restore(&sandbox_config)?;
 
     // Only OCI-rooted sandboxes can be snapshotted today; non-OCI
     // rootfs (passthrough, disk-image-rootfs) are out of scope.
@@ -173,7 +341,15 @@ pub(super) async fn create_snapshot(
     }
 
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
-    let disk = snapshot_disk_closure(&sandbox_dir, &root_disk)?;
+    let disk = capture_disk_source(
+        local,
+        &sandbox_dir,
+        &source_sandbox,
+        current.id,
+        current.status,
+        &root_disk,
+    )
+    .await?;
 
     // Stage the artifact in a sibling directory, so a failed create never
     // leaves a partial artifact at the destination (which would poison
@@ -220,25 +396,20 @@ pub(super) async fn create_snapshot(
     promote_snapshot_directory(&staging_dir, &dest_dir, force).await?;
     let promote_us = promote_started.elapsed().as_micros();
 
-    // Best-effort index upsert. Failures are logged, not propagated —
-    // the artifact on disk is the source of truth.
-    let index_started = Instant::now();
-    if let Err(e) = index_upsert(local, &dest_dir, &digest, &manifest).await {
-        tracing::warn!(error = %e, snapshot = %digest, "snapshot_index upsert failed");
-    }
-    let index_us = index_started.elapsed().as_micros();
     tracing::info!(
         target: "microsandbox_checkpoint_timing",
-        operation = "snapshot_create_installed_stopped",
+        operation = "snapshot_create_installed_disk",
         source_sandbox,
         total_us = total_started.elapsed().as_micros(),
         artifact_build_us,
         promote_us,
-        index_us,
-        "stopped snapshot creation timing"
+        "disk snapshot creation timing"
     );
 
-    Ok(Snapshot::from_parts(dest_dir, digest, manifest, labels))
+    Ok(StagedSnapshot {
+        snapshot: Snapshot::from_parts(dest_dir, digest, manifest, labels),
+        source_recovery: None,
+    })
 }
 
 /// Capture one running sandbox into an installed composite-checkpoint snapshot.
@@ -248,7 +419,7 @@ async fn create_full_snapshot(
     source_sandbox: &str,
     labels: Vec<(String, String)>,
     model: sandbox_entity::Model,
-) -> MicrosandboxResult<Snapshot> {
+) -> MicrosandboxResult<StagedSnapshot> {
     let dest_dir = destination.path;
     let total_started = Instant::now();
     let parent_dir = dest_dir
@@ -265,10 +436,9 @@ async fn create_full_snapshot(
     // The runtime owns capture and recovery even if this client disappears. Do not allocate an
     // artifact staging directory while waiting for it: there is nothing to stage until capture
     // succeeds. The guard also removes partial materialization on ordinary errors/cancellation.
-    let captured = capture_full_snapshot(source_sandbox, labels, model).await?;
+    let captured = capture_full_snapshot(local, source_sandbox, labels, model).await?;
     let capture_us = capture_started.elapsed().as_micros();
-    publish_full_snapshot(
-        local,
+    stage_full_snapshot(
         destination,
         source_sandbox,
         captured,
@@ -279,25 +449,23 @@ async fn create_full_snapshot(
     .await
 }
 
-/// Publish a validated capture independently from the running source. Keeping this boundary
-/// separate also lets failure tests exercise real materialization without starting a VM.
-async fn publish_full_snapshot(
-    local: &LocalBackend,
+/// Materialize a validated capture without exposing its operation-owned path as publication.
+async fn stage_full_snapshot(
     destination: SnapshotDestination<'_>,
     source_sandbox: &str,
     mut captured: CapturedFullSnapshot,
     parent_dir: PathBuf,
     total_started: Instant,
     capture_us: u128,
-) -> MicrosandboxResult<Snapshot> {
+) -> MicrosandboxResult<StagedSnapshot> {
     let SnapshotDestination {
         name,
         path: dest_dir,
         force,
     } = destination;
     let source_recovery = captured.source_recovery.take();
-    // Recovery belongs to the source, not to the immutable artifact. Complete publication before
-    // returning the diagnostic; all intermediate errors must retain it as well.
+    // Recovery belongs to the source, not to the immutable artifact. Carry it through staging
+    // until the outer publisher owns the final group member and its ancestry cursor.
     let published = async {
         let staging = tempfile::Builder::new()
             .prefix(&format!(".{name}."))
@@ -341,11 +509,6 @@ async fn publish_full_snapshot(
         let promote_started = Instant::now();
         promote_snapshot_directory(&staging_dir, dest_dir, force).await?;
         let promote_us = promote_started.elapsed().as_micros();
-        let index_started = Instant::now();
-        if let Err(error) = index_upsert(local, dest_dir, &digest, &captured.manifest).await {
-            tracing::warn!(error = %error, snapshot = %digest, "snapshot_index upsert failed");
-        }
-        let index_us = index_started.elapsed().as_micros();
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
             operation = "snapshot_create_installed_full",
@@ -356,7 +519,6 @@ async fn publish_full_snapshot(
             closure_verify_us,
             metadata_descriptor_us,
             promote_us,
-            index_us,
             "installed full snapshot creation timing"
         );
         Ok(Snapshot::from_parts(
@@ -367,17 +529,16 @@ async fn publish_full_snapshot(
         ))
     }
     .await;
-    finish_capture(published, source_recovery, |snapshot| {
-        PublishedSnapshotArtifact {
-            kind: SnapshotArtifactKind::Installed,
-            path: snapshot.path().to_path_buf(),
-            snapshot_id: snapshot.id().to_string(),
-            digest: snapshot.digest().to_string(),
-        }
-    })
+    match published {
+        Ok(snapshot) => Ok(StagedSnapshot {
+            snapshot,
+            source_recovery,
+        }),
+        Err(error) => Err(capture_publication_failure(error, source_recovery)),
+    }
 }
 
-/// Capture directly from a stopped sandbox into an archive without creating
+/// Capture a disk or full snapshot directly into an archive without creating
 /// an installed artifact directory or index row.
 pub(super) async fn create_snapshot_archive(
     local: &LocalBackend,
@@ -387,7 +548,8 @@ pub(super) async fn create_snapshot_archive(
 ) -> MicrosandboxResult<SnapshotArchive> {
     let total_started = Instant::now();
     let SnapshotConfig {
-        name,
+        mut name,
+        group,
         dest_dir,
         source_sandbox,
         labels,
@@ -395,21 +557,35 @@ pub(super) async fn create_snapshot_archive(
         record_integrity,
         full,
     } = config;
-    if dest_dir.is_some() {
+    if dest_dir.is_some() || group.is_some() {
         return Err(MicrosandboxError::InvalidConfig(
-            "direct archive capture is mutually exclusive with dest_dir".into(),
+            "direct archive capture does not install a group; omit group and dest_dir".into(),
         ));
     }
+    if name.is_empty() {
+        name = format!("msb-{:08x}", rand::random::<u32>());
+    }
     validate_snapshot_name(&name)?;
+    let lineage = super::lineage::begin(local, &source_sandbox).await?;
     let db = local.db().await?.read();
     let model = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
         .one(db)
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
+    if model.id != lineage.sandbox_id() {
+        return Err(MicrosandboxError::InvalidConfig(
+            "source sandbox changed before snapshot capture".into(),
+        ));
+    }
     if full {
         let capture_started = Instant::now();
-        let captured = capture_full_snapshot(&source_sandbox, labels, model).await?;
+        let mut captured = capture_full_snapshot(local, &source_sandbox, labels, model).await?;
+        lineage
+            .validate_source(local, &source_sandbox)
+            .await
+            .map_err(|error| capture_publication_failure(error, captured.source_recovery.take()))?;
+        captured.manifest.parent = lineage.parent.clone();
         let capture_us = capture_started.elapsed().as_micros();
         return publish_full_archive(
             SnapshotDestination {
@@ -419,38 +595,46 @@ pub(super) async fn create_snapshot_archive(
             },
             &source_sandbox,
             captured,
+            lineage,
             plain_tar,
             total_started,
             capture_us,
         )
         .await;
     }
-    if matches!(
-        model.status,
-        SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
-    ) {
+    if model.status == SandboxStatus::Draining {
         return Err(MicrosandboxError::SnapshotSandboxRunning(source_sandbox));
     }
-    let _lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
-        &local.config().run_dir(),
-        &source_sandbox,
-        std::time::Duration::from_secs(5),
-    )
-    .await?;
+    let live = matches!(model.status, SandboxStatus::Running | SandboxStatus::Paused);
+    let _lifecycle_guard = if live {
+        None
+    } else {
+        Some(
+            crate::runtime::acquire_sandbox_lifecycle_guard(
+                &local.config().run_dir(),
+                &source_sandbox,
+                std::time::Duration::from_secs(5),
+            )
+            .await?,
+        )
+    };
     let current = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
         .one(local.db().await?.read())
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
     if current.id != model.id
-        || matches!(
-            current.status,
-            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
-        )
+        || current.status == SandboxStatus::Draining
+        || live
+            != matches!(
+                current.status,
+                SandboxStatus::Running | SandboxStatus::Paused
+            )
     {
         return Err(MicrosandboxError::SnapshotSandboxRunning(source_sandbox));
     }
     let sandbox_config: SandboxConfig = serde_json::from_str(&current.config)?;
+    LocalBackend::validate_completed_restore(&sandbox_config)?;
     let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(
             "only OCI-rooted sandboxes with a pinned image can be snapshotted".into(),
@@ -464,7 +648,16 @@ pub(super) async fn create_snapshot_archive(
         )));
     }
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
-    let disk = snapshot_disk_closure(&sandbox_dir, &root_disk)?;
+    let disk = capture_disk_source(
+        local,
+        &sandbox_dir,
+        &source_sandbox,
+        current.id,
+        current.status,
+        &root_disk,
+    )
+    .await?;
+    lineage.validate_source(local, &source_sandbox).await?;
     let integrity_started = Instant::now();
     let integrities = vec![None; disk.sources.len()];
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
@@ -476,6 +669,7 @@ pub(super) async fn create_snapshot_archive(
         &source_sandbox,
         root_disk,
     )?;
+    manifest.parent = lineage.parent.clone();
     if record_integrity && let SnapshotState::File(file) = &mut manifest.state {
         for index in 0..file.layers.len() {
             let source = &disk.sources[index].path;
@@ -502,28 +696,42 @@ pub(super) async fn create_snapshot_archive(
         .iter()
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
-    super::archive::save_direct_file_snapshot(
-        &manifest,
-        &labels,
-        &name,
-        &source_paths,
-        out,
-        plain_tar,
-        force,
-    )
-    .await?;
+    let owned_out = out.to_path_buf();
+    let logical_bytes = disk.virtual_size;
+    let (manifest, labels) = tokio::spawn(async move {
+        // A stopped disk remains locked and a live immutable cut remains pinned until the
+        // background writer finishes, even if the caller stops awaiting this operation.
+        let _disk = disk;
+        let _lifecycle_guard = _lifecycle_guard;
+        super::archive::save_direct_file_snapshot(
+            &manifest,
+            &labels,
+            &name,
+            &source_paths,
+            &owned_out,
+            plain_tar,
+            force,
+        )
+        .await?;
+        lineage.commit(&manifest.snapshot_id).await?;
+        Ok::<_, MicrosandboxError>((manifest, labels))
+    })
+    .await
+    .map_err(|error| {
+        MicrosandboxError::Runtime(format!("snapshot archive publication: {error}"))
+    })??;
     let archive_us = archive_started.elapsed().as_micros();
     tracing::info!(
         target: "microsandbox_checkpoint_timing",
-        operation = "snapshot_create_archive_stopped",
+        operation = "snapshot_create_archive_disk",
         source_sandbox,
         plain_tar,
         record_integrity,
-        logical_bytes = disk.virtual_size,
+        logical_bytes,
         total_us = total_started.elapsed().as_micros(),
         integrity_us,
         archive_us,
-        "direct stopped snapshot archive timing"
+        "direct disk snapshot archive timing"
     );
     Ok(SnapshotArchive::from_parts(
         out.to_path_buf(),
@@ -538,6 +746,7 @@ async fn publish_full_archive(
     destination: SnapshotDestination<'_>,
     source_sandbox: &str,
     mut captured: CapturedFullSnapshot,
+    lineage: super::lineage::CaptureLineage,
     plain_tar: bool,
     total_started: Instant,
     capture_us: u128,
@@ -554,16 +763,28 @@ async fn publish_full_archive(
             .digest()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
         let archive_started = Instant::now();
-        super::archive::save_direct_checkpoint_snapshot(
-            &captured.manifest,
-            &captured.labels,
-            name,
-            &captured.checkpoint_path,
-            out,
-            plain_tar,
-            force,
-        )
-        .await?;
+        let name = name.to_owned();
+        let owned_out = out.to_path_buf();
+        // Keep both the immutable input and source sequencer alive when the caller cancels its
+        // wait. The archive writer and cursor publication still complete in their original order.
+        let captured = tokio::spawn(async move {
+            super::archive::save_direct_checkpoint_snapshot(
+                &captured.manifest,
+                &captured.labels,
+                &name,
+                &captured.checkpoint_path,
+                &owned_out,
+                plain_tar,
+                force,
+            )
+            .await?;
+            lineage.commit(&captured.manifest.snapshot_id).await?;
+            Ok::<_, MicrosandboxError>(captured)
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Runtime(format!("snapshot archive publication: {error}"))
+        })??;
         let archive_us = archive_started.elapsed().as_micros();
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
@@ -594,6 +815,7 @@ async fn publish_full_archive(
 /// Installed snapshots and direct archives share this boundary so both publish byte-for-byte the
 /// same descriptor and checkpoint closure.
 async fn capture_full_snapshot(
+    local: &LocalBackend,
     source_sandbox: &str,
     labels: Vec<(String, String)>,
     model: sandbox_entity::Model,
@@ -605,6 +827,7 @@ async fn capture_full_snapshot(
         ));
     }
     let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
+    LocalBackend::validate_completed_restore(&sandbox_config)?;
     let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(format!(
             "sandbox '{source_sandbox}' has no OCI image pinned; full snapshots require an OCI root"
@@ -615,7 +838,8 @@ async fn capture_full_snapshot(
 
     let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
     let outcome =
-        crate::sandbox::control_checkpoint_create(source_sandbox, checkpoint_id.clone()).await?;
+        crate::sandbox::control_checkpoint_create(local, source_sandbox, checkpoint_id.clone())
+            .await?;
     let checkpoint = outcome.checkpoint;
     let validated = (|| {
         if checkpoint.checkpoint_id != checkpoint_id {
@@ -745,6 +969,28 @@ fn finish_capture<T>(
     Err(MicrosandboxError::SnapshotSourceRecovery(Box::new(failure)))
 }
 
+fn installed_artifact(snapshot: &Snapshot) -> PublishedSnapshotArtifact {
+    PublishedSnapshotArtifact {
+        kind: SnapshotArtifactKind::Installed,
+        path: snapshot.path().to_path_buf(),
+        snapshot_id: snapshot.id().to_string(),
+        digest: snapshot.digest().to_string(),
+    }
+}
+
+fn capture_publication_failure(
+    error: MicrosandboxError,
+    source_recovery: Option<SnapshotSourceRecoveryError>,
+) -> MicrosandboxError {
+    match source_recovery {
+        Some(mut failure) => {
+            failure.publication_error = Some(error.to_string());
+            MicrosandboxError::SnapshotSourceRecovery(Box::new(failure))
+        }
+        None => error,
+    }
+}
+
 /// Build the artifact contents (upper copy, integrity, descriptor) into
 /// `dir`. Pure staging: the caller promotes or discards the directory.
 async fn build_artifact(
@@ -866,7 +1112,7 @@ async fn build_artifact(
         payload_sync_us,
         integrity_us,
         descriptor_us,
-        "stopped snapshot artifact build timing"
+        "disk snapshot artifact build timing"
     );
 
     Ok((digest, manifest))
@@ -1011,6 +1257,90 @@ fn snapshot_root_disk(
     }
 }
 
+/// Resident runtimes return a sealed closure while retaining their lifecycle lock.
+/// Stopped callers own that lock themselves. Packaging never reads a live writable head.
+async fn capture_disk_source(
+    local: &LocalBackend,
+    sandbox_dir: &Path,
+    source: &str,
+    source_id: i32,
+    status: SandboxStatus,
+    root_disk: &SnapshotRootDisk,
+) -> MicrosandboxResult<SnapshotDiskClosure> {
+    if !matches!(status, SandboxStatus::Running | SandboxStatus::Paused) {
+        return snapshot_disk_closure(sandbox_dir, root_disk);
+    }
+    let id = format!("disk_{:032x}", rand::random::<u128>());
+    let captured =
+        crate::sandbox::control_disk_checkpoint_create(local, source, id.clone()).await?;
+    let expected_path = sandbox_dir.join("runtime").join("checkpoints").join(&id);
+    let expected_device = match root_disk {
+        SnapshotRootDisk::Flat => "vda",
+        SnapshotRootDisk::Managed => "vdb",
+        SnapshotRootDisk::Tmpfs { .. } => {
+            return Err(MicrosandboxError::InvalidConfig(
+                "tmpfs requires a full snapshot".into(),
+            ));
+        }
+    };
+    if captured.checkpoint_id != id
+        || captured.path != expected_path
+        || captured.disk.device_id != expected_device
+    {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "disk capture identity, path, or root device mismatch".into(),
+        ));
+    }
+    captured
+        .disk
+        .validate()
+        .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
+    let sources = captured
+        .disk
+        .layers
+        .iter()
+        .map(|layer| {
+            let format = match layer.format.as_str() {
+                "raw" => SnapshotFormat::Raw,
+                "qcow2" => SnapshotFormat::Qcow2,
+                other => {
+                    return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                        "unsupported live disk format {other}"
+                    )));
+                }
+            };
+            Ok(SnapshotDiskSource {
+                path: captured
+                    .path
+                    .join("layers")
+                    .join(format!("{}.{}", layer.layer_id, layer.format)),
+                format,
+            })
+        })
+        .collect::<MicrosandboxResult<Vec<_>>>()?;
+    let size = captured
+        .disk
+        .layers
+        .last()
+        .ok_or_else(|| MicrosandboxError::SnapshotIntegrity("empty disk capture".into()))?
+        .virtual_size;
+    let mut disk = validate_snapshot_disk_sources(sources, size)?;
+    disk.capture_root = Some(expected_path);
+    // A live runtime owns the lifecycle lock, not this SDK call. If the source was replaced
+    // between lookup and capture, never publish its disk under the original image/config.
+    let current = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(source))
+        .one(local.db().await?.read())
+        .await?;
+    if !current.is_some_and(|model| model.id == source_id) {
+        return Err(MicrosandboxError::Runtime(
+            "snapshot source was replaced during disk capture; retry with the current sandbox"
+                .into(),
+        ));
+    }
+    Ok(disk)
+}
+
 fn snapshot_disk_closure(
     sandbox_dir: &Path,
     root_disk: &SnapshotRootDisk,
@@ -1105,6 +1435,7 @@ fn validate_snapshot_disk_sources(
     Ok(SnapshotDiskClosure {
         sources,
         virtual_size,
+        capture_root: None,
     })
 }
 
@@ -1163,6 +1494,20 @@ pub(crate) fn materialize_checkpoint_closure(
     source: &Path,
     destination: &Path,
 ) -> std::io::Result<()> {
+    materialize_checkpoint_tree(source, destination, true)
+}
+
+/// Construction-only closure: retain independent links, but do not make disposable staging
+/// durable. Persistent disk successors are published separately before guest activation.
+pub(crate) fn stage_checkpoint_closure(source: &Path, destination: &Path) -> std::io::Result<()> {
+    materialize_checkpoint_tree(source, destination, false)
+}
+
+fn materialize_checkpoint_tree(
+    source: &Path,
+    destination: &Path,
+    durable: bool,
+) -> std::io::Result<()> {
     let source_metadata = std::fs::symlink_metadata(source)?;
     if !source_metadata.file_type().is_dir() {
         return Err(std::io::Error::new(
@@ -1176,7 +1521,7 @@ pub(crate) fn materialize_checkpoint_closure(
         let source_member = source.join(member);
         match std::fs::symlink_metadata(&source_member) {
             Ok(metadata) if metadata.file_type().is_dir() => {
-                copy_checkpoint_directory(&source_member, &destination.join(member))?;
+                copy_checkpoint_directory(&source_member, &destination.join(member), durable)?;
             }
             Ok(_) => {
                 return Err(std::io::Error::new(
@@ -1193,10 +1538,17 @@ pub(crate) fn materialize_checkpoint_closure(
         &source.join("checkpoint.json"),
         &destination.join("checkpoint.json"),
     )?;
-    sync_directory(destination)
+    if durable {
+        sync_directory(destination)?;
+    }
+    Ok(())
 }
 
-fn copy_checkpoint_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+fn copy_checkpoint_directory(
+    source: &Path,
+    destination: &Path,
+    durable: bool,
+) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
@@ -1204,7 +1556,7 @@ fn copy_checkpoint_directory(source: &Path, destination: &Path) -> std::io::Resu
         let destination_path = destination.join(entry.file_name());
         let metadata = std::fs::symlink_metadata(&source_path)?;
         if metadata.file_type().is_dir() {
-            copy_checkpoint_directory(&source_path, &destination_path)?;
+            copy_checkpoint_directory(&source_path, &destination_path, durable)?;
         } else if metadata.file_type().is_file() {
             copy_checkpoint_file(&source_path, &destination_path)?;
         } else {
@@ -1217,7 +1569,10 @@ fn copy_checkpoint_directory(source: &Path, destination: &Path) -> std::io::Resu
             ));
         }
     }
-    sync_directory(destination)
+    if durable {
+        sync_directory(destination)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn copy_checkpoint_file(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -1371,8 +1726,25 @@ mod tests {
     use std::path::PathBuf;
 
     use microsandbox_types::DiskImageFormat;
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 
     use super::*;
+
+    async fn fixture_source(local: &LocalBackend) {
+        let mut config = SandboxConfig::default();
+        config.spec.name = "box".into();
+        std::fs::create_dir_all(local.sandboxes_dir().join("box")).unwrap();
+        sandbox_entity::ActiveModel {
+            name: Set("box".into()),
+            config: Set(serde_json::to_string(&config).unwrap()),
+            status: Set(SandboxStatus::Crashed),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+    }
 
     fn file_metadata(root_disk: SnapshotRootDisk) -> FileSnapshotMetadata<'static> {
         FileSnapshotMetadata {
@@ -1497,22 +1869,50 @@ mod tests {
             let captured = captured_fixture(&temp.path().join("checkpoint"), Some(detail));
             let canonical = captured.manifest.to_canonical_bytes().unwrap();
             let root = captured.checkpoint_root.clone();
-            let destination = temp.path().join("snapshot");
-            let error = publish_full_snapshot(
-                &local,
+            let snapshot_id = captured.manifest.snapshot_id.clone();
+            fixture_source(&local).await;
+            let lineage = super::super::lineage::begin(&local, "box").await.unwrap();
+            let group = super::super::group::ensure(&local.snapshots_dir(), Some("box"))
+                .await
+                .unwrap();
+            let staging = tempfile::Builder::new()
+                .prefix(".capture-")
+                .tempdir_in(&group)
+                .unwrap();
+            let staged_path = staging.path().join("snapshot");
+            let staged = stage_full_snapshot(
                 SnapshotDestination {
                     name: "snapshot",
-                    path: &destination,
+                    path: &staged_path,
                     force: false,
                 },
                 "box",
                 captured,
-                temp.path().to_path_buf(),
+                staging.path().to_path_buf(),
                 Instant::now(),
                 0,
             )
             .await
+            .unwrap();
+            assert!(staged.source_recovery.is_some());
+            assert!(
+                super::super::store::list_indexed(&local)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let error = publish_snapshot_group(
+                &local,
+                staged,
+                staging,
+                lineage,
+                "snapshot".into(),
+                false,
+                "box",
+            )
+            .await
             .unwrap_err();
+            let destination = group.join(snapshot_id.as_str());
             let MicrosandboxError::SnapshotSourceRecovery(failure) = error else {
                 panic!("expected partial failure")
             };
@@ -1521,6 +1921,27 @@ mod tests {
             let artifact = failure.artifact.unwrap();
             assert_eq!(artifact.kind, SnapshotArtifactKind::Installed);
             assert_eq!(artifact.path, destination);
+            assert_ne!(artifact.path, staged_path);
+            assert!(!staged_path.exists());
+            let indexed = super::super::store::list_indexed(&local).await.unwrap();
+            assert_eq!(indexed.len(), 1);
+            assert_eq!(
+                indexed[0].artifact_path,
+                destination.canonicalize().unwrap()
+            );
+            assert_eq!(
+                super::super::group::resolve(&local.snapshots_dir(), "box")
+                    .await
+                    .unwrap(),
+                destination
+            );
+            assert_eq!(
+                super::super::lineage::begin(&local, "box")
+                    .await
+                    .unwrap()
+                    .parent,
+                Some(snapshot_id)
+            );
             assert_eq!(
                 std::fs::read(destination.join(DESCRIPTOR_FILENAME)).unwrap(),
                 canonical
@@ -1550,6 +1971,8 @@ mod tests {
         );
         let expected = captured.manifest.to_canonical_bytes().unwrap();
         let out = temp.path().join("snapshot.tar");
+        fixture_source(&local).await;
+        let lineage = super::super::lineage::begin(&local, "box").await.unwrap();
         let error = publish_full_archive(
             SnapshotDestination {
                 name: "snapshot",
@@ -1558,6 +1981,7 @@ mod tests {
             },
             "box",
             captured,
+            lineage,
             true,
             Instant::now(),
             0,
@@ -1592,6 +2016,7 @@ mod tests {
             .build()
             .await
             .unwrap();
+        fixture_source(&local).await;
         for archive in [false, true] {
             let captured = captured_fixture(
                 &temp.path().join(if archive {
@@ -1611,12 +2036,12 @@ mod tests {
                 force: false,
             };
             let error = if archive {
-                publish_full_archive(target, "box", captured, true, Instant::now(), 0)
+                let lineage = super::super::lineage::begin(&local, "box").await.unwrap();
+                publish_full_archive(target, "box", captured, lineage, true, Instant::now(), 0)
                     .await
                     .unwrap_err()
             } else {
-                publish_full_snapshot(
-                    &local,
+                stage_full_snapshot(
                     target,
                     "box",
                     captured,
@@ -1647,6 +2072,13 @@ mod tests {
     #[tokio::test]
     async fn successful_source_recovery_keeps_existing_success_result() {
         let temp = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        fixture_source(&local).await;
+        let lineage = super::super::lineage::begin(&local, "box").await.unwrap();
         let captured = captured_fixture(&temp.path().join("checkpoint"), None);
         let out = temp.path().join("snapshot.tar");
         let archive = publish_full_archive(
@@ -1657,6 +2089,7 @@ mod tests {
             },
             "box",
             captured,
+            lineage,
             true,
             Instant::now(),
             0,
@@ -1729,6 +2162,7 @@ mod tests {
         let source = temp.path().join("source.ext4");
         std::fs::write(&source, b"snapshot payload").unwrap();
         let disk = SnapshotDiskClosure {
+            capture_root: None,
             sources: vec![SnapshotDiskSource {
                 path: source,
                 format: SnapshotFormat::Raw,
@@ -1780,6 +2214,7 @@ mod tests {
             .await
             .unwrap();
         let disk = SnapshotDiskClosure {
+            capture_root: None,
             sources: vec![
                 SnapshotDiskSource {
                     path: raw,

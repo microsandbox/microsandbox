@@ -217,13 +217,28 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_base: Option<String>,
 
-    /// Child-owned checkpoint closure used only for this process construction.
+    /// Snapshot from which this sandbox derives. Later captures retain their own local cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) snapshot_parent: Option<String>,
+
+    /// Child-owned checkpoint closure for an unfinished restore construction.
     ///
     /// The builder initially points this at an installed snapshot. The local create path copies
-    /// the closure into child staging and rewrites the path before spawning the runtime.
-    #[serde(skip)]
+    /// the closure into child staging and rewrites the path before spawning the runtime. Local
+    /// creation persists this intent until activation succeeds; an interrupted restore must not
+    /// subsequently be interpreted as an ordinary cold boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg(feature = "local")]
     pub(crate) checkpoint_restore: Option<CheckpointRestoreConfig>,
+
+    /// Source name for a one-shot direct local branch, consumed under child reservation.
+    #[serde(skip)]
+    #[cfg(feature = "local")]
+    pub(crate) branch_source: Option<super::identity::BranchSource>,
+
+    /// Restore captured RAM through private CoW mappings; never a cold-boot policy.
+    #[serde(skip)]
+    pub(crate) forked: bool,
 
     /// Transient checkpoint materialization policy selected by the caller.
     #[serde(skip)]
@@ -285,6 +300,8 @@ impl SandboxConfig {
         #[cfg(feature = "local")]
         {
             config.checkpoint_restore = None;
+            config.branch_source = None;
+            config.forked = false;
         }
         config.snapshot_restore_mode = SnapshotRestoreMode::Full;
         config.resumed_from_full_snapshot = false;
@@ -766,9 +783,13 @@ impl Default for SandboxConfig {
             snapshot_root_layer_sources: Vec::new(),
             snapshot_root_virtual_size: None,
             snapshot_archive_source: None,
+            snapshot_parent: None,
             snapshot_base: None,
             #[cfg(feature = "local")]
             checkpoint_restore: None,
+            #[cfg(feature = "local")]
+            branch_source: None,
+            forked: false,
             snapshot_restore_mode: SnapshotRestoreMode::Full,
             resumed_from_full_snapshot: false,
             #[cfg(feature = "local")]
@@ -1747,6 +1768,8 @@ mod tests {
                 },
                 snapshot_restore_mode: restore_mode,
                 checkpoint_restore: Some(CheckpointRestoreConfig {
+                    local_branch: false,
+                    forked: false,
                     closure: PathBuf::from("/tmp/checkpoint"),
                     checkpoint_root:
                         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

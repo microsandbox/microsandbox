@@ -78,6 +78,7 @@ impl DiskCompactionBuilder {
             .await?
             .ok_or_else(|| MicrosandboxError::SandboxNotFound(self.name.clone()))?;
         let config: SandboxConfig = serde_json::from_str(&model.config)?;
+        crate::LocalBackend::validate_completed_restore(&config)?;
         use microsandbox_types::RootDisk;
         if config.manifest_digest.is_none()
             || matches!(
@@ -124,6 +125,8 @@ impl DiskCompactionBuilder {
             ));
         }
         let runtime_dir = local.sandboxes_dir().join(&self.name).join("runtime");
+        let current_config: SandboxConfig = serde_json::from_str(&current.config)?;
+        crate::LocalBackend::validate_completed_restore(&current_config)?;
         tokio::task::spawn_blocking(move || {
             // Dropping an SDK future does not cancel spawn_blocking. Keep disk ownership in the
             // worker until it finishes, even when its caller disconnects or cancels the await.

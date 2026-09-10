@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use microsandbox_protocol::bulk::{
@@ -20,7 +20,8 @@ use microsandbox_protocol::codec;
 use microsandbox_protocol::message::{Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClosed, TcpConnect, TcpConnected, TcpData, TcpEof, TcpFailed};
 
-use crate::agent::AdmittedBulkRecord;
+use crate::agent::{AdmittedBulkRecord, BulkInputPermit};
+use crate::serial::InputCharge;
 #[cfg(test)]
 use crate::session::SessionOutputEnvelope;
 use crate::session::{
@@ -64,8 +65,8 @@ pub struct TcpSession {
 }
 
 enum TcpCommand {
-    Data(Vec<u8>),
-    Eof,
+    Data(Vec<u8>, Option<InputCharge>),
+    Eof(Option<InputCharge>),
     BulkRecord(AdmittedBulkRecord),
 }
 
@@ -91,7 +92,8 @@ struct PendingTcpWrite {
     payload: Bytes,
     written: usize,
     bulk_end: Option<u64>,
-    _bulk_input_permit: Option<OwnedSemaphorePermit>,
+    _bulk_input_permit: Option<BulkInputPermit>,
+    _control_input_charge: Option<InputCharge>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -109,11 +111,19 @@ impl TcpSession {
     /// Awaits queue space when the per-session relay is behind, so a stalled
     /// destination backpressures the caller instead of growing memory.
     pub async fn write_data(&self, data: Vec<u8>) -> Result<(), String> {
+        self.write_data_charged(data, None).await
+    }
+
+    pub(crate) async fn write_data_charged(
+        &self,
+        data: Vec<u8>,
+        charge: Option<InputCharge>,
+    ) -> Result<(), String> {
         if self.bulk {
             return Err("CBOR TCP data is invalid after raw bulk acceptance".into());
         }
         self.commands
-            .send(TcpCommand::Data(data))
+            .send(TcpCommand::Data(data, charge))
             .await
             .map_err(|_| "TCP session is closed".to_string())
     }
@@ -123,11 +133,18 @@ impl TcpSession {
     /// Ordered after any queued data, so the destination sees the write shutdown
     /// only once it has received everything sent before it.
     pub async fn close_write(&self) -> Result<(), String> {
+        self.close_write_charged(None).await
+    }
+
+    pub(crate) async fn close_write_charged(
+        &self,
+        charge: Option<InputCharge>,
+    ) -> Result<(), String> {
         if self.bulk {
             return Err("CBOR TCP EOF is invalid after raw bulk acceptance".into());
         }
         self.commands
-            .send(TcpCommand::Eof)
+            .send(TcpCommand::Eof(charge))
             .await
             .map_err(|_| "TCP session is closed".to_string())
     }
@@ -152,7 +169,9 @@ impl TcpSession {
             .as_ref()
             .ok_or_else(|| "TCP bulk control path is unavailable".to_string())?;
         if control.credit.is_closed() {
-            return Err("TCP session is closed".into());
+            // Sink consumption can return credit after the producer queued its final output.
+            // There is no sender left to enable; failing here would cancel its queued raw tail.
+            return Ok(());
         }
         control.credit.send_replace(Some(credit));
         Ok(())
@@ -467,6 +486,12 @@ async fn relay_tcp_session(
     let mut read_eof = false;
 
     loop {
+        // One EOF leaves the opposite half usable. Once both halves finish, all ordered
+        // writes have completed and the peer's final output/EOF is already queued. Exit so
+        // the existing terminal frame releases the host route and guest session together.
+        if read_eof && write_shutdown {
+            break;
+        }
         let read_limit = bulk.as_ref().map_or(TCP_CHUNK_SIZE, |state| {
             state
                 .send
@@ -648,6 +673,7 @@ async fn relay_tcp_session(
                         // The destination socket has consumed the full payload. Release aggregate
                         // input capacity before an outbound credit waits on the opposite lane.
                         drop(completed._bulk_input_permit);
+                        drop(completed._control_input_charge);
                         if let Some(end) = bulk_end {
                             let Some(state) = bulk.as_mut() else {
                                 terminal_sent = send_tcp_failure(
@@ -721,7 +747,13 @@ async fn relay_tcp_session(
             }
             command = commands.recv(), if pending_write.is_none() && !write_shutdown => {
                 match command {
-                    Some(TcpCommand::Data(data)) => {
+                    Some(TcpCommand::Data(data, charge)) => {
+                        if data.is_empty() {
+                            // An empty data message is not EOF and owns no socket write. Its
+                            // frame token still bounded admission until it reached this turn.
+                            drop(charge);
+                            continue;
+                        }
                         if bulk.is_some() {
                             terminal_sent = send_tcp_failure(
                                 id,
@@ -736,9 +768,10 @@ async fn relay_tcp_session(
                             written: 0,
                             bulk_end: None,
                             _bulk_input_permit: None,
+                            _control_input_charge: charge,
                         });
                     }
-                    Some(TcpCommand::Eof) => {
+                    Some(TcpCommand::Eof(charge)) => {
                         if bulk.is_some() {
                             terminal_sent = send_tcp_failure(
                                 id,
@@ -763,6 +796,7 @@ async fn relay_tcp_session(
                             break;
                         }
                         write_shutdown = true;
+                        drop(charge);
                     }
                     None => {
                         break;
@@ -795,6 +829,7 @@ async fn relay_tcp_session(
                             written: 0,
                             bulk_end: Some(end),
                             _bulk_input_permit: Some(permit),
+                            _control_input_charge: None,
                         });
                     }
                 }
@@ -904,6 +939,100 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn admitted_transport_window_fits_each_tcp_input_queue() {
+        use microsandbox_protocol::core::{
+            WORKLOAD_TRANSPORT_BULK_FRAMES, WORKLOAD_TRANSPORT_CONTROL_FRAMES,
+        };
+
+        // Data and EOF retain their admission token until the socket consumes them. One input
+        // frame occupies at most one command slot, independent of its byte length.
+        assert!(
+            WORKLOAD_TRANSPORT_CONTROL_FRAMES + WORKLOAD_TRANSPORT_BULK_FRAMES
+                <= TCP_COMMAND_CAPACITY as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_tcp_retains_data_and_eof_credit_until_consumption_or_cancel() {
+        use crate::serial::{InputLane, InputWindow};
+        use microsandbox_protocol::core::WorkloadTransportCredit;
+        use std::os::fd::AsRawFd;
+
+        for cancel in [false, true] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            // Bound receive buffering before accept so the peer cannot consume the entire
+            // admitted8MiB while the application intentionally has not started reading.
+            let receive_bytes: libc::c_int = 64 * 1024;
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        listener.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_RCVBUF,
+                        (&receive_bytes as *const libc::c_int).cast(),
+                        std::mem::size_of_val(&receive_bytes) as libc::socklen_t,
+                    )
+                },
+                0
+            );
+            let (sender, mut output) = SessionOutputSender::channel();
+            let session = TcpSession::open(
+                8,
+                TcpConnect {
+                    host: "127.0.0.1".into(),
+                    port: listener.local_addr().unwrap().port(),
+                    bulk: None,
+                },
+                &sender,
+            );
+            let (mut peer, _) = listener.accept().await.unwrap();
+            assert_eq!(recv_message(&mut output).await.t, MessageType::TcpConnected);
+            let initial = WorkloadTransportCredit {
+                control_bytes: 64,
+                control_frames: 2,
+                bulk_bytes: 8 * 1024 * 1024,
+                bulk_frames: 2,
+            };
+            let ledger = InputWindow::new(initial);
+            let payload_len = initial.bulk_bytes as usize - 64;
+            let data_charge = ledger.admit(InputLane::Bulk, payload_len + 32).unwrap();
+            let eof_charge = ledger.admit(InputLane::Bulk, 32).unwrap();
+            tokio::time::timeout(Duration::from_millis(100), async {
+                session
+                    .write_data_charged(vec![0x5c; payload_len], Some(data_charge))
+                    .await
+                    .unwrap();
+                session.close_write_charged(Some(eof_charge)).await.unwrap();
+            })
+            .await
+            .expect("admitted input waited for a blocked TCP consumer");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(ledger.credit().unwrap(), initial);
+            assert!(ledger.admit(InputLane::Bulk, 1).is_err());
+            if cancel {
+                session.close();
+                wait_finished(&session).await;
+            } else {
+                let mut bytes = Vec::new();
+                tokio::time::timeout(Duration::from_secs(10), peer.read_to_end(&mut bytes))
+                    .await
+                    .expect("ordered TCP EOF did not arrive")
+                    .unwrap();
+                assert_eq!(bytes.len(), payload_len);
+                assert!(bytes.iter().all(|byte| *byte == 0x5c));
+                session.close();
+                wait_finished(&session).await;
+            }
+            assert_eq!(ledger.credit().unwrap().bulk_bytes, initial.bulk_bytes * 2);
+            assert_eq!(ledger.credit().unwrap().bulk_frames, 4);
+            assert_eq!(
+                ledger.credit().unwrap().control_bytes,
+                initial.control_bytes
+            );
+        }
+    }
+
     #[tokio::test]
     async fn connect_failure_sends_terminal_failed() {
         let (session_tx, mut session_rx) = SessionOutputSender::channel();
@@ -1008,6 +1137,227 @@ mod tests {
         wait_finished(&session).await;
 
         accept_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_raw_credit_validation_and_inline_negotiation_still_apply() {
+        for raw in [false, true] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let (tx, mut rx) = SessionOutputSender::channel();
+            let session = TcpSession::open(
+                41,
+                TcpConnect {
+                    host: "127.0.0.1".into(),
+                    port: listener.local_addr().unwrap().port(),
+                    bulk: raw.then(BulkOffer::tcp),
+                },
+                &tx,
+            );
+            let (_peer, _) = listener.accept().await.unwrap();
+            assert_eq!(recv_message(&mut rx).await.t, MessageType::TcpConnected);
+            if raw {
+                assert_eq!(recv_message(&mut rx).await.t, MessageType::BulkAccepted);
+            }
+            let result = session
+                .apply_credit(BulkCredit {
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::GuestToHost,
+                    consumed_offset: 1,
+                    credit_limit: DEFAULT_BULK_WINDOW + 1,
+                })
+                .await;
+            if raw {
+                result.unwrap();
+                let failed = tokio::time::timeout(Duration::from_secs(1), recv_message(&mut rx))
+                    .await
+                    .unwrap();
+                assert_eq!(failed.t, MessageType::TcpFailed);
+                assert_eq!(failed.flags, FLAG_TERMINAL);
+                assert!(
+                    failed
+                        .payload::<TcpFailed>()
+                        .unwrap()
+                        .error
+                        .contains("not admitted")
+                );
+                wait_finished(&session).await;
+            } else {
+                assert!(result.unwrap_err().contains("generation-6"));
+                session.close();
+                wait_finished(&session).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn both_half_close_orders_preserve_data_and_emit_one_terminal() {
+        for raw in [false, true] {
+            for peer_first in [false, true] {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                    let (tx, mut rx) = SessionOutputSender::channel();
+                    let session = TcpSession::open(
+                        31,
+                        TcpConnect {
+                            host: "127.0.0.1".into(),
+                            port: listener.local_addr().unwrap().port(),
+                            bulk: raw.then(BulkOffer::tcp),
+                        },
+                        &tx,
+                    );
+                    let (mut peer, _) = listener.accept().await.unwrap();
+                    assert_eq!(recv_message(&mut rx).await.t, MessageType::TcpConnected);
+                    if raw {
+                        assert_eq!(recv_message(&mut rx).await.t, MessageType::BulkAccepted);
+                    }
+                    let host_data = b"host data survives the peer's first EOF";
+                    let peer_data = b"peer data survives the host's first EOF";
+                    if peer_first {
+                        peer.write_all(peer_data).await.unwrap();
+                        peer.shutdown().await.unwrap();
+                        assert_tcp_output_through_eof(&mut rx, raw, peer_data).await;
+                        assert!(!session.is_finished(), "one EOF must preserve host writes");
+                        send_test_input_and_eof(&session, raw, host_data).await;
+                    } else {
+                        send_test_input_and_eof(&session, raw, host_data).await;
+                    }
+
+                    let mut received = Vec::new();
+                    peer.read_to_end(&mut received).await.unwrap();
+                    assert_eq!(received, host_data);
+                    if !peer_first {
+                        assert!(!session.is_finished(), "one EOF must preserve peer output");
+                        peer.write_all(peer_data).await.unwrap();
+                        peer.shutdown().await.unwrap();
+                        assert_tcp_output_through_eof(&mut rx, raw, peer_data).await;
+                    }
+                    assert_one_normal_terminal(&session, &mut rx).await;
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("TCP completion timed out: raw={raw}, peer_first={peer_first}")
+                });
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_finish_waits_for_delayed_record_and_pending_socket_write_before_terminal() {
+        use std::os::fd::AsRawFd;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let (stream, accepted) = tokio::join!(
+                TcpStream::connect(listener.local_addr().unwrap()),
+                listener.accept(),
+            );
+            let stream = stream.unwrap();
+            let (mut peer, _) = accepted.unwrap();
+            // Make the last record larger than both fixed socket buffers. The test observes a
+            // delivered prefix before draining the rest, so EOF cannot be credited at enqueue.
+            for (fd, option, bytes) in [
+                (stream.as_raw_fd(), libc::SO_SNDBUF, 4096 as libc::c_int),
+                (peer.as_raw_fd(), libc::SO_RCVBUF, 65536 as libc::c_int),
+            ] {
+                assert_eq!(
+                    unsafe {
+                        libc::setsockopt(
+                            fd,
+                            libc::SOL_SOCKET,
+                            option,
+                            (&bytes as *const libc::c_int).cast(),
+                            std::mem::size_of_val(&bytes) as libc::socklen_t,
+                        )
+                    },
+                    0
+                );
+            }
+            let (tx, mut rx) = SessionOutputSender::channel();
+            let (commands, commands_rx) = mpsc::channel(TCP_COMMAND_CAPACITY);
+            let (credit, credit_rx) = watch::channel(None);
+            let (finish, finish_rx) = mpsc::channel(1);
+            let task = tokio::spawn(relay_tcp_session(
+                37,
+                stream,
+                commands_rx,
+                Some(TcpBulkControlReceivers {
+                    credit: credit_rx,
+                    finish: finish_rx,
+                }),
+                tx,
+                Some(TcpBulkState {
+                    send: BulkSendState::new(
+                        BulkKind::Tcp,
+                        BulkFlow::GuestToHost,
+                        DEFAULT_BULK_RECORD_PAYLOAD,
+                        DEFAULT_BULK_WINDOW,
+                    )
+                    .unwrap(),
+                    receive: BulkReceiveState::new(
+                        BulkKind::Tcp,
+                        BulkFlow::HostToGuest,
+                        DEFAULT_BULK_RECORD_PAYLOAD,
+                        DEFAULT_BULK_WINDOW,
+                        DEFAULT_BULK_WINDOW,
+                    )
+                    .unwrap(),
+                }),
+            ));
+            let session = TcpSession {
+                owner_id: 37,
+                commands,
+                bulk_control: Some(TcpBulkControlSenders { credit, finish }),
+                task,
+                bulk: true,
+            };
+            peer.shutdown().await.unwrap();
+            assert_tcp_output_through_eof(&mut rx, true, b"").await;
+            let payload = Bytes::from(vec![0x6a; DEFAULT_BULK_RECORD_PAYLOAD as usize]);
+            session
+                .finish_bulk(BulkFinish {
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::HostToGuest,
+                    final_offset: payload.len() as u64,
+                })
+                .await
+                .unwrap();
+            while session.bulk_control.as_ref().unwrap().finish.capacity() == 0 {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                !session.is_finished(),
+                "finish cannot skip its missing final record"
+            );
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            session
+                .write_bulk(AdmittedBulkRecord::for_test(BulkRecord {
+                    id: 37,
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::HostToGuest,
+                    offset: 0,
+                    payload: payload.clone(),
+                }))
+                .await
+                .unwrap();
+            let mut received = vec![0];
+            peer.read_exact(&mut received).await.unwrap();
+            assert!(
+                !session.is_finished(),
+                "finish cannot skip a partial socket write"
+            );
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            peer.read_to_end(&mut received).await.unwrap();
+            assert_eq!(received, payload);
+            assert_one_normal_terminal(&session, &mut rx).await;
+        })
+        .await
+        .expect("delayed raw record did not finish normally");
     }
 
     #[tokio::test]
@@ -1207,6 +1557,88 @@ mod tests {
         assert_eq!(finish_rx.recv().await, Some(finish_update));
 
         session.close();
+    }
+
+    async fn send_test_input_and_eof(session: &TcpSession, raw: bool, data: &[u8]) {
+        if raw {
+            session
+                .write_bulk(AdmittedBulkRecord::for_test(BulkRecord {
+                    id: session.owner_id(),
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::HostToGuest,
+                    offset: 0,
+                    payload: Bytes::copy_from_slice(data),
+                }))
+                .await
+                .unwrap();
+            session
+                .finish_bulk(BulkFinish {
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::HostToGuest,
+                    final_offset: data.len() as u64,
+                })
+                .await
+                .unwrap();
+        } else {
+            session.write_data(data.to_vec()).await.unwrap();
+            session.close_write().await.unwrap();
+        }
+    }
+
+    async fn assert_tcp_output_through_eof(
+        rx: &mut mpsc::Receiver<SessionOutputEnvelope>,
+        raw: bool,
+        expected: &[u8],
+    ) {
+        let mut received = Vec::new();
+        loop {
+            let envelope = rx.recv().await.expect("TCP output ended before EOF");
+            match envelope.output {
+                SessionOutput::Bulk(output) => {
+                    assert!(raw);
+                    assert_eq!(output.record.offset, received.len() as u64);
+                    received.extend_from_slice(&output.record.payload);
+                }
+                SessionOutput::Raw(mut output) => {
+                    let message = decode_one_message(&mut output.frame);
+                    assert_eq!(message.flags & FLAG_TERMINAL, 0, "terminal preceded EOF");
+                    match message.t {
+                        MessageType::TcpData => {
+                            assert!(!raw);
+                            received.extend(message.payload::<TcpData>().unwrap().data);
+                        }
+                        MessageType::TcpEof => {
+                            assert!(!raw);
+                            break;
+                        }
+                        MessageType::BulkFinish => {
+                            assert!(raw);
+                            let finish = message.payload::<BulkFinish>().unwrap();
+                            assert_eq!(finish.final_offset, received.len() as u64);
+                            break;
+                        }
+                        _ => panic!("unexpected TCP output: {:?}", message.t),
+                    }
+                }
+                _ => panic!("unexpected non-TCP output"),
+            }
+        }
+        assert_eq!(received, expected);
+    }
+
+    async fn assert_one_normal_terminal(
+        session: &TcpSession,
+        rx: &mut mpsc::Receiver<SessionOutputEnvelope>,
+    ) {
+        let closed = recv_message(rx).await;
+        assert_eq!(closed.t, MessageType::TcpClosed);
+        assert_eq!(closed.flags, FLAG_TERMINAL);
+        closed.payload::<TcpClosed>().unwrap();
+        wait_finished(session).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 
     async fn wait_finished(session: &TcpSession) {

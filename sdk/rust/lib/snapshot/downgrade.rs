@@ -1753,7 +1753,8 @@ mod tests {
             "reverse_complete"
         );
 
-        Migrator::down(pools.write().inner(), Some(1))
+        // Reverse both the empty group projection and stable-identity projection.
+        Migrator::down(pools.write().inner(), Some(2))
             .await
             .unwrap();
         let count = pools

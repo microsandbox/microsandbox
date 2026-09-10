@@ -6,6 +6,7 @@
 //! for guest communication.
 
 pub(crate) mod attach;
+pub(crate) mod branch;
 mod builder;
 mod compact;
 pub(crate) mod config;
@@ -14,13 +15,15 @@ pub mod exec;
 pub(crate) mod flat_rootfs;
 pub mod fs;
 mod handle;
-mod identity;
+pub(crate) mod identity;
 pub mod init;
 pub(crate) mod metrics;
 #[cfg(feature = "local")]
 mod modify;
 #[cfg(feature = "local")]
 mod patch;
+#[cfg(feature = "local")]
+pub(crate) mod pause;
 #[cfg(all(feature = "local", windows))]
 mod reap;
 #[cfg(feature = "ssh")]
@@ -104,6 +107,8 @@ pub(crate) use builder::{apply_checkpoint_restore_constraints, apply_snapshot_ro
 #[cfg(feature = "local")]
 pub(crate) use modify::control_checkpoint_create;
 #[cfg(feature = "local")]
+pub(crate) use modify::control_disk_checkpoint_create;
+#[cfg(feature = "local")]
 pub(crate) use patch::{apply_patches, build_flat_tree, build_upper_tree};
 #[cfg(all(feature = "local", windows))]
 pub(crate) use reap::reap_leaked_runtime_process;
@@ -151,6 +156,8 @@ pub use microsandbox_network::policy::{
 };
 #[cfg(feature = "net")]
 pub use microsandbox_network::{OutboundProxy, Socks5Credentials};
+#[cfg(feature = "local")]
+pub use microsandbox_runtime::control::PauseControlState as SandboxPauseState;
 pub use microsandbox_types::SandboxLogLevel as LogLevel;
 pub use microsandbox_types::{CpuPlacement, PullPolicy};
 #[cfg(feature = "net")]
@@ -1089,6 +1096,36 @@ impl Sandbox {
         // ProcessHandle drops without sending SIGTERM.
     }
 
+    /// Keep the creator's process safety net armed until every creation check has succeeded.
+    #[cfg(feature = "local")]
+    pub(crate) async fn finish_detached_creation(&mut self) -> MicrosandboxResult<()> {
+        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
+            crate::MicrosandboxError::Runtime(
+                "creation owner was shared before finalization".into(),
+            )
+        })?;
+        if let crate::backend::SandboxInner::Local(local) = inner
+            && let Some(handle) = local.handle.take()
+        {
+            handle.lock().await.disarm();
+        }
+        Ok(())
+    }
+
+    /// Creation cleanup owns this exact process and must not reacquire its transition lock.
+    #[cfg(feature = "local")]
+    pub(crate) async fn terminate_creation_owner(&self) {
+        if let Some(local) = self.local()
+            && let Some(handle) = &local.handle
+        {
+            let mut handle = handle.lock().await;
+            if matches!(handle.try_wait(), Ok(None)) {
+                let _ = handle.kill();
+                let _ = tokio::time::timeout(DEFAULT_KILL_TIMEOUT, handle.wait()).await;
+            }
+        }
+    }
+
     fn is_local_ephemeral(&self) -> bool {
         #[cfg(feature = "local")]
         {
@@ -1696,6 +1733,8 @@ pub(super) async fn remove_local_persisted_sandbox(
     let _transition_guard =
         LocalBackend::acquire_sandbox_transition_guard(&local_backend.config().run_dir(), name)
             .await?;
+    let _lineage_guard =
+        crate::snapshot::lineage::lock_source(&local_backend.config().run_dir(), name).await?;
 
     // Re-read after acquiring transition ownership. A stale `Sandbox` object must never delete a
     // newer sandbox that reused the same deterministic name, and an active identity must not be
@@ -2132,5 +2171,52 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_removal_waits_for_snapshot_lineage_owner() {
+        let temp = tempdir().unwrap();
+        let backend = std::sync::Arc::new(
+            LocalBackend::builder()
+                .home(temp.path().join("home"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let pools = backend.db().await.unwrap();
+        let current = super::sandbox_entity::ActiveModel {
+            name: Set("snapshot-source".to_string()),
+            config: Set("{}".to_string()),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let sandbox_dir = backend.sandboxes_dir().join("snapshot-source");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+        let lineage =
+            crate::snapshot::lineage::lock_source(&backend.config().run_dir(), "snapshot-source")
+                .await
+                .unwrap();
+        let other = backend.clone();
+        let mut removal = tokio::spawn(async move {
+            remove_local_persisted_sandbox(&other, "snapshot-source", current.id).await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut removal)
+                .await
+                .is_err()
+        );
+        // The source must remain present while capture can still publish its cursor.
+        assert!(sandbox_dir.exists());
+        drop(lineage);
+        tokio::time::timeout(std::time::Duration::from_secs(5), removal)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!sandbox_dir.exists());
     }
 }

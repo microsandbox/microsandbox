@@ -391,6 +391,15 @@ impl SandboxBuilder {
         self
     }
 
+    /// Restore a full snapshot using private copy-on-write memory.
+    ///
+    /// Clean pages can be shared by children; writes remain private. This requires
+    /// a full snapshot and cannot be combined with a fresh boot or disk-only restore.
+    pub fn forked(mut self) -> Self {
+        self.config.forked = true;
+        self
+    }
+
     /// Set the runtime log level for the sandbox process.
     ///
     /// This controls the verbosity of the `msb sandbox` process.
@@ -1201,7 +1210,7 @@ impl SandboxBuilder {
         self
     }
 
-    /// Supply the exact base snapshot or standalone base archive for a disk-dependent archive.
+    /// Supply the base snapshot or standalone archive for omitted disk layers and RAM objects.
     pub fn snapshot_base(mut self, base: impl Into<String>) -> Self {
         self.config.snapshot_base = Some(base.into());
         self
@@ -1287,6 +1296,7 @@ impl SandboxBuilder {
         }
 
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
+        self.config.snapshot_parent = Some(snap.id().to_string());
         let unsupported = snap.manifest().unsupported_requires();
         if !unsupported.is_empty() {
             return Err(crate::MicrosandboxError::unsupported(
@@ -1315,27 +1325,22 @@ impl SandboxBuilder {
                 )
                 .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
                 let closure = snap.path().join(crate::snapshot::CHECKPOINT_DIRECTORY);
-                let opened = match self.config.snapshot_restore_mode {
-                    SnapshotRestoreMode::Full => {
-                        microsandbox_image::checkpoint::CheckpointClosure::open(
-                            &closure,
-                            Some(&expected),
-                        )
-                    }
-                    SnapshotRestoreMode::DiskOnly => {
-                        microsandbox_image::checkpoint::CheckpointClosure::open_portable(
-                            &closure,
-                            Some(&expected),
-                        )
-                    }
-                }
+                let opened = microsandbox_image::checkpoint::CheckpointClosure::inspect_manifest(
+                    &closure,
+                    Some(&expected),
+                )
                 .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-                if opened.checkpoint().checkpoint_id != state.checkpoint_id {
+                if opened.checkpoint_id != state.checkpoint_id {
                     return Err(crate::MicrosandboxError::SnapshotIntegrity(
                         "snapshot and checkpoint closure identities differ".into(),
                     ));
                 }
                 if self.config.snapshot_restore_mode == SnapshotRestoreMode::Full {
+                    if opened.architecture != std::env::consts::ARCH {
+                        return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                            "checkpoint architecture cannot restore on this host".into(),
+                        ));
+                    }
                     let restore_overrides = self.restore_override_intent();
                     apply_checkpoint_restore_constraints(
                         &mut self.config,
@@ -1347,6 +1352,8 @@ impl SandboxBuilder {
                 }
                 self.config.checkpoint_restore =
                     Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                        local_branch: false,
+                        forked: false,
                         closure,
                         checkpoint_root: state.checkpoint_root.clone(),
                         checkpoint_id: state.checkpoint_id.clone(),
@@ -1650,6 +1657,17 @@ impl SandboxBuilder {
             ));
         }
         #[cfg(feature = "local")]
+        if self.config.forked
+            && (self.config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly
+                || (self.config.checkpoint_restore.is_none()
+                    && self.config.snapshot_archive_source.is_none()))
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "forked requires a full snapshot restore and cannot be combined with disk_only"
+                    .into(),
+            ));
+        }
+        #[cfg(feature = "local")]
         if self.config.checkpoint_restore.is_some() && !self.config.spec.patches.is_empty() {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "patches cannot be combined with full snapshot restore".into(),
@@ -1931,14 +1949,19 @@ fn validate_config_script_name(name: &str) -> Result<(), String> {
 pub(crate) fn apply_checkpoint_restore_constraints(
     config: &mut SandboxConfig,
     state: &crate::snapshot::CheckpointSnapshotState,
-    closure: &microsandbox_image::checkpoint::CheckpointClosure,
+    checkpoint: &microsandbox_image::checkpoint::CheckpointManifest,
     overrides: RestoreOverrideIntent,
 ) -> MicrosandboxResult<()> {
     apply_checkpoint_resources(config, state, overrides)?;
+    apply_capture_network(config, &checkpoint.resources)
+}
 
-    let mut resources = closure
-        .checkpoint()
-        .resources
+#[cfg(feature = "local")]
+pub(crate) fn apply_capture_network(
+    config: &mut SandboxConfig,
+    captured_resources: &[microsandbox_image::checkpoint::ResourceDescriptor],
+) -> MicrosandboxResult<()> {
+    let mut resources = captured_resources
         .iter()
         .filter(|resource| resource.kind == "network");
     let Some(resource) = resources.next() else {
@@ -3340,6 +3363,53 @@ mod tests {
                 .map(VolumeMount::guest)
                 .collect::<Vec<_>>(),
             vec!["/workspace", "/workspace/persist"]
+        );
+    }
+    #[tokio::test]
+    async fn forked_rejects_fresh_boot() {
+        let error = SandboxBuilder::new("forked-boot")
+            .image("alpine")
+            .forked()
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("forked requires a full snapshot")
+        );
+    }
+
+    #[tokio::test]
+    async fn forked_restore_is_transient_and_requires_execution() {
+        let mut builder = SandboxBuilder::new("forked-child").image("alpine").forked();
+        builder.config.checkpoint_restore =
+            Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                local_branch: false,
+                forked: false,
+                closure: "/owned/checkpoint".into(),
+                checkpoint_root: "blake3:captured-root".into(),
+                checkpoint_id: "captured".into(),
+            });
+        builder.validate().unwrap();
+        let config = builder.config.clone();
+        assert!(config.forked);
+        assert!(!config.clone_for_persistence().forked);
+        assert!(
+            serde_json::to_value(&config)
+                .unwrap()
+                .get("forked")
+                .is_none()
+        );
+        builder.config.snapshot_restore_mode =
+            crate::sandbox::config::SnapshotRestoreMode::DiskOnly;
+        assert!(
+            builder
+                .build()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("forked")
         );
     }
 }

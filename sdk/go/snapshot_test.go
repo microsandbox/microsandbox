@@ -9,16 +9,6 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
-func TestSnapshotCreateEmptyName(t *testing.T) {
-	_, err := Snapshot.Create(context.Background(), SnapshotCreateOptions{FromSandbox: "baseline"})
-	if !IsKind(err, ErrInvalidConfig) {
-		t.Fatalf("err = %v, want ErrInvalidConfig", err)
-	}
-	if !strings.Contains(err.Error(), "Name") {
-		t.Fatalf("error should name the missing field: %q", err.Error())
-	}
-}
-
 func TestSnapshotCreateEmptyFromSandbox(t *testing.T) {
 	_, err := Snapshot.Create(context.Background(), SnapshotCreateOptions{Name: "after-pip-install"})
 	if !IsKind(err, ErrInvalidConfig) {
@@ -65,6 +55,42 @@ func TestFFIWireShape_SnapshotCreateDestDir(t *testing.T) {
 	}
 	if _, present := got["full"]; present {
 		t.Fatal("full must not appear in payload when unset")
+	}
+}
+
+func TestFFIWireShape_SnapshotGroupWithGeneratedName(t *testing.T) {
+	got := marshalSnapshotCreateOptions(t, ffi.SnapshotCreateOptions{Group: "work"})
+	if got["group"] != "work" {
+		t.Fatalf("group = %v, want work", got["group"])
+	}
+	if _, present := got["name"]; present {
+		t.Fatal("generated names must be omitted for the Rust builder to assign")
+	}
+}
+
+func TestFFIWireShape_SnapshotLoadGroupOptions(t *testing.T) {
+	payload, err := json.Marshal(ffi.SnapshotLoadOptions{
+		Dest: "/snapshots", Base: "work:baseline", Group: "work", SetHead: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["dest"] != "/snapshots" || got["base"] != "work:baseline" || got["group"] != "work" || got["set_head"] != true {
+		t.Fatalf("unexpected load options: %s", payload)
+	}
+}
+
+func TestFFIWireShape_SnapshotHeadUpdate(t *testing.T) {
+	var update ffi.SnapshotHeadUpdate
+	if err := json.Unmarshal([]byte(`{"group":"work","previous":null,"head":"baseline","reason":"initialized","changed":true}`), &update); err != nil {
+		t.Fatal(err)
+	}
+	if update.Group != "work" || update.Previous != nil || update.Head != "baseline" || update.Reason != "initialized" || !update.Changed {
+		t.Fatalf("unexpected head update: %#v", update)
 	}
 }
 

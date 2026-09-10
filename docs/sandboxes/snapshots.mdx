@@ -6,20 +6,53 @@ icon: "code-branch"
 
 <Tooltip tip="Disk snapshots are local-only. On microsandbox cloud, use a named volume for state that must survive sandbox replacement."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-A snapshot is a portable artifact that can hold either a sandbox's writable disk state or a full checkpoint of a running sandbox. Managed and flat OCI roots are supported; the descriptor preserves the root layout so a flat `rootfs.raw` is never mistaken for a managed OverlayFS upper. Move it with `scp`, archive it as `.tar.zst`, or create a child sandbox from it.
+A snapshot is a portable artifact that can hold either a sandbox's writable disk state or a full checkpoint of a running sandbox. Managed and flat OCI roots are supported; the descriptor preserves the root layout so a flat `rootfs.raw` is never mistaken for a managed OverlayFS upper. Move it with `scp`, archive it as `.msb`, or create a child sandbox from it.
 
 <Note>
-Disk snapshots capture stopped or crashed sandboxes. Full snapshots use `--full` and capture a running sandbox without requiring the user to pause it first.
+Disk snapshots work with running, paused, stopped, or crashed sandboxes. A running disk capture briefly pauses the VM, seals its disk, and resumes it without copying RAM. Full snapshots use `--full` to include memory and execution state. A user-paused source stays paused in either mode.
 </Note>
 
 ## What gets captured
 
+`.msb` is the recommended snapshot archive extension; compression defaults to tar + zstd. Archives are recognized by their contents, so existing `.tar.zst`, `.tar`, and other filenames still work. Explicit output filenames are kept as given. Disk-only, full, and incremental exports use the same extension; the archive records what it contains.
+
 | Mode | Source | Captured state | Restore behavior |
 | ---- | ------ | -------------- | ---------------- |
-| Disk (default) | Stopped or crashed sandbox | Writable disk closure and pinned image | Cold-boots a fresh VM |
-| Full | Running sandbox | Disk, memory, vCPU, device, and admitted resource state | Eagerly resumes the captured execution in a child VM |
+| Disk (default) | Running, paused, stopped, or crashed sandbox | Writable disk closure and pinned image | Cold-boots a fresh VM |
+| Full | Running or user-paused sandbox | Disk, memory, vCPU, device, and admitted resource state | Resumes the captured execution in a child VM |
 
 Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `state.kind` is either `file` or `checkpoint`, and `root_disk.layout` records `managed`, `flat`, or `tmpfs`. Checkpoint payloads live in a content-addressed closure rather than a standalone disk file. A tmpfs root has no stopped disk snapshot because its writable state exists only in memory, but it is included in a running full snapshot; such a snapshot must be resumed and cannot use `--disk-only`.
+
+## Share restored memory with CoW
+
+On supported Linux, macOS, and Windows hosts, add `--forked` when restoring a full snapshot to share clean memory pages between children. Writes stay private to each child. Without the flag, restore eagerly copies memory. The source needs no special creation option.
+
+```bash
+msb create alpine --name baseline --root-disk flat:1G
+msb snapshot create ready --from-sandbox baseline --full
+msb create --name worker-a --from-snapshot baseline:ready --forked
+msb create --name worker-b --from-snapshot baseline:ready --forked
+```
+
+The SDK creation options are Rust `.forked()`, Python `forked=True`, TypeScript `.forked()`, and Go `WithForked()`. The option requires a full snapshot and cannot be combined with `--disk-only` or an image cold boot.
+
+Snapshots are still manual. CoW uses a protected local memory cache; the first uncached restore must build it, while later children reuse it. Captures from forked children can prepare later restore backing with filesystem reflinks when available. Removing the input archive does not invalidate a running child's backing. Explicit NUMA placement with CoW is not supported yet; requests fail instead of silently switching modes.
+
+If a restore fails after creating a child record, remove that child and create a new one from the snapshot. An incomplete restore cannot be started as a fresh VM or modified; the original snapshot remains reusable.
+
+## Branch a running sandbox
+
+Use `branch` for an independent local child without first saving a full snapshot:
+
+```bash
+msb branch baseline --name worker
+```
+
+The child resumes the captured processes, memory, and disk state. Its writes do not affect the source. CoW memory is built in—no `--forked` flag is needed. A running source resumes after capture; a user-paused source stays paused. Branches work on supported Linux, macOS, and Windows hosts, require a new child name, and cannot inherit published host ports.
+
+The SDK methods are Rust `source.branch("worker").await?`, Python `await source.branch("worker")`, TypeScript `await source.branch("worker")`, and Go `source.Branch(ctx, "worker")`. They also work on sandbox handles returned by `get`.
+
+Local branching still writes a consistent memory backing file, but skips portable RAM packaging and snapshot registration. It is not a saved recovery point. Use `snapshot create --full` when you need a durable, exportable snapshot.
 
 ## Quick start
 
@@ -35,17 +68,67 @@ msb stop baseline
 msb snapshot create after-pip-install --from-sandbox baseline
 
 # 3. Boot a fresh sandbox from the snapshot
-msb run --name worker --from-snapshot after-pip-install \
+msb run --name worker --from-snapshot baseline:after-pip-install \
     -- python -c "import requests; print(requests.__version__)"
 ```
 
 <Tip>
-By default, the snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`. That whole directory is the snapshot.
+The snapshot belongs to the source's group, `baseline`, and lives at `~/.microsandbox/snapshots/baseline/snap_<id>/`. Its friendly name is `baseline:after-pip-install`.
 </Tip>
 
 ## Snapshot a sandbox
 
-Snapshot under a bare name, resolved to `~/.microsandbox/snapshots/<name>/` by default. The name is a local alias; the descriptor carries a stable `snap_...` identity. Pass a destination directory to create the artifact on a different volume (`DIR/<name>`). Either way the directory is the whole artifact; move it with save/load (or plain `mv`):
+Each capture is an immutable member of a snapshot group. The group defaults to the source sandbox's name; use `--group` to choose another. Member names are local aliases, while the descriptor carries a stable `snap_...` identity. Omitting the member name generates one. A destination directory selects another group-store root (`DIR/<group>/<snapshot_id>`).
+
+## Groups and head selection
+
+Use a bare group to restore its selected head, or `group:member` for an exact checkpoint:
+
+```bash
+msb snapshot create cp01 --from-sandbox baseline --group work
+msb snapshot create cp02 --from-sandbox baseline --group work
+msb create --name latest --from-snapshot work
+msb create --name earlier --from-snapshot work:cp01
+
+msb snapshot head work           # Show the selected snapshot ID
+msb snapshot head work:cp01      # Explicitly select an earlier checkpoint
+```
+
+The first snapshot initializes the head. Later captures or imports advance it only when known ancestry proves they descend from the current head. Importing an older checkpoint, a sibling, or one with missing history keeps the head unchanged. Both members remain available. Concurrent siblings use the first successful head update; the other capture still succeeds. There is no special main branch and timestamps do not decide the winner.
+
+```text
+work:cp01 ---- work:cp02 ---- work:cp03  <- head
+                    \
+                     +------ work:experiment
+```
+
+`msb snapshot head work:experiment` selects the other branch. Import with `--set-head` to explicitly select the imported archive's head. Missing historical checkpoints are allowed if the snapshot's disk and RAM dependencies are complete. Imports resolve payload dependencies from the supplied archives and an explicitly named destination group; `--base` supplies an external fallback.
+
+```bash
+msb snapshot load checkpoint.msb --group work
+msb snapshot load experiment.msb --group work --set-head
+```
+
+Loading without `--group` creates a fresh generated group. The same archive can be imported into different groups without overwriting either copy. Within a group, an identical ID/descriptor is reusable; conflicting IDs or names fail. A current head cannot be removed while other members remain—select another first. Existing flat snapshot directories can still be opened by explicit path.
+
+An interrupted call may already have published its snapshot. Inspect the group before retrying; member publication never overwrites an existing snapshot.
+
+## Load a set of archives
+
+Import a baseline and its dependent archives together. The shell expands the wildcard; archive order does not matter:
+
+```bash
+msb snapshot load checkpoints/*.msb --group received
+msb snapshot load changes.msb base.msb --group received --dest /mnt/snapshots
+```
+
+`load` accepts one or more archive paths. Use `--dest DIR` for a different group-store root; a trailing positional path is another archive, not a destination. A batch without `--group` creates one generated group for all its archives. Existing single-archive calls still print the digest followed by the installed path. Multi-archive calls print each result and report the batch's head decision once.
+
+Dependencies are resolved from the batch and exact matching snapshots already installed in the explicitly named destination group. For example, after importing `base.msb` into `received`, `msb snapshot load changes.msb --group received` can reuse that base automatically. Use `--base SOURCE` when a dependency must come from another installed snapshot or standalone archive. Imports do not search unrelated groups or nearby archive files. These operations accept the existing archive format; no format conversion or schema bump is required.
+
+All requested members are validated before publication. A batch with one tip follows the normal head-update rules. If a batch contains divergent tips, the existing group head stays selected; a new group has no head until you choose a member with `msb snapshot head GROUP:MEMBER`. `--set-head` requires a unique batch tip and rejects an ambiguous batch before publishing members. The final printed result is not necessarily the selected head.
+
+## Capture from the SDK
 
 <CodeGroup>
 ```typescript TypeScript
@@ -53,7 +136,7 @@ import { Sandbox } from "microsandbox";
 
 const h = await Sandbox.get("baseline");
 
-// Resolves under ~/.microsandbox/snapshots/<name>/
+// Installs in baseline's group; snap.path is the exact artifact directory.
 const snap = await h.snapshot("after-pip-install");
 
 console.log(snap.digest); // sha256:...
@@ -64,7 +147,7 @@ use microsandbox::Sandbox;
 
 let h = Sandbox::get("baseline").await?;
 
-// Resolves under ~/.microsandbox/snapshots/<name>/
+// Installs in baseline's group; snap.path() is the exact artifact directory.
 let snap = h.snapshot("after-pip-install").await?;
 
 println!("{}", snap.digest()); // sha256:...
@@ -75,7 +158,7 @@ from microsandbox import Sandbox
 
 h = await Sandbox.get("baseline")
 
-# Resolves under ~/.microsandbox/snapshots/<name>/
+# Installs in baseline's group; snap.path is the exact artifact directory.
 snap = await h.snapshot("after-pip-install")
 
 print(snap.digest)  # sha256:...
@@ -87,7 +170,7 @@ if err != nil {
     return err
 }
 
-// Resolves under ~/.microsandbox/snapshots/<name>/
+// Installs in baseline's group; snap.Path() is the exact artifact directory.
 snap, err := h.Snapshot(ctx, "after-pip-install")
 
 fmt.Println(snap.Digest()) // sha256:...
@@ -95,15 +178,14 @@ fmt.Println(snap.Digest()) // sha256:...
 
 ```bash CLI
 msb snapshot create after-pip-install --from-sandbox baseline
-msb snapshot create after-pip-install --from-sandbox baseline --label stage=ready
+msb snapshot create ready-with-label --from-sandbox baseline --label stage=ready
 
-# Create the artifact on another volume: lands at /mnt/big/after-pip-install
+# Use another group-store root: /mnt/big/baseline/snap_<id>/
 msb snapshot create after-pip-install --from-sandbox baseline --dest-dir /mnt/big
 ```
-
 </CodeGroup>
 
-The default disk mode requires a stopped or crashed sandbox; running sandboxes are rejected. If the sandbox has previously produced a full snapshot, its writable state may already be a raw/qcow2 chain. Disk snapshotting preserves that complete chain, including writes made after the earlier full snapshot, and every restored child receives a fresh private writable head.
+The default disk mode captures only the owned managed or flat root disk. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Direct `--archive ./saved.msb` capture works in either mode without installing a snapshot directory.
 
 ## Capture a running sandbox
 
@@ -160,21 +242,23 @@ Repeated full checkpoints add disk layers. You choose when to export changes and
 
 ```bash
 msb snapshot create checkpoint-b --from-sandbox worker --full
-msb snapshot save checkpoint-b changes.tar.zst --since checkpoint-a
+msb snapshot save worker:checkpoint-b changes.msb --since worker:checkpoint-a
 msb modify worker --compact --layers 3 --dry-run
 msb modify worker --compact --layers 3
 ```
 
 `--layers 3` merges the oldest three physical layers, **including the base**. It never includes the writable head, even when stopped. Omit `--layers` to merge all sealed layers; a chain with fewer than two sealed layers is unchanged. Managed and flat roots support compaction, running or stopped. Existing snapshots remain valid and retain their storage until you remove them separately.
 
-`--since` requires an exact physical-prefix base. Alternatively, `--last-layers 2` includes the newest two sealed checkpoint layers. A full checkpoint export still includes all required memory and device state. Unlike ordinary standalone exports, these smaller archives require the omitted base when loading or restoring:
+`--since` omits disk layers and, for full checkpoints, RAM objects already supplied by the base. The disk base must be an exact physical prefix. Each archive still includes its complete memory map and CPU/device state; it does not replay earlier memory images. Alternatively, `--last-layers 2` selects only disk layers and keeps all required RAM objects. Import these smaller archives with their bases in the same batch, into a named group containing their dependencies, or with an explicit external base. Direct restore still accepts an explicit base:
 
 ```bash
-msb snapshot load changes.tar.zst --base checkpoint-a
-msb create --name child --from-snapshot changes.tar.zst --snapshot-base checkpoint-a
+msb snapshot load changes.msb --base worker:checkpoint-a --group imported
+msb create --name child --from-snapshot changes.msb --snapshot-base worker:checkpoint-a
 ```
 
-The base can also be a standalone snapshot archive. Restore copies the required closure into child-owned storage, without installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compaction, export a new standalone baseline before resuming incremental exports: the old physical prefix no longer matches. Do not combine compaction with unrelated `modify` options, or incremental export with `--with-parents`.
+An explicit external base can also be a standalone snapshot archive. Dependent archives can supply one another within a batch; they need not be loaded in dependency order. Loads resolve disk and RAM dependencies without starting a VM; only the final sandbox creation resumes execution. Missing or incorrect dependencies fail before publication or execution. Loaded snapshots and restored children own their required files, so removing the base later does not break them. Direct restore skips installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compaction, export a new standalone baseline before resuming incremental exports: the old physical prefix no longer matches. Do not combine compaction with unrelated `modify` options, or incremental export with `--with-parents`.
+
+Current development limitation: successive disk-only captures reassign layer IDs, so their `--since` export can reject the base even when physical layers were unchanged. Use standalone disk-only exports for now. Full-checkpoint incremental exports and imports are unaffected by this capture issue.
 
 ## Capture directly to an archive
 
@@ -194,7 +278,7 @@ use microsandbox::Snapshot;
 
 let archive = Snapshot::builder("after-pip-install")
     .from_sandbox("baseline")
-    .create_archive("/tmp/after-pip-install.tar.zst", false)
+    .create_archive("/tmp/after-pip-install.msb", false)
     .await?;
 ```
 
@@ -203,7 +287,7 @@ from microsandbox import Snapshot
 
 archive = await Snapshot.create_archive(
     "after-pip-install",
-    "/tmp/after-pip-install.tar.zst",
+    "/tmp/after-pip-install.msb",
     from_sandbox="baseline",
 )
 ```
@@ -214,14 +298,14 @@ archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
         Name:        "after-pip-install",
         FromSandbox: "baseline",
     },
-    ArchivePath: "/tmp/after-pip-install.tar.zst",
+    ArchivePath: "/tmp/after-pip-install.msb",
 })
 ```
 
 ```bash CLI
 msb snapshot create after-pip-install \
     --from-sandbox baseline \
-    --archive /tmp/after-pip-install.tar.zst
+    --archive /tmp/after-pip-install.msb
 ```
 </CodeGroup>
 
@@ -230,13 +314,13 @@ Direct capture publishes only the archive and returns its snapshot ID and path. 
 An explicit archive path can also be used directly as the source of a new sandbox:
 
 ```bash
-msb run --name worker --from-snapshot ./after-pip-install.tar.zst -- python -V
+msb run --name worker --from-snapshot ./after-pip-install.msb -- python -V
 ```
 
 The same archive path works with the SDK restore methods shown below. The archive is unpacked into child-owned staging, so no intermediate installed snapshot is loaded into `~/.microsandbox/snapshots`.
 
 <Note>
-Direct capture records the pinned image identity, but does not bundle the cached OCI image. The target must already have that image or be able to pull it. For an offline target, create an installed snapshot and use `msb snapshot save --with-image` instead.
+Direct capture records the pinned image identity, but does not bundle the cached OCI image. A flat snapshot already contains the complete disk, so restore only needs the pinned image's configuration from cache or the registry; it does not download the original disk layers again. Layered snapshots still need their base image artifacts. For an offline target, create an installed snapshot and use `msb snapshot save --with-image` instead.
 </Note>
 
 ## Boot from a snapshot
@@ -248,7 +332,7 @@ A snapshot already pins its image, so booting from one is mutually exclusive wit
 import { Sandbox } from "microsandbox";
 
 const sb = await Sandbox.builder("worker")
-    .fromSnapshot("after-pip-install")
+    .fromSnapshot("baseline:after-pip-install")
     .create();
 ```
 
@@ -256,7 +340,7 @@ const sb = await Sandbox.builder("worker")
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
-    .from_snapshot("after-pip-install")
+    .from_snapshot("baseline:after-pip-install")
     .create()
     .await?;
 ```
@@ -265,19 +349,18 @@ let sb = Sandbox::builder("worker")
 from microsandbox import Sandbox
 
 # `from_snapshot=` is a peer of `image=` and mutually exclusive with it
-sb = await Sandbox.create("worker", from_snapshot="after-pip-install")
+sb = await Sandbox.create("worker", from_snapshot="baseline:after-pip-install")
 ```
 
 ```go Go
 sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithFromSnapshot("after-pip-install"),
+    m.WithFromSnapshot("baseline:after-pip-install"),
 )
 ```
 
 ```bash CLI
-msb run --name worker --from-snapshot after-pip-install -- python -V
+msb run --name worker --from-snapshot baseline:after-pip-install -- python -V
 ```
-
 </CodeGroup>
 
 For disk state, creation cold-boots from a child-owned writable copy. For checkpoint state, creation eagerly restores the captured execution into child-owned state.
@@ -289,14 +372,14 @@ To discard the captured execution and cold-boot only its filesystem state, selec
 <CodeGroup>
 ```typescript TypeScript
 const sb = await Sandbox.builder("worker")
-  .fromSnapshot("worker-checkpoint")
+  .fromSnapshot("worker:worker-checkpoint")
   .diskOnly()
   .create();
 ```
 
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .from_snapshot("worker-checkpoint")
+    .from_snapshot("worker:worker-checkpoint")
     .disk_only()
     .create()
     .await?;
@@ -305,24 +388,24 @@ let sb = Sandbox::builder("worker")
 ```python Python
 sb = await Sandbox.create(
     "worker",
-    from_snapshot="worker-checkpoint",
+    from_snapshot="worker:worker-checkpoint",
     disk_only=True,
 )
 ```
 
 ```go Go
 sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithFromSnapshot("worker-checkpoint"),
+    m.WithFromSnapshot("worker:worker-checkpoint"),
     m.WithSnapshotDiskOnly(),
 )
 ```
 
 ```bash CLI
-msb run --name worker --from-snapshot worker-checkpoint --disk-only
+msb run --name worker --from-snapshot worker:worker-checkpoint --disk-only
 ```
 </CodeGroup>
 
-Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The full capture freezes workloads and syncs guest filesystems before pausing the VM, so this cold-boot view is filesystem-clean.
+Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. Like a live disk snapshot, this disk-only view is crash-consistent: recent writes still buffered in guest RAM may be absent, and filesystem journal recovery may run during boot. Full restore preserves those buffers in captured RAM. Pause and full capture do not automatically sync guest filesystems; host disk flushes and durable snapshot publication are still enforced.
 
 ## List, inspect, and remove
 
@@ -331,10 +414,10 @@ Disk-only restore copies only the checkpoint's disk chain, creates a fresh writa
 import { Snapshot } from "microsandbox";
 
 const all = await Snapshot.list();                       // Indexed snapshots
-const h = await Snapshot.get("after-pip-install");       // By name, digest, or path
+const h = await Snapshot.get("baseline:after-pip-install");       // By group/member selector or explicit path
 console.log(`${h.name ?? "-"} (${h.digest})`);
 
-await Snapshot.remove("after-pip-install");
+await Snapshot.remove("baseline:after-pip-install");
 await Snapshot.reindex();                               // Default snapshots directory
 ```
 
@@ -342,10 +425,10 @@ await Snapshot.reindex();                               // Default snapshots dir
 use microsandbox::Snapshot;
 
 let all = Snapshot::list().await?; // Indexed snapshots
-let h = Snapshot::get("after-pip-install").await?; // By name, digest, or path
+let h = Snapshot::get("baseline:after-pip-install").await?; // By group/member selector or explicit path
 println!("{} ({})", h.name().unwrap_or("-"), h.digest());
 
-Snapshot::remove("after-pip-install", false).await?;
+Snapshot::remove("baseline:after-pip-install", false).await?;
 Snapshot::reindex("/data/snapshots").await?;
 ```
 
@@ -353,42 +436,41 @@ Snapshot::reindex("/data/snapshots").await?;
 from microsandbox import Snapshot
 
 all = await Snapshot.list()                              # Indexed snapshots
-h = await Snapshot.get("after-pip-install")              # By name, digest, or path
+h = await Snapshot.get("baseline:after-pip-install")              # By group/member selector or explicit path
 print(f"{h.name or '-'} ({h.digest})")
 
-await Snapshot.remove("after-pip-install")
+await Snapshot.remove("baseline:after-pip-install")
 await Snapshot.reindex()                                 # Default snapshots directory
 ```
 
 ```go Go
 all, err := m.Snapshot.List(ctx)            // Indexed snapshots
 fmt.Printf("%d snapshots\n", len(all))
-h, err := m.Snapshot.Get(ctx, "after-pip-install") // By name, digest, or path
+h, err := m.Snapshot.Get(ctx, "baseline:after-pip-install") // By group/member selector or explicit path
 name := "-"
 if h.Name() != nil {
     name = *h.Name()
 }
 fmt.Printf("%s (%s)\n", name, h.Digest())
 
-err = m.Snapshot.Remove(ctx, "after-pip-install", false)
+err = m.Snapshot.Remove(ctx, "baseline:after-pip-install", false)
 _, err = m.Snapshot.Reindex(ctx, "/data/snapshots")
 ```
 
 ```bash CLI
 msb snapshots                  # Also: msb snaps, msb snapshot ls
-msb snapshot inspect after-pip-install
-msb snapshot rm after-pip-install
+msb snapshot inspect baseline:after-pip-install
+msb snapshot rm baseline:after-pip-install
 
 # Also if it has indexed children
-msb snapshot rm after-pip-install --force
+msb snapshot rm baseline:after-pip-install --force
 
 # Rebuild the index from artifacts on disk
 msb snapshot reindex
 ```
-
 </CodeGroup>
 
-`list` and `get` use a local index for fast lookup. If the index gets out of sync, `reindex` rebuilds it from the snapshot artifacts on disk.
+`list` uses a rebuildable local index; group/head selection comes from the artifacts on disk. If the index gets out of sync, `reindex` rebuilds it. Global ID or digest lookup refuses ambiguity when several local copies exist—use a group selector or explicit path. `--force` does not bypass the current-head removal guard.
 
 ## Move snapshots between machines
 
@@ -396,31 +478,35 @@ The snapshot directory is the whole artifact; there is no hidden daemon state. C
 
 ```bash
 # Copy the directory directly with scp (image must be cached or pullable on the target)
-scp -r ~/.microsandbox/snapshots/after-pip-install \
-    other-host:~/.microsandbox/snapshots/
+scp -r ~/.microsandbox/snapshots/baseline/snap_<id> other-host:/tmp/saved-snapshot
+# Open that copied artifact by its explicit path; use archive load to add it to a group.
 
-# Bundle into a .tar.zst, transport, then load
-msb snapshot save after-pip-install /tmp/snap.tar.zst
-scp /tmp/snap.tar.zst other-host:
-ssh other-host msb snapshot load /tmp/snap.tar.zst
+# Bundle into a .msb, transport, then load
+msb snapshot save baseline:after-pip-install /tmp/snap.msb
+scp /tmp/snap.msb other-host:
+ssh other-host msb snapshot load /tmp/snap.msb
 
 # Fully offline: include the OCI image cache so the target needs no network
-msb snapshot save after-pip-install /tmp/snap.tar.zst --with-image
-ssh other-host msb snapshot load /tmp/snap.tar.zst
+msb snapshot save baseline:after-pip-install /tmp/snap.msb --with-image
+ssh other-host msb snapshot load /tmp/snap.msb
 ```
 
-Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expose the same save and load operations as the CLI.
+Archives use tar + zstd by default; `.msb` is the recommended filename extension. Pass `--plain-tar` for uncompressed tar. SDKs expose the same save and load operations as the CLI.
 
 ## Artifact identity and layout
 
 Current file snapshots use a stable opaque snapshot ID, a separate SHA-256 descriptor digest, and one ordered physical layer closure. A normal raw ext4 snapshot is still one layer, whether those bytes represent a managed upper or a complete flat root:
 
 ```text
-after-pip-install/
-├── snapshot.json
-├── metadata.json        # present when local labels exist
-└── layers/
-    └── layer_....raw
+snapshots/
+└── baseline/
+    ├── group.json                    # selected head ID
+    └── snap_<id>/
+        ├── snapshot.json             # stable ID + parent ID + disk/state references
+        ├── group-member.json         # local name: after-pip-install
+        ├── metadata.json             # optional labels
+        └── layers/
+            └── layer_....raw
 ```
 
 `metadata.json` contains mutable local labels and does not participate in the descriptor digest or snapshot identity. The descriptor names each layer by `DiskLayerId`. Once a full snapshot has rolled the sandbox onto qcow2, a later disk snapshot carries the complete oldest-first raw/qcow2 chain in this same artifact family; archive save/load and direct archive restore preserve every member.
@@ -491,10 +577,9 @@ report, err := snap.Verify(ctx)
 msb snapshot create after-pip-install --from-sandbox baseline --integrity
 
 # Verify a snapshot's recorded integrity on demand
-msb snapshot verify after-pip-install
-msb snapshot inspect after-pip-install --verify
+msb snapshot verify baseline:after-pip-install
+msb snapshot inspect baseline:after-pip-install --verify
 ```
-
 </CodeGroup>
 
 `msb snapshot save` and `msb snapshot load` preserve recorded integrity but do not silently execute it. They still enforce the archive grammar, path confinement, entry sizes, descriptor identities, and ordinary archive-entry hashes. Run `msb snapshot verify` explicitly after receiving a snapshot when your workflow requires an independent payload scan. Released `msb-sparse-sha256-v1` descriptors remain readable and verifiable, but ordinary open, boot, save, load, and upgrade paths do not pay their full logical-size SHA cost.

@@ -93,6 +93,16 @@ char *msb_sandbox_handle_stop(uint64_t cancel_id,
                               unsigned char *buf,
                               uintptr_t buf_len);
 
+char *msb_sandbox_handle_pause(uint64_t cancel_id,
+                               const char *name,
+                               unsigned char *buf,
+                               uintptr_t buf_len);
+
+char *msb_sandbox_handle_resume(uint64_t cancel_id,
+                                const char *name,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
 char *msb_sandbox_handle_request_stop(uint64_t cancel_id,
                                       const char *name,
                                       unsigned char *buf,
@@ -159,6 +169,20 @@ char *msb_sandbox_stop(uint64_t cancel_id,
                        uint64_t timeout_ms,
                        unsigned char *buf,
                        uintptr_t buf_len);
+
+char *msb_sandbox_pause(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Branch by live handle, or by persisted name when handle is zero.
+ */
+char *msb_sandbox_branch(uint64_t cancel_id,
+                         Handle handle,
+                         const char *source,
+                         const char *child,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+char *msb_sandbox_resume(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_request_stop(uint64_t cancel_id,
                                Handle handle,
@@ -802,6 +826,32 @@ char *msb_snapshot_import_with_base(uint64_t cancel_id,
                                     const char *base,
                                     unsigned char *buf,
                                     uintptr_t buf_len);
+
+/**
+ * Import an archive with group selection without changing the existing import ABI.
+ */
+char *msb_snapshot_import_with_options(uint64_t cancel_id,
+                                       const char *archive,
+                                       const char *opts_json,
+                                       unsigned char *buf,
+                                       uintptr_t buf_len);
+
+/**
+ * Import archives together with dependencies resolved within the batch and destination group.
+ */
+char *msb_snapshot_import_many(uint64_t cancel_id,
+                               const char *archives_json,
+                               const char *opts_json,
+                               unsigned char *buf,
+                               uintptr_t buf_len);
+
+/**
+ * Read a group head, or select a `group:member` as its head.
+ */
+char *msb_snapshot_group_head(uint64_t cancel_id,
+                              const char *selector,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
 
 /**
  * Open a streaming read from a guest file.

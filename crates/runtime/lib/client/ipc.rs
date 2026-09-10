@@ -133,6 +133,46 @@ pub fn acquire_lifecycle_guard(
     }
 }
 
+/// Stable namespace shared by launchers and read-time recovery.
+pub fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
+    let digest = Sha256::digest(name.as_bytes());
+    run_dir
+        .join("creation-locks")
+        .join(format!("{}.lock", hex::encode(&digest[..16])))
+}
+
+/// Claim a name transition without waiting; a live creator must never be reaped as abandoned.
+pub fn try_acquire_transition_guard(run_dir: &Path, name: &str) -> std::io::Result<Option<File>> {
+    let path = sandbox_transition_lock_path(run_dir, name);
+    std::fs::create_dir_all(path.parent().expect("transition path has parent"))?;
+    let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+    if microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+        Ok(Some(file))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Stable capture-publication ownership, outside the removable source directory.
+pub fn snapshot_lineage_lock_path(run_dir: &Path, name: &str) -> PathBuf {
+    lifecycle_lock_path(run_dir, name).with_extension("snapshot-lineage.lock")
+}
+
+/// Claim source publication ownership without waiting, including from a runtime exit observer.
+pub fn try_acquire_snapshot_lineage_guard(
+    run_dir: &Path,
+    name: &str,
+) -> std::io::Result<Option<File>> {
+    let path = snapshot_lineage_lock_path(run_dir, name);
+    std::fs::create_dir_all(path.parent().expect("lineage lock path has parent"))?;
+    let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+    if microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+        Ok(Some(file))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Try to acquire exclusive lifecycle ownership without blocking.
 pub fn try_acquire_lifecycle_guard(
     run_dir: &Path,

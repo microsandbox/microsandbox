@@ -155,7 +155,7 @@ impl JsSandboxBuilder {
         self
     }
 
-    /// Supply the exact base for a disk-dependent snapshot archive.
+    /// Supply the base for omitted disk layers and RAM objects in a snapshot archive.
     #[napi]
     pub fn snapshot_base(&mut self, base: String) -> &Self {
         let prev = self.take_inner();
@@ -241,6 +241,17 @@ impl JsSandboxBuilder {
         };
         let prev = self.take_inner();
         self.inner = Some(prev.thp(policy));
+        Ok(self)
+    }
+
+    /// Restore a full snapshot with private copy-on-write memory.
+    #[napi]
+    pub fn forked(&mut self) -> Result<&Self> {
+        let prev = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("builder already consumed"))?;
+        self.inner = Some(prev.forked());
         Ok(self)
     }
 

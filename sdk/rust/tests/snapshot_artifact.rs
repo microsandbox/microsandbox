@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use microsandbox::Snapshot;
@@ -532,6 +532,52 @@ async fn isolated_backend(home: &Path) -> Arc<dyn Backend> {
     Arc::new(LocalBackend::builder().home(home).build().await.unwrap())
 }
 
+/// Export complete synthetic artifacts independently: their parent edges describe history,
+/// not a requirement to have every ancestor present merely to read the disk payload.
+async fn save_batch_fixtures(parent: &Path, artifacts: &[PathBuf]) -> Vec<PathBuf> {
+    let mut archives = Vec::new();
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let archive = parent.join(format!("batch-{index}.msb"));
+        Snapshot::save(
+            artifact.to_string_lossy().as_ref(),
+            &archive,
+            microsandbox::snapshot::SaveOpts {
+                plain_tar: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        archives.push(archive);
+    }
+    archives
+}
+
+fn batch_group_options(group: &str) -> microsandbox::snapshot::LoadOpts {
+    microsandbox::snapshot::LoadOpts {
+        group: Some(group.into()),
+        ..Default::default()
+    }
+}
+
+/// A failed batch may leave an empty group/staging directory, but no immutable member
+/// may become visible before every input archive and publication conflict is checked.
+fn assert_no_batch_members(root: &Path) {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        if !path.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            assert_ne!(entry.file_name(), DESCRIPTOR_FILENAME);
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -831,6 +877,478 @@ async fn save_then_load_round_trips_via_plain_tar() {
     let dest = tmp.path().join("imported-plain");
     let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
+}
+
+#[tokio::test]
+async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (source, digest) = make_artifact(tmp.path(), "clean", b"group payload");
+    let snapshot_id = artifact_id(&source);
+    let archive = tmp.path().join("group.msb");
+    let reexport = tmp.path().join("renamed.msb");
+
+    microsandbox::with_backend(backend, async {
+        Snapshot::save(
+            source.to_string_lossy().as_ref(),
+            &archive,
+            microsandbox::snapshot::SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+        let options = microsandbox::snapshot::LoadOpts {
+            group: Some("work".into()),
+            ..Default::default()
+        };
+        let first = Snapshot::load_with_options(&archive, options.clone())
+            .await
+            .unwrap();
+        assert_eq!(first.group(), Some("work"));
+        assert_eq!(first.name(), Some("clean"));
+        assert_eq!(first.path(), home.join("snapshots/work").join(&snapshot_id));
+        assert_eq!(
+            first.head_update().unwrap().reason,
+            microsandbox::snapshot::HeadUpdateReason::Initialized
+        );
+
+        // Reimporting the same identity into the same group is idempotent.
+        let repeated = Snapshot::load_with_options(&archive, options)
+            .await
+            .unwrap();
+        assert_eq!(repeated.path(), first.path());
+        assert_eq!(repeated.id(), snapshot_id);
+        assert_eq!(
+            repeated.head_update().unwrap().reason,
+            microsandbox::snapshot::HeadUpdateReason::Unchanged
+        );
+        assert_eq!(Snapshot::list().await.unwrap().len(), 1);
+        assert_eq!(Snapshot::open("work").await.unwrap().digest(), digest);
+        assert_eq!(
+            Snapshot::open("work:clean").await.unwrap().id().as_str(),
+            snapshot_id
+        );
+        assert_eq!(
+            Snapshot::open(format!("work:{snapshot_id}"))
+                .await
+                .unwrap()
+                .digest(),
+            digest
+        );
+
+        // A default import always gets its own local namespace, even for identical bytes.
+        let fresh = Snapshot::load(&archive, None).await.unwrap();
+        let another = Snapshot::load(&archive, None).await.unwrap();
+        assert_ne!(fresh.group(), another.group());
+        assert_ne!(fresh.group(), Some("work"));
+        assert_eq!(fresh.id(), first.id());
+        assert_eq!(another.id(), first.id());
+        assert_eq!(Snapshot::list().await.unwrap().len(), 3);
+
+        Snapshot::save(
+            "work:clean",
+            &reexport,
+            microsandbox::snapshot::SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+        let renamed = Snapshot::load_with_options(
+            &reexport,
+            microsandbox::snapshot::LoadOpts {
+                group: Some("renamed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed.name(), Some("clean"));
+        assert_eq!(renamed.id(), snapshot_id);
+        assert_eq!(
+            Snapshot::group_head("renamed").await.unwrap().head,
+            snapshot_id
+        );
+
+        // Removing one installed copy does not erase another group's membership or payload.
+        Snapshot::remove(&format!("{}:clean", fresh.group().unwrap()), false)
+            .await
+            .unwrap();
+        assert!(!fresh.path().exists());
+        assert!(first.path().is_dir());
+        assert!(another.path().is_dir());
+        assert!(renamed.path().is_dir());
+        assert_eq!(Snapshot::list().await.unwrap().len(), 3);
+        assert_eq!(Snapshot::open("work:clean").await.unwrap().digest(), digest);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (first, first_digest) = make_artifact(&tmp.path().join("first"), "clean", b"first");
+    let (second, _) = make_artifact(&tmp.path().join("second"), "clean", b"second");
+    let original_id = artifact_id(&first);
+    let competing_id = artifact_id(&second);
+    let archive = tmp.path().join("first.msb");
+    let competing = tmp.path().join("second.msb");
+    microsandbox::with_backend(backend, async {
+        for (source, destination) in [(&first, &archive), (&second, &competing)] {
+            Snapshot::save(
+                source.to_string_lossy().as_ref(),
+                destination,
+                microsandbox::snapshot::SaveOpts::default(),
+            )
+            .await
+            .unwrap();
+        }
+        let options = microsandbox::snapshot::LoadOpts {
+            group: Some("work".into()),
+            ..Default::default()
+        };
+        let installed = Snapshot::load_with_options(&archive, options.clone())
+            .await
+            .unwrap();
+        let error = Snapshot::load_with_options(&competing, options)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("conflicts"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            Snapshot::group_head("work").await.unwrap().head,
+            original_id
+        );
+        assert_eq!(
+            Snapshot::open("work:clean").await.unwrap().digest(),
+            first_digest
+        );
+        assert_eq!(
+            std::fs::read(artifact_payload_path(installed.path())).unwrap(),
+            b"first"
+        );
+        assert!(!home.join("snapshots/work").join(competing_id).exists());
+        assert_eq!(Snapshot::list().await.unwrap().len(), 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn load_many_selects_lineage_tip_independently_of_input_order() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let source = tmp.path().join("source-artifacts");
+    let (first, _) = make_artifact(&source, "cp01", b"first disk");
+    let first_id = artifact_id(&first);
+    let (second, _) =
+        make_artifact_with_parent(&source, "cp02", b"second disk", Some(first_id.clone()));
+    let second_id = artifact_id(&second);
+    let (third, _) =
+        make_artifact_with_parent(&source, "cp03", b"third disk", Some(second_id.clone()));
+    let third_id = artifact_id(&third);
+    microsandbox::with_backend(backend, async {
+        let archives = save_batch_fixtures(tmp.path(), &[first, second, third]).await;
+        for (group, order) in [("reverse", [2, 1, 0]), ("shuffled", [1, 0, 2])] {
+            let input = order.map(|index| archives[index].clone());
+            let handles = Snapshot::load_many(&input, batch_group_options(group))
+                .await
+                .unwrap();
+            let expected_ids = [&first_id, &second_id, &third_id];
+            assert_eq!(handles.len(), input.len());
+            for (handle, index) in handles.iter().zip(order) {
+                assert_eq!(handle.id(), expected_ids[index]);
+                assert_eq!(handle.group(), Some(group));
+            }
+            assert_eq!(Snapshot::group_head(group).await.unwrap().head, third_id);
+            assert_eq!(
+                Snapshot::open(format!("{group}:cp01"))
+                    .await
+                    .unwrap()
+                    .id()
+                    .as_str(),
+                first_id
+            );
+        }
+        // Loading owns the reconstructed artifacts, never a path into an input archive
+        // or the sender's snapshot directory.
+        std::fs::remove_dir_all(&source).unwrap();
+        for archive in archives {
+            std::fs::remove_file(archive).unwrap();
+        }
+        for (group, name, expected) in [
+            ("reverse", "cp01", b"first disk".as_slice()),
+            ("reverse", "cp02", b"second disk".as_slice()),
+            ("shuffled", "cp03", b"third disk".as_slice()),
+        ] {
+            let artifact = Snapshot::open(format!("{group}:{name}")).await.unwrap();
+            assert_eq!(
+                std::fs::read(artifact_payload_path(artifact.path())).unwrap(),
+                expected
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn load_many_duplicate_inputs_return_input_heads_but_install_once() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (source, _) = make_artifact(tmp.path(), "baseline", b"owned bytes");
+    microsandbox::with_backend(backend, async {
+        let archive = save_batch_fixtures(tmp.path(), &[source]).await.remove(0);
+        let copied_archive = tmp.path().join("identical-copy.msb");
+        std::fs::copy(&archive, &copied_archive).unwrap();
+        let handles = Snapshot::load_many(
+            &[archive.clone(), copied_archive, archive],
+            batch_group_options("work"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(handles.len(), 3);
+        assert!(
+            handles
+                .iter()
+                .all(|handle| handle.path() == handles[0].path())
+        );
+        assert_eq!(Snapshot::list().await.unwrap().len(), 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn load_many_sibling_batch_preserves_existing_head_and_leaves_new_group_headless() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (base, _) = make_artifact(tmp.path(), "base", b"base");
+    let base_id = artifact_id(&base);
+    let (left, _) = make_artifact_with_parent(tmp.path(), "left", b"left", Some(base_id.clone()));
+    let left_id = artifact_id(&left);
+    let (right, _) =
+        make_artifact_with_parent(tmp.path(), "right", b"right", Some(base_id.clone()));
+    microsandbox::with_backend(backend, async {
+        let archives = save_batch_fixtures(tmp.path(), &[base, left, right]).await;
+        Snapshot::load_with_options(&archives[0], batch_group_options("existing"))
+            .await
+            .unwrap();
+        let siblings = [archives[2].clone(), archives[1].clone()];
+        Snapshot::load_many(&siblings, batch_group_options("existing"))
+            .await
+            .unwrap();
+        assert_eq!(
+            Snapshot::group_head("existing").await.unwrap().head,
+            base_id
+        );
+        let handles = Snapshot::load_many(&siblings, batch_group_options("fresh"))
+            .await
+            .unwrap();
+        assert_eq!(handles.len(), 2);
+        assert!(handles.iter().all(|handle| handle.head_update().is_none()));
+        assert!(Snapshot::open("fresh").await.is_err());
+        assert_eq!(
+            Snapshot::open("fresh:left").await.unwrap().id().as_str(),
+            left_id
+        );
+        assert_eq!(
+            Snapshot::group_head("fresh:left").await.unwrap().head,
+            left_id
+        );
+        assert_eq!(
+            Snapshot::open("fresh").await.unwrap().id().as_str(),
+            left_id
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn load_many_ambiguous_set_head_rejects_before_publishing_members() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (left, _) = make_artifact(tmp.path(), "left", b"left");
+    let (right, _) = make_artifact(tmp.path(), "right", b"right");
+    microsandbox::with_backend(backend, async {
+        let archives = save_batch_fixtures(tmp.path(), &[left, right]).await;
+        let mut options = batch_group_options("ambiguous");
+        options.set_head = true;
+        assert!(Snapshot::load_many(&archives, options).await.is_err());
+        assert_no_batch_members(&home.join("snapshots/ambiguous"));
+        assert!(Snapshot::list().await.unwrap().is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn load_many_accepts_complete_payload_with_missing_historical_parent() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let missing = format!("snap_{:032x}", 7);
+    let (source, _) =
+        make_artifact_with_parent(tmp.path(), "complete", b"complete payload", Some(missing));
+    let id = artifact_id(&source);
+    microsandbox::with_backend(backend, async {
+        let archives = save_batch_fixtures(tmp.path(), &[source]).await;
+        let handles = Snapshot::load_many(&archives, batch_group_options("work"))
+            .await
+            .unwrap();
+        assert_eq!(handles[0].id(), id);
+        assert_eq!(Snapshot::group_head("work").await.unwrap().head, id);
+        assert_eq!(
+            std::fs::read(artifact_payload_path(handles[0].path())).unwrap(),
+            b"complete payload"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn load_many_conflicting_aliases_rejects_before_any_member_is_published() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (first, _) = make_artifact(&tmp.path().join("one"), "same-name", b"one");
+    let (second, _) = make_artifact(&tmp.path().join("two"), "same-name", b"two");
+    microsandbox::with_backend(backend, async {
+        let archives = save_batch_fixtures(tmp.path(), &[first, second]).await;
+        let error = Snapshot::load_many(&archives, batch_group_options("work"))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("conflict"),
+            "unexpected error: {error}"
+        );
+        assert_no_batch_members(&home.join("snapshots/work"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn load_many_duplicate_ids_with_conflicting_labels_rejects_before_publication() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    // Keep both descriptor bytes and suggested aliases identical. Labels are the only conflict,
+    // and reversing the archive order must not silently choose either local metadata sidecar.
+    let (first, digest) = make_artifact(&tmp.path().join("one"), "same", b"same disk");
+    let (second, _) = make_artifact(&tmp.path().join("two"), "same", b"same disk");
+    std::fs::copy(
+        first.join(DESCRIPTOR_FILENAME),
+        second.join(DESCRIPTOR_FILENAME),
+    )
+    .unwrap();
+    for (artifact, label) in [(&first, "first"), (&second, "second")] {
+        std::fs::write(
+            artifact.join("metadata.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "microsandbox.snapshot-metadata/1",
+                "labels": {"stage": label},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    microsandbox::with_backend(backend, async {
+        for artifact in [&first, &second] {
+            assert_eq!(
+                Snapshot::open(artifact.to_string_lossy().as_ref())
+                    .await
+                    .unwrap()
+                    .digest(),
+                digest
+            );
+        }
+        let archives = save_batch_fixtures(tmp.path(), &[first, second]).await;
+        for (group, order) in [("forward", [0, 1]), ("reverse", [1, 0])] {
+            let inputs = order.map(|index| archives[index].clone());
+            let error = Snapshot::load_many(&inputs, batch_group_options(group))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("conflicting labels"), "{error}");
+            assert_no_batch_members(&home.join("snapshots").join(group));
+        }
+        assert!(Snapshot::list().await.unwrap().is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn load_many_conflicting_ids_rejects_before_any_member_is_published() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (first, _) = make_artifact(tmp.path(), "first", b"one");
+    let (second, _) = make_artifact(tmp.path(), "second", b"two");
+    let mut descriptor =
+        Manifest::from_bytes(&std::fs::read(second.join(DESCRIPTOR_FILENAME)).unwrap()).unwrap();
+    descriptor.snapshot_id = SnapshotId::new(artifact_id(&first)).unwrap();
+    std::fs::write(
+        second.join(DESCRIPTOR_FILENAME),
+        descriptor.to_canonical_bytes().unwrap(),
+    )
+    .unwrap();
+    microsandbox::with_backend(backend, async {
+        let archives = save_batch_fixtures(tmp.path(), &[first, second]).await;
+        assert!(
+            Snapshot::load_many(&archives, batch_group_options("work"))
+                .await
+                .is_err()
+        );
+        assert_no_batch_members(&home.join("snapshots/work"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn load_many_corrupt_later_archive_never_publishes_valid_earlier_member() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (first, _) = make_artifact(tmp.path(), "first", b"one");
+    let (second, _) = make_artifact(tmp.path(), "second", b"two");
+    microsandbox::with_backend(backend, async {
+        let archives = save_batch_fixtures(tmp.path(), &[first, second]).await;
+        corrupt_dense_tar_member(&archives[1], ".raw");
+        let error = Snapshot::load_many(&archives, batch_group_options("work"))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("integrity"),
+            "unexpected error: {error}"
+        );
+        assert_no_batch_members(&home.join("snapshots/work"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn load_many_single_legacy_archive_preserves_single_load_compatibility() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let archive = tmp.path().join("legacy.tar");
+    write_v066_archive(&archive, "sha256-0123456789abcdef", b"legacy disk");
+    microsandbox::with_backend(backend, async {
+        let batch = Snapshot::load_many(&[archive.clone()], batch_group_options("batch"))
+            .await
+            .unwrap();
+        let single = Snapshot::load_with_options(&archive, batch_group_options("single"))
+            .await
+            .unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].id(), single.id());
+        assert_eq!(
+            std::fs::read(artifact_payload_path(batch[0].path())).unwrap(),
+            b"legacy disk"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -1408,7 +1926,7 @@ async fn load_selects_child_head_when_parents_are_present() {
     let (parent_dir, _) = make_artifact(&snapshots_dir, "parent", b"parent");
     let parent_id = artifact_id(&parent_dir);
     let (child_dir, child_digest) =
-        make_artifact_with_parent(&snapshots_dir, "child", b"child", Some(parent_id));
+        make_artifact_with_parent(&snapshots_dir, "child", b"child", Some(parent_id.clone()));
     let child_id = artifact_id(&child_dir);
     let archive = tmp.path().join("chain.tar");
     let dest = tmp.path().join("imported-chain");
@@ -1438,7 +1956,17 @@ async fn load_selects_child_head_when_parents_are_present() {
     .await;
     assert_eq!(handle.digest(), child_digest);
     assert_eq!(handle.id(), child_id);
-    assert_eq!(handle.path(), dest.join(child_id));
+    let imported_group = dest.join(handle.group().expect("load creates a local group"));
+    assert_eq!(handle.path(), imported_group.join(&child_id));
+    assert_eq!(handle.head_update().unwrap().head, child_id);
+    assert_eq!(handle.head_update().unwrap().previous, None);
+    assert!(
+        imported_group
+            .join(parent_id)
+            .join(DESCRIPTOR_FILENAME)
+            .is_file()
+    );
+    assert_eq!(Snapshot::list_dir(&imported_group).await.unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -1531,8 +2059,8 @@ async fn failed_load_with_conflicting_cache_target_does_not_install_cache_entrie
     .await;
 
     assert!(
-        !dest.join("src-cache-conflict").exists(),
-        "failed import promoted staged snapshot"
+        Snapshot::list_dir(&dest).await.unwrap().is_empty(),
+        "failed import promoted a grouped snapshot"
     );
     assert_eq!(
         std::fs::read(&conflicting_metadata).unwrap(),
@@ -1602,7 +2130,7 @@ async fn create_full_resolves_source_before_touching_anything() {
     })
     .await;
 
-    assert!(!home.join("snapshots").join("warm").exists());
+    assert!(!home.join("snapshots").join("box").exists());
 }
 
 #[tokio::test]
@@ -1673,10 +2201,14 @@ async fn replacing_child_in_place_does_not_inflate_parent_child_count() {
             b"child v2 with different size",
             Some(parent_id),
         );
-        Snapshot::open("child").await.unwrap();
+        Snapshot::open(cdir.to_string_lossy().as_ref())
+            .await
+            .unwrap();
 
-        Snapshot::remove("child", false).await.unwrap();
-        Snapshot::remove("parent", false)
+        Snapshot::remove(cdir.to_string_lossy().as_ref(), false)
+            .await
+            .unwrap();
+        Snapshot::remove(pdir.to_string_lossy().as_ref(), false)
             .await
             .expect("parent should be removable once its only child is gone");
     })

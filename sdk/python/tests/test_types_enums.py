@@ -292,12 +292,26 @@ def test_sandbox_create_treats_explicit_none_as_omitted() -> None:
     with pytest.raises(ValueError, match="image= or from_snapshot= is required"):
         Sandbox.create("explicit-none-image", image=None)
 
-    with pytest.raises(FileNotFoundError, match="snapshot artifact not found"):
+    # Selector lookup is async; type/options validation still happens before making the future.
+    with pytest.raises(type(baseline.value)):
         Sandbox.create(
             "explicit-none-image-with-snapshot",
             image=None,
             from_snapshot="definitely-missing-snapshot",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector", ["missing-group", "missing-group:missing-member"])
+async def test_missing_snapshot_selector_is_reported_when_awaited(selector: str) -> None:
+    with pytest.raises(FileNotFoundError):
+        await Sandbox.create("missing-snapshot-source", image=None, from_snapshot=selector)
+
+
+@pytest.mark.asyncio
+async def test_missing_snapshot_pathlike_is_reported_when_awaited(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        await Sandbox.create("missing-snapshot-path", from_snapshot=tmp_path / "missing")
 
 
 def test_inactive_mount_enum_fields_are_still_validated() -> None:

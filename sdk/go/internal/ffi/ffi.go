@@ -122,6 +122,11 @@ typedef char *(*msb_sandbox_close_fn)(uint64_t cancel_id, uint64_t handle, uint8
 typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_resume_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_pause_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_resume_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_kill_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_request_kill_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_list_fn)(uint64_t cancel_id, const char *filter_json, uint8_t *buf, size_t buf_len);
@@ -228,6 +233,9 @@ typedef char *(*msb_snapshot_reindex_fn)(uint64_t cancel_id, const char *dir, ui
 typedef char *(*msb_snapshot_export_fn)(uint64_t cancel_id, const char *name_or_path, const char *out, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_import_fn)(uint64_t cancel_id, const char *archive, const char *dest, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_import_with_base_fn)(uint64_t cancel_id, const char *archive, const char *dest, const char *base, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_import_with_options_fn)(uint64_t cancel_id, const char *archive, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_import_many_fn)(uint64_t cancel_id, const char *archives_json, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_group_head_fn)(uint64_t cancel_id, const char *selector, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_compact_fn)(uint64_t cancel_id, uint64_t handle, const char *name, const char *opts, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_fs_read_stream_fn)(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
@@ -275,6 +283,11 @@ static msb_sandbox_close_fn      ptr_msb_sandbox_close      = NULL;
 static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
 static msb_sandbox_stop_fn       ptr_msb_sandbox_stop       = NULL;
 static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
+static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
+static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
+static msb_sandbox_resume_fn ptr_msb_sandbox_resume = NULL;
+static msb_sandbox_handle_pause_fn ptr_msb_sandbox_handle_pause = NULL;
+static msb_sandbox_handle_resume_fn ptr_msb_sandbox_handle_resume = NULL;
 static msb_sandbox_kill_fn       ptr_msb_sandbox_kill       = NULL;
 static msb_sandbox_request_kill_fn ptr_msb_sandbox_request_kill = NULL;
 static msb_sandbox_list_fn       ptr_msb_sandbox_list       = NULL;
@@ -388,6 +401,9 @@ static msb_snapshot_reindex_fn     ptr_msb_snapshot_reindex     = NULL;
 static msb_snapshot_export_fn      ptr_msb_snapshot_export      = NULL;
 static msb_snapshot_import_fn      ptr_msb_snapshot_import      = NULL;
 static msb_snapshot_import_with_base_fn ptr_msb_snapshot_import_with_base = NULL;
+static msb_snapshot_import_with_options_fn ptr_msb_snapshot_import_with_options = NULL;
+static msb_snapshot_import_many_fn ptr_msb_snapshot_import_many = NULL;
+static msb_snapshot_group_head_fn ptr_msb_snapshot_group_head = NULL;
 static msb_sandbox_compact_fn ptr_msb_sandbox_compact = NULL;
 
 // dlopen handle — set once by load_microsandbox, never closed.
@@ -454,6 +470,11 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_detach);
 	RESOLVE(msb_sandbox_stop);
 	RESOLVE(msb_sandbox_request_stop);
+	RESOLVE(msb_sandbox_pause);
+	RESOLVE(msb_sandbox_branch);
+	RESOLVE(msb_sandbox_resume);
+	RESOLVE(msb_sandbox_handle_pause);
+	RESOLVE(msb_sandbox_handle_resume);
 	RESOLVE(msb_sandbox_kill);
 	RESOLVE(msb_sandbox_request_kill);
 	RESOLVE(msb_sandbox_list);
@@ -567,6 +588,9 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_snapshot_export);
 	RESOLVE(msb_snapshot_import);
 	RESOLVE(msb_snapshot_import_with_base);
+	RESOLVE(msb_snapshot_import_with_options);
+	RESOLVE(msb_snapshot_import_many);
+	RESOLVE(msb_snapshot_group_head);
 	RESOLVE(msb_sandbox_compact);
 	return NULL;
 }
@@ -653,6 +677,21 @@ char *call_msb_sandbox_stop(uint64_t cancel_id, uint64_t handle, uint64_t timeou
 }
 char *call_msb_sandbox_request_stop(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_request_stop ? ptr_msb_sandbox_request_stop(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_pause(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_pause ? ptr_msb_sandbox_pause(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_branch(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_branch ? ptr_msb_sandbox_branch(cancel_id, handle, source, child, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_resume(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_resume ? ptr_msb_sandbox_resume(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_pause(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_pause ? ptr_msb_sandbox_handle_pause(cancel_id, name, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_resume(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_resume ? ptr_msb_sandbox_handle_resume(cancel_id, name, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_kill(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_kill ? ptr_msb_sandbox_kill(cancel_id, handle, timeout_ms, buf, buf_len) : NULL;
@@ -993,6 +1032,15 @@ char *call_msb_snapshot_import(uint64_t cancel_id, const char *archive, const ch
 
 char *call_msb_snapshot_import_with_base(uint64_t cancel_id, const char *archive, const char *dest, const char *base, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_snapshot_import_with_base ? ptr_msb_snapshot_import_with_base(cancel_id, archive, dest, base, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_import_with_options(uint64_t cancel_id, const char *archive, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_import_with_options ? ptr_msb_snapshot_import_with_options(cancel_id, archive, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_import_many(uint64_t cancel_id, const char *archives_json, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_import_many ? ptr_msb_snapshot_import_many(cancel_id, archives_json, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_group_head(uint64_t cancel_id, const char *selector, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_group_head ? ptr_msb_snapshot_group_head(cancel_id, selector, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_compact(uint64_t cancel_id, uint64_t handle, const char *name, const char *opts, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_compact ? ptr_msb_sandbox_compact(cancel_id, handle, name, opts, buf, buf_len) : NULL;
@@ -1604,6 +1652,7 @@ type CreateOptions struct {
 	CPUPlacement         string               `json:"cpu_placement,omitempty"`
 	PlacementProfile     string               `json:"placement_profile,omitempty"`
 	THP                  string               `json:"thp,omitempty"`
+	Forked               bool                 `json:"forked,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
 	SecurityProfile      string               `json:"security_profile,omitempty"`
@@ -2252,6 +2301,32 @@ func RequestStopSandboxByName(ctx context.Context, name string) error {
 	return err
 }
 
+// PauseSandboxByName controls resident execution without an agent connection.
+func PauseSandboxByName(ctx context.Context, name string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_pause(cancelID, cName, buf, bufLen)
+	})
+	return err
+}
+
+// ResumeSandboxByName controls resident execution without an agent connection.
+func ResumeSandboxByName(ctx context.Context, name string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_resume(cancelID, cName, buf, bufLen)
+	})
+	return err
+}
+
 // KillSandboxByName terminates a sandbox identified by name and waits for stopped observation.
 func KillSandboxByName(ctx context.Context, name string, timeoutMs uint64) error {
 	if err := ensureLoaded(); err != nil {
@@ -2460,6 +2535,66 @@ func (s *Sandbox) RequestStop(ctx context.Context) error {
 	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_sandbox_request_stop(cancelID, s.h(), buf, bufLen)
+	})
+	return err
+}
+
+// Branch creates an independent local child through the host runtime.
+func (s *Sandbox) Branch(ctx context.Context, name string) (*Sandbox, error) {
+	return branchSandbox(ctx, uint64(s.h()), s.name, name)
+}
+
+// BranchSandboxByName branches execution without an agent connection to the source.
+func BranchSandboxByName(ctx context.Context, source, name string) (*Sandbox, error) {
+	return branchSandbox(ctx, 0, source, name)
+}
+
+func branchSandbox(ctx context.Context, handle uint64, source, name string) (*Sandbox, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cSource, cName := C.CString(source), C.CString(name)
+	defer C.free(unsafe.Pointer(cSource))
+	defer C.free(unsafe.Pointer(cName))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_branch(cancelID, C.uint64_t(handle), cSource, cName, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Handle      uint64 `json:"handle"`
+		BackendKind string `json:"backend_kind"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		if h := salvageHandle(out); h != 0 {
+			releaseHandle(h)
+		}
+		return nil, fmt.Errorf("parse branch response: %w", err)
+	}
+	s := &Sandbox{name: name, backendKind: resp.BackendKind}
+	s.handle.Store(resp.Handle)
+	return s, nil
+}
+
+// Pause controls resident execution through the host runtime.
+func (s *Sandbox) Pause(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_pause(cancelID, s.h(), buf, bufLen)
+	})
+	return err
+}
+
+// Resume controls resident execution through the host runtime.
+func (s *Sandbox) Resume(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_resume(cancelID, s.h(), buf, bufLen)
 	})
 	return err
 }
@@ -4806,28 +4941,29 @@ func ImageSave(ctx context.Context, references []string, outputPath string, form
 // ---------------------------------------------------------------------------
 
 type SnapshotInfo struct {
-	ID                        string            `json:"id"`
-	Path                      string            `json:"path"`
-	Digest                    string            `json:"digest"`
-	SizeBytes                 *uint64           `json:"size_bytes"`
-	ImageRef                  string            `json:"image_ref"`
-	ImageManifestDigest       string            `json:"image_manifest_digest"`
-	Scope                     string            `json:"scope"`
-	StateKind                 string            `json:"state_kind"`
-	Format                    *string           `json:"format"`
-	Fstype                    *string           `json:"fstype"`
-	UpperFile                 *string           `json:"upper_file"`
-	UpperIntegrityAlgorithm   *string           `json:"upper_integrity_algorithm"`
-	UpperIntegrityDigest      *string           `json:"upper_integrity_digest"`
-	UpperIntegrityRoot        *string           `json:"upper_integrity_root"`
-	UpperIntegrityLogicalSize *uint64           `json:"upper_integrity_logical_size"`
-	UpperIntegrityLeafSize    *uint32           `json:"upper_integrity_leaf_size"`
-	CheckpointID              *string           `json:"checkpoint_id"`
-	CheckpointManifestDigest  *string           `json:"checkpoint_manifest_digest"`
-	Parent                    *string           `json:"parent"`
-	CreatedAt                 string            `json:"created_at"`
-	Labels                    map[string]string `json:"labels"`
-	SourceSandbox             *string           `json:"source_sandbox"`
+	HeadUpdate                *SnapshotHeadUpdate `json:"head_update"`
+	ID                        string              `json:"id"`
+	Path                      string              `json:"path"`
+	Digest                    string              `json:"digest"`
+	SizeBytes                 *uint64             `json:"size_bytes"`
+	ImageRef                  string              `json:"image_ref"`
+	ImageManifestDigest       string              `json:"image_manifest_digest"`
+	Scope                     string              `json:"scope"`
+	StateKind                 string              `json:"state_kind"`
+	Format                    *string             `json:"format"`
+	Fstype                    *string             `json:"fstype"`
+	UpperFile                 *string             `json:"upper_file"`
+	UpperIntegrityAlgorithm   *string             `json:"upper_integrity_algorithm"`
+	UpperIntegrityDigest      *string             `json:"upper_integrity_digest"`
+	UpperIntegrityRoot        *string             `json:"upper_integrity_root"`
+	UpperIntegrityLogicalSize *uint64             `json:"upper_integrity_logical_size"`
+	UpperIntegrityLeafSize    *uint32             `json:"upper_integrity_leaf_size"`
+	CheckpointID              *string             `json:"checkpoint_id"`
+	CheckpointManifestDigest  *string             `json:"checkpoint_manifest_digest"`
+	Parent                    *string             `json:"parent"`
+	CreatedAt                 string              `json:"created_at"`
+	Labels                    map[string]string   `json:"labels"`
+	SourceSandbox             *string             `json:"source_sandbox"`
 }
 
 type SnapshotArchiveInfo struct {
@@ -4837,23 +4973,25 @@ type SnapshotArchiveInfo struct {
 }
 
 type SnapshotHandleInfo struct {
-	ID                       string  `json:"id"`
-	Digest                   string  `json:"digest"`
-	Name                     *string `json:"name"`
-	ParentDigest             *string `json:"parent_digest"`
-	ImageRef                 string  `json:"image_ref"`
-	Scope                    string  `json:"scope"`
-	StateKind                string  `json:"state_kind"`
-	Format                   *string `json:"format"`
-	Fstype                   *string `json:"fstype"`
-	CheckpointManifestDigest *string `json:"checkpoint_manifest_digest"`
-	SizeBytes                *uint64 `json:"size_bytes"`
-	Locality                 string  `json:"locality"`
-	Availability             string  `json:"availability"`
-	MigrationState           string  `json:"migration_state"`
-	MigrationErrorCode       *string `json:"migration_error_code"`
-	CreatedAtUnix            int64   `json:"created_at_unix"`
-	Path                     string  `json:"path"`
+	Group                    *string             `json:"group"`
+	HeadUpdate               *SnapshotHeadUpdate `json:"head_update"`
+	ID                       string              `json:"id"`
+	Digest                   string              `json:"digest"`
+	Name                     *string             `json:"name"`
+	ParentDigest             *string             `json:"parent_digest"`
+	ImageRef                 string              `json:"image_ref"`
+	Scope                    string              `json:"scope"`
+	StateKind                string              `json:"state_kind"`
+	Format                   *string             `json:"format"`
+	Fstype                   *string             `json:"fstype"`
+	CheckpointManifestDigest *string             `json:"checkpoint_manifest_digest"`
+	SizeBytes                *uint64             `json:"size_bytes"`
+	Locality                 string              `json:"locality"`
+	Availability             string              `json:"availability"`
+	MigrationState           string              `json:"migration_state"`
+	MigrationErrorCode       *string             `json:"migration_error_code"`
+	CreatedAtUnix            int64               `json:"created_at_unix"`
+	Path                     string              `json:"path"`
 }
 
 type SnapshotVerifyReport struct {
@@ -4872,6 +5010,7 @@ type SnapshotVerifyReport struct {
 
 type SnapshotCreateOptions struct {
 	Name            string            `json:"name,omitempty"`
+	Group           string            `json:"group,omitempty"`
 	DestDir         string            `json:"dest_dir,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	Force           bool              `json:"force,omitempty"`
@@ -4885,6 +5024,21 @@ type SnapshotSaveOptions struct {
 	WithParents bool    `json:"with_parents,omitempty"`
 	WithImage   bool    `json:"with_image,omitempty"`
 	PlainTar    bool    `json:"plain_tar,omitempty"`
+}
+
+type SnapshotLoadOptions struct {
+	Dest    string `json:"dest,omitempty"`
+	Base    string `json:"base,omitempty"`
+	Group   string `json:"group,omitempty"`
+	SetHead bool   `json:"set_head,omitempty"`
+}
+
+type SnapshotHeadUpdate struct {
+	Group    string  `json:"group"`
+	Previous *string `json:"previous"`
+	Head     string  `json:"head"`
+	Reason   string  `json:"reason"`
+	Changed  bool    `json:"changed"`
 }
 
 func SandboxHandleSnapshot(ctx context.Context, sandboxName, snapshotName string) (*SnapshotInfo, error) {
@@ -5146,4 +5300,79 @@ func SnapshotLoadWithBase(ctx context.Context, archive, dest, base string) (*Sna
 		return nil, err
 	}
 	return &info, nil
+}
+
+func SnapshotLoadWithOptions(ctx context.Context, archive string, opts SnapshotLoadOptions) (*SnapshotHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(opts)
+	if err != nil {
+		return nil, err
+	}
+	cArchive, cOpts := C.CString(archive), C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cArchive))
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_import_with_options(cancelID, cArchive, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info SnapshotHandleInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse snapshot load: %w", err)
+	}
+	return &info, nil
+}
+
+func SnapshotLoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*SnapshotHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	// A nil slice is an empty batch, not JSON null; the core validates empty batches.
+	if archives == nil {
+		archives = []string{}
+	}
+	archivePayload, err := json.Marshal(archives)
+	if err != nil {
+		return nil, err
+	}
+	optsPayload, err := json.Marshal(opts)
+	if err != nil {
+		return nil, err
+	}
+	cArchives, cOpts := C.CString(string(archivePayload)), C.CString(string(optsPayload))
+	defer C.free(unsafe.Pointer(cArchives))
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_import_many(cancelID, cArchives, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var infos []*SnapshotHandleInfo
+	if err := json.Unmarshal([]byte(out), &infos); err != nil {
+		return nil, fmt.Errorf("parse snapshot batch load: %w", err)
+	}
+	return infos, nil
+}
+
+func SnapshotGroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cSelector := C.CString(selector)
+	defer C.free(unsafe.Pointer(cSelector))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_group_head(cancelID, cSelector, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var update SnapshotHeadUpdate
+	if err := json.Unmarshal([]byte(out), &update); err != nil {
+		return nil, fmt.Errorf("parse snapshot group head: %w", err)
+	}
+	return &update, nil
 }

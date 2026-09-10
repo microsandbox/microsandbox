@@ -15,6 +15,21 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
+func TestForkedRestoreOption(t *testing.T) {
+	var config SandboxConfig
+	WithForked()(&config)
+	if !config.Forked {
+		t.Fatal("forked option was lost")
+	}
+	// Restore policy is construction-only, not a property of stopped sandbox disks.
+	if err := json.Unmarshal([]byte(`{"resources":{"cpus":1,"memory_mib":128}}`), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Forked {
+		t.Fatal("forked option leaked into persisted configuration")
+	}
+}
+
 func TestWithRootDiskManaged(t *testing.T) {
 	o := SandboxConfig{}
 	WithRootDisk(RootDisk.Managed(8192))(&o)

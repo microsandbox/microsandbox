@@ -276,6 +276,8 @@ A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecyc
 
 Command execution (`exec`, `execWith`, `execStream`, `execStreamWith`, `shell`, `shellStream`) and foreground attachment (`attach`, `attachWith`, `attachShell`) live on the [Execution](/sdk/typescript/execution) page.
 
+Lifecycle calls do not wait for unrelated guest operations on the same handle to finish. For example, you can pause and resume while an `exec()` promise is pending. Await operations explicitly when their order matters; stopping a sandbox may interrupt pending commands or filesystem requests.
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">config()</span>
 
 ```typescript
@@ -317,6 +319,8 @@ await sandbox.detach(); // keeps running in the background
 </Accordion>
 
 Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox.get()`](#sandbox-get).
+
+After detaching, this handle and its existing `fs()` objects reject new guest operations. Already-started operations retain their connection; await them before detaching if you need their results first.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">fs()</span>
 

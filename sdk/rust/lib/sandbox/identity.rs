@@ -12,6 +12,23 @@
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SandboxId(pub(crate) String);
 
+/// One local runtime generation selected before opening a name-addressed control endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "local")]
+pub(crate) struct SandboxRunIdentity {
+    pub(crate) sandbox_id: i32,
+    pub(crate) run_id: i32,
+    pub(crate) pid: i32,
+}
+
+/// Exact source selected for a direct branch before reserving its child.
+#[derive(Clone, Debug)]
+#[cfg(feature = "local")]
+pub(crate) struct BranchSource {
+    pub(crate) name: String,
+    pub(crate) run: SandboxRunIdentity,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------

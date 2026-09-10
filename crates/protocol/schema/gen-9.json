@@ -76,6 +76,10 @@
     },
     {
       "introduced_in": 9,
+      "wire": "core.workload.transport.credit"
+    },
+    {
+      "introduced_in": 9,
       "wire": "core.root_disk.prepare"
     },
     {

@@ -36,6 +36,7 @@ type SandboxConfig struct {
 	CPUPlacement      CPUPlacement
 	PlacementProfile  string
 	THP               THPPolicy
+	Forked            bool
 	Workdir           string
 	Shell             string
 	SecurityProfile   SecurityProfile
@@ -478,6 +479,12 @@ const (
 
 // THPPolicy selects the guest transparent huge-page policy at boot.
 type THPPolicy string
+
+// WithForked restores a full snapshot with private copy-on-write memory.
+// It cannot be combined with a fresh boot or disk-only restore.
+func WithForked() SandboxOption {
+	return func(o *SandboxConfig) { o.Forked = true }
+}
 
 const (
 	// THPAlways transparently uses huge pages for eligible anonymous mappings.

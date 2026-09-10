@@ -1,16 +1,19 @@
 //! Exec session management: spawning processes with PTY or pipe I/O.
 
+use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::{iter, mem, ptr};
 
 use nix::pty;
 use nix::sys::signal::Signal;
 use tokio::io::AsyncReadExt;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use microsandbox_protocol::bulk::BulkRecord;
@@ -21,6 +24,7 @@ use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
 use crate::process::{ProcessExitWatcher, ProcessIdentity, ProcessManager};
 use crate::rlimit;
+use crate::serial::InputCharge;
 use crate::workload::WorkloadPlacement;
 
 //--------------------------------------------------------------------------------------------------
@@ -145,10 +149,20 @@ pub struct ExecSession {
     process_manager: Arc<ProcessManager>,
 
     /// The PTY master fd (only for PTY mode, used for writing and resize).
-    pty_master: Option<OwnedFd>,
+    pty_master: Option<AsyncFd<OwnedFd>>,
 
     /// The child's stdin (only for pipe mode).
-    stdin: Option<tokio::process::ChildStdin>,
+    stdin: Option<AsyncFd<OwnedFd>>,
+
+    /// Accepted input stays ordered, including EOF, while a pipe or PTY backpressures.
+    pending_stdin: VecDeque<PendingStdin>,
+}
+
+#[derive(Debug)]
+struct PendingStdin {
+    data: Vec<u8>,
+    written: usize,
+    _charge: Option<InputCharge>,
 }
 
 /// Output from a session that the agent loop should forward to the host.
@@ -188,6 +202,16 @@ pub struct SessionOutputEnvelope {
 
 /// Lifecycle commands processed ahead of queued dedicated-lane output.
 pub enum BulkOutputCommand {
+    /// Park after the currently written complete record, retaining all queued source output.
+    Park {
+        /// Cumulative complete dedicated-lane wire bytes at the cut.
+        completion: oneshot::Sender<u64>,
+    },
+    /// Release the parked source or restored output generation after its thaw reply.
+    Resume {
+        /// Resolves once ordinary output is eligible again.
+        completion: oneshot::Sender<()>,
+    },
     /// Discard inherited transfer output before acknowledging restore activation.
     Restore {
         /// New attachment generation; late output from previous generations is discarded.
@@ -432,6 +456,30 @@ impl SessionOutputSender {
         self.generation
     }
 
+    pub(crate) async fn park_bulk_output(&self) -> Result<u64, &'static str> {
+        let Some(commands) = &self.bulk_command_tx else {
+            return Ok(0);
+        };
+        let (completion, completed) = oneshot::channel();
+        commands
+            .send(BulkOutputCommand::Park { completion })
+            .await
+            .map_err(|_| "bulk scheduler closed while parking")?;
+        completed.await.map_err(|_| "bulk output park failed")
+    }
+
+    pub(crate) async fn resume_bulk_output(&self) -> Result<(), &'static str> {
+        let Some(commands) = &self.bulk_command_tx else {
+            return Ok(());
+        };
+        let (completion, completed) = oneshot::channel();
+        commands
+            .send(BulkOutputCommand::Resume { completion })
+            .await
+            .map_err(|_| "bulk scheduler closed while resuming")?;
+        completed.await.map_err(|_| "bulk output resume failed")
+    }
+
     /// Change only the root sender. Existing producers keep their old generation while they
     /// drain inherited pipes, so their output can never complete a new client's correlation.
     pub(crate) async fn restore_generation(&mut self) -> Result<(), &'static str> {
@@ -650,12 +698,141 @@ impl ExecSession {
 
     /// Writes data to the process's stdin (or PTY master).
     pub async fn write_stdin(&self, data: &[u8]) -> AgentdResult<()> {
-        if let Some(ref master) = self.pty_master {
-            blocking_write_fd(master.as_raw_fd(), data).await
-        } else if let Some(ref stdin) = self.stdin {
-            blocking_write_fd(stdin.as_raw_fd(), data).await
+        let mut written = 0;
+        while written < data.len() {
+            let count =
+                std::future::poll_fn(|cx| self.poll_write_stdin(cx, &data[written..])).await?;
+            if count == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+            }
+            written += count;
+        }
+        Ok(())
+    }
+
+    /// Try the common writable-stdin path without a copy, task hop, or readiness registration.
+    pub(crate) fn try_write_stdin(&self, data: &[u8]) -> std::io::Result<usize> {
+        match self.pty_master.as_ref().or(self.stdin.as_ref()) {
+            Some(input) => write_nonblocking_fd(input.as_raw_fd(), data),
+            None => Ok(data.len()),
+        }
+    }
+
+    /// Poll a previously blocked input without preventing the agent from reading lifecycle frames.
+    pub(crate) fn poll_write_stdin(
+        &self,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let Some(input) = self.pty_master.as_ref().or(self.stdin.as_ref()) else {
+            return Poll::Ready(Ok(data.len()));
+        };
+        loop {
+            let mut ready = std::task::ready!(input.poll_write_ready(cx))?;
+            match ready.try_io(|inner| write_nonblocking_fd(inner.as_raw_fd(), data)) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    /// Retain only an already-admitted frame. The caller's aggregate wire credit bounds both
+    /// this allocation and zero-length EOF cardinality across every active and detached session.
+    pub(crate) fn enqueue_stdin(
+        &mut self,
+        data: Vec<u8>,
+        charge: Option<InputCharge>,
+    ) -> std::io::Result<()> {
+        let mut written = 0;
+        if self.pending_stdin.is_empty() {
+            if data.is_empty() {
+                self.close_stdin();
+                return Ok(());
+            }
+            match self.try_write_stdin(&data) {
+                Ok(count) if count == data.len() => return Ok(()),
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(count) => written = count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.pending_stdin.push_back(PendingStdin {
+            data,
+            written,
+            _charge: charge,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn has_pending_stdin(&self) -> bool {
+        !self.pending_stdin.is_empty()
+    }
+
+    /// The restored process no longer has a host-side stdin owner. Drain everything accepted
+    /// before the cut, then close pipe input. A PTY has no separate write half to close safely.
+    pub(crate) fn detach_stdin(&mut self) {
+        if self.stdin.is_none() {
+            return;
+        }
+        if self.pending_stdin.is_empty() {
+            self.close_stdin();
+        } else if !self
+            .pending_stdin
+            .iter()
+            .any(|pending| pending.data.is_empty())
+        {
+            // At most one marker per already-admitted nonempty queue: detachment cannot create
+            // an unbounded stream of uncharged empty messages.
+            self.pending_stdin.push_back(PendingStdin {
+                data: Vec::new(),
+                written: 0,
+                _charge: None,
+            });
+        }
+    }
+
+    /// Consume one bounded turn without losing a partial-write cursor when a lifecycle event
+    /// cancels this poll. Restored detached sessions use the same path for accepted input only.
+    pub(crate) fn poll_pending_stdin(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let mut progressed = false;
+        for _ in 0..16 {
+            let Some(pending) = self.pending_stdin.front() else {
+                break;
+            };
+            if pending.data.is_empty() {
+                self.close_stdin();
+                self.pending_stdin.pop_front();
+                progressed = true;
+                continue;
+            }
+            match self.poll_write_stdin(cx, &pending.data[pending.written..]) {
+                Poll::Ready(Ok(0)) => {
+                    self.pending_stdin.pop_front();
+                    return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+                }
+                Poll::Ready(Ok(count)) => {
+                    let pending = self
+                        .pending_stdin
+                        .front_mut()
+                        .expect("polled pending input");
+                    pending.written += count;
+                    if pending.written == pending.data.len() {
+                        self.pending_stdin.pop_front();
+                    }
+                    progressed = true;
+                }
+                Poll::Ready(Err(error)) => {
+                    self.pending_stdin.pop_front();
+                    return Poll::Ready(Err(error));
+                }
+                Poll::Pending => break,
+            }
+        }
+        if progressed {
+            Poll::Ready(Ok(()))
         } else {
-            Ok(())
+            Poll::Pending
         }
     }
 
@@ -909,6 +1086,10 @@ impl ExecSession {
             return Err(std::io::Error::last_os_error().into());
         }
         let reader_fd = unsafe { OwnedFd::from_raw_fd(reader_fd) };
+        let pty_master = nonblocking_input(pty.master).inspect_err(|_| {
+            let _ = process_manager.signal_process_group(process_identity, Signal::SIGKILL as i32);
+            process_manager.release(process_identity);
+        })?;
 
         // Spawn background reader task.
         tokio::spawn(pty_reader_task(id, reader_fd, exit_watcher, tx));
@@ -916,8 +1097,9 @@ impl ExecSession {
         Ok(Self {
             process_identity,
             process_manager: Arc::clone(process_manager),
-            pty_master: Some(pty.master),
+            pty_master: Some(pty_master),
             stdin: None,
+            pending_stdin: VecDeque::new(),
         })
     }
 
@@ -988,6 +1170,14 @@ impl ExecSession {
             exit_watcher,
         } = spawn_piped_process(cmd, process_manager)?;
         let process_identity = exit_watcher.identity();
+        let stdin = stdin
+            .map(|input| input.into_owned_fd().and_then(nonblocking_input))
+            .transpose()
+            .inspect_err(|_| {
+                let _ =
+                    process_manager.signal_process_group(process_identity, Signal::SIGKILL as i32);
+                process_manager.release(process_identity);
+            })?;
 
         // Spawn background reader task.
         tokio::spawn(pipe_reader_task(id, stdout, stderr, exit_watcher, tx));
@@ -997,6 +1187,7 @@ impl ExecSession {
             process_manager: Arc::clone(process_manager),
             pty_master: None,
             stdin,
+            pending_stdin: VecDeque::new(),
         })
     }
 }
@@ -1449,42 +1640,35 @@ fn agentd_to_io_error(err: AgentdError) -> std::io::Error {
     std::io::Error::other(err.to_string())
 }
 
-/// Writes data to a raw fd using a blocking task, handling short writes.
-async fn blocking_write_fd(fd: RawFd, data: &[u8]) -> AgentdResult<()> {
-    let data = data.to_vec();
-    tokio::task::spawn_blocking(move || {
-        let mut written = 0;
-        while written < data.len() {
-            let ptr = unsafe { data.as_ptr().add(written) as *const libc::c_void };
-            let ret = unsafe { libc::write(fd, ptr, data.len() - written) };
-            if ret < 0 {
-                let err = std::io::Error::last_os_error();
-                let code = err.raw_os_error();
-                if code == Some(libc::EAGAIN) || code == Some(libc::EWOULDBLOCK) {
-                    wait_fd_writable(fd)?;
-                    continue;
-                }
-                if code == Some(libc::EINTR) {
-                    continue;
-                }
-                return Err(AgentdError::Io(err));
-            }
-            if ret == 0 {
-                wait_fd_writable(fd)?;
-                continue;
-            }
-            written += ret as usize;
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| AgentdError::ExecSession(format!("stdin write join error: {e}")))?
+/// Keep one owned descriptor across readiness waits; cancellation cannot leave a blocking task
+/// writing through a borrowed fd after its session has been removed or restored.
+fn nonblocking_input(fd: OwnedFd) -> std::io::Result<AsyncFd<OwnedFd>> {
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    AsyncFd::new(fd)
 }
 
-fn wait_fd_writable(fd: RawFd) -> AgentdResult<()> {
+fn write_nonblocking_fd(fd: RawFd, data: &[u8]) -> std::io::Result<usize> {
+    loop {
+        let written = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
+        if written >= 0 {
+            return Ok(written as usize);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+fn wait_fd_readable(fd: RawFd) -> AgentdResult<()> {
     let mut pollfd = libc::pollfd {
         fd,
-        events: libc::POLLOUT,
+        events: libc::POLLIN,
         revents: 0,
     };
 
@@ -1500,10 +1684,7 @@ fn wait_fd_writable(fd: RawFd) -> AgentdResult<()> {
         if ret == 0 {
             continue;
         }
-        // Any positive return means the fd is actionable: POLLOUT lets the
-        // next write make progress, and POLLHUP/POLLERR/POLLNVAL will cause
-        // the next write to fail with a real errno (typically EPIPE) which
-        // is more meaningful than poll's revents.
+        // Always retry read on HUP/ERR too: a PTY may still contain final output before EIO.
         return Ok(());
     }
 }
@@ -1522,10 +1703,8 @@ async fn pty_reader_task(
         // edge-driven readiness. Fast writers followed by process exit can
         // strand the tail behind a missed wakeup/HUP transition.
         let raw = master_fd.as_raw_fd();
-        let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
-        if flags >= 0 {
-            unsafe { libc::fcntl(raw, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
-        }
+        // The duplicated master shares O_NONBLOCK with stdin. Never clear that flag here:
+        // a blocked write would otherwise strand lifecycle handling on the agent actor.
 
         loop {
             let mut buf = [0u8; 4096];
@@ -1554,6 +1733,11 @@ async fn pty_reader_task(
             let err = std::io::Error::last_os_error();
             match err.raw_os_error() {
                 Some(libc::EINTR) => continue,
+                Some(libc::EAGAIN) => {
+                    if wait_fd_readable(raw).is_err() {
+                        break;
+                    }
+                }
                 Some(libc::EIO) => break,
                 _ => break,
             }

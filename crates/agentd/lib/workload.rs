@@ -1,8 +1,8 @@
 //! Checkpoint-time execution latch for agentd-managed workloads.
 
 use std::fs::{File, OpenOptions};
-use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::io::{self, Read, Seek, SeekFrom};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/microsandbox-workload";
 const FREEZE_TIMEOUT: Duration = Duration::from_secs(5);
-const FREEZE_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const FREEZE_STATE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
+const FREEZE_FAST_RECHECK_INTERVAL: Duration = Duration::from_micros(100);
+const FREEZE_FAST_RECHECK_WINDOW: Duration = Duration::from_millis(1);
 const MAX_ATTEMPT_ID_BYTES: usize = 128;
 
 //--------------------------------------------------------------------------------------------------
@@ -33,6 +35,7 @@ pub(crate) struct WorkloadLatch {
 enum LatchState {
     Running { last_thawed: Option<String> },
     Frozen { attempt_id: String },
+    RecoveryRequired { attempt_id: String },
 }
 
 trait FreezerControl: Send {
@@ -43,6 +46,7 @@ trait FreezerControl: Send {
 struct CgroupFreezer {
     root: PathBuf,
     cgroup_procs: File,
+    cgroup_events: File,
 }
 
 /// A child-owned cgroup placement handle prepared before `fork`.
@@ -116,9 +120,9 @@ impl WorkloadLatch {
             .transpose()
     }
 
-    /// Whether a checkpoint attempt currently holds the workload frozen.
+    /// Whether an attempt blocks new work, including an uncertain freezer transition.
     pub(crate) fn is_frozen(&self) -> bool {
-        matches!(self.state, LatchState::Frozen { .. })
+        !matches!(self.state, LatchState::Running { .. })
     }
 
     /// Freeze every process in the agentd-managed workload cgroup.
@@ -130,19 +134,27 @@ impl WorkloadLatch {
             } if current == attempt_id => return Ok(()),
             LatchState::Frozen {
                 attempt_id: current,
+            }
+            | LatchState::RecoveryRequired {
+                attempt_id: current,
             } => {
                 return Err(WorkloadLatchError::Conflict(format!(
-                    "attempt {current:?} already owns the freeze"
+                    "attempt {current:?} owns the latch; thaw it before another freeze"
                 )));
             }
             LatchState::Running { .. } => {}
         }
 
+        self.freezer()?;
+        // Record ownership before writing: an error may follow a successful cgroup write.
+        // Only a confirmed thaw can release an uncertain transition.
+        self.state = LatchState::RecoveryRequired {
+            attempt_id: attempt_id.to_string(),
+        };
         self.freezer()?.set_frozen(true)?;
-        // Agentd itself remains outside the workload cgroup, so it can flush every mounted
-        // filesystem after user processes stop mutating them and before the host pauses the VM.
-        // `sync(2)` has no error return; completion is the durability boundary exposed by Linux.
-        unsafe { libc::sync() };
+        // This latch stops execution, not guest writeback. Full captures preserve dirty guest
+        // cache pages in RAM alongside the matching device/disk cut; disk-only extraction is
+        // crash-consistent. Host block draining and durable publication remain separate gates.
         self.state = LatchState::Frozen {
             attempt_id: attempt_id.to_string(),
         };
@@ -179,14 +191,21 @@ impl WorkloadLatch {
             }
             LatchState::Frozen {
                 attempt_id: current,
+            }
+            | LatchState::RecoveryRequired {
+                attempt_id: current,
             } if current != attempt_id => {
                 return Err(WorkloadLatchError::Conflict(format!(
                     "attempt {current:?} owns the freeze"
                 )));
             }
-            LatchState::Frozen { .. } => {}
+            LatchState::Frozen { .. } | LatchState::RecoveryRequired { .. } => {}
         }
 
+        // A failed thaw must not leave a state that freeze retries can acknowledge as frozen.
+        self.state = LatchState::RecoveryRequired {
+            attempt_id: attempt_id.to_string(),
+        };
         self.freezer()?.set_frozen(false)?;
         self.state = LatchState::Running {
             last_thawed: Some(attempt_id.to_string()),
@@ -230,27 +249,36 @@ impl CgroupFreezer {
         Ok(Self {
             root: root.to_path_buf(),
             cgroup_procs,
+            cgroup_events: File::open(events)?,
         })
     }
 
     fn wait_for_state(&self, expected: bool) -> io::Result<()> {
-        let deadline = Instant::now() + FREEZE_TIMEOUT;
-        loop {
-            let events = std::fs::read_to_string(self.root.join("cgroup.events"))?;
-            if parse_frozen_event(&events) == Some(expected) {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "cgroup did not report frozen={} within {FREEZE_TIMEOUT:?}",
-                        expected as u8
-                    ),
-                ));
-            }
-            std::thread::sleep(FREEZE_POLL_INTERVAL);
-        }
+        let mut events = &self.cgroup_events;
+        let fd = events.as_raw_fd();
+        let mut contents = String::with_capacity(128);
+        // cgroup.events sends POLLPRI/POLLERR when frozen changes. Read on the same open
+        // descriptor before each wait: an early completion is observed immediately, and a
+        // change between read and poll remains pending on this descriptor's kernfs counter.
+        // cgroup_file_notify rate-limits notifications, however, so bounded poll timeouts
+        // also recheck authoritative state instead of waiting for a delayed notification.
+        wait_for_frozen_event(
+            expected,
+            Instant::now() + FREEZE_TIMEOUT,
+            || {
+                events.seek(SeekFrom::Start(0))?;
+                contents.clear();
+                events.read_to_string(&mut contents)?;
+                parse_frozen_event(&contents).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "cgroup.events omitted frozen state",
+                    )
+                })
+            },
+            |remaining| wait_for_cgroup_event(fd, remaining),
+            Instant::now,
+        )
     }
 }
 
@@ -308,6 +336,94 @@ impl FreezerControl for CgroupFreezer {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn wait_for_frozen_event(
+    expected: bool,
+    deadline: Instant,
+    mut read_state: impl FnMut() -> io::Result<bool>,
+    mut wait: impl FnMut(Duration) -> io::Result<()>,
+    mut now: impl FnMut() -> Instant,
+) -> io::Result<()> {
+    let fast_until = now() + FREEZE_FAST_RECHECK_WINDOW;
+    loop {
+        let interrupted = match read_state() {
+            Ok(state) if state == expected => return Ok(()),
+            Ok(_) => false,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => true,
+            Err(error) => return Err(error),
+        };
+        let observed_at = now();
+        let remaining = deadline.saturating_duration_since(observed_at);
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "cgroup did not report frozen={} within {FREEZE_TIMEOUT:?}",
+                    expected as u8
+                ),
+            ));
+        }
+        if interrupted {
+            continue;
+        }
+        // Cgroup notifications can be delayed even after frozen=1. Brief sleeping rechecks
+        // avoid a whole millisecond of observation lag without spinning for the deadline.
+        let interval = if observed_at < fast_until {
+            FREEZE_FAST_RECHECK_INTERVAL
+        } else {
+            FREEZE_STATE_RECHECK_INTERVAL
+        };
+        match wait(remaining.min(interval)) {
+            Ok(()) => {}
+            // Recheck state and the original deadline after interruptions or spurious events.
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn wait_for_cgroup_event(fd: RawFd, remaining: Duration) -> io::Result<()> {
+    let mut event = libc::pollfd {
+        fd,
+        events: libc::POLLPRI | libc::POLLERR,
+        revents: 0,
+    };
+    // Linux guests use ppoll so sub-millisecond waits are not rounded back up to 1 ms.
+    // Non-Linux builds only exercise the portable unit-test fallback, never a guest freezer.
+    #[cfg(target_os = "linux")]
+    let result = {
+        let timeout = libc::timespec {
+            // Infer the platform's field type: naming libc::time_t is deprecated on musl.
+            tv_sec: remaining.as_secs().try_into().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "cgroup wait duration is too large",
+                )
+            })?,
+            tv_nsec: remaining.subsec_nanos().into(),
+        };
+        unsafe { libc::ppoll(&mut event, 1, &timeout, std::ptr::null()) }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let result = {
+        let timeout = remaining
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u128) as i32;
+        unsafe { libc::poll(&mut event, 1, timeout) }
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if event.revents & (libc::POLLNVAL | libc::POLLHUP) != 0 {
+        return Err(io::Error::other(
+            "cgroup.events descriptor became unavailable",
+        ));
+    }
+    // POLLERR accompanies normal kernfs notifications; it is not by itself an I/O failure.
+    // Timeout and other wakeups both lead to a fresh state read and deadline check.
+    Ok(())
+}
+
 fn validate_attempt_id(attempt_id: &str) -> Result<(), WorkloadLatchError> {
     if attempt_id.is_empty()
         || attempt_id.len() > MAX_ATTEMPT_ID_BYTES
@@ -340,12 +456,285 @@ fn parse_frozen_event(events: &str) -> Option<bool> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::cell::Cell;
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
     use super::*;
 
+    #[test]
+    fn completed_freezer_transition_does_not_wait() {
+        let start = Instant::now();
+        wait_for_frozen_event(
+            true,
+            start + FREEZE_TIMEOUT,
+            || Ok(true),
+            |_| panic!("already frozen"),
+            || start,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn freezer_transition_between_read_and_wait_is_not_lost() {
+        let start = Instant::now();
+        let frozen = Cell::new(false);
+        let waits = Cell::new(0);
+        wait_for_frozen_event(
+            true,
+            start + FREEZE_TIMEOUT,
+            || Ok(frozen.get()),
+            |_| {
+                // Model a pending kernfs notification from a transition after the state read.
+                frozen.set(true);
+                waits.set(waits.get() + 1);
+                Ok(())
+            },
+            || start,
+        )
+        .unwrap();
+        assert_eq!(waits.get(), 1);
+    }
+
+    #[test]
+    fn freezer_spurious_notifications_and_eintr_recheck_state() {
+        let start = Instant::now();
+        let waits = Cell::new(0);
+        wait_for_frozen_event(
+            false,
+            start + FREEZE_TIMEOUT,
+            || Ok(waits.get() < 3),
+            |_| {
+                waits.set(waits.get() + 1);
+                if waits.get() == 2 {
+                    Err(io::ErrorKind::Interrupted.into())
+                } else {
+                    Ok(())
+                }
+            },
+            || start,
+        )
+        .unwrap();
+        assert_eq!(waits.get(), 3);
+    }
+
+    #[test]
+    fn freezer_delayed_notification_does_not_delay_the_authoritative_state_read() {
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let frozen = Cell::new(false);
+        let waits = Cell::new(0);
+        wait_for_frozen_event(
+            true,
+            start + FREEZE_TIMEOUT,
+            || Ok(frozen.get()),
+            |remaining| {
+                assert_eq!(remaining, FREEZE_FAST_RECHECK_INTERVAL);
+                // The state is ready but cgroup_file_notify defers its notification by
+                // roughly 10 ms. A bounded timeout observes readiness without that event.
+                frozen.set(true);
+                elapsed.set(elapsed.get() + remaining);
+                waits.set(waits.get() + 1);
+                Ok(())
+            },
+            || start + elapsed.get(),
+        )
+        .unwrap();
+        assert_eq!(waits.get(), 1);
+        assert_eq!(elapsed.get(), FREEZE_FAST_RECHECK_INTERVAL);
+    }
+
+    #[test]
+    fn freezer_interruptions_do_not_extend_original_deadline() {
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let error = wait_for_frozen_event(
+            true,
+            start + Duration::from_millis(3),
+            || Ok(false),
+            |remaining| {
+                assert_eq!(
+                    remaining,
+                    (Duration::from_millis(3) - elapsed.get()).min(
+                        if elapsed.get() < FREEZE_FAST_RECHECK_WINDOW {
+                            FREEZE_FAST_RECHECK_INTERVAL
+                        } else {
+                            FREEZE_STATE_RECHECK_INTERVAL
+                        }
+                    )
+                );
+                elapsed.set(elapsed.get() + Duration::from_millis(1));
+                Err(io::ErrorKind::Interrupted.into())
+            },
+            || start + elapsed.get(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(elapsed.get(), Duration::from_millis(3));
+    }
+
+    #[test]
+    fn freezer_fast_rechecks_back_off_and_respect_short_final_wait() {
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let waits = Cell::new(0);
+        let timeout = Duration::from_micros(2_050);
+        let error = wait_for_frozen_event(
+            true,
+            start + timeout,
+            || Ok(false),
+            |duration| {
+                let expected = if elapsed.get() < FREEZE_FAST_RECHECK_WINDOW {
+                    FREEZE_FAST_RECHECK_INTERVAL
+                } else {
+                    FREEZE_STATE_RECHECK_INTERVAL
+                };
+                assert_eq!(duration, expected.min(timeout - elapsed.get()));
+                elapsed.set(elapsed.get() + duration);
+                waits.set(waits.get() + 1);
+                Ok(())
+            },
+            || start + elapsed.get(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(waits.get(), 12);
+        assert_eq!(elapsed.get(), timeout);
+    }
+
+    #[test]
+    fn freezer_read_interruptions_retry_with_a_bounded_deadline() {
+        let start = Instant::now();
+        let reads = Cell::new(0);
+        let error = wait_for_frozen_event(
+            true,
+            start + Duration::from_millis(3),
+            || {
+                reads.set(reads.get() + 1);
+                Err(io::ErrorKind::Interrupted.into())
+            },
+            |_| panic!("an interrupted read must be retried before waiting"),
+            || start + Duration::from_millis(reads.get()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn freezer_read_and_notification_errors_are_not_success() {
+        let start = Instant::now();
+        let error = wait_for_frozen_event(
+            true,
+            start + FREEZE_TIMEOUT,
+            || Err(io::ErrorKind::InvalidData.into()),
+            |_| unreachable!(),
+            || start,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let error = wait_for_frozen_event(
+            true,
+            start + FREEZE_TIMEOUT,
+            || Ok(false),
+            |_| Err(io::ErrorKind::BrokenPipe.into()),
+            || start,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn freezer_reads_final_state_before_reporting_timeout() {
+        let start = Instant::now();
+        let completed = Cell::new(false);
+        wait_for_frozen_event(
+            true,
+            start + FREEZE_TIMEOUT,
+            || Ok(completed.get()),
+            |_| {
+                completed.set(true);
+                Ok(())
+            },
+            || {
+                if completed.get() {
+                    start + FREEZE_TIMEOUT
+                } else {
+                    start
+                }
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn invalid_cgroup_poll_descriptor_is_an_error() {
+        assert!(wait_for_cgroup_event(i32::MAX, Duration::from_millis(1)).is_err());
+    }
+
     struct FakeFreezer {
         states: Arc<Mutex<Vec<bool>>>,
+    }
+
+    struct FailingFreezer {
+        outcomes: Mutex<VecDeque<bool>>,
+    }
+
+    impl FreezerControl for FailingFreezer {
+        fn placement(&self) -> io::Result<WorkloadPlacement> {
+            unreachable!()
+        }
+
+        fn set_frozen(&self, _frozen: bool) -> io::Result<()> {
+            // Model either a failed write or a write that succeeded before acknowledgement failed.
+            if self.outcomes.lock().unwrap().pop_front().unwrap() {
+                Ok(())
+            } else {
+                Err(io::Error::other("injected freezer transition failure"))
+            }
+        }
+    }
+
+    #[test]
+    fn failed_freeze_retains_ownership_until_confirmed_thaw() {
+        let mut latch = WorkloadLatch::with_freezer(Box::new(FailingFreezer {
+            outcomes: Mutex::new(VecDeque::from([false, false, true])),
+        }));
+        assert!(latch.freeze("a").is_err());
+        assert!(latch.is_frozen());
+        assert!(latch.freeze("a").is_err());
+        assert!(latch.freeze("b").is_err());
+        assert!(latch.thaw("b").is_err());
+        assert!(latch.thaw("a").is_err());
+        assert!(latch.is_frozen());
+        latch.thaw("a").unwrap();
+        assert!(!latch.is_frozen());
+        latch.thaw("a").unwrap();
+    }
+
+    #[test]
+    fn failed_thaw_never_acknowledges_a_freeze_retry() {
+        let mut latch = WorkloadLatch::with_freezer(Box::new(FailingFreezer {
+            outcomes: Mutex::new(VecDeque::from([true, false, true])),
+        }));
+        latch.freeze("a").unwrap();
+        assert!(latch.thaw("a").is_err());
+        assert!(latch.is_frozen());
+        assert!(latch.freeze("a").is_err());
+        latch.thaw("a").unwrap();
+        assert!(!latch.is_frozen());
+    }
+
+    #[test]
+    fn known_unavailable_never_takes_ownership() {
+        let mut latch = WorkloadLatch::unavailable("no cgroup freezer");
+        for attempt in ["a", "b"] {
+            assert!(matches!(
+                latch.freeze(attempt),
+                Err(WorkloadLatchError::Unavailable(_))
+            ));
+            assert!(!latch.is_frozen());
+        }
     }
 
     impl FreezerControl for FakeFreezer {

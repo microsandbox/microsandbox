@@ -8,7 +8,9 @@ use std::time::Instant;
 use microsandbox_image::checkpoint::{
     CheckpointClosure, MemoryExtentContent, ObjectId, ResourceDescriptor, ResourceTreatment,
 };
-use microsandbox_protocol::core::Ready;
+use microsandbox_protocol::core::{
+    Ready, WORKLOAD_TRANSPORT_BARRIER_VERSION, WorkloadTransportCredit, WorkloadTransportPosition,
+};
 use microsandbox_protocol::message::{MessageType, PROTOCOL_VERSION};
 
 use super::coordinator::TYPE_FS;
@@ -30,7 +32,8 @@ const MAX_MEMORY_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) struct PreparedCheckpointRestore {
     execution: msb_krun::ExecutionState,
     devices: Vec<PreparedDeviceRestore>,
-    memory: CheckpointMemoryRestore,
+    memory: Option<CheckpointMemoryRestore>,
+    local_memory: Option<msb_krun::PrivateMemoryBacking>,
     agent: RestoredAgentState,
 }
 
@@ -42,6 +45,12 @@ pub(crate) struct RestoredAgentState {
     pub(crate) ready: Ready,
     /// Checkpoint attempt that owns the captured workload freeze.
     pub(crate) attempt_id: String,
+    /// Complete host input admitted before the captured freeze acknowledgement.
+    pub(crate) host_input: WorkloadTransportPosition,
+    /// Absolute guest grants, including debt retained by inherited stdin.
+    pub(crate) input_credit: WorkloadTransportCredit,
+    /// Complete dedicated guest bulk output observed before capture.
+    pub(crate) guest_bulk_bytes_target: u64,
 }
 
 enum PreparedDeviceRestore {
@@ -61,6 +70,57 @@ struct CheckpointMemoryRestore {
 //--------------------------------------------------------------------------------------------------
 
 impl PreparedCheckpointRestore {
+    /// Borrow disk admission while the prepared durable restore owns its validated closure.
+    pub(crate) fn disk_closure(&self) -> Option<&CheckpointClosure> {
+        self.memory.as_ref().map(|memory| &memory.closure)
+    }
+
+    /// Decode a local handoff and pin its RAM before constructing any guest mappings.
+    pub(crate) fn open_local(root: PathBuf, expected_id: &str) -> Result<Self, String> {
+        let state = super::LocalBranchState::open(&root).map_err(|e| e.to_string())?;
+        if state.id != expected_id {
+            return Err("local branch identity differs".into());
+        }
+        let read = |id: &ObjectId, limit| {
+            super::LocalBranchState::read_object(&root, id, limit).map_err(|e| e.to_string())
+        };
+        let execution = msb_krun::ExecutionState::decode(&read(
+            &state.execution_state,
+            MAX_EXECUTION_STATE_BYTES,
+        )?)
+        .map_err(|e| e.to_string())?;
+        if execution.pause_generation() != state.pause_generation {
+            return Err("branch execution epoch differs".into());
+        }
+        let devices = decode_devices(&state.devices, state.pause_generation, read)?;
+        let resource = state
+            .resources
+            .iter()
+            .find(|r| r.id == "guest:agentd")
+            .ok_or("branch has no captured agent identity")?;
+        let agent = parse_restored_agent_resource(resource, &state.id)?;
+        let file = state.memory.pin().map_err(|e| e.to_string())?;
+        let regions = state
+            .memory
+            .regions
+            .into_iter()
+            .map(|region| msb_krun::PrivateMemoryRegion {
+                guest_address: region.guest_address,
+                length: region.length,
+                file_offset: region.file_offset,
+            })
+            .collect();
+        let backing =
+            msb_krun::PrivateMemoryBacking::new(file, regions).map_err(|e| e.to_string())?;
+        Ok(Self {
+            execution,
+            devices,
+            memory: None,
+            local_memory: Some(backing),
+            agent,
+        })
+    }
+
     /// Resolve and decode every construction-time state envelope before building the VM.
     pub(crate) fn open(root: PathBuf, expected_root: &str) -> Result<Self, String> {
         let total_started = Instant::now();
@@ -89,50 +149,11 @@ impl PreparedCheckpointRestore {
         let execution_us = execution_started.elapsed().as_micros();
 
         let devices_started = Instant::now();
-        let mut devices = Vec::with_capacity(closure.checkpoint().devices.len());
-        for device in &closure.checkpoint().devices {
-            let max_state_bytes = if device.device_type == TYPE_FS {
-                MAX_FS_DEVICE_STATE_BYTES
-            } else {
-                MAX_DEVICE_STATE_BYTES
-            };
-            let bytes = closure
-                .read_object(&device.state, max_state_bytes)
-                .map_err(|error| format!("read checkpoint device {}: {error}", device.device_id))?;
-            if device.device_type == 2 {
-                let state = msb_krun::BlockDeviceState::decode(&bytes).map_err(|error| {
-                    format!(
-                        "decode checkpoint block device {}: {error}",
-                        device.device_id
-                    )
-                })?;
-                if state.pause_generation != pause_generation {
-                    return Err(format!(
-                        "block device {} does not belong to the checkpoint epoch",
-                        device.device_id
-                    ));
-                }
-                devices.push(PreparedDeviceRestore::Block {
-                    device_id: device.device_id.clone(),
-                    state,
-                });
-            } else {
-                let state = msb_krun::VirtioDeviceState::decode(&bytes).map_err(|error| {
-                    format!(
-                        "decode checkpoint virtio device {}: {error}",
-                        device.device_id
-                    )
-                })?;
-                if state.pause_generation != pause_generation || state.device_id != device.device_id
-                {
-                    return Err(format!(
-                        "virtio device {} does not belong to the checkpoint binding/epoch",
-                        device.device_id
-                    ));
-                }
-                devices.push(PreparedDeviceRestore::Virtio(state));
-            }
-        }
+        let devices = decode_devices(
+            &closure.checkpoint().devices,
+            pause_generation,
+            |id, limit| closure.read_object(id, limit).map_err(|e| e.to_string()),
+        )?;
         let devices_us = devices_started.elapsed().as_micros();
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
@@ -151,15 +172,59 @@ impl PreparedCheckpointRestore {
         Ok(Self {
             execution,
             devices,
-            memory: CheckpointMemoryRestore { closure },
+            memory: Some(CheckpointMemoryRestore { closure }),
+            local_memory: None,
             agent,
         })
     }
 
     /// Install all restore sources and leave the VM at an explicit activation gate.
-    pub(crate) fn install(self, vm: &mut msb_krun::Vm) -> RestoredAgentState {
+    pub(crate) fn install(
+        self,
+        vm: &mut msb_krun::Vm,
+        cache_root: Option<PathBuf>,
+    ) -> Result<RestoredAgentState, String> {
         vm.set_execution_restore(self.execution);
-        vm.set_memory_restore(self.memory);
+        if let Some(backing) = self.local_memory {
+            vm.set_private_memory_backing(backing);
+        } else if let Some(root) = cache_root {
+            let closure = &self
+                .memory
+                .as_ref()
+                .expect("durable restore memory")
+                .closure;
+            let cache = super::MemoryCache::open(root).map_err(|e| e.to_string())?;
+            let cached = cache
+                .materialize_parallel(
+                    closure.memory(),
+                    &closure.checkpoint().memory,
+                    |id, bytes| {
+                        closure
+                            .read_object_into(id, MAX_MEMORY_OBJECT_BYTES, bytes)
+                            .map_err(io::Error::other)
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            tracing::info!(
+                cache_hit = cached.cache_hit,
+                prepare_us = cached.prepare_us,
+                "prepared private memory backing"
+            );
+            let regions = cached
+                .regions
+                .into_iter()
+                .map(|region| msb_krun::PrivateMemoryRegion {
+                    guest_address: region.guest_address,
+                    length: region.length,
+                    file_offset: region.file_offset,
+                })
+                .collect();
+            let backing = msb_krun::PrivateMemoryBacking::new(cached.file, regions)
+                .map_err(|e| e.to_string())?;
+            vm.set_private_memory_backing(backing);
+        } else {
+            vm.set_memory_restore(self.memory.expect("durable restore memory"));
+        }
         for device in self.devices {
             match device {
                 PreparedDeviceRestore::Block { device_id, state } => {
@@ -169,7 +234,7 @@ impl PreparedCheckpointRestore {
             }
         }
         vm.set_start_paused(true);
-        self.agent
+        Ok(self.agent)
     }
 }
 
@@ -182,9 +247,7 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
         let total_started = Instant::now();
         let mut zero_write_us = 0u128;
         let mut zero_bytes = 0u64;
-        let mut object_read_us = 0u128;
         let mut guest_write_us = 0u128;
-        let mut object_bytes = 0u64;
         let mut guest_object_bytes = 0u64;
         let mut object_extent_count = 0usize;
         let mut objects: BTreeMap<ObjectId, Vec<(msb_krun::GuestMemoryRange, u64)>> =
@@ -209,53 +272,58 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
             }
         }
 
-        // Read and identity-check each packed object exactly once, write all of its referenced
-        // guest ranges, then release the small object buffer. This fuses integrity with the
-        // unavoidable restore pass without retaining a RAM-sized cache.
+        // Read and identity-check each packed object exactly once with bounded read-ahead.
+        // Guest ranges are disjoint and only this construction thread writes them; workers
+        // never obtain guest-memory access or permit activation before verification completes.
         let object_count = objects.len();
-        for (id, extents) in objects {
-            let read_started = Instant::now();
-            let bytes = self
-                .closure
-                .read_object(&id, MAX_MEMORY_OBJECT_BYTES)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-            object_read_us += read_started.elapsed().as_micros();
-            object_bytes = object_bytes.saturating_add(bytes.len() as u64);
-            for (range, offset) in extents {
-                let start = usize::try_from(offset).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "memory object offset is too large",
-                    )
-                })?;
-                let length = usize::try_from(range.length()).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "memory extent is too large")
-                })?;
-                let end = start.checked_add(length).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "memory object slice overflows")
-                })?;
-                let slice = bytes.get(start..end).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "memory object slice exceeds verified bytes",
-                    )
-                })?;
-                let write_started = Instant::now();
-                target.write_bytes(range, slice)?;
-                guest_write_us += write_started.elapsed().as_micros();
-                guest_object_bytes = guest_object_bytes.saturating_add(range.length());
-            }
-        }
+        let pipeline = super::object_pipeline::consume_verified_objects(
+            objects,
+            |id, bytes| {
+                self.closure
+                    .read_object_into(id, MAX_MEMORY_OBJECT_BYTES, bytes)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+            },
+            |extents, bytes| {
+                for (range, offset) in extents {
+                    let start = usize::try_from(offset).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "memory object offset is too large",
+                        )
+                    })?;
+                    let length = usize::try_from(range.length()).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "memory extent is too large")
+                    })?;
+                    let end = start.checked_add(length).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "memory object slice overflows")
+                    })?;
+                    let slice = bytes.get(start..end).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "memory object slice exceeds verified bytes",
+                        )
+                    })?;
+                    let write_started = Instant::now();
+                    target.write_bytes(range, slice)?;
+                    guest_write_us += write_started.elapsed().as_micros();
+                    guest_object_bytes = guest_object_bytes.saturating_add(range.length());
+                }
+                Ok(())
+            },
+        )?;
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
             operation = "restore_memory",
             total_us = total_started.elapsed().as_micros(),
-            object_read_us,
+            object_read_us = pipeline.read_us + pipeline.hash_us,
+            object_io_worker_us = pipeline.read_us,
+            object_hash_worker_us = pipeline.hash_us,
+            object_pipeline_us = pipeline.elapsed_us,
             guest_write_us,
             zero_write_us,
             object_count,
             object_extent_count,
-            object_bytes,
+            object_bytes = pipeline.object_bytes,
             guest_object_bytes,
             zero_bytes,
             "checkpoint memory restore timing"
@@ -267,6 +335,56 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn decode_devices(
+    references: &[microsandbox_image::checkpoint::DeviceStateRef],
+    pause_generation: u64,
+    mut read: impl FnMut(&ObjectId, u64) -> Result<Vec<u8>, String>,
+) -> Result<Vec<PreparedDeviceRestore>, String> {
+    let mut devices = Vec::with_capacity(references.len());
+    for device in references {
+        let max_state_bytes = if device.device_type == TYPE_FS {
+            MAX_FS_DEVICE_STATE_BYTES
+        } else {
+            MAX_DEVICE_STATE_BYTES
+        };
+        let bytes = read(&device.state, max_state_bytes)
+            .map_err(|error| format!("read checkpoint device {}: {error}", device.device_id))?;
+        if device.device_type == 2 {
+            let state = msb_krun::BlockDeviceState::decode(&bytes).map_err(|error| {
+                format!(
+                    "decode checkpoint block device {}: {error}",
+                    device.device_id
+                )
+            })?;
+            if state.pause_generation != pause_generation {
+                return Err(format!(
+                    "block device {} does not belong to the checkpoint epoch",
+                    device.device_id
+                ));
+            }
+            devices.push(PreparedDeviceRestore::Block {
+                device_id: device.device_id.clone(),
+                state,
+            });
+        } else {
+            let state = msb_krun::VirtioDeviceState::decode(&bytes).map_err(|error| {
+                format!(
+                    "decode checkpoint virtio device {}: {error}",
+                    device.device_id
+                )
+            })?;
+            if state.pause_generation != pause_generation || state.device_id != device.device_id {
+                return Err(format!(
+                    "virtio device {} does not belong to the checkpoint binding/epoch",
+                    device.device_id
+                ));
+            }
+            devices.push(PreparedDeviceRestore::Virtio(state));
+        }
+    }
+    Ok(devices)
+}
 
 fn parse_restored_agent(closure: &CheckpointClosure) -> Result<RestoredAgentState, String> {
     let resource = closure
@@ -304,11 +422,41 @@ fn parse_restored_agent_resource(
         ));
     }
 
+    let ready: Ready = serde_json::from_str(value("ready")?)
+        .map_err(|error| format!("checkpoint guest readiness is invalid: {error}"))?;
+    if ready.workload_transport_barrier_version != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) {
+        return Err("checkpoint guest has an unsupported development transport-credit contract; recreate the full snapshot with a matching build".into());
+    }
+    let host_input: WorkloadTransportPosition =
+        serde_json::from_str(value("transport_host_input")?)
+            .map_err(|error| format!("checkpoint host input position is invalid: {error}"))?;
+    let input_credit: WorkloadTransportCredit =
+        serde_json::from_str(value("transport_input_credit")?)
+            .map_err(|error| format!("checkpoint input credit is invalid: {error}"))?;
+    if host_input.control_bytes > input_credit.control_bytes
+        || host_input.control_frames > input_credit.control_frames
+        || host_input.bulk_bytes > input_credit.bulk_bytes
+        || host_input.bulk_frames > input_credit.bulk_frames
+    {
+        return Err("checkpoint transport input exceeds captured credit".into());
+    }
+    let guest_bulk_bytes_target = value("transport_guest_bulk_bytes")?
+        .parse::<u64>()
+        .map_err(|error| format!("checkpoint guest bulk position is invalid: {error}"))?;
+    if ready.bulk_transport.is_none() && guest_bulk_bytes_target != 0 {
+        return Err("combined checkpoint has a dedicated guest bulk counter".into());
+    }
     Ok(RestoredAgentState {
         protocol_generation,
-        ready: serde_json::from_str(value("ready")?)
-            .map_err(|error| format!("checkpoint guest readiness is invalid: {error}"))?,
-        attempt_id: checkpoint_id.into(),
+        ready,
+        host_input,
+        input_credit,
+        guest_bulk_bytes_target,
+        attempt_id: resource
+            .binding
+            .get("attempt_id")
+            .cloned()
+            .unwrap_or_else(|| checkpoint_id.into()),
     })
 }
 
@@ -335,12 +483,24 @@ mod tests {
                 ("init_time_ns".into(), "20".into()),
                 ("ready_time_ns".into(), "30".into()),
                 (
+                    "transport_host_input".into(),
+                    serde_json::to_string(&WorkloadTransportPosition::default()).unwrap(),
+                ),
+                (
+                    "transport_input_credit".into(),
+                    serde_json::to_string(&WorkloadTransportCredit::default()).unwrap(),
+                ),
+                ("transport_guest_bulk_bytes".into(), "0".into()),
+                (
                     "ready".into(),
                     serde_json::to_string(&Ready {
                         agent_version: "0.6.16-test".into(),
                         boot_time_ns: 10,
                         init_time_ns: 20,
                         ready_time_ns: 30,
+                        workload_transport_barrier_version: Some(
+                            WORKLOAD_TRANSPORT_BARRIER_VERSION,
+                        ),
                         ..Default::default()
                     })
                     .unwrap(),
@@ -373,6 +533,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_development_snapshot_with_stdin_charged_to_control() {
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        let mut ready: Ready = serde_json::from_str(&resource.binding["ready"]).unwrap();
+        ready.workload_transport_barrier_version = Some(1);
+        resource
+            .binding
+            .insert("ready".into(), serde_json::to_string(&ready).unwrap());
+        let error = parse_restored_agent_resource(&resource, "old-development-cut")
+            .err()
+            .unwrap();
+        assert!(error.contains("unsupported development transport-credit contract"));
+    }
+
+    #[test]
     fn rejects_reconstructed_agent_resource() {
         let mut resource = agent_resource(PROTOCOL_VERSION);
         resource.treatment = ResourceTreatment::Reconnect;
@@ -382,5 +556,75 @@ mod tests {
             .unwrap();
 
         assert!(error.contains("incompatible resource treatment"));
+    }
+
+    #[test]
+    fn rejects_development_capture_without_proven_transport_position() {
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        resource.binding.remove("transport_host_input");
+        assert!(
+            parse_restored_agent_resource(&resource, "attempt")
+                .err()
+                .unwrap()
+                .contains("transport_host_input")
+        );
+    }
+
+    #[test]
+    fn rejects_transport_debt_beyond_captured_grants() {
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        resource.binding.insert(
+            "transport_host_input".into(),
+            serde_json::to_string(&WorkloadTransportPosition {
+                control_bytes: 1,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        assert!(
+            parse_restored_agent_resource(&resource, "attempt")
+                .err()
+                .unwrap()
+                .contains("exceeds captured credit")
+        );
+    }
+
+    #[test]
+    fn combined_transport_accepts_input_bulk_counter_but_not_dedicated_output_cut() {
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        resource.binding.insert(
+            "transport_host_input".into(),
+            serde_json::to_string(&WorkloadTransportPosition {
+                bulk_bytes: 32,
+                bulk_frames: 1,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        resource.binding.insert(
+            "transport_input_credit".into(),
+            serde_json::to_string(&WorkloadTransportCredit {
+                bulk_bytes: 64,
+                bulk_frames: 2,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        assert_eq!(
+            parse_restored_agent_resource(&resource, "attempt")
+                .unwrap()
+                .host_input
+                .bulk_bytes,
+            32
+        );
+        resource
+            .binding
+            .insert("transport_guest_bulk_bytes".into(), "1".into());
+        assert!(
+            parse_restored_agent_resource(&resource, "attempt")
+                .err()
+                .unwrap()
+                .contains("dedicated guest bulk counter")
+        );
     }
 }

@@ -519,6 +519,22 @@ export class Sandbox implements AsyncDisposable {
     await withMappedErrors(() => this.inner.stop());
   }
 
+  /** Create an independent local CoW child without a durable full snapshot. */
+  async branch(name: string): Promise<Sandbox> {
+    const child = await withMappedErrors(() => this.inner.branch(name));
+    return new Sandbox(child, name, false);
+  }
+
+  /** Suspend this resident VM without creating a snapshot. */
+  async pause(): Promise<void> {
+    await withMappedErrors(() => this.inner.pause());
+  }
+
+  /** Explicit resident resume; no snapshot is created. */
+  async resume(): Promise<void> {
+    await withMappedErrors(() => this.inner.resume());
+  }
+
   async requestStop(): Promise<void> {
     await withMappedErrors(() => this.inner.requestStop());
   }
@@ -581,6 +597,11 @@ export class Sandbox implements AsyncDisposable {
     );
   }
 
+  /**
+   * Consume this handle without stopping the sandbox. New guest and filesystem
+   * operations on this handle are rejected; already admitted operations retain
+   * their connection. Await operations first when their completion matters.
+   */
   async detach(): Promise<void> {
     await withMappedErrors(() => this.inner.detach());
   }

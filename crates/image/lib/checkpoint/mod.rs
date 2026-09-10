@@ -3,6 +3,7 @@
 //! Checkpoint artifacts keep guest-visible state in canonical, content-addressed objects. Mutable
 //! operation progress, runtime ownership, and provider locations deliberately live elsewhere.
 
+mod admitted_disk;
 mod compact;
 mod layer_selection;
 mod manifest;
@@ -26,5 +27,8 @@ pub use manifest::{
     ResourceDescriptor, ResourceTreatment,
 };
 pub use qcow::{create_qcow2_overlay, relocate_qcow2_backing, relocated_qcow2_header};
-pub use resolver::CheckpointClosure;
-pub use store::{LocalObjectStore, ObjectId, SparseFileIntegrity, sparse_file_integrity};
+pub use resolver::{CheckpointClosure, CheckpointObjectReadTiming};
+pub use store::{
+    AdmittedObject, CaptureObjectBatch, CaptureObjectBatchStats, LocalObjectStore, ObjectId,
+    SparseFileIntegrity, sparse_file_integrity,
+};

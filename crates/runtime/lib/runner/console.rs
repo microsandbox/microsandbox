@@ -98,6 +98,10 @@ pub struct ByteQueueSnapshot {
 /// transmitted by the guest agent", `rx_ring` = "bytes received by the guest
 /// agent".
 pub struct ConsoleSharedState {
+    /// Trusted lifecycle control shares no capacity with SDK input.
+    pub(crate) workload_control: Arc<super::workload_control::WorkloadControl>,
+    /// User pause or recovery fence for new guest operations and idle policy.
+    pub resident_paused: Arc<std::sync::atomic::AtomicBool>,
     /// Guest → Host: console TX thread pushes byte chunks, relay pops them.
     pub tx_ring: ByteQueue,
 
@@ -159,6 +163,8 @@ impl ConsoleSharedState {
     /// Create shared state with a specific byte capacity in each direction.
     pub fn with_capacity(byte_capacity: usize) -> Self {
         Self {
+            workload_control: super::workload_control::WorkloadControl::new(),
+            resident_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tx_ring: ByteQueue::new(byte_capacity),
             rx_ring: ByteQueue::new(byte_capacity),
             tx_wake: WakePipe::new(),
@@ -171,6 +177,7 @@ impl ConsoleSharedState {
 
     /// Unblock console producers because the runtime is shutting down.
     pub fn close(&self) {
+        self.workload_control.close();
         self.closed.store(true, Ordering::Release);
         self.tx_capacity_wake.wake();
         self.rx_capacity_wake.wake();

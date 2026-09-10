@@ -36,6 +36,9 @@ use microsandbox_runtime::{
 /// `--config-file` for manual invocation). See issue #997.
 #[derive(Debug, Args)]
 pub struct SandboxArgs {
+    /// Require captured execution; runtimes without this protocol reject the invocation.
+    #[arg(long, hide = true)]
+    pub restore: bool,
     /// Override automatic internal host/guest agent transport selection.
     #[arg(
         long = "agent-transport",
@@ -292,6 +295,7 @@ pub fn run(args: SandboxArgs) -> ! {
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         thp: launch.thp,
+        memory_cache_dir: launch.memory_cache_dir,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
         max_cpus: args.max_vcpus.unwrap_or(args.vcpus).max(args.vcpus),
@@ -426,7 +430,12 @@ fn load_launch_config(args: &SandboxArgs) -> Result<LaunchConfig, String> {
             .map_err(|e| format!("failed to read --config-file {}: {e}", path.display()))?,
         None => return Err("missing --config-file for `msb sandbox`".to_string()),
     };
-    serde_json::from_slice(&bytes).map_err(|e| format!("invalid launch config: {e}"))
+    let config = LaunchConfig::decode(&bytes)?;
+    if args.restore != (config.execution == microsandbox_runtime::launch::ExecutionIntent::Restore)
+    {
+        return Err("--restore and launch execution intent disagree".into());
+    }
+    Ok(config)
 }
 
 /// Read the full contents of the inherited config fd, taking ownership so it
@@ -724,6 +733,7 @@ mod tests {
         let _ = config_fd;
 
         SandboxArgs {
+            restore: false,
             agent_transport: AgentTransportProfile::Auto,
             sandbox_name: "test".to_string(),
             sandbox_id: 1,
@@ -851,6 +861,21 @@ mod tests {
         assert_eq!(
             loaded.writeback_lease_dir,
             PathBuf::from("/tmp/writeback-leases")
+        );
+    }
+
+    #[test]
+    fn restore_argument_cannot_select_a_fresh_boot() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&serde_json::to_vec(&LaunchConfig::default()).unwrap())
+            .unwrap();
+        let mut args = args_with(None, Some(file.path().to_path_buf()));
+        args.restore = true;
+        assert!(
+            load_launch_config(&args)
+                .unwrap_err()
+                .contains("intent disagree")
         );
     }
 

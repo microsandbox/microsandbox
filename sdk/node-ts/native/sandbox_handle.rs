@@ -195,6 +195,26 @@ impl JsSandboxHandle {
         self.inner.stop().await.map_err(to_napi_error)
     }
 
+    /// Create an independent local CoW child without a durable full snapshot.
+    #[napi]
+    pub async fn branch(&self, name: String) -> Result<crate::sandbox::Sandbox> {
+        Ok(crate::sandbox::Sandbox::from_rust(
+            self.inner.branch(name).await.map_err(to_napi_error)?,
+        ))
+    }
+
+    /// Explicit resident pause through host control.
+    #[napi]
+    pub async fn pause(&self) -> Result<()> {
+        self.inner.pause().await.map_err(to_napi_error)
+    }
+
+    /// Explicit resident resume through host control.
+    #[napi]
+    pub async fn resume(&self) -> Result<()> {
+        self.inner.resume().await.map_err(to_napi_error)
+    }
+
     /// Request graceful shutdown without waiting.
     #[napi]
     pub async fn request_stop(&self) -> Result<()> {
@@ -324,7 +344,7 @@ impl JsSandboxHandle {
         crate::sandbox::spawn_log_stream_from_stream(stream).await
     }
 
-    /// Snapshot this (stopped) sandbox under a bare name.
+    /// Snapshot this sandbox's disk under a bare name, preserving its running/paused state.
     ///
     /// Resolves under `~/.microsandbox/snapshots/<name>/`. Move
     /// artifacts with `Snapshot.save`/`Snapshot.load`.

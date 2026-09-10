@@ -189,6 +189,7 @@ export interface NapiSandboxBuilderSetters {
   memory(mib: number): this;
   maxMemory(mib: number): this;
   thp(policy: "always" | "madvise" | "never"): this;
+  forked(): this;
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
@@ -294,6 +295,9 @@ export interface NapiSandbox {
   attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
   stop(): Promise<void>;
+  branch(name: string): Promise<NapiSandbox>;
+  pause(): Promise<void>;
+  resume(): Promise<void>;
   requestStop(): Promise<void>;
   stopWithTimeout(timeoutMs: number): Promise<void>;
   kill(): Promise<void>;
@@ -329,6 +333,9 @@ export interface NapiSandboxHandle {
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   connectOrStart(detached?: boolean): Promise<NapiSandbox>;
   stop(): Promise<void>;
+  branch(name: string): Promise<NapiSandbox>;
+  pause(): Promise<void>;
+  resume(): Promise<void>;
   requestStop(): Promise<void>;
   stopWithTimeout(timeoutMs: number): Promise<void>;
   kill(): Promise<void>;
@@ -581,6 +588,24 @@ export interface NapiSnapshotStatic {
   reindex(dir?: string): Promise<number>;
   save(name: string, out: string, opts?: NapiSaveOpts): Promise<void>;
   load(archive: string, dest?: string, base?: string): Promise<NapiSnapshotHandle>;
+  loadWithOptions(archive: string, opts?: NapiLoadOpts): Promise<NapiSnapshotHandle>;
+  loadMany(archives: string[], opts?: NapiLoadOpts): Promise<NapiSnapshotHandle[]>;
+  groupHead(selector: string): Promise<NapiHeadUpdate>;
+}
+
+export interface NapiLoadOpts {
+  dest?: string;
+  base?: string;
+  group?: string;
+  setHead?: boolean;
+}
+
+export interface NapiHeadUpdate {
+  readonly group: string;
+  readonly previous: string | null | undefined;
+  readonly head: string;
+  readonly reason: string;
+  readonly changed: boolean;
 }
 
 export type NapiSnapshotBuilderCtor = new (name: string) => NapiSnapshotBuilder;
@@ -588,6 +613,7 @@ export type NapiSnapshotBuilderCtor = new (name: string) => NapiSnapshotBuilder;
 export interface NapiSnapshotBuilderSetters {
   fromSandbox(sourceSandbox: string): this;
   destDir(destDir: string): this;
+  group(group: string): this;
   label(key: string, value: string): this;
   force(): this;
   recordIntegrity(): this;
@@ -608,6 +634,7 @@ export interface NapiSnapshotArchive {
 export interface NapiSnapshot {
   readonly id: string;
   readonly path: string;
+  readonly headUpdate: NapiHeadUpdate | null | undefined;
   readonly digest: string;
   readonly sizeBytes: bigint | null | undefined;
   readonly imageRef: string;
@@ -634,6 +661,8 @@ export interface NapiSnapshotHandle {
   readonly id: string;
   readonly digest: string;
   readonly name: string | null | undefined;
+  readonly group: string | null | undefined;
+  readonly headUpdate: NapiHeadUpdate | null | undefined;
   readonly parentDigest: string | null | undefined;
   readonly scope: string; // "disk" | "full"
   readonly imageRef: string;
@@ -656,6 +685,8 @@ export interface NapiSnapshotInfo {
   readonly id: string;
   readonly digest: string;
   readonly name: string | null | undefined;
+  readonly group: string | null | undefined;
+  readonly headUpdate: NapiHeadUpdate | null | undefined;
   readonly parentDigest: string | null | undefined;
   readonly scope: string; // "disk" | "full"
   readonly imageRef: string;

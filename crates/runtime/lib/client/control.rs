@@ -35,6 +35,26 @@ pub const CONTROL_PROTOCOL_VERSION: u16 = 1;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Seal only the owned root disk; never capture guest RAM or execution state.
+    DiskCheckpointCreate {
+        /// Caller-selected safe capture identity.
+        checkpoint_id: String,
+    },
+    /// Capture directly into a reserved child-owned local handoff directory.
+    BranchCreate {
+        /// Unique capture identity matching the child's reservation.
+        branch_id: String,
+        /// Reserved sandbox name in this runtime's backend, never a host path.
+        child_name: String,
+        /// Cache in which the caller holds its handoff lock; must match the source runtime.
+        memory_cache_dir: PathBuf,
+    },
+    /// Retain a resident pause until an explicit resume or stop.
+    Pause,
+    /// Resume a user-owned resident pause.
+    Resume,
+    /// Inspect user pause and full-capture availability without entering the guest.
+    PauseState,
     /// Grow the owned root disk and mounted ext4 filesystem without rebooting.
     RootDiskGrow {
         /// Target capacity in bytes.
@@ -138,6 +158,12 @@ pub struct SecretValue(pub String);
 /// The reply to any control request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlResponse {
+    /// Completed local handoff, deliberately not a portable checkpoint identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<PathBuf>,
+    /// Resident pause status for lifecycle operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<PauseControlState>,
     /// Guest-observed root capacities after successful filesystem expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_disk: Option<RootDiskGrowthResult>,
@@ -171,6 +197,9 @@ pub struct ControlResponse {
     /// failure such as an unsuccessful source resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<CheckpointControlState>,
+    /// Sealed disk-only capture, with no RAM or execution-state closure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_checkpoint: Option<DiskCheckpointControlState>,
 }
 
 /// Published checkpoint information returned by the runtime control executor.
@@ -188,6 +217,17 @@ pub struct CheckpointControlState {
     pub memory_logical_bytes: u64,
     /// Non-zero memory bytes written during this capture.
     pub memory_emitted_bytes: u64,
+}
+
+/// Immutable disk closure returned after a live root-head rollover.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiskCheckpointControlState {
+    /// Capture identity echoed from the request.
+    pub checkpoint_id: String,
+    /// Runtime-owned closure, independent of the source's new writable head.
+    pub path: PathBuf,
+    /// Complete base-to-head disk generation; contains no memory or device payloads.
+    pub disk: microsandbox_image::checkpoint::DiskGenerationManifest,
 }
 
 /// Verified capacity and measured phases of a completed online root growth.
@@ -211,6 +251,12 @@ pub struct RootDiskGrowthResult {
 /// resize-capable and secrets-incapable.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct ControlCapabilities {
+    /// Direct local branch capture is supported on this host.
+    #[serde(default)]
+    pub branch_create: bool,
+    /// Resident pause/resume with identity-preserving clock correction.
+    #[serde(default)]
+    pub pause_resume: bool,
     /// Host control supports root growth; guest capability is checked before mutation.
     #[serde(default)]
     pub root_disk_grow: bool,
@@ -229,6 +275,20 @@ pub struct ControlCapabilities {
     /// Same-epoch composite checkpoint capture is available.
     #[serde(default)]
     pub checkpoint_create: bool,
+    /// Disk-only live capture is available without full-state admission.
+    #[serde(default)]
+    pub disk_checkpoint_create: bool,
+}
+
+/// Host-confirmed resident suspension state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PauseControlState {
+    /// Whether a user pause is currently held.
+    pub paused: bool,
+    /// Whether a failed operation has fenced ordinary resume and mutations.
+    pub recovery_required: bool,
+    /// Why full capture cannot use this pause, if guest preparation is unavailable.
+    pub capture_unavailable: Option<String>,
 }
 
 /// Memory sizing carried in [`ControlResponse`], all in MiB.
@@ -402,6 +462,9 @@ mod tests {
                 memory_resize: false,
                 secrets_update: true,
                 checkpoint_create: true,
+                disk_checkpoint_create: true,
+                branch_create: true,
+                pause_resume: true,
                 disk_compact: true,
             }),
             ..Default::default()

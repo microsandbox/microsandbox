@@ -188,6 +188,22 @@ export class SandboxHandle {
     await withMappedErrors(() => this.inner.stop());
   }
 
+  /** Create an independent local CoW child without a durable full snapshot. */
+  async branch(name: string): Promise<Sandbox> {
+    const child = await withMappedErrors(() => this.inner.branch(name));
+    return new Sandbox(child, name, false);
+  }
+
+  /** Suspend this resident VM without creating a snapshot. */
+  async pause(): Promise<void> {
+    await withMappedErrors(() => this.inner.pause());
+  }
+
+  /** Explicit resident resume; no snapshot is created. */
+  async resume(): Promise<void> {
+    await withMappedErrors(() => this.inner.resume());
+  }
+
   async requestStop(): Promise<void> {
     await withMappedErrors(() => this.inner.requestStop());
   }
@@ -282,12 +298,12 @@ export class SandboxHandle {
   }
 
   /**
-   * Snapshot this (stopped) sandbox under a bare name. Resolves under
+   * Snapshot this sandbox's disk under a bare name. Resolves under
    * `~/.microsandbox/snapshots/<name>/`. For an explicit filesystem
    * destination, move the artifact with `Snapshot.save`/`Snapshot.load`.
    *
-   * The sandbox must be stopped (or crashed); running sandboxes are
-   * rejected with a `SnapshotSandboxRunning` error.
+   * Running and paused sources are supported. A live cut is crash-consistent
+   * and preserves the source's running/paused state.
    */
   async snapshot(name: string): Promise<Snapshot> {
     const raw = await withMappedErrors(() => this.inner.snapshot(name));

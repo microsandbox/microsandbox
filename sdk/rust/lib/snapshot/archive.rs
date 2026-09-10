@@ -1,4 +1,5 @@
-//! Snapshot save / load via `.tar.zst` bundles.
+//! Snapshot save / load via `.msb` bundles (tar + zstd, or explicit plain tar).
+//! Encoding is detected from contents; legacy suffixes and extensionless inputs remain valid.
 //!
 //! Default archive format is zstd-compressed tar. Regular files with holes, notably the sparse `upper.ext4` whose logical size is the configured upper cap rather than the data
 //! written, are stored as old-GNU sparse entries (type `S`): only allocated extents are read and archived, so save cost scales with the data a sandbox actually wrote instead of
@@ -8,6 +9,7 @@
 //! depths, produced by our own save path), and owning the walk lets sparse entries be restored map-driven: data runs copied straight off the wire, holes never written and kept
 //! unallocated per platform ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`] on APFS). `tokio_tar` remains the header codec and the dense-entry writer.
 
+mod batch;
 mod delta;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -59,6 +61,19 @@ const GNU_EXT_SPARSE_SLOTS: usize = 21;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Options for installing an archive in a local snapshot group.
+#[derive(Debug, Clone, Default)]
+pub struct LoadOpts {
+    /// Group-store root; defaults to the configured snapshots directory.
+    pub dest: Option<PathBuf>,
+    /// Explicit base selector for omitted disk layers and RAM objects.
+    pub base: Option<String>,
+    /// Existing/new destination group, or a freshly generated group when omitted.
+    pub group: Option<String>,
+    /// Select the imported target even when it is not a fast-forward.
+    pub set_head: bool,
+}
+
 /// Options for [`super::Snapshot::save`].
 #[derive(Debug, Clone, Default)]
 pub struct SaveOpts {
@@ -69,7 +84,8 @@ pub struct SaveOpts {
     pub with_image: bool,
     /// Skip zstd compression and write a plain `.tar`. Default: zstd.
     pub plain_tar: bool,
-    /// Export only disk layers after this exact base snapshot (name, directory, or archive).
+    /// Omit disk layers and RAM objects supplied by this base (name, directory, or archive).
+    /// The base must be an exact physical disk prefix; full-snapshot metadata stays complete.
     /// Mutually exclusive with `last_layers` and `with_parents`.
     pub since: Option<String>,
     /// Export the newest N sealed disk layers, requiring an explicit base when loading omissions.
@@ -289,13 +305,25 @@ pub(super) async fn save_snapshot(
     let mut parents: Vec<Snapshot> = Vec::new();
 
     if opts.with_parents {
-        let mut current = head.manifest().parent.clone();
-        while let Some(parent_id) = current {
-            let parent_path = resolve_parent_artifact(local, parent_id.as_str()).await?;
+        let mut current = head.clone();
+        let mut visited = HashSet::from([head.id().to_string()]);
+        while let Some(parent_id) = current.manifest().parent.clone() {
+            if !visited.insert(parent_id.to_string()) {
+                return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                    "snapshot parent chain contains a cycle at {parent_id}"
+                )));
+            }
+            let parent_path = resolve_parent_artifact(local, &current, parent_id.as_str()).await?;
             let parent =
                 store::open_snapshot(local, parent_path.to_string_lossy().as_ref()).await?;
+            if parent.id() != &parent_id {
+                return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                    "snapshot parent path contains {}, expected {parent_id}",
+                    parent.id()
+                )));
+            }
             parents.push(parent.clone());
-            current = parent.manifest().parent.clone();
+            current = parent;
         }
     }
     parents.reverse();
@@ -920,167 +948,34 @@ pub(super) async fn load_snapshot_with_base(
     dest: Option<&Path>,
     base: Option<&str>,
 ) -> MicrosandboxResult<SnapshotHandle> {
-    let total_started = Instant::now();
-    let snapshots_dir = match dest {
-        Some(d) => d.to_path_buf(),
-        None => local.snapshots_dir(),
-    };
-    tokio::fs::create_dir_all(&snapshots_dir).await?;
-    let cache_dir = local.cache_dir();
-    tokio::fs::create_dir_all(&cache_dir).await?;
+    load_snapshot_with_options(
+        local,
+        archive,
+        LoadOpts {
+            dest: dest.map(Path::to_path_buf),
+            base: base.map(str::to_string),
+            ..Default::default()
+        },
+    )
+    .await
+}
 
-    let snapshot_stage = tempfile::Builder::new()
-        .prefix(".msb-snapshot-import-")
-        .tempdir_in(&snapshots_dir)?;
-    let cache_tmp_dir = cache_dir.join("tmp");
-    tokio::fs::create_dir_all(&cache_tmp_dir).await?;
-    let cache_stage = tempfile::Builder::new()
-        .prefix("snapshot-import-")
-        .tempdir_in(&cache_tmp_dir)?;
+pub(super) async fn load_snapshot_with_options(
+    local: &LocalBackend,
+    archive: &Path,
+    opts: LoadOpts,
+) -> MicrosandboxResult<SnapshotHandle> {
+    let mut loaded = batch::load(local, &[archive.to_path_buf()], opts).await?;
+    Ok(loaded.remove(0))
+}
 
-    // Stream rather than slurp — archives carry the full upper layer and are
-    // routinely multi-GB.
-    let file = tokio::fs::File::open(archive).await?;
-    let mut buf = BufReader::new(file);
-    let is_zstd = {
-        let bytes = buf.fill_buf().await?;
-        bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
-    };
-
-    let unpack_started = Instant::now();
-    let unpacked = if is_zstd {
-        let decoder = ZstdDecoder::new(buf);
-        // The decoder and archive walker both carry sizeable buffers across
-        // await points. Keep their combined future off Tokio's worker stack.
-        Box::pin(unpack_archive(
-            decoder,
-            snapshot_stage.path(),
-            cache_stage.path(),
-        ))
-        .await?
-    } else {
-        Box::pin(unpack_archive(
-            buf,
-            snapshot_stage.path(),
-            cache_stage.path(),
-        ))
-        .await?
-    };
-    let unpack_us = unpack_started.elapsed().as_micros();
-
-    let validate_started = Instant::now();
-    if unpacked.inventory.is_none() {
-        super::migration::normalize_staged(local.db().await?, &unpacked.manifest_dirs).await?;
-    } else if let Some(inventory) = unpacked.inventory.as_ref() {
-        delta::resolve(
-            local,
-            inventory,
-            snapshot_stage.path(),
-            cache_stage.path(),
-            base,
-        )
-        .await?;
-        materialize_inventory_layers(inventory, snapshot_stage.path()).await?;
-    }
-    let imported = verify_imported_snapshots(local, &unpacked.manifest_dirs).await?;
-    for snapshot in &imported {
-        super::metadata::write(snapshot.path(), snapshot.labels()).await?;
-    }
-    if let Some(inventory) = unpacked.inventory.as_ref() {
-        validate_inventory_snapshot_bindings(inventory, &imported)?;
-    }
-    let head_index = match unpacked.head.as_deref() {
-        Some(head) => imported
-            .iter()
-            .position(|snapshot| snapshot.id().as_str() == head)
-            .ok_or_else(|| {
-                MicrosandboxError::Custom(format!("archive inventory head {head} was not imported"))
-            })?,
-        None => select_head_snapshot(&imported)?,
-    };
-    let head_stage_path = imported[head_index].path().to_path_buf();
-    let head_relative = head_stage_path
-        .strip_prefix(snapshot_stage.path())
-        .map_err(|_| MicrosandboxError::Custom("imported snapshot escaped staging dir".into()))?
-        .to_path_buf();
-    let head_manifest = imported[head_index].manifest().clone();
-    let head_path = snapshots_dir.join(&head_relative);
-    let validate_us = validate_started.elapsed().as_micros();
-
-    let promote_started = Instant::now();
-    ensure_promote_targets_available(snapshot_stage.path(), &snapshots_dir).await?;
-    // Cache installation carries hashing buffers across await points. Keep
-    // that future on the heap so the archive loader remains within Windows'
-    // smaller default worker-thread stack.
-    Box::pin(install_staged_cache(
-        cache_stage.path(),
-        &cache_dir,
-        &head_manifest,
-    ))
-    .await?;
-    promote_stage(snapshot_stage.path(), &snapshots_dir).await?;
-
-    let snap = store::open_snapshot(local, head_path.to_string_lossy().as_ref()).await?;
-
-    // Index this and any sibling artifacts that landed in the dest dir.
-    let _ = store::reindex_dir(local, &snapshots_dir).await;
-    let promote_index_us = promote_started.elapsed().as_micros();
-
-    let (state_kind, format, fstype, checkpoint_manifest_digest, size_bytes) =
-        match &snap.manifest().state {
-            SnapshotState::File(state) => (
-                "file".to_string(),
-                Some(state.disk_format),
-                Some(state.filesystem.clone()),
-                None,
-                Some(state.virtual_size),
-            ),
-            SnapshotState::Checkpoint(state) => (
-                "checkpoint".to_string(),
-                None,
-                None,
-                Some(state.checkpoint_root.clone()),
-                None,
-            ),
-        };
-    let handle = SnapshotHandle {
-        snapshot_id: snap.id().to_string(),
-        digest: snap.digest().to_string(),
-        name: snap
-            .path()
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string()),
-        parent_digest: snap.manifest().parent.as_ref().map(ToString::to_string),
-        scope: snap.manifest().scope,
-        image_ref: snap.manifest().image.reference.clone(),
-        state_kind,
-        format,
-        fstype,
-        checkpoint_manifest_digest,
-        size_bytes,
-        locality: "embedded".into(),
-        availability: "ready".into(),
-        migration_state: "canonical".into(),
-        migration_error_code: None,
-        created_at: chrono::DateTime::parse_from_rfc3339(&snap.manifest().capture.created_at)
-            .map(|d| d.naive_utc())
-            .unwrap_or_else(|_| chrono::Utc::now().naive_utc()),
-        artifact_path: snap.path().to_path_buf(),
-    };
-    let archive_bytes = tokio::fs::metadata(archive).await?.len();
-    tracing::info!(
-        target: "microsandbox_checkpoint_timing",
-        operation = "snapshot_load_archive",
-        zstd = is_zstd,
-        archive_bytes,
-        total_us = total_started.elapsed().as_micros(),
-        unpack_us,
-        validate_us,
-        promote_index_us,
-        "snapshot archive load timing"
-    );
-    Ok(handle)
+/// Resolve all supplied archives together, publishing their members into one group.
+pub(super) async fn load_snapshots(
+    local: &LocalBackend,
+    archives: &[PathBuf],
+    opts: LoadOpts,
+) -> MicrosandboxResult<Vec<SnapshotHandle>> {
+    batch::load(local, archives, opts).await
 }
 
 /// Consume a current archive directly into a child sandbox's staging directory.
@@ -1114,7 +1009,7 @@ pub(crate) async fn materialize_archive_for_child_with_base(
         .tempdir_in(&cache_tmp_dir)?;
 
     let file = tokio::fs::File::open(archive).await?;
-    let mut buffered = BufReader::new(file);
+    let mut buffered = BufReader::with_capacity(1024 * 1024, file);
     let is_zstd = buffered
         .fill_buf()
         .await?
@@ -1326,7 +1221,7 @@ async fn write_archive_entries<W>(
     cache_files: &[(PathBuf, String)],
     head: &Snapshot,
     opts: &SaveOpts,
-    dependencies: Option<&delta::DiskDependencies>,
+    dependencies: Option<&delta::Dependencies>,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
@@ -1460,6 +1355,30 @@ where
     Ok(())
 }
 
+async fn normalize_imported_descriptor(snapshot: &Snapshot) -> MicrosandboxResult<()> {
+    let path = snapshot.path().join(DESCRIPTOR_FILENAME);
+    let canonical = snapshot
+        .manifest()
+        .to_canonical_bytes()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    if tokio::fs::read(&path).await? == canonical {
+        return Ok(());
+    }
+    if let SnapshotState::File(file) = &snapshot.manifest().state {
+        for layer in &file.layers {
+            let source = snapshot.layer_path(layer);
+            let destination = snapshot.path().join(file.layer_path(layer));
+            if source != destination {
+                tokio::fs::create_dir_all(destination.parent().expect("layer has parent")).await?;
+                tokio::fs::rename(source, destination).await?;
+            }
+        }
+    }
+    tokio::fs::write(&path, canonical).await?;
+    tokio::fs::File::open(path).await?.sync_all().await?;
+    Ok(())
+}
+
 async fn build_archive_inventory(
     snapshots: &[Snapshot],
     cache_files: &[(PathBuf, String)],
@@ -1586,12 +1505,28 @@ async fn build_archive_inventory(
 
     snapshot_members.sort_by(|left, right| left.snapshot_id.cmp(&right.snapshot_id));
     entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
-    let suggested_name = head
-        .path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty() && name.len() <= 255)
-        .map(str::to_string);
+    // Names are local aliases, not descriptor identity. Carry them as optional
+    // archive metadata so importing a group preserves its useful selectors.
+    let mut member_names = BTreeMap::new();
+    for snapshot in snapshots {
+        if let Some(name) = super::group::member_name(snapshot.path())? {
+            member_names.insert(snapshot.id().to_string(), name);
+        }
+    }
+    let suggested_name = member_names.get(head.id().as_str()).cloned().or_else(|| {
+        head.path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty() && name.len() <= 255)
+            .map(str::to_string)
+    });
+    let mut extensions = BTreeMap::new();
+    if !member_names.is_empty() {
+        extensions.insert(
+            "msb-snapshot-member-names".into(),
+            serde_json::to_value(member_names)?,
+        );
+    }
     let encoded_bytes = entries.iter().map(|entry| entry.encoded_size).sum();
     let apparent_bytes = entries.iter().map(|entry| entry.apparent_size).sum();
     Ok(ArchiveInventory {
@@ -1606,7 +1541,7 @@ async fn build_archive_inventory(
             apparent_bytes,
         },
         entries,
-        extensions: BTreeMap::new(),
+        extensions,
         requires: vec![ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into()],
     })
 }
@@ -1932,8 +1867,23 @@ where
     let mut header = Header::new_gnu();
     header.set_metadata_in_mode(&meta, HeaderMode::Complete);
     if header.set_path(name).is_err() {
-        // Needs a GNU long-name entry; the dense path emits one.
-        return Ok(None);
+        // GNU long-name records apply to sparse members too. Canonical qcow2
+        // checkpoint paths exceed the fixed name field by one byte.
+        let mut long = Header::new_gnu();
+        // set_path normalizes away the leading dots; use the exact GNU
+        // marker emitted by the existing dense writer and accepted by readers.
+        long.as_gnu_mut().expect("GNU header").name[..13].copy_from_slice(b"././@LongLink");
+        long.set_entry_type(EntryType::GNULongName);
+        long.set_mode(0o644);
+        long.set_size(name.len() as u64 + 1);
+        long.set_cksum();
+        let dst = builder.get_mut();
+        dst.write_all(long.as_bytes()).await?;
+        dst.write_all(name.as_bytes()).await?;
+        dst.write_all(&[0]).await?;
+        let padding = tar_pad(name.len() as u64 + 1) as usize;
+        dst.write_all(&[0u8; TAR_BLOCK as usize][..padding]).await?;
+        header.set_path("sparse-member")?;
     }
     header.set_entry_type(EntryType::GNUSparse);
     header.set_size(map.archived);
@@ -2447,6 +2397,29 @@ fn tar_pad(size: u64) -> u64 {
     (TAR_BLOCK - size % TAR_BLOCK) % TAR_BLOCK
 }
 
+/// Amortize async filesystem dispatch while preserving the caller's bounded
+/// reader and transport hashing. Reuse the same buffer across sparse extents.
+async fn copy_archive_payload<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut [u8],
+) -> std::io::Result<u64>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let mut copied = 0;
+    loop {
+        let read = reader.read(buffer).await?;
+        if read == 0 {
+            return Ok(copied);
+        }
+        writer.write_all(&buffer[..read]).await?;
+        copied += read as u64;
+    }
+}
+
 /// Stream a dense entry's bytes into `target`.
 async fn unpack_dense_entry<R>(
     reader: &mut R,
@@ -2466,7 +2439,8 @@ where
         hasher: archive_transport_hasher(kind, archive_path, size, size, &[]),
         bytes_read: 0,
     };
-    let copied = tokio::io::copy(&mut source, &mut file).await?;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let copied = copy_archive_payload(&mut source, &mut file, &mut buffer).await?;
     if copied != size {
         return Err(MicrosandboxError::Custom(
             "archive truncated mid-entry".into(),
@@ -2586,6 +2560,7 @@ where
     std_file.set_len(realsize)?;
     let mut file = tokio::fs::File::from_std(std_file);
     let mut transport = archive_transport_hasher(kind, archive_path, archived, realsize, &map);
+    let mut buffer = vec![0u8; 1024 * 1024];
 
     for (offset, numbytes) in &map {
         if *numbytes == 0 {
@@ -2597,7 +2572,7 @@ where
             hasher: transport,
             bytes_read: 0,
         };
-        let copied = tokio::io::copy(&mut source, &mut file).await?;
+        let copied = copy_archive_payload(&mut source, &mut file, &mut buffer).await?;
         transport = source.hasher;
         if copied != *numbytes {
             return Err(MicrosandboxError::Custom(
@@ -2823,7 +2798,7 @@ async fn validate_archive_inventory(
     }
     if !matches!(
         inventory.completeness.as_str(),
-        "boot-complete" | "disk-dependent"
+        "boot-complete" | "dependent"
     ) {
         return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,
@@ -3570,28 +3545,6 @@ fn select_head_snapshot(snapshots: &[Snapshot]) -> MicrosandboxResult<usize> {
     }
 }
 
-async fn ensure_promote_targets_available(stage: &Path, dest: &Path) -> MicrosandboxResult<()> {
-    let mut entries = tokio::fs::read_dir(stage).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let target = dest.join(entry.file_name());
-        if tokio::fs::symlink_metadata(&target).await.is_ok() {
-            return Err(MicrosandboxError::SnapshotAlreadyExists(
-                target.display().to_string(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-async fn promote_stage(stage: &Path, dest: &Path) -> MicrosandboxResult<()> {
-    let mut entries = tokio::fs::read_dir(stage).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let target = dest.join(entry.file_name());
-        tokio::fs::rename(entry.path(), target).await?;
-    }
-    Ok(())
-}
-
 async fn install_staged_cache(
     cache_stage: &Path,
     cache_dir: &Path,
@@ -3965,8 +3918,17 @@ fn file_name_str(p: &Path) -> MicrosandboxResult<String> {
 
 async fn resolve_parent_artifact(
     local: &LocalBackend,
+    child: &Snapshot,
     parent_id: &str,
 ) -> MicrosandboxResult<PathBuf> {
+    // An archive may be installed repeatedly in independent groups. Follow local siblings
+    // before consulting the global identity index, where multiple copies are ambiguous.
+    if let Some(directory) = super::group::group_path(child.path()) {
+        let sibling = directory.join(parent_id);
+        if tokio::fs::try_exists(&sibling).await? {
+            return Ok(sibling);
+        }
+    }
     if let Some(handle) = store::lookup_by_digest(local, parent_id).await? {
         return Ok(handle.artifact_path);
     }
@@ -4010,6 +3972,155 @@ mod tests {
     };
 
     use super::*;
+
+    fn grouped_archive_manifest(id: u128, parent: Option<&Manifest>) -> Manifest {
+        let layer_id = DiskLayerId::new(format!("layer_{id:032x}")).unwrap();
+        Manifest {
+            schema: SCHEMA.into(),
+            snapshot_id: SnapshotId::new(format!("snap_{id:032x}")).unwrap(),
+            scope: SnapshotScope::Disk,
+            state: SnapshotState::File(FileSnapshotState {
+                disk_format: SnapshotFormat::Raw,
+                filesystem: "ext4".into(),
+                virtual_size: 4096,
+                head: layer_id.clone(),
+                layers: vec![DiskLayer {
+                    layer_id,
+                    format: SnapshotFormat::Raw,
+                    virtual_size: 4096,
+                    backing: None,
+                    payload: LayerPayload {
+                        file_kind: LayerFileKind::Regular,
+                        integrity: None,
+                    },
+                }],
+            }),
+            capture: SnapshotCapture {
+                created_at: "2026-09-10T00:00:00Z".into(),
+                source_lineage: None,
+                source_checkpoint: None,
+                consistency: SnapshotConsistency::CrashConsistent,
+            },
+            image: ImageRef {
+                reference: "docker.io/library/alpine:3.20".into(),
+                manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            root_disk: SnapshotRootDisk::Managed,
+            parent: parent.map(|parent| parent.snapshot_id.clone()),
+            extensions: BTreeMap::new(),
+            requires: Vec::new(),
+        }
+    }
+
+    fn write_grouped_archive_fixture(path: &Path, manifest: &Manifest) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(
+            path.join(DESCRIPTOR_FILENAME),
+            manifest.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        let SnapshotState::File(state) = &manifest.state else {
+            unreachable!()
+        };
+        for layer in &state.layers {
+            let payload = path.join(state.layer_path(layer));
+            std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+            std::fs::write(payload, vec![42; layer.virtual_size as usize]).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn with_parents_prefers_group_members_when_global_identities_repeat() {
+        let home = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        let parent = grouped_archive_manifest(1, None);
+        let child = grouped_archive_manifest(2, Some(&parent));
+        for name in ["first", "second"] {
+            let group = super::super::group::ensure(&local.snapshots_dir(), Some(name))
+                .await
+                .unwrap();
+            let stage = tempfile::tempdir().unwrap();
+            for manifest in [&parent, &child] {
+                write_grouped_archive_fixture(
+                    &stage.path().join(manifest.snapshot_id.as_str()),
+                    manifest,
+                );
+            }
+            let aliases = BTreeMap::from([
+                (parent.snapshot_id.to_string(), "base".into()),
+                (child.snapshot_id.to_string(), "child".into()),
+            ]);
+            super::super::group::publish(&group, stage.path(), &aliases, &child.snapshot_id, false)
+                .await
+                .unwrap();
+        }
+        store::reindex_dir(&local, &local.snapshots_dir())
+            .await
+            .unwrap();
+        assert!(
+            store::lookup_by_digest(&local, parent.snapshot_id.as_str())
+                .await
+                .is_err()
+        );
+        let archive = home.path().join("group.msb");
+        save_snapshot(
+            &local,
+            "first:child",
+            &archive,
+            SaveOpts {
+                with_parents: true,
+                plain_tar: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let loaded = load_snapshot(&local, &archive, None).await.unwrap();
+        let loaded_group = loaded.group().unwrap();
+        assert_eq!(
+            store::get_handle(&local, &format!("{loaded_group}:base"))
+                .await
+                .unwrap()
+                .id(),
+            parent.snapshot_id.as_str()
+        );
+        assert_eq!(
+            store::get_handle(&local, &format!("{loaded_group}:child"))
+                .await
+                .unwrap()
+                .id(),
+            child.snapshot_id.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_suggested_name_that_is_not_a_group_alias_does_not_block_import() {
+        let home = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        let manifest = grouped_archive_manifest(1, None);
+        let artifact = home.path().join("legacy name with spaces");
+        write_grouped_archive_fixture(&artifact, &manifest);
+        let archive = home.path().join("legacy.msb");
+        save_snapshot(
+            &local,
+            artifact.to_str().unwrap(),
+            &archive,
+            SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+        let loaded = load_snapshot(&local, &archive, None).await.unwrap();
+        assert_eq!(loaded.id(), manifest.snapshot_id.as_str());
+        assert!(loaded.group().is_some());
+    }
 
     #[test]
     fn digest_hex_rejects_uppercase_identity() {
@@ -4101,7 +4212,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().join("home");
         let source = directory.path().join("upper.ext4");
-        let archive = directory.path().join("snapshot.tar.zst");
         let child_stage = directory.path().join("child");
         let mut payload = b"direct archive payload".to_vec();
         payload.resize(4096, 0);
@@ -4147,28 +4257,42 @@ mod tests {
         };
         let local = LocalBackend::builder().home(&home).build().await.unwrap();
 
-        save_direct_file_snapshot(
-            &manifest,
-            &BTreeMap::new(),
-            "test-snapshot",
-            std::slice::from_ref(&source),
-            &archive,
-            false,
-            false,
-        )
-        .await
-        .unwrap();
-        let restored = materialize_archive_for_child(&local, &archive, &child_stage, false)
-            .await
-            .unwrap();
-
-        assert_eq!(restored.manifest.snapshot_id, snapshot_id);
-        assert_eq!(
-            std::fs::read(child_stage.join("upper.ext4")).unwrap(),
-            payload
-        );
-        assert!(!child_stage.join(snapshot_id.as_str()).exists());
-        assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
+        // The suffix is only a user-facing convention, never the encoding discriminator.
+        // Exercise compressed and plain tar under both conventional and misleading names.
+        for plain_tar in [false, true] {
+            let archive_dir = directory.path().join(plain_tar.to_string());
+            std::fs::create_dir(&archive_dir).unwrap();
+            for name in [
+                "snapshot.msb",
+                "snapshot.tar.zst",
+                "snapshot.tar",
+                "snapshot",
+            ] {
+                let archive = archive_dir.join(name);
+                save_direct_file_snapshot(
+                    &manifest,
+                    &BTreeMap::new(),
+                    "test-snapshot",
+                    std::slice::from_ref(&source),
+                    &archive,
+                    plain_tar,
+                    false,
+                )
+                .await
+                .unwrap();
+                let child_stage = child_stage.join(format!("{plain_tar}-{name}"));
+                let restored = materialize_archive_for_child(&local, &archive, &child_stage, false)
+                    .await
+                    .unwrap();
+                assert_eq!(restored.manifest.snapshot_id, snapshot_id);
+                assert_eq!(
+                    std::fs::read(child_stage.join("upper.ext4")).unwrap(),
+                    payload
+                );
+                assert!(!child_stage.join(snapshot_id.as_str()).exists());
+                assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
+            }
+        }
     }
 
     #[tokio::test]
@@ -4327,14 +4451,14 @@ mod tests {
         drop(layer_file);
 
         // The canonical checkpoint qcow member is one byte too long for the
-        // fixed GNU header path field. It therefore exercises dense long-name
-        // fallback even though the source itself has a sparse extent map.
+        // fixed GNU header path field. It must retain sparse encoding even
+        // when a GNU long-name record precedes the sparse header.
         let archive_layer_path =
             format!("checkpoints/snap_00000000000000000000000000000002/layers/{layer_id}.qcow2");
         assert_eq!(archive_layer_path.len(), 101);
         assert!(
             archive_encoded_size(&source_layer).await.unwrap() < 4 * 1024 * 1024,
-            "test source must remain sparse so dense fallback changes the encoded size"
+            "test source must remain sparse"
         );
         let layer_integrity = sparse_file_integrity(&source_layer).unwrap();
         let disk = DiskGenerationManifest {
@@ -4416,6 +4540,21 @@ mod tests {
         )
         .await
         .unwrap();
+        // Inspect the actual transport, not just same-reader roundtrip results.
+        let compressed = tokio::fs::File::open(&archive).await.unwrap();
+        let decoder = ZstdDecoder::new(tokio::io::BufReader::new(compressed));
+        let mut tar = tokio_tar::Archive::new(decoder);
+        let mut entries = tar.entries().unwrap();
+        let mut found_sparse = false;
+        while let Some(entry) = futures::StreamExt::next(&mut entries).await {
+            let entry = entry.unwrap();
+            if entry.path().unwrap() == Path::new(&archive_layer_path) {
+                assert!(entry.header().entry_type().is_gnu_sparse());
+                assert!(entry.header().entry_size().unwrap() < 4 * 1024 * 1024);
+                found_sparse = true;
+            }
+        }
+        assert!(found_sparse);
         std::fs::remove_dir_all(&source).unwrap();
         let restored = materialize_archive_for_child(&local, &archive, &child_stage, false)
             .await

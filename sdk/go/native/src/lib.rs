@@ -1063,6 +1063,7 @@ struct SandboxCreateOpts {
     cpu_placement: Option<String>,
     placement_profile: Option<String>,
     thp: Option<String>,
+    forked: Option<bool>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -1185,6 +1186,7 @@ struct LogStreamOpts {
 #[derive(serde::Deserialize, Default)]
 struct SnapshotCreateOpts {
     name: Option<String>,
+    group: Option<String>,
     dest_dir: Option<String>,
     #[serde(default)]
     labels: HashMap<String, String>,
@@ -1206,6 +1208,15 @@ struct SnapshotSaveOptsJson {
     with_image: bool,
     #[serde(default)]
     plain_tar: bool,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SnapshotLoadOptsJson {
+    dest: Option<PathBuf>,
+    base: Option<String>,
+    group: Option<String>,
+    #[serde(default)]
+    set_head: bool,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -2290,6 +2301,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     .map_err(FfiError::invalid_argument)?;
                 builder = builder.thp(policy);
             }
+            if opts.forked.unwrap_or(false) {
+                builder = builder.forked();
+            }
             if let Some(w) = opts.workdir {
                 builder = builder.workdir(w);
             }
@@ -2888,6 +2902,44 @@ pub unsafe extern "C" fn msb_sandbox_handle_stop(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_pause(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let sb = Sandbox::get_for_control(&name)
+                .await
+                .map_err(FfiError::from)?;
+            sb.pause().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_resume(
+    cancel_id: u64,
+    name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        Ok(Box::pin(async move {
+            let sb = Sandbox::get_for_control(&name)
+                .await
+                .map_err(FfiError::from)?;
+            sb.resume().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_handle_request_stop(
     cancel_id: u64,
     name: *const c_char,
@@ -3160,6 +3212,74 @@ pub unsafe extern "C" fn msb_sandbox_stop(
             sb.stop_with_timeout(Duration::from_millis(timeout_ms))
                 .await
                 .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_pause(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            sb.pause().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+/// Branch by live handle, or by persisted name when handle is zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_branch(
+    cancel_id: u64,
+    handle: Handle,
+    source: *const c_char,
+    child: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let child = unsafe { cstr(child) }?;
+        let source = unsafe { cstr(source) }?;
+        let live = if handle == 0 {
+            None
+        } else {
+            Some(get(handle)?)
+        };
+        Ok(Box::pin(async move {
+            let sb = if let Some(live) = live {
+                live.branch(child).await.map_err(FfiError::from)?
+            } else {
+                Sandbox::get(&source)
+                    .await
+                    .map_err(FfiError::from)?
+                    .branch(child)
+                    .await
+                    .map_err(FfiError::from)?
+            };
+            let backend_kind = sb.backend_kind().as_str();
+            let handle = register(sb)?;
+            Ok(serde_json::json!({ "handle": handle, "backend_kind": backend_kind }).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_resume(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            sb.resume().await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -6059,6 +6179,7 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
     };
     serde_json::json!({
         "path": s.path().display().to_string(),
+        "head_update": s.head_update(),
         "id": s.id().as_str(),
         "digest": s.digest(),
         "size_bytes": s.size_bytes(),
@@ -6088,6 +6209,8 @@ fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
         "id": h.id(),
         "digest": h.digest(),
         "name": h.name(),
+        "group": h.group(),
+        "head_update": h.head_update(),
         "parent_digest": h.parent_digest(),
         "image_ref": h.image_ref(),
         "scope": snapshot_scope_str(h.scope()),
@@ -6127,10 +6250,10 @@ fn snapshot_builder_from_opts(
     source_sandbox: String,
     opts: SnapshotCreateOpts,
 ) -> Result<microsandbox::SnapshotBuilder, FfiError> {
-    let Some(name) = opts.name else {
-        return Err(FfiError::invalid_argument("snapshot create requires name"));
-    };
-    let mut builder = Snapshot::builder(name).from_sandbox(source_sandbox);
+    let mut builder = Snapshot::builder(opts.name.unwrap_or_default()).from_sandbox(source_sandbox);
+    if let Some(group) = opts.group {
+        builder = builder.group(group);
+    }
     if let Some(dest_dir) = opts.dest_dir {
         builder = builder.dest_dir(PathBuf::from(dest_dir));
     }
@@ -6430,6 +6553,91 @@ pub unsafe extern "C" fn msb_snapshot_import_with_base(
                 .await
                 .map_err(FfiError::from)?;
             Ok(snapshot_handle_json(&h).to_string())
+        }))
+    })
+}
+
+/// Import an archive with group selection without changing the existing import ABI.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_import_with_options(
+    cancel_id: u64,
+    archive: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let archive = PathBuf::from(unsafe { cstr(archive) }?);
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SnapshotLoadOptsJson = serde_json::from_str(&opts_raw)
+            .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
+        Ok(Box::pin(async move {
+            let h = Snapshot::load_with_options(
+                &archive,
+                microsandbox::snapshot::LoadOpts {
+                    dest: opts.dest,
+                    base: opts.base,
+                    group: opts.group,
+                    set_head: opts.set_head,
+                },
+            )
+            .await
+            .map_err(FfiError::from)?;
+            Ok(snapshot_handle_json(&h).to_string())
+        }))
+    })
+}
+
+/// Import archives together with dependencies resolved within the batch and destination group.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_import_many(
+    cancel_id: u64,
+    archives_json: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let archives_raw = unsafe { cstr(archives_json) }?;
+        let archives: Vec<PathBuf> = serde_json::from_str(&archives_raw)
+            .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SnapshotLoadOptsJson = serde_json::from_str(&opts_raw)
+            .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
+        Ok(Box::pin(async move {
+            let handles = Snapshot::load_many(
+                &archives,
+                microsandbox::snapshot::LoadOpts {
+                    dest: opts.dest,
+                    base: opts.base,
+                    group: opts.group,
+                    set_head: opts.set_head,
+                },
+            )
+            .await
+            .map_err(FfiError::from)?;
+            let values = handles.iter().map(snapshot_handle_json).collect::<Vec<_>>();
+            Ok(serde_json::Value::Array(values).to_string())
+        }))
+    })
+}
+
+/// Read a group head, or select a `group:member` as its head.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_group_head(
+    cancel_id: u64,
+    selector: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let selector = unsafe { cstr(selector) }?;
+        Ok(Box::pin(async move {
+            let update = Snapshot::group_head(&selector)
+                .await
+                .map_err(FfiError::from)?;
+            serde_json::to_string(&update)
+                .map_err(|error| FfiError::invalid_argument(error.to_string()))
         }))
     })
 }

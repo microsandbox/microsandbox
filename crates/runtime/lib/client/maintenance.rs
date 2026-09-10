@@ -27,7 +27,8 @@ use microsandbox_db::entity::{
 };
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ColumnTrait, Condition, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 
 use crate::{RuntimeError, RuntimeResult};
@@ -87,7 +88,7 @@ pub enum CleanupOutcome {
     /// The sandbox is persistent, so it is intentionally left in place.
     SkippedPersistent,
 
-    /// The sandbox is not in a terminal status yet.
+    /// The sandbox is not terminal yet or a source snapshot is still being published.
     SkippedActive,
 
     /// The sandbox still has a run with a live PID.
@@ -362,6 +363,14 @@ async fn cleanup_terminal_ephemeral_sandbox_inner(
     if !is_terminal(sandbox.status) {
         return Ok(CleanupOutcome::SkippedActive);
     }
+
+    // Snapshot publication may outlive its runtime. Never remove its source cursor or storage
+    // while that capture owns lineage. Exit observers already own lifecycle, so this must be
+    // try-only: waiting here would invert the lineage -> lifecycle order used by SDK removal.
+    let Some(_lineage) = crate::ipc::try_acquire_snapshot_lineage_guard(run_dir, &sandbox.name)?
+    else {
+        return Ok(CleanupOutcome::SkippedActive);
+    };
 
     let _guard = if owner_holds_guard {
         None
@@ -657,7 +666,7 @@ pub async fn clear_install_exclusive_lease_idempotent(
 /// migration yet. In that case startup continues so normal migrations can
 /// create it. Once the table exists, the install-exclusive row becomes a hard
 /// refusal while unexpired.
-pub async fn refuse_if_install_exclusive_held(db: &DbWriteConnection) -> RuntimeResult<()> {
+pub async fn refuse_if_install_exclusive_held<C: ConnectionTrait>(db: &C) -> RuntimeResult<()> {
     let now = chrono::Utc::now().naive_utc();
     let lease = match lease_entity::Entity::find_by_id(lease_entity::INSTALL_EXCLUSIVE)
         .one(db)
@@ -717,6 +726,12 @@ async fn reconcile_stale_active(
     run_dir: &Path,
     sandbox: &sandbox_entity::Model,
 ) -> RuntimeResult<bool> {
+    // A creator may have persisted Starting but not spawned its child yet. On Windows it also
+    // briefly releases the runtime lock for handoff; transition ownership closes both gaps.
+    let Some(_transition) = crate::ipc::try_acquire_transition_guard(run_dir, &sandbox.name)?
+    else {
+        return Ok(false);
+    };
     let Some(_guard) = crate::ipc::try_acquire_lifecycle_guard(run_dir, &sandbox.name)? else {
         return Ok(false);
     };
@@ -742,11 +757,13 @@ async fn reconcile_stale_active(
         .one(db)
         .await?;
 
-    // No active run yet while Starting means the runtime has not inserted a run row. Draining with no active run
-    // means the stop request already reached a terminal run state, so repair
-    // the sandbox status instead of leaving future stop callers polling.
+    // With neither creator nor runtime ownership, Starting without an active run is abandoned.
+    // Preserve the config (including pending restore intent) while publishing its terminal state.
     let Some(run) = run else {
-        if sandbox.status == sandbox_entity::SandboxStatus::Draining {
+        if matches!(
+            sandbox.status,
+            sandbox_entity::SandboxStatus::Starting | sandbox_entity::SandboxStatus::Draining
+        ) {
             remove_runtime_socket_artifacts(run_dir, sandboxes_dir, &sandbox.name)?;
             let now = chrono::Utc::now().naive_utc();
             let (terminal_status, _) = stale_runtime_terminal_state(sandbox.status);
@@ -762,7 +779,7 @@ async fn reconcile_stale_active(
                 )
                 .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                 .filter(sandbox_entity::Column::Id.eq(sandbox.id))
-                .filter(sandbox_entity::Column::Status.eq(sandbox_entity::SandboxStatus::Draining))
+                .filter(sandbox_entity::Column::Status.eq(sandbox.status))
                 .exec(db)
                 .await?;
             return Ok(result.rows_affected > 0);
@@ -1372,6 +1389,111 @@ mod tests {
             assert_socket_artifacts_absent(dir.path(), &dead_sockets, "dead");
             assert_socket_artifacts_absent(dir.path(), &draining_sockets, "draining");
             assert_socket_artifacts_absent(dir.path(), &draining_no_run_sockets, "draining-no-run");
+        }
+    }
+
+    #[tokio::test]
+    async fn starting_without_run_is_reaped_only_after_creator_releases_transition() {
+        let (dir, db) = test_db().await;
+        let run_dir = dir.path().join("run");
+        let id = insert_sandbox(
+            &db,
+            "abandoned",
+            sandbox_entity::SandboxStatus::Starting,
+            false,
+        )
+        .await;
+        let model = sandbox_entity::Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let creator = crate::ipc::try_acquire_transition_guard(&run_dir, "abandoned")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !reconcile_stale_active(&db, dir.path(), &run_dir, &model)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            status_of(&db, id).await,
+            Some(sandbox_entity::SandboxStatus::Starting)
+        );
+        drop(creator);
+        assert!(
+            reconcile_stale_active(&db, dir.path(), &run_dir, &model)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            status_of(&db, id).await,
+            Some(sandbox_entity::SandboxStatus::Crashed)
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_defers_for_lineage_publication_then_retries() {
+        for owner_holds_guard in [false, true] {
+            let (dir, db) = test_db().await;
+            let run_dir = dir.path().join("run");
+            let name = "publishing";
+            let id = insert_sandbox(&db, name, sandbox_entity::SandboxStatus::Stopped, true).await;
+            let sandbox_dir = dir.path().join(name);
+            std::fs::create_dir_all(&sandbox_dir).unwrap();
+            let marker = sandbox_dir.join("snapshot-cursor");
+            std::fs::write(&marker, b"publication in progress").unwrap();
+            #[cfg(unix)]
+            let agent_socket = {
+                let path = crate::ipc::canonical_agent_endpoint(&run_dir, name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"runtime endpoint").unwrap();
+                path
+            };
+            let lineage = crate::ipc::try_acquire_snapshot_lineage_guard(&run_dir, name)
+                .unwrap()
+                .unwrap();
+            // Model the synchronous exit observer, which cannot release lifecycle ownership
+            // just to wait for the SDK publisher. The ordinary maintenance path owns no guard.
+            let _runtime = owner_holds_guard
+                .then(|| crate::ipc::acquire_lifecycle_guard(&run_dir, name).unwrap());
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                cleanup_terminal_ephemeral_sandbox_inner(
+                    &db,
+                    dir.path(),
+                    &run_dir,
+                    id,
+                    owner_holds_guard,
+                ),
+            )
+            .await
+            .expect("cleanup must not wait for lineage while owning lifecycle")
+            .unwrap();
+            assert_eq!(outcome, CleanupOutcome::SkippedActive);
+            assert_eq!(std::fs::read(&marker).unwrap(), b"publication in progress");
+            assert_eq!(
+                status_of(&db, id).await,
+                Some(sandbox_entity::SandboxStatus::Stopped)
+            );
+            #[cfg(unix)]
+            assert!(agent_socket.exists());
+
+            drop(lineage);
+            let outcome = cleanup_terminal_ephemeral_sandbox_inner(
+                &db,
+                dir.path(),
+                &run_dir,
+                id,
+                owner_holds_guard,
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome, CleanupOutcome::Removed);
+            assert!(!sandbox_dir.exists());
+            assert_eq!(status_of(&db, id).await, None);
+            #[cfg(unix)]
+            assert!(!agent_socket.exists());
         }
     }
 }

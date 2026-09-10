@@ -14,6 +14,7 @@ use crate::snapshot::{JsSnapshot, JsSnapshotArchive};
 #[napi(object, js_name = "SnapshotConfig")]
 pub struct JsSnapshotConfig {
     pub name: String,
+    pub group: Option<String>,
     pub source_sandbox: Option<String>,
     pub dest_dir: Option<String>,
     // Keep the public name stable when napi-rs renders this renamed nested object.
@@ -37,6 +38,7 @@ pub struct JsSnapshotLabel {
 pub struct JsSnapshotBuilder {
     inner: Option<RustSnapshotBuilder>,
     name: String,
+    group: Option<String>,
     source_sandbox: Option<String>,
     dest_dir: Option<String>,
     labels: Vec<(String, String)>,
@@ -56,6 +58,7 @@ impl JsSnapshotBuilder {
         Self {
             inner: Some(RustSnapshot::builder(&name)),
             name,
+            group: None,
             source_sandbox: None,
             dest_dir: None,
             labels: Vec::new(),
@@ -66,12 +69,21 @@ impl JsSnapshotBuilder {
     }
 
     /// Create the artifact under this parent directory instead of the
-    /// default snapshots store. The artifact lands at `destDir/<name>`.
+    /// default snapshots store. The snapshot group is created under this root.
     #[napi(js_name = "destDir")]
     pub fn dest_dir(&mut self, dest_dir: String) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.dest_dir(&dest_dir));
         self.dest_dir = Some(dest_dir);
+        self
+    }
+
+    /// Install the snapshot in this group (defaults to the source sandbox's name).
+    #[napi]
+    pub fn group(&mut self, group: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.group(&group));
+        self.group = Some(group);
         self
     }
 
@@ -96,7 +108,7 @@ impl JsSnapshotBuilder {
         self
     }
 
-    /// Overwrite an existing artifact at the destination.
+    /// Overwrite an archive destination; installed group members are immutable.
     #[napi]
     pub fn force(&mut self) -> &Self {
         let prev = self.take_inner();
@@ -128,6 +140,7 @@ impl JsSnapshotBuilder {
     pub fn build(&self) -> JsSnapshotConfig {
         JsSnapshotConfig {
             name: self.name.clone(),
+            group: self.group.clone(),
             source_sandbox: self.source_sandbox.clone(),
             dest_dir: self.dest_dir.clone(),
             labels: self
