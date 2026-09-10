@@ -502,10 +502,12 @@ export declare class NetworkBuilder {
    * interface. The closure receives a fresh `InterfaceOverridesBuilder`.
    */
   interface(configure: (arg: InterfaceOverridesBuilder) => InterfaceOverridesBuilder): this
-  /** Configure the violation action for secrets. */
-  onSecretViolation(configure: (arg: JsViolationActionBuilder) => JsViolationActionBuilder): this
+  /** Configure the default blocking action for secret placeholders. */
+  secretViolationAction(action: string): this
   /** Set the maximum number of concurrent connections. */
   maxConnections(max: number): this
+  /** Require hostname-based policy allows to use inspectable application authority. */
+  strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
   ipv4Pool(pool: string): this
   /** Set the IPv6 pool used for per-sandbox /64 guest prefixes. */
@@ -586,6 +588,16 @@ export declare class NetworkRateLimiterBuilder {
 }
 export type JsNetworkRateLimiterBuilder = NetworkRateLimiterBuilder
 
+/** Selects the protocol for an outbound proxy. */
+export declare class OutboundProxyBuilder {
+  constructor()
+  /** Select a SOCKS4 proxy at `address`. */
+  socks4(address: string): Socks4ProxyBuilder
+  /** Select a SOCKS5 proxy at `address`. */
+  socks5(address: string): Socks5ProxyBuilder
+}
+export type JsOutboundProxyBuilder = OutboundProxyBuilder
+
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
   constructor()
@@ -624,7 +636,7 @@ export declare class PullProgressCreate {
    * Await the sandbox. Resolves once the pull + boot finishes.
    * Calling more than once errors.
    */
-  awaitSandbox(): Promise<JsSandbox>
+  awaitSandbox(): Promise<Sandbox>
 }
 export type JsPullProgressCreate = PullProgressCreate
 
@@ -908,8 +920,10 @@ export declare class Sandbox {
   get backendKind(): string
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): Promise<string>
+  /** Stable backend-assigned identity for this persisted sandbox. */
+  get id(): string
   /** Whether this handle owns the sandbox lifecycle (attached mode). */
-  get ownsLifecycle(): Promise<boolean>
+  get ownsLifecycle(): boolean
   /**
    * Get the full configuration this sandbox was created with
    * (image, cpus, memory, env, mounts, etc.) as a JSON string.
@@ -945,7 +959,7 @@ export declare class Sandbox {
   /** Execute a shell command with streaming I/O. */
   shellStream(script: string): Promise<ExecHandle>
   /** Get a filesystem handle for operations on the running sandbox. */
-  fs(): JsSandboxFs
+  fs(): SandboxFsOps
   /** Connect a native in-process SSH client to this sandbox. */
   sshConnect(options?: SshClientOptions | undefined | null): Promise<JsSshClient>
   /** Prepare a reusable SSH server endpoint for this sandbox. */
@@ -998,6 +1012,12 @@ export declare class Sandbox {
   drain(): Promise<void>
   /** Request graceful drain without waiting for observed exit. */
   requestDrain(): Promise<void>
+  /** Wait until this exact sandbox reaches the requested status. */
+  waitForStatus(status: string): Promise<JsSandboxHandle>
+  /** Stop and start this exact sandbox. */
+  restart(options?: SandboxRestartOptions | undefined | null): Promise<Sandbox>
+  /** Stop and remove this exact sandbox. */
+  destroy(options?: SandboxDestroyOptions | undefined | null): Promise<void>
   /** Wait until the sandbox is observed in a terminal non-running state. */
   waitUntilStopped(): Promise<SandboxStopResult>
   /** Wait for the sandbox process to exit. */
@@ -1170,6 +1190,8 @@ export declare class SandboxBuilder {
   disableNetwork(): this
   /** Configure networking via a callback. */
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
+  /** Configure the single proxy used for outbound sandbox connections. */
+  proxy(configure: (arg: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder): this
   /** Publish a TCP port from host -> guest. */
   port(hostPort: number, guestPort: number): this
   /** Publish a TCP port from host -> guest on a specific host bind address. */
@@ -1234,7 +1256,14 @@ export declare class SandboxBuilder {
    * synchronously before awaiting; napi-rs requires the `unsafe` tag
    * regardless. JS callers see `create(): Promise<Sandbox>`.
    */
-  create(): Promise<JsSandbox>
+  create(): Promise<Sandbox>
+  /**
+   * Connect to the persisted sandbox with this name, or create it.
+   *
+   * # Safety
+   * Same justification as `create`.
+   */
+  connectOrCreate(): Promise<Sandbox>
   /**
    * Create the sandbox with image-pull progress reporting. Returns
    * a `PullProgressStream` of per-layer download/materialization
@@ -1292,7 +1321,9 @@ export type JsSandboxFsOps = SandboxFsOps
 export declare class SandboxHandle {
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): string
-  /** Status at time of query: "running", "stopped", "crashed", or "draining". */
+  /** Stable backend-assigned identity for this persisted sandbox. */
+  get id(): string
+  /** Status at time of query. */
   get status(): string
   /** Backend retained by this handle (`"local"` or `"cloud"`). */
   get backendKind(): string
@@ -1331,6 +1362,8 @@ export declare class SandboxHandle {
   startDetached(): Promise<Sandbox>
   /** Connect to an already-running sandbox (no lifecycle ownership). */
   connect(): Promise<Sandbox>
+  /** Connect when running, or start the same persisted sandbox when stopped. */
+  connectOrStart(detached?: boolean | undefined | null): Promise<Sandbox>
   /**
    * Connect with an explicit timeout in milliseconds.
    *
@@ -1363,6 +1396,12 @@ export declare class SandboxHandle {
   killWithTimeout(timeoutMs: number): Promise<void>
   /** Request graceful drain without waiting for completion. */
   requestDrain(): Promise<void>
+  /** Wait until this exact sandbox reaches the requested status. */
+  waitForStatus(status: string): Promise<SandboxHandle>
+  /** Stop and start this exact sandbox. */
+  restart(options?: SandboxRestartOptions | undefined | null): Promise<Sandbox>
+  /** Stop and remove this exact sandbox. */
+  destroy(options?: SandboxDestroyOptions | undefined | null): Promise<void>
   /** Wait until the sandbox is observed in a terminal non-running state. */
   waitUntilStopped(): Promise<SandboxStopResult>
   /** Remove the sandbox from the database. */
@@ -1400,10 +1439,8 @@ export declare class SecretBuilder {
   value(value: string): this
   /** Custom placeholder. Auto-generated as `$MSB_<env>` when unset. */
   placeholder(placeholder: string): this
-  /** Add an allowed exact-match host. */
-  allowHost(host: string): this
-  /** Add an allowed wildcard host pattern (e.g. `*.openai.com`). */
-  allowHostPattern(pattern: string): this
+  /** Add a host allowed to receive the substituted secret value. */
+  allow(host: string): this
   /**
    * Allow any host. **Dangerous** — secret can be exfiltrated.
    * Pass `true` to opt in.
@@ -1411,16 +1448,16 @@ export declare class SecretBuilder {
   allowAnyHostDangerous(iUnderstand: boolean): this
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity(enabled: boolean): this
-  /** Configure header injection (default: true). */
-  injectHeaders(enabled: boolean): this
-  /** Configure Basic Auth injection (default: true). */
-  injectBasicAuth(enabled: boolean): this
-  /** Configure URL query parameter injection (default: false). */
-  injectQuery(enabled: boolean): this
-  /** Configure request body injection (default: false). */
-  injectBody(enabled: boolean): this
-  /** Configure violation behavior for this secret. */
-  onViolation(configure: (arg: JsViolationActionBuilder) => JsViolationActionBuilder): this
+  /** Allow a host to receive the unchanged placeholder. */
+  allowPassthroughFor(host: string): this
+  /** Configure header substitution (default: true). */
+  substituteInHeaders(enabled: boolean): this
+  /** Configure URL query parameter substitution (default: false). */
+  substituteInQuery(enabled: boolean): this
+  /** Configure request body substitution (default: false). */
+  substituteInBody(enabled: boolean): this
+  /** Configure the blocking action for this secret. */
+  violationAction(action: string): this
   /**
    * Materialize into a `SecretEntry`. Panics if required fields are not
    * set (matches the underlying Rust builder's contract; surface as a
@@ -1581,6 +1618,20 @@ export declare class SnapshotHandle {
 }
 export type JsSnapshotHandle = SnapshotHandle
 
+/** Builds a SOCKS4 outbound proxy. */
+export declare class Socks4ProxyBuilder {
+  /** Set the optional user ID sent during the SOCKS4 handshake. */
+  userId(userId: string): this
+}
+export type JsSocks4ProxyBuilder = Socks4ProxyBuilder
+
+/** Builds a SOCKS5 outbound proxy. */
+export declare class Socks5ProxyBuilder {
+  /** Set username authentication and a host-side password source. */
+  credentials(username: string, password: SecretSourceInput): this
+}
+export type JsSocks5ProxyBuilder = Socks5ProxyBuilder
+
 /** Native in-process SSH client session. */
 export declare class SshClient {
   /** Run an SSH exec request and collect stdout, stderr, and exit status. */
@@ -1628,24 +1679,6 @@ export declare class TlsBuilder {
   build(): TlsConfig
 }
 export type JsTlsBuilder = TlsBuilder
-
-/** Fluent builder for secret violation behavior. */
-export declare class ViolationActionBuilder {
-  constructor()
-  /** Block the request silently. */
-  block(): this
-  /** Block the request and log a warning. */
-  blockAndLog(): this
-  /** Block the request and terminate the sandbox. */
-  blockAndTerminate(): this
-  /** Allow an exact host to receive placeholders unchanged. */
-  passthroughHost(host: string): this
-  /** Allow hosts matching a wildcard pattern to receive placeholders unchanged. */
-  passthroughHostPattern(pattern: string): this
-  /** Allow any host to receive placeholders unchanged. */
-  passthroughAllHosts(iUnderstand: boolean): this
-}
-export type JsViolationActionBuilder = ViolationActionBuilder
 
 export declare class Volume {
   static get(name: string): Promise<VolumeHandle>
@@ -1754,7 +1787,7 @@ export interface AttachOptions {
   user?: string
   env: Record<string, string>
   detachKeys?: string
-  rlimits: Array<JsRlimit>
+  rlimits: Array<Rlimit>
 }
 
 /** Return secret-safe information about the active default backend. */
@@ -1915,7 +1948,10 @@ export declare function imageRemove(reference: string, force?: boolean | undefin
  */
 export declare function imageSave(references: Array<string>, outputPath: string, format?: string | undefined | null): Promise<void>
 
-/** Download and install msb + libkrunfw to ~/.microsandbox/. */
+/**
+ * Download and install msb + libkrunfw under non-empty $MSB_HOME, or
+ * ~/.microsandbox/ when the override is unset or empty.
+ */
 export declare function install(): Promise<void>
 
 /** Check if msb and libkrunfw are installed and available. */
@@ -2168,6 +2204,12 @@ export interface Rlimit {
   hard: number
 }
 
+/** Options for `destroy`. */
+export interface SandboxDestroyOptions {
+  force?: boolean
+  timeoutMs?: number
+}
+
 /** Options for one paginated sandbox list request. */
 export interface SandboxListOptions {
   cursor?: string
@@ -2226,6 +2268,13 @@ export interface SandboxPingResult {
   latencyMs: number
 }
 
+/** Options for `restart`. */
+export interface SandboxRestartOptions {
+  force?: boolean
+  timeoutMs?: number
+  detached?: boolean
+}
+
 /** Result of observing a sandbox in a terminal state. */
 export interface SandboxStopResult {
   name: string
@@ -2278,18 +2327,12 @@ export interface SecretEntry {
   allowedHostPatterns: Array<string>
   /** Allow any host. **Dangerous** — secret can be exfiltrated. */
   allowAnyHost: boolean
+  /** Hosts allowed to receive the placeholder unchanged. */
+  passthroughHosts: Array<string>
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity: boolean
   /** Where the secret may be injected into requests. */
-  injection: JsSecretInjection
-}
-
-/** Injection sites for a secret value. */
-export interface SecretInjection {
-  headers: boolean
-  basicAuth: boolean
-  queryParams: boolean
-  body: boolean
+  substitution: SecretSubstitution
 }
 
 /**
@@ -2304,6 +2347,21 @@ export interface SecretModifySpec {
   store?: string
   placeholder?: string
   allowedHosts?: Array<string>
+}
+
+/** Host-side source for secret material. */
+export interface SecretSourceInput {
+  /** Source kind. Currently only `env` is supported for proxy credentials. */
+  kind: string
+  /** Host environment variable name. */
+  var: string
+}
+
+/** Injection sites for a secret value. */
+export interface SecretSubstitution {
+  headers: boolean
+  query: boolean
+  body: boolean
 }
 
 /**
@@ -2335,7 +2393,7 @@ export interface SnapshotConfig {
   name: string
   sourceSandbox?: string
   destDir?: string
-  labels: Array<JsSnapshotLabel>
+  labels: Array<SnapshotLabel>
   force: boolean
   recordIntegrity: boolean
   resumable: boolean
@@ -2450,8 +2508,8 @@ export interface TlsConfig {
   interceptedPorts: Array<number>
   blockQuic: boolean
   upstreamCaCertPaths: Array<string>
-  scopedUpstreamCaCerts: Array<JsScopedUpstreamCaCert>
-  scopedVerifyUpstream: Array<JsScopedVerifyUpstream>
+  scopedUpstreamCaCerts: Array<ScopedUpstreamCaCert>
+  scopedVerifyUpstream: Array<ScopedVerifyUpstream>
   interceptCaCertPath?: string
   interceptCaKeyPath?: string
 }

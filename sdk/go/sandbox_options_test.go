@@ -9,6 +9,29 @@ import (
 	"time"
 )
 
+func TestLifecycleConvergenceOptions(t *testing.T) {
+	connect := connectOrStartOptions{}
+	WithConnectOrStartDetached()(&connect)
+	if !connect.detached {
+		t.Fatal("WithConnectOrStartDetached did not enable detached mode")
+	}
+
+	restart := restartOptions{}
+	WithRestartForce()(&restart)
+	WithRestartTimeout(3 * time.Second)(&restart)
+	WithRestartDetached()(&restart)
+	if !restart.force || restart.timeout != 3*time.Second || !restart.detached {
+		t.Fatalf("restart options = %#v", restart)
+	}
+
+	destroy := destroyOptions{}
+	WithDestroyForce()(&destroy)
+	WithDestroyTimeout(4 * time.Second)(&destroy)
+	if !destroy.force || destroy.timeout != 4*time.Second {
+		t.Fatalf("destroy options = %#v", destroy)
+	}
+}
+
 func marshalCreateOptions(t *testing.T, opts ...SandboxOption) map[string]any {
 	t.Helper()
 	cfg := SandboxConfig{}
@@ -673,9 +696,9 @@ func TestFFIWireShape_Secrets(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
 		WithSecrets(Secret.Env("OPENAI_API_KEY", "sk-xxx", SecretEnvOptions{
-			AllowHosts:        []string{"api.openai.com"},
-			AllowHostPatterns: []string{"*.openai.com"},
-			OnViolation:       ViolationActionBlockAndTerminate,
+			Allow:           []string{"api.openai.com", "*.openai.com"},
+			Passthrough:     []string{"api.anthropic.com"},
+			ViolationAction: ViolationActionBlockAndTerminate,
 		})),
 	)
 	secs := mustField(t, got, "secrets").([]any)
@@ -686,12 +709,12 @@ func TestFFIWireShape_Secrets(t *testing.T) {
 	if s["env_var"] != "OPENAI_API_KEY" || s["value"] != "sk-xxx" {
 		t.Fatalf("secret = %v", s)
 	}
-	if s["on_violation"] != "block-and-terminate" {
-		t.Fatalf("on_violation = %v", s["on_violation"])
+	if s["violation_action"] != "block-and-terminate" {
+		t.Fatalf("violation_action = %v", s["violation_action"])
 	}
-	hosts := s["allow_hosts"].([]any)
-	if len(hosts) != 1 || hosts[0] != "api.openai.com" {
-		t.Fatalf("allow_hosts = %v", hosts)
+	hosts := s["allow"].([]any)
+	if len(hosts) != 2 || hosts[0] != "api.openai.com" || hosts[1] != "*.openai.com" {
+		t.Fatalf("allow = %v", hosts)
 	}
 }
 
@@ -727,9 +750,11 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			DNS: &DNSConfig{
 				Nameservers: []string{"1.1.1.1:53"},
 			},
+			Strict:  true,
 			IPv4Pool: "172.31.240.0/24",
 			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),
+		WithProxy(SOCKS5Proxy("127.0.0.1:1080")),
 	)
 	net := mustField(t, got, "network").(map[string]any)
 
@@ -751,6 +776,9 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	if len(deny) != 1 || deny[0] != "blocked.example.com" {
 		t.Fatalf("deny_domains = %v", deny)
 	}
+	if net["strict"] != true {
+		t.Fatalf("strict = %v", net["strict"])
+	}
 	if net["ipv4_pool"] != "172.31.240.0/24" {
 		t.Fatalf("ipv4_pool = %v", net["ipv4_pool"])
 	}
@@ -761,6 +789,21 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	ns := dns["nameservers"].([]any)
 	if len(ns) != 1 || ns[0] != "1.1.1.1:53" {
 		t.Fatalf("dns.nameservers = %v", ns)
+	}
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	if proxy["protocol"] != "socks5" || proxy["address"] != "127.0.0.1:1080" {
+		t.Fatalf("proxy = %#v", proxy)
+	}
+}
+
+func TestFFIWireShape_SOCKS4Proxy(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithProxy(SOCKS4Proxy("127.0.0.1:1080", SOCKS4ProxyOptions{UserID: "sandbox"})),
+	)
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	if proxy["protocol"] != "socks4" || proxy["address"] != "127.0.0.1:1080" || proxy["user_id"] != "sandbox" {
+		t.Fatalf("proxy = %#v", proxy)
 	}
 }
 
@@ -880,6 +923,18 @@ func TestFFIWireShape_NetworkRateLimiters(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_SOCKS5Credentials(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithProxy(SOCKS5Proxy("127.0.0.1:1080").Credentials("sandbox", SecretSourceEnv("SOCKS5_PASSWORD"))),
+	)
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	passwordSource, ok := proxy["password_source"].(map[string]any)
+	if proxy["username"] != "sandbox" || !ok || passwordSource["kind"] != "env" || passwordSource["var"] != "SOCKS5_PASSWORD" {
+		t.Fatalf("proxy credentials = %#v", proxy)
+	}
+}
+
 // The Rust side relies on serde(default), so zero-valued Go scalar fields must
 // not reach the wire. Explicit optional values use pointers when zero is valid
 // on the wire for validation.
@@ -891,7 +946,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		"thp",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "vsock", "network", "secrets", "patches", "volumes",
-		"init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
+		"proxy", "init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
 	} {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)
@@ -924,7 +979,7 @@ func TestFFIWireShape_KitchenSinkDoesNotPanic(t *testing.T) {
 			TLS: &TLSConfig{Bypass: []string{"*.googleapis.com"}},
 		}),
 		WithSecrets(Secret.Env("K", "v", SecretEnvOptions{
-			AllowHosts: []string{"h"},
+			Allow: []string{"h"},
 		})),
 		WithPatches(Patch.Mkdir("/app", PatchOptions{})),
 		WithPorts(map[uint16]uint16{8080: 80}),

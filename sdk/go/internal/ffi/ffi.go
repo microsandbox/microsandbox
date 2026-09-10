@@ -104,7 +104,8 @@ typedef void     (*msb_cancel_trigger_fn)(uint64_t id);
 typedef void     (*msb_cancel_unregister_fn)(uint64_t id);
 typedef char *(*msb_default_backend_info_fn)(uint8_t *buf, size_t buf_len);
 
-typedef char *(*msb_sandbox_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, bool connect_or_create, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_lifecycle_fn)(uint64_t cancel_id, const char *name, const char *expected_id, const char *operation, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_lookup_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_connect_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_start_fn)(uint64_t cancel_id, const char *name, bool detached, uint8_t *buf, size_t buf_len);
@@ -254,6 +255,7 @@ static msb_cancel_alloc_fn       ptr_msb_cancel_alloc       = NULL;
 static msb_cancel_trigger_fn     ptr_msb_cancel_trigger     = NULL;
 static msb_cancel_unregister_fn  ptr_msb_cancel_unregister  = NULL;
 static msb_sandbox_create_fn     ptr_msb_sandbox_create     = NULL;
+static msb_sandbox_handle_lifecycle_fn ptr_msb_sandbox_handle_lifecycle = NULL;
 static msb_sandbox_lookup_fn     ptr_msb_sandbox_lookup     = NULL;
 static msb_default_backend_info_fn ptr_msb_default_backend_info = NULL;
 static msb_sandbox_connect_fn    ptr_msb_sandbox_connect    = NULL;
@@ -431,6 +433,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_cancel_unregister);
 	RESOLVE_OPTIONAL(msb_default_backend_info);
 	RESOLVE(msb_sandbox_create);
+	RESOLVE(msb_sandbox_handle_lifecycle);
 	RESOLVE(msb_sandbox_lookup);
 	RESOLVE(msb_sandbox_connect);
 	RESOLVE(msb_sandbox_start);
@@ -587,8 +590,11 @@ void call_msb_cancel_trigger(uint64_t id) {
 void call_msb_cancel_unregister(uint64_t id) {
 	if (ptr_msb_cancel_unregister) ptr_msb_cancel_unregister(id);
 }
-char *call_msb_sandbox_create(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_create ? ptr_msb_sandbox_create(cancel_id, name, opts_json, buf, buf_len) : NULL;
+char *call_msb_sandbox_create(uint64_t cancel_id, const char *name, const char *opts_json, bool connect_or_create, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_create ? ptr_msb_sandbox_create(cancel_id, name, opts_json, connect_or_create, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_lifecycle(uint64_t cancel_id, const char *name, const char *expected_id, const char *operation, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_lifecycle ? ptr_msb_sandbox_handle_lifecycle(cancel_id, name, expected_id, operation, opts_json, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_lookup(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_lookup ? ptr_msb_sandbox_lookup(cancel_id, name, buf, buf_len) : NULL;
@@ -1026,9 +1032,9 @@ func IsLoaded() bool {
 }
 
 // SetSdkMsbPath pushes the SDK-resolved msb binary path into the Rust
-// resolver's tier 2 (see sdk/rust/lib/config/mod.rs:
-// resolve_msb_path). Set-once on the Rust side: subsequent calls are
-// ignored. The user's MSB_PATH env var still wins as tier 1.
+// runtime resolver's SdkPackage tier (see setup::resolve_runtime). Set-once
+// on the Rust side: subsequent calls are ignored. The user's MSB_PATH env
+// var still wins through the Environment tier.
 func SetSdkMsbPath(path string) {
 	if path == "" {
 		return
@@ -1109,6 +1115,7 @@ func (e *Error) Error() string { return e.Message }
 const (
 	KindSandboxNotFound        = "sandbox_not_found"
 	KindSandboxAlreadyExists   = "sandbox_already_exists"
+	KindSandboxReplaced        = "sandbox_replaced"
 	KindSandboxStillRunning    = "sandbox_still_running"
 	KindVolumeNotFound         = "volume_not_found"
 	KindVolumeAlreadyExists    = "volume_already_exists"
@@ -1142,6 +1149,7 @@ const (
 type Sandbox struct {
 	handle      atomic.Uint64
 	name        string
+	id          string
 	backendKind string
 }
 
@@ -1186,6 +1194,9 @@ func (s *Sandbox) h() C.uint64_t { return C.uint64_t(s.handle.Load()) }
 
 // Name returns the sandbox name supplied at creation time.
 func (s *Sandbox) Name() string { return s.name }
+
+// ID returns the stable persisted sandbox identity.
+func (s *Sandbox) ID() string { return s.id }
 
 // BackendKind returns the backend retained by this sandbox.
 func (s *Sandbox) BackendKind() string {
@@ -1583,15 +1594,16 @@ type CreateOptions struct {
 	RegistryInsecure bool `json:"registry_insecure,omitempty"`
 	// RegistryCACerts holds PEM-encoded CA root certificate bundles trusted
 	// when pulling.
-	RegistryCACerts []string             `json:"registry_ca_certs,omitempty"`
-	Ports           map[uint16]uint16    `json:"ports,omitempty"`
-	PortsUDP        map[uint16]uint16    `json:"ports_udp,omitempty"`
-	PortBindings    []PortBindingOptions `json:"port_bindings,omitempty"`
-	Vsock           []VsockRouteOptions  `json:"vsock,omitempty"`
-	Network         *NetworkOptions      `json:"network,omitempty"`
-	Secrets         []SecretOptions      `json:"secrets,omitempty"`
-	Patches         []PatchOptions       `json:"patches,omitempty"`
-	Volumes         map[string]MountSpec `json:"volumes,omitempty"`
+	RegistryCACerts []string              `json:"registry_ca_certs,omitempty"`
+	Ports           map[uint16]uint16     `json:"ports,omitempty"`
+	PortsUDP        map[uint16]uint16     `json:"ports_udp,omitempty"`
+	PortBindings    []PortBindingOptions  `json:"port_bindings,omitempty"`
+	Vsock           []VsockRouteOptions   `json:"vsock,omitempty"`
+	Network         *NetworkOptions       `json:"network,omitempty"`
+	Proxy           *OutboundProxyOptions `json:"proxy,omitempty"`
+	Secrets         []SecretOptions       `json:"secrets,omitempty"`
+	Patches         []PatchOptions        `json:"patches,omitempty"`
+	Volumes         map[string]MountSpec  `json:"volumes,omitempty"`
 }
 
 // InitOptions describes a guest PID-1 init handoff.
@@ -1649,13 +1661,14 @@ type NetworkOptions struct {
 	DenyDomains         []string                   `json:"deny_domains,omitempty"`
 	DenyDomainSuffixes  []string                   `json:"deny_domain_suffixes,omitempty"`
 	TLS                 *TLSOptions                `json:"tls,omitempty"`
+	Strict             *bool                      `json:"strict,omitempty"`
 	Ports               map[uint16]uint16          `json:"ports,omitempty"`
 	PortBindings        []PortBindingOptions       `json:"port_bindings,omitempty"`
 	IPv4Pool            string                     `json:"ipv4_pool,omitempty"`
 	IPv6Pool            string                     `json:"ipv6_pool,omitempty"`
 	MaxConnections      *uint                      `json:"max_connections,omitempty"`
 	RateLimiter         *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
-	OnSecretViolation   string                     `json:"on_secret_violation,omitempty"`
+	SecretViolationAction string                   `json:"secret_violation_action,omitempty"`
 	TrustHostCAs        *bool                      `json:"trust_host_cas,omitempty"`
 }
 
@@ -1677,6 +1690,21 @@ type TokenBucketOptions struct {
 	Size         uint64 `json:"size"`
 	RefillTimeMs uint64 `json:"refill_time_ms"`
 	OneTimeBurst uint64 `json:"one_time_burst,omitempty"`
+}
+
+// OutboundProxyOptions is the JSON representation of an outbound proxy.
+type OutboundProxyOptions struct {
+	Protocol       string               `json:"protocol"`
+	Address        string               `json:"address"`
+	UserID         string               `json:"user_id,omitempty"`
+	Username       *string              `json:"username,omitempty"`
+	PasswordSource *SecretSourceOptions `json:"password_source,omitempty"`
+}
+
+// SecretSourceOptions is the JSON representation of a host-side secret source.
+type SecretSourceOptions struct {
+	Kind string `json:"kind"`
+	Var  string `json:"var,omitempty"`
 }
 
 // PortBindingOptions publishes a host port on a specific host bind address.
@@ -1748,13 +1776,21 @@ type ScopedVerifyUpstream struct {
 
 // SecretOptions is the JSON representation of a single credential.
 type SecretOptions struct {
-	EnvVar            string   `json:"env_var"`
-	Value             string   `json:"value"`
-	AllowHosts        []string `json:"allow_hosts,omitempty"`
-	AllowHostPatterns []string `json:"allow_host_patterns,omitempty"`
-	Placeholder       string   `json:"placeholder,omitempty"`
-	RequireTLS        *bool    `json:"require_tls,omitempty"`
-	OnViolation       string   `json:"on_violation,omitempty"`
+	EnvVar              string                     `json:"env_var"`
+	Value               string                     `json:"value"`
+	Allow               []string                   `json:"allow,omitempty"`
+	Passthrough         []string                   `json:"passthrough,omitempty"`
+	Placeholder         string                     `json:"placeholder,omitempty"`
+	RequireTLSIdentity  *bool                      `json:"require_tls_identity,omitempty"`
+	Substitution        SecretSubstitutionOptions  `json:"substitution,omitempty"`
+	ViolationAction     string                     `json:"violation_action,omitempty"`
+}
+
+// SecretSubstitutionOptions selects request locations for substitution.
+type SecretSubstitutionOptions struct {
+	Headers *bool `json:"headers,omitempty"`
+	Query   bool  `json:"query,omitempty"`
+	Body    bool  `json:"body,omitempty"`
 }
 
 // PatchOptions is the JSON representation of a single rootfs patch.
@@ -1776,6 +1812,15 @@ type PatchOptions struct {
 // Ownership: cName and cOpts are Go-allocated C strings borrowed by Rust for
 // the duration of the call. Rust copies any strings it retains before returning.
 func CreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandbox, error) {
+	return createSandbox(ctx, name, opts, false)
+}
+
+// ConnectOrCreateSandbox connects by name or creates using opts.
+func ConnectOrCreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandbox, error) {
+	return createSandbox(ctx, name, opts, true)
+}
+
+func createSandbox(ctx context.Context, name string, opts CreateOptions, connectOrCreate bool) (*Sandbox, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -1789,7 +1834,7 @@ func CreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandb
 	defer C.free(unsafe.Pointer(cOpts))
 
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_create(cancelID, cName, cOpts, buf, bufLen)
+		return C.call_msb_sandbox_create(cancelID, cName, cOpts, C.bool(connectOrCreate), buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -1797,6 +1842,7 @@ func CreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandb
 	var resp struct {
 		Handle      uint64 `json:"handle"`
 		BackendKind string `json:"backend_kind"`
+		ID          string `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		// Rust has allocated a handle we can no longer trust. Best-effort
@@ -1807,7 +1853,7 @@ func CreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandb
 		}
 		return nil, fmt.Errorf("parse create response: %w", err)
 	}
-	s := &Sandbox{name: name, backendKind: resp.BackendKind}
+	s := &Sandbox{name: name, id: resp.ID, backendKind: resp.BackendKind}
 	s.handle.Store(resp.Handle)
 	return s, nil
 }
@@ -1831,6 +1877,7 @@ func ConnectSandbox(ctx context.Context, name string) (*Sandbox, error) {
 	var resp struct {
 		Handle      uint64 `json:"handle"`
 		BackendKind string `json:"backend_kind"`
+		ID          string `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		if h := salvageHandle(out); h != 0 {
@@ -1838,19 +1885,147 @@ func ConnectSandbox(ctx context.Context, name string) (*Sandbox, error) {
 		}
 		return nil, fmt.Errorf("parse connect response: %w", err)
 	}
-	s := &Sandbox{name: name, backendKind: resp.BackendKind}
+	s := &Sandbox{name: name, id: resp.ID, backendKind: resp.BackendKind}
 	s.handle.Store(resp.Handle)
 	return s, nil
 }
 
 // SandboxHandleInfo is the JSON payload returned by LookupSandbox.
 type SandboxHandleInfo struct {
+	ID            string `json:"id"`
 	Name          string `json:"name"`
 	Status        string `json:"status"`
 	ConfigJSON    string `json:"config_json"`
 	CreatedAtUnix *int64 `json:"created_at_unix"`
 	UpdatedAtUnix *int64 `json:"updated_at_unix"`
 	BackendKind   string `json:"backend_kind"`
+}
+
+// SandboxHandleLifecycleOptions is the JSON payload for identity-safe handle operations.
+type SandboxHandleLifecycleOptions struct {
+	Detached bool `json:"detached,omitempty"`
+	Force    bool `json:"force,omitempty"`
+	// Keep zero on the wire: it means immediate escalation for lifecycle
+	// convergence and must not be mistaken for an omitted/default timeout.
+	TimeoutMs uint64 `json:"timeout_ms"`
+	Status    string `json:"status,omitempty"`
+}
+
+func sandboxHandleLifecycle(
+	ctx context.Context,
+	name string,
+	id string,
+	operation string,
+	opts SandboxHandleLifecycleOptions,
+) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	optsJSON, err := json.Marshal(opts)
+	if err != nil {
+		return "", fmt.Errorf("marshal lifecycle opts: %w", err)
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cID := C.CString(id)
+	defer C.free(unsafe.Pointer(cID))
+	cOperation := C.CString(operation)
+	defer C.free(unsafe.Pointer(cOperation))
+	cOpts := C.CString(string(optsJSON))
+	defer C.free(unsafe.Pointer(cOpts))
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_lifecycle(
+			cancelID,
+			cName,
+			cID,
+			cOperation,
+			cOpts,
+			buf,
+			bufLen,
+		)
+	})
+}
+
+// SandboxHandleLiveLifecycle runs an identity-safe operation returning a live sandbox.
+func SandboxHandleLiveLifecycle(
+	ctx context.Context,
+	name string,
+	id string,
+	operation string,
+	opts SandboxHandleLifecycleOptions,
+) (*Sandbox, error) {
+	out, err := sandboxHandleLifecycle(ctx, name, id, operation, opts)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Handle      uint64 `json:"handle"`
+		BackendKind string `json:"backend_kind"`
+		ID          string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		if handle := salvageHandle(out); handle != 0 {
+			releaseHandle(handle)
+		}
+		return nil, fmt.Errorf("parse lifecycle response: %w", err)
+	}
+	sandbox := &Sandbox{name: name, id: response.ID, backendKind: response.BackendKind}
+	sandbox.handle.Store(response.Handle)
+	return sandbox, nil
+}
+
+// SandboxHandleInfoLifecycle runs an identity-safe operation returning refreshed metadata.
+func SandboxHandleInfoLifecycle(
+	ctx context.Context,
+	name string,
+	id string,
+	operation string,
+	opts SandboxHandleLifecycleOptions,
+) (*SandboxHandleInfo, error) {
+	out, err := sandboxHandleLifecycle(ctx, name, id, operation, opts)
+	if err != nil {
+		return nil, err
+	}
+	var info SandboxHandleInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse lifecycle handle response: %w", err)
+	}
+	return &info, nil
+}
+
+// SandboxHandleStopLifecycle waits and returns the observed terminal state.
+func SandboxHandleStopLifecycle(
+	ctx context.Context,
+	name string,
+	id string,
+) (*SandboxStopResult, error) {
+	out, err := sandboxHandleLifecycle(
+		ctx,
+		name,
+		id,
+		"wait_until_stopped",
+		SandboxHandleLifecycleOptions{},
+	)
+	if err != nil {
+		return nil, err
+	}
+	var result SandboxStopResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return nil, fmt.Errorf("parse lifecycle stop response: %w", err)
+	}
+	return &result, nil
+}
+
+// SandboxHandleVoidLifecycle runs an identity-safe operation with no result payload.
+func SandboxHandleVoidLifecycle(
+	ctx context.Context,
+	name string,
+	id string,
+	operation string,
+	opts SandboxHandleLifecycleOptions,
+) error {
+	_, err := sandboxHandleLifecycle(ctx, name, id, operation, opts)
+	return err
 }
 
 // BackendInfo is the secret-safe backend diagnostic shape returned by Rust.
@@ -2002,6 +2177,7 @@ func StartSandbox(ctx context.Context, name string, detached bool) (*Sandbox, er
 	var resp struct {
 		Handle      uint64 `json:"handle"`
 		BackendKind string `json:"backend_kind"`
+		ID          string `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		if h := salvageHandle(out); h != 0 {
@@ -2009,7 +2185,7 @@ func StartSandbox(ctx context.Context, name string, detached bool) (*Sandbox, er
 		}
 		return nil, fmt.Errorf("parse start response: %w", err)
 	}
-	s := &Sandbox{name: name, backendKind: resp.BackendKind}
+	s := &Sandbox{name: name, id: resp.ID, backendKind: resp.BackendKind}
 	s.handle.Store(resp.Handle)
 	return s, nil
 }

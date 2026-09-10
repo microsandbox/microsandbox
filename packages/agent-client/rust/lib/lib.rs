@@ -13,6 +13,12 @@
 
 pub mod client;
 pub mod error;
+/// Internal Unix-local shared-memory transport used by the UDS adapter and runtime relay.
+///
+/// Callers connect through [`AgentClient`]; arena negotiation and lifecycle are automatic.
+#[cfg(all(feature = "uds", unix))]
+#[doc(hidden)]
+pub mod local_shm;
 pub mod message;
 pub mod stream;
 pub mod transport;
@@ -32,7 +38,7 @@ pub mod transports {
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use client::{AgentClient, AgentProtocol};
+pub use client::{AgentClient, AgentFrame, AgentProtocol};
 pub use error::{AgentClientError, AgentClientResult};
 pub use message::{EncodedMessage, IntoOutboundMessage, OutboundMessage, TypedMessage};
 pub use stream::AgentStream;

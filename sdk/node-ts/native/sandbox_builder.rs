@@ -7,8 +7,9 @@ use napi_derive::napi;
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
     CpuPlacement as RustCpuPlacement, DeploymentProfile as RustDeploymentProfile,
-    PullPolicy as RustPullPolicy, Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
-    SecurityProfile as RustSecurityProfile, TransparentHugePagePolicy as RustThpPolicy,
+    OutboundProxy as RustOutboundProxy, PullPolicy as RustPullPolicy, Sandbox as RustSandbox,
+    SandboxBuilder as RustSandboxBuilder, SecurityProfile as RustSecurityProfile,
+    TransparentHugePagePolicy as RustThpPolicy,
 };
 use microsandbox::size::Mebibytes;
 
@@ -19,11 +20,14 @@ use crate::image_builder::JsImageBuilder;
 use crate::init_options_builder::JsInitOptionsBuilder;
 use crate::mount_builder::JsMountBuilder;
 use crate::network_builder::JsNetworkBuilder;
+use crate::outbound_proxy_builder::{
+    JsOutboundProxyBuilder, JsSocks4ProxyBuilder, JsSocks5ProxyBuilder, take_selected_proxy,
+};
 use crate::patch_builder::JsPatchBuilder;
 use crate::pull_progress::JsPullProgressStream;
 use crate::registry_builder::JsRegistryConfigBuilder;
 use crate::root_disk_builder::JsRootDiskBuilder;
-use crate::sandbox::Sandbox as JsSandbox;
+use crate::sandbox::Sandbox;
 use crate::secret_builder::JsSecretBuilder;
 use crate::tls_builder::JsTlsBuilder;
 
@@ -31,7 +35,14 @@ use crate::tls_builder::JsTlsBuilder;
 // re-emit references to these classes (otherwise they'd appear as
 // the Rust struct names in `index.d.ts`).
 #[allow(dead_code)]
-type _NapiHints = (JsDnsBuilder, JsTlsBuilder, JsSecretBuilder);
+type _NapiHints = (
+    JsDnsBuilder,
+    JsTlsBuilder,
+    JsSecretBuilder,
+    JsOutboundProxyBuilder,
+    JsSocks4ProxyBuilder,
+    JsSocks5ProxyBuilder,
+);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -46,6 +57,7 @@ type _NapiHints = (JsDnsBuilder, JsTlsBuilder, JsSecretBuilder);
 #[napi(js_name = "SandboxBuilder")]
 pub struct JsSandboxBuilder {
     inner: Option<RustSandboxBuilder>,
+    outbound_proxy: Option<RustOutboundProxy>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -59,6 +71,7 @@ impl JsSandboxBuilder {
     pub fn new(name: String) -> Self {
         Self {
             inner: Some(microsandbox::Sandbox::builder(name)),
+            outbound_proxy: None,
         }
     }
 
@@ -499,7 +512,31 @@ impl JsSandboxBuilder {
         let mut returned = configure.call(initial)?;
         let net_builder = returned.take_inner_builder()?;
         let prev = self.take_inner();
-        self.inner = Some(prev.network(|_default| net_builder));
+        let mut next = prev.network(|_default| net_builder);
+        if let Some(proxy) = self.outbound_proxy.clone() {
+            next = next.proxy(|_| proxy);
+        }
+        self.inner = Some(next);
+        Ok(self)
+    }
+
+    /// Configure the single proxy used for outbound sandbox connections.
+    #[napi(
+        ts_args_type = "configure: (arg: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder"
+    )]
+    pub fn proxy(
+        &mut self,
+        env: &Env,
+        configure: Function<ClassInstance<JsOutboundProxyBuilder>, Unknown<'_>>,
+    ) -> Result<&Self> {
+        let selector = JsOutboundProxyBuilder::new();
+        let selection = selector.selection();
+        let initial = selector.into_instance(env)?;
+        configure.call(initial)?;
+        let proxy = take_selected_proxy(&selection)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.proxy(|_| proxy.clone()));
+        self.outbound_proxy = Some(proxy);
         Ok(self)
     }
 
@@ -752,13 +789,27 @@ impl JsSandboxBuilder {
     /// synchronously before awaiting; napi-rs requires the `unsafe` tag
     /// regardless. JS callers see `create(): Promise<Sandbox>`.
     #[napi]
-    pub async unsafe fn create(&mut self) -> Result<JsSandbox> {
+    pub async unsafe fn create(&mut self) -> Result<Sandbox> {
         let b = self
             .inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
         let inner: RustSandbox = b.create().await.map_err(to_napi_error)?;
-        Ok(JsSandbox::from_rust(inner))
+        Ok(Sandbox::from_rust(inner))
+    }
+
+    /// Connect to the persisted sandbox with this name, or create it.
+    ///
+    /// # Safety
+    /// Same justification as `create`.
+    #[napi(js_name = "connectOrCreate")]
+    pub async unsafe fn connect_or_create(&mut self) -> Result<Sandbox> {
+        let builder = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
+        let inner = builder.connect_or_create().await.map_err(to_napi_error)?;
+        Ok(Sandbox::from_rust(inner))
     }
 
     /// Create the sandbox with image-pull progress reporting. Returns
@@ -812,7 +863,7 @@ impl JsPullProgressCreate {
     /// Await the sandbox. Resolves once the pull + boot finishes.
     /// Calling more than once errors.
     #[napi(js_name = "awaitSandbox")]
-    pub async fn await_sandbox(&self) -> Result<JsSandbox> {
+    pub async fn await_sandbox(&self) -> Result<Sandbox> {
         let mut guard = self.task.lock().await;
         let task = guard
             .take()
@@ -821,7 +872,7 @@ impl JsPullProgressCreate {
             .await
             .map_err(|e| napi::Error::from_reason(format!("create task panicked: {e}")))?
             .map_err(to_napi_error)?;
-        Ok(JsSandbox::from_rust(inner))
+        Ok(Sandbox::from_rust(inner))
     }
 }
 

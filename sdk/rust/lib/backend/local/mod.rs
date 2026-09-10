@@ -42,7 +42,7 @@ use super::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 use crate::{
     SandboxConfig,
-    config::{DatabaseConfig, LocalConfig, RegistryEntry, load_persisted_config_or_default},
+    config::{DatabaseConfig, GlobalConfig, RegistryEntry, load_persisted_config_or_default},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -51,12 +51,12 @@ use crate::{
 
 /// Local-runtime backend: spawns microVMs via libkrun on the calling host.
 ///
-/// Owns the persisted [`LocalConfig`] (paths, sandbox defaults, registry
+/// Owns the persisted [`GlobalConfig`] (paths, sandbox defaults, registry
 /// settings, database tuning) and the SQLite [`DbPools`] for this instance.
 /// Built via either [`LocalBackend::lazy`] (no-explicit-setup ambient
 /// default, lazily initialised) or [`LocalBackend::builder`] (programmatic).
 pub struct LocalBackend {
-    config: Arc<LocalConfig>,
+    config: Arc<GlobalConfig>,
     db: OnceCell<DbPools>,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
@@ -162,14 +162,14 @@ impl LocalBackend {
             .await
     }
 
-    /// Borrow this backend's [`LocalConfig`].
-    pub fn config(&self) -> &LocalConfig {
+    /// Borrow this backend's [`GlobalConfig`].
+    pub fn config(&self) -> &GlobalConfig {
         &self.config
     }
 
     /// Clone the backend-owned config handle for APIs that need to return the
     /// ambient local config without borrowing through a temporary backend `Arc`.
-    pub(crate) fn config_handle(&self) -> Arc<LocalConfig> {
+    pub(crate) fn config_handle(&self) -> Arc<GlobalConfig> {
         self.config.clone()
     }
 
@@ -431,7 +431,7 @@ impl LocalBackendBuilder {
     }
 
     /// Finish lazy construction from an already resolved persisted config.
-    fn build_lazy_from(self, persisted: LocalConfig) -> LocalBackend {
+    fn build_lazy_from(self, persisted: GlobalConfig) -> LocalBackend {
         let config = self.merge_into(persisted);
         LocalBackend {
             config: Arc::new(config),
@@ -443,7 +443,7 @@ impl LocalBackendBuilder {
 
     /// Overlay the builder's overrides on top of `base`. Builder values win;
     /// `None` builder fields fall through to `base`.
-    fn merge_into(self, mut base: LocalConfig) -> LocalConfig {
+    fn merge_into(self, mut base: GlobalConfig) -> GlobalConfig {
         let LocalBackendBuilder {
             home,
             sandboxes_dir,
@@ -815,17 +815,102 @@ fn is_missing_migrations_table(err: &DbErr) -> bool {
 #[cfg(test)]
 mod tests {
     use microsandbox_image::snapshot::Manifest;
+    use microsandbox_types::{
+        CpuPlacement, MemoryPlacement, NumaPlacement, PlacementProfile, SandboxResourcesPatch,
+    };
     use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
     use sha2::{Digest as _, Sha256};
 
     use super::*;
+    use crate::SandboxConfigPatch;
     use crate::backend::with_backend;
+    use crate::sandbox::SandboxBuilder;
     use crate::volume::VolumeConfig;
+
+    #[tokio::test]
+    async fn sandbox_config_patch_overlays_global_config_by_field_presence() {
+        let mut config = GlobalConfig {
+            sandbox_defaults: crate::config::SandboxDefaults {
+                cpus: 4,
+                memory_mib: 2048,
+                cpu_placement: CpuPlacement::Auto,
+                placement_profile: Some("global-locality".into()),
+                thp: microsandbox_types::TransparentHugePagePolicy::Always,
+                shell: "/bin/bash".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.runtime.placement_profiles.insert(
+            "global-locality".into(),
+            PlacementProfile {
+                numa: NumaPlacement::PreferSingle,
+                memory: MemoryPlacement::FollowCpu,
+            },
+        );
+
+        let backend = LocalBackend {
+            config: Arc::new(config),
+            db: OnceCell::new(),
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
+        };
+
+        let (inherited, overridden) = with_backend(backend, async {
+            let patch = SandboxResourcesPatch::new()
+                .cpus(2)
+                .max_cpus(2)
+                .memory_mib(512);
+            let supplied = SandboxConfigPatch::new().resources(patch);
+            let inherited = SandboxBuilder::new("test")
+                .overlay(supplied.clone())
+                .image("alpine")
+                .build()
+                .await
+                .unwrap();
+
+            let patch = SandboxResourcesPatch::new()
+                .cpu_placement(CpuPlacement::Spread)
+                .thp(microsandbox_types::TransparentHugePagePolicy::Never);
+            let supplied = supplied.overlay(SandboxConfigPatch::new().resources(patch));
+            let overridden = SandboxBuilder::new("test")
+                .overlay(supplied)
+                .image("alpine")
+                .build()
+                .await
+                .unwrap();
+
+            (inherited, overridden)
+        })
+        .await;
+
+        assert_eq!(inherited.spec.resources.cpus, 2);
+        assert_eq!(inherited.spec.resources.max_cpus, 2);
+        assert_eq!(inherited.spec.resources.memory_mib, 512);
+        assert_eq!(inherited.spec.resources.cpu_placement, CpuPlacement::Auto);
+        assert_eq!(
+            inherited.spec.resources.placement_profile.as_deref(),
+            Some("global-locality")
+        );
+        assert_eq!(
+            inherited.spec.resources.thp,
+            microsandbox_types::TransparentHugePagePolicy::Always
+        );
+        assert_eq!(inherited.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(
+            overridden.spec.resources.cpu_placement,
+            CpuPlacement::Spread
+        );
+        assert_eq!(
+            overridden.spec.resources.thp,
+            microsandbox_types::TransparentHugePagePolicy::Never
+        );
+    }
 
     #[test]
     fn operator_deployment_profile_overrides_sandbox_request() {
         let backend = LocalBackend {
-            config: Arc::new(LocalConfig {
+            config: Arc::new(GlobalConfig {
                 deployment_profile: Some(DeploymentProfile::MultiTenant),
                 ..Default::default()
             }),
@@ -848,7 +933,7 @@ mod tests {
     #[test]
     fn sandbox_deployment_profile_is_preserved_without_operator_override() {
         let backend = LocalBackend {
-            config: Arc::new(LocalConfig::default()),
+            config: Arc::new(GlobalConfig::default()),
             db: OnceCell::new(),
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
@@ -1038,6 +1123,73 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("database schema is newer"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_migrate_upgrades_v0_6_15_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
+        std::fs::create_dir_all(&db_dir).unwrap();
+
+        let db = microsandbox_db::connection::DbWriteConnection::open(
+            &db_path,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let released_prefix_len = schema_metadata::migration_ids()
+            .position(|id| id == schema_metadata::SHARED_CPU_ALLOCATION_MIGRATION_ID)
+            .unwrap()
+            + 1;
+        Migrator::up(db.inner(), Some(released_prefix_len as u32))
+            .await
+            .unwrap();
+
+        // v0.6.15 ended with this schema-free compatibility marker. Insert
+        // its migration row to reproduce a database last opened by v0.6.15.
+        db.inner()
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO seaql_migrations (version, applied_at) VALUES (?, ?)",
+                [
+                    schema_metadata::MOUNT_OWNER_CONFIG_MIGRATION_ID.into(),
+                    1_i64.into(),
+                ],
+            ))
+            .await
+            .unwrap();
+        drop(db);
+
+        let pools = connect_and_migrate(
+            &db_dir,
+            &DatabaseConfig::default(),
+            &tmp.path().join("snapshots"),
+        )
+        .await
+        .unwrap();
+        let network_slot_migration = pools
+            .read()
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::SANDBOX_NETWORK_SLOT_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        let network_slot_column = pools
+            .read()
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM pragma_table_info('sandbox') WHERE name = 'network_slot'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap();
+
+        assert!(network_slot_migration.is_some());
+        assert!(network_slot_column.is_some());
     }
 
     #[tokio::test]
@@ -1284,7 +1436,7 @@ mod tests {
     fn builder_merge_preserves_persisted_fields_when_not_overridden() {
         // Persisted base: a fully-populated config the user supposedly
         // wrote to ~/.microsandbox/config.json.
-        let base = LocalConfig {
+        let base = GlobalConfig {
             log_level: Some(microsandbox_runtime::logging::LogLevel::Debug),
             deployment_profile: Some(DeploymentProfile::MultiTenant),
             database: DatabaseConfig {
@@ -1340,7 +1492,7 @@ mod tests {
 
     #[test]
     fn builder_deployment_profile_overrides_persisted_policy() {
-        let base = LocalConfig {
+        let base = GlobalConfig {
             deployment_profile: Some(DeploymentProfile::SingleTenant),
             ..Default::default()
         };
@@ -1357,7 +1509,7 @@ mod tests {
 
     #[test]
     fn builder_ssh_inactivity_timeout_overrides_persisted_default() {
-        let base = LocalConfig {
+        let base = GlobalConfig {
             ssh: crate::config::SshConfig {
                 inactivity_timeout_secs: 1800,
             },

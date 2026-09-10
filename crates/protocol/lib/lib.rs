@@ -78,6 +78,14 @@ const _: () = assert!(
 /// Virtio-console port name for the agent channel.
 pub const AGENT_PORT_NAME: &str = "agent";
 
+/// Virtio-console port name for the optional generation-8 bulk lane.
+#[doc(hidden)]
+pub const AGENT_BULK_PORT_NAME: &str = "agent-bulk";
+
+/// Internal kernel command-line selector for the first dual-port transport profile.
+#[doc(hidden)]
+pub const AGENT_TRANSPORT_DUAL_PORT_CMDLINE: &str = "microsandbox.agent_transport=dual-port-v1";
+
 /// Virtiofs tag for the runtime filesystem (scripts, heartbeat).
 pub const RUNTIME_FS_TAG: &str = "msb_runtime";
 
@@ -217,10 +225,9 @@ pub const ENV_DIR_MOUNTS: &str = "MSB_DIR_MOUNTS";
 /// Environment variable carrying virtiofs **file** volume mount specs for guest init.
 ///
 /// Used when the host path is a single file rather than a directory. The SDK
-/// wraps each file in an isolated staging directory (hard-linked to preserve
-/// the same inode) and shares that directory via virtiofs. Agentd mounts the
-/// share at [`FILE_MOUNTS_DIR`]`/<tag>/` and bind-mounts the file to the
-/// guest path.
+/// asks the runtime to expose the source through a synthetic one-entry
+/// filesystem. Agentd mounts that share at [`FILE_MOUNTS_DIR`]`/<tag>/` and
+/// bind-mounts the file to the guest path.
 ///
 /// Format: `tag:filename:guest_path[:opts][;tag:filename:guest_path[:opts];...]`
 ///
@@ -432,6 +439,7 @@ pub const GUEST_TLS_HOST_CAS_PATH: &str = "/.msb/tls/host-cas.pem";
 //--------------------------------------------------------------------------------------------------
 
 pub mod bootstrap;
+pub mod bulk;
 pub mod codec;
 pub mod core;
 pub mod exec;
@@ -439,5 +447,7 @@ pub mod fs;
 pub mod heartbeat;
 pub mod message;
 pub mod tcp;
+#[doc(hidden)]
+pub mod transport;
 
 pub use error::*;
