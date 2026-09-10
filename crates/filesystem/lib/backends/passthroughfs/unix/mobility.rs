@@ -4,12 +4,14 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
     io,
-    os::fd::{AsRawFd, FromRawFd, RawFd},
+    os::fd::{FromRawFd, RawFd},
     sync::{Arc, Mutex, RwLock, atomic::Ordering},
 };
 
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
+#[cfg(target_os = "macos")]
+use std::os::fd::AsRawFd;
 #[cfg(target_os = "macos")]
 use std::{
     ffi::{CStr, CString, OsStr},
