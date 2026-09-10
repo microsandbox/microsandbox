@@ -234,13 +234,20 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     };
 
     if let Some(archive_path) = args.archive.as_ref() {
-        let archive = builder.create_archive(archive_path, args.plain_tar).await?;
-        spinner.finish_success("Snapshotted");
-        if !args.quiet {
-            println!("{}", archive.id());
-            println!("{}", archive.path().display());
-        }
-        return Ok(());
+        return match builder.create_archive(archive_path, args.plain_tar).await {
+            Ok(archive) => {
+                spinner.finish_success("Snapshotted");
+                if !args.quiet {
+                    println!("{}", archive.id());
+                    println!("{}", archive.path().display());
+                }
+                Ok(())
+            }
+            Err(error) => {
+                spinner.finish_clear();
+                Err(error.into())
+            }
+        };
     }
 
     match builder.create().await {
