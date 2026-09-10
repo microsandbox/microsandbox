@@ -16,6 +16,8 @@ Results retain individual samples, correctness checks, and nearest-rank p50/p95.
 means canonical VEOF, not a nonexistent PTY half-close. Bulk overlap is measured at the CLI
 operation boundary, not claimed as an instrumented guest-frame boundary. This is a POSIX
 harness. It never reads or stops sandboxes from the caller's MSB_HOME.
+Use --home-parent /short/disk/path when /tmp has a RAM or per-user quota; every run still
+creates and owns a fresh home underneath that directory.
 """
 
 import argparse
@@ -547,7 +549,9 @@ class TransportSmoke(BASE.Smoke):
         # Reports may live under a long build directory; Unix sockets cannot. Allocate the
         # home independently, never borrow an existing path. Base cleanup still owns exactly
         # this freshly allocated directory and only removes it after catalog/PID verification.
-        self.home = Path(tempfile.mkdtemp(prefix="msb-t-", dir="/tmp"))
+        # Some Linux hosts mount /tmp as quota-limited tmpfs. Keep the short-path default,
+        # but permit an explicit disk-backed parent for archive and CoW memory fixtures.
+        self.home = Path(tempfile.mkdtemp(prefix="msb-t-", dir=args.home_parent))
         self.env["MSB_HOME"] = str(self.home)
         self.report["home"] = str(self.home)
         # Make the CLI and its launched runtime an explicit matching pair. Do not inherit a
@@ -1030,6 +1034,8 @@ def main():
         parser.add_argument("--" + label + "-firmware", type=Path)
         parser.add_argument("--" + label + "-agentd", type=Path, help="Otherwise use embedded agentd")
     parser.add_argument("--output", type=Path, help="Exclusive new report directory")
+    parser.add_argument("--home-parent", type=Path, default=Path("/tmp"),
+                        help="Existing short directory for a fresh isolated home (default: /tmp)")
     parser.add_argument("--samples", type=bounded_int, default=3)
     parser.add_argument("--input-modes", nargs="+", choices=("pipe", "pty"), default=["pipe", "pty"])
     parser.add_argument("--cases", nargs="+", choices=("idle", "throughput", "stdin-throughput", "paused", "full", "branch",

@@ -37,17 +37,29 @@ class TransportCheckpointTests(unittest.TestCase):
         self.output = self.root / "logs"
         self.output.mkdir()
 
-    def smoke(self):
+    def smoke(self, home_parent=Path("/tmp")):
         smoke = HARNESS.TransportSmoke(argparse.Namespace(
             binary=Path(sys.executable), output=self.root / "run", label="candidate",
             firmware=self.firmware, agentd=None, image="never-pull-this-unit-fixture",
             layout="managed", timeout=3, suite_timeout=20, samples=1, stdin_mib=2, bulk_mib=1,
-            gate_delay=20, tcp_mib=64,
+            gate_delay=20, tcp_mib=64, home_parent=home_parent,
             cases=["idle", "throughput", "paused", "full", "branch"],
             input_modes=["pipe", "pty"],
         ))
         self.addCleanup(shutil.rmtree, smoke.home, True)
         return smoke
+
+    def test_custom_home_parent_allocates_fresh_owned_directory(self):
+        parent = self.root / "homes"
+        parent.mkdir()
+        existing = parent / "keep"
+        existing.write_text("not owned by the harness")
+        smoke = self.smoke(home_parent=parent)
+        self.assertEqual(smoke.home.parent, parent)
+        self.assertTrue(smoke.home.name.startswith("msb-t-"))
+        self.assertTrue(smoke.home.is_dir())
+        self.assertEqual(smoke.env["MSB_HOME"], str(smoke.home))
+        self.assertEqual(existing.read_text(), "not owned by the harness")
 
     def stream(self, program=None, arguments=None, is_pty=False, control=False):
         # Only the small guest Python fixture runs, as a local child. The real CLI invocation
