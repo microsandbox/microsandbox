@@ -1,19 +1,24 @@
 //! Runtime-owned composite checkpoint production.
 
+#[cfg(feature = "runner")]
 mod coordinator;
 mod disk;
+#[cfg(feature = "runner")]
 mod restore;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "runner")]
 pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult};
+#[cfg(feature = "runner")]
 pub(crate) use disk::recover_runtime_owned_root;
 pub use disk::{
     DiskCompactionResult, RuntimeOwnedRootChain, RuntimeOwnedRootLayer, compact_stopped_root,
     grow_stopped_root, load_runtime_owned_root_chain, recover_stopped_root_growth,
 };
+#[cfg(feature = "runner")]
 pub(crate) use restore::{PreparedCheckpointRestore, RestoredAgentState};
 
 //--------------------------------------------------------------------------------------------------

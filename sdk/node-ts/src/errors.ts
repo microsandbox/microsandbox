@@ -3,12 +3,16 @@ export type MicrosandboxErrorCode =
   | "http"
   | "cloudHttp"
   | "libkrunfwNotFound"
+  | "runtimeNotInstalled"
+  | "runtimeIncomplete"
   | "database"
   | "invalidConfig"
   | "noDefaultCommand"
   | "sandboxNotFound"
   | "sandboxAlreadyExists"
+  | "sandboxReplaced"
   | "sandboxStillRunning"
+  | "sandboxNotRunning"
   | "runtime"
   | "json"
   | "protocol"
@@ -62,6 +66,18 @@ export class LibkrunfwNotFoundError extends MicrosandboxError {
   }
 }
 
+export class RuntimeNotInstalledError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("runtimeNotInstalled", message, options);
+  }
+}
+
+export class RuntimeIncompleteError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("runtimeIncomplete", message, options);
+  }
+}
+
 export class DatabaseError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("database", message, options);
@@ -92,9 +108,21 @@ export class SandboxAlreadyExistsError extends MicrosandboxError {
   }
 }
 
+export class SandboxReplacedError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("sandboxReplaced", message, options);
+  }
+}
+
 export class SandboxStillRunningError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("sandboxStillRunning", message, options);
+  }
+}
+
+export class SandboxNotRunningError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("sandboxNotRunning", message, options);
   }
 }
 

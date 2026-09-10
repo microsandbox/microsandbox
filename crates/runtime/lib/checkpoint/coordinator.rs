@@ -483,6 +483,7 @@ impl CheckpointCoordinator {
     fn thaw_workload(&self, workload: &FrozenWorkload) -> Result<(), String> {
         let request = WorkloadThaw {
             attempt_id: workload.attempt_id.clone(),
+            mode: microsandbox_protocol::core::WorkloadThawMode::Continue,
         };
         let reply = self
             .runtime
@@ -831,6 +832,11 @@ impl FrozenWorkload {
                 ("boot_time_ns".into(), self.ready.boot_time_ns.to_string()),
                 ("init_time_ns".into(), self.ready.init_time_ns.to_string()),
                 ("ready_time_ns".into(), self.ready.ready_time_ns.to_string()),
+                // Restore the negotiated physical transport as well as the agent identity.
+                (
+                    "ready".into(),
+                    serde_json::to_string(&self.ready).expect("Ready is serializable"),
+                ),
             ]),
         }
     }

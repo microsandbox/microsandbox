@@ -10,32 +10,34 @@ Use this crate when you already have an agent relay endpoint and want direct pro
 
 ```toml
 [dependencies]
-microsandbox-agent-client = "0.6.15"
-microsandbox-protocol = "0.6.15"
+microsandbox-agent-client = "0.6.18"
+microsandbox-protocol = "0.6.18"
 ```
 
 The crate is transport-agnostic by default. Enable exactly the transport adapter you need:
 
 ```toml
 # Local microsandbox relay sockets.
-microsandbox-agent-client = { version = "0.6.15", features = ["uds"] }
+microsandbox-agent-client = { version = "0.6.18", features = ["uds"] }
 
 # Any caller-owned byte-stream transport (e.g. a pre-authenticated WebSocket
 # adapted to bytes).
-microsandbox-agent-client = { version = "0.6.15", features = ["stream"] }
+microsandbox-agent-client = { version = "0.6.18", features = ["stream"] }
 ```
 
 The high-level `microsandbox` SDK enables `uds` explicitly because local sandboxes are reached through Unix domain sockets.
 
+The `uds` adapter negotiates local shared-memory payload transport automatically when the runtime supports it. Callers continue to use `AgentClient`; arena descriptors, mappings, and releases are an internal connection detail.
+
 ## Protocol Model
 
-The agent protocol is a length-prefixed binary frame:
+The agent protocol uses a stable length-prefixed binary frame header:
 
 ```text
-[len: u32 BE][id: u32 BE][flags: u8][CBOR Message body]
+[len: u32 BE][id: u32 BE][flags: u8][body]
 ```
 
-The CBOR `Message` body contains:
+Ordinary control frames carry a CBOR `Message` body:
 
 ```text
 { v, t, p }
@@ -44,6 +46,8 @@ The CBOR `Message` body contains:
 - `v`: protocol generation.
 - `t`: wire message type such as `core.exec.request`.
 - `p`: CBOR-encoded payload for that message type.
+
+Generation 8 adds an opt-in raw data body for negotiated filesystem and TCP streams. `FLAG_BULK` is exclusive, and its body is `[kind: u8][flow: u8][reserved: u16 = 0][offset: u64 BE][payload]`. The relay continues to route solely on the stable header; endpoints validate kind, direction, exact offset, negotiated record size, and absolute credit.
 
 `AgentClient` owns `id` allocation from the relay-assigned range. Callers choose message types and payloads; the client computes flags, gates unsupported message types against the negotiated protocol generation, frames messages, and routes responses by correlation ID.
 
@@ -83,6 +87,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
                     path: "/etc/os-release".to_string(),
                     follow_symlink: true,
                 },
+                bulk: None,
             },
         )
         .await?;
@@ -99,7 +104,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 Enable the `stream` feature:
 
 ```toml
-microsandbox-agent-client = { version = "0.6.15", features = ["stream"] }
+microsandbox-agent-client = { version = "0.6.18", features = ["stream"] }
 ```
 
 Drive the client over any `AsyncRead + AsyncWrite` — the caller owns the dial and any authentication, then hands over the connected stream:
@@ -129,6 +134,8 @@ client.request(MessageType::FsRequest, &payload).await?;
 client.stream(MessageType::ExecRequest, &payload).await?;
 client.send(id, MessageType::ExecStdin, &payload).await?;
 ```
+
+Negotiated bulk streams use `stream_frames` to receive control messages and raw records on the same correlation, `send_bulk` for owned raw payloads, and `cancel_bulk` to stop the peer and release local dispatch state. These methods reject peers older than generation 8 before raw bytes are sent.
 
 Raw APIs move complete CBOR message envelope bodies while still letting the client own frame headers, ID allocation, and response routing:
 

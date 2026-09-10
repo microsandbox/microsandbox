@@ -7,6 +7,8 @@ mod command;
 mod domain;
 mod error;
 pub mod modify;
+mod registry;
+mod snapshot;
 mod validation;
 
 #[cfg(feature = "ts")]
@@ -29,18 +31,21 @@ pub use command::{CommandResolutionError, ResolvedCommand, resolve_default_comma
 pub use domain::{
     Action, CertCacheConfig, CpuPlacement, DEFAULT_METRICS_SAMPLE_INTERVAL_MS,
     DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, DeploymentProfile, Destination,
-    DestinationGroup, Direction, DiskImageFormat, DnsConfig, EnvVar, FlatClone, HandoffInit,
-    HostPattern, HostPermissions, InterceptCaConfig, InterfaceOverrides, LogSource,
-    MAX_SECRET_PLACEHOLDER_BYTES, MemoryPlacement, MountOptions, NamedVolumeCreate,
-    NamedVolumeMode, NetworkPolicy, NetworkRateLimitDirection, NetworkRateLimiterConfig,
-    NetworkSpec, NumaPlacement, OciRootfsSource, Patch, PlacementProfile, PortProtocol, PortRange,
-    Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError, RateLimiterConfig, Rlimit,
-    RlimitResource, RootDisk, RootfsSource, Rule, SandboxLogLevel, SandboxPolicy, SandboxResources,
-    SandboxRuntimeOptions, SandboxSpec, ScopedUpstreamCaCert, ScopedVerifyUpstream,
-    SecretConfigError, SecretEntry, SecretInjection, SecretsConfig, SecurityProfile, SnapshotSpec,
-    StatVirtualization, TlsConfig, TokenBucketConfig, TransparentHugePagePolicy, ViolationAction,
-    VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec,
-    canonicalize_volume_mounts,
+    DestinationGroup, Direction, DiskImageFormat, DnsConfig, DnsConfigPatch, EnvVar, FlatClone,
+    HandoffInit, HostPattern, HostPermissions, InterceptCaConfig, InterfaceOverrides,
+    InterfaceOverridesPatch, LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MemoryPlacement,
+    MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkPolicy, NetworkRateLimitDirection,
+    NetworkRateLimiterConfig, NetworkRateLimiterConfigPatch, NetworkSpec, NetworkSpecPatch,
+    NumaPlacement, OciRootfsSource, OutboundProxy, Patch, PlacementProfile, PortProtocol,
+    PortRange, Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError, RateLimiterConfig,
+    Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxConfigPatch, SandboxLogLevel,
+    SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
+    SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec, ScopedUpstreamCaCert,
+    ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretSubstitution,
+    SecretViolationAction, SecretsConfig, SecretsConfigPatch, SecurityProfile, SnapshotSpec,
+    Socks5Credentials, StatVirtualization, TlsConfig, TlsConfigPatch, TokenBucketConfig,
+    TransparentHugePagePolicy, VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec,
+    VsockSocketType, VsockSpec, VsockSpecPatch, canonicalize_volume_mounts,
 };
 pub use error::{TypesError, TypesResult};
 pub use modify::{
@@ -49,6 +54,8 @@ pub use modify::{
     ResourceResizeStatus, SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind,
     SecretModificationPatch, SecretPlannedChange, SecretSource,
 };
+pub use registry::RegistryAuth;
+pub use snapshot::DiskCompactionResult;
 pub use validation::{
     MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, hostname_from_sandbox_name, validate_hostname,
     validate_sandbox_name,

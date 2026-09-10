@@ -10,12 +10,16 @@ use std::time::Instant;
 #[cfg(unix)]
 use std::fs::File;
 
+use microsandbox_image::checkpoint::sparse_file_integrity;
 use microsandbox_image::checkpoint::{
     CompactLayer, DiskCompactionPlan, compact_layer_capacity, materialize_compact_prefix,
 };
-use microsandbox_image::checkpoint::{DiskGenerationManifest, DiskLayerRef, sparse_file_integrity};
+#[cfg(feature = "runner")]
+use microsandbox_image::checkpoint::{DiskGenerationManifest, DiskLayerRef};
+pub use microsandbox_types::DiskCompactionResult;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "runner")]
 use crate::vm::{UpperLayerSpec, UpperSpec, VmConfig};
 
 //--------------------------------------------------------------------------------------------------
@@ -58,26 +62,8 @@ pub struct RuntimeOwnedRootLayer {
     pub format: String,
 }
 
-/// Measured outcome or dry-run projection of an explicit root-disk compaction.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct DiskCompactionResult {
-    /// Whether only selection was performed.
-    pub dry_run: bool,
-    /// Physical layers before compaction, including the writable head.
-    pub input_layers: usize,
-    /// Selected oldest layers, including the base, excluding the writable head.
-    pub selected_layers: usize,
-    /// Physical layers after compaction, including the writable head.
-    pub output_layers: usize,
-    /// Guest bytes materialized; not a disk-space saving estimate.
-    pub materialized_bytes: u64,
-    /// Total operation duration in microseconds.
-    pub total_us: u64,
-    /// Measured VM pause through resume, zero for stopped sources and dry runs.
-    pub pause_us: u64,
-}
-
 /// Successfully sealed disk generation and the block state captured at its pause boundary.
+#[cfg(feature = "runner")]
 pub(crate) struct RootDiskRollover {
     pub(crate) manifest: DiskGenerationManifest,
     pub(crate) device_state: Vec<u8>,
@@ -87,6 +73,7 @@ pub(crate) struct RootDiskRollover {
 #[derive(Debug)]
 pub(crate) struct RootDiskRolloverError {
     message: String,
+    #[cfg(feature = "runner")]
     pub(crate) keep_paused: bool,
 }
 
@@ -193,6 +180,7 @@ impl RuntimeOwnedRootDisk {
     }
 
     /// Open the authoritative chain journal or initialize it from a sandbox-owned root disk.
+    #[cfg(feature = "runner")]
     pub(crate) fn open(runtime_dir: &Path, vm: &VmConfig) -> Result<Option<Self>, String> {
         let Some(layout) = configured_layout(vm) else {
             return Ok(None);
@@ -240,13 +228,14 @@ impl RuntimeOwnedRootDisk {
     }
 
     /// Guest-visible block identity owned by this rollover provider.
+    #[cfg(feature = "runner")]
     pub(crate) fn device_id(&self) -> &str {
         &self.state.device_id
     }
 
     pub(crate) fn compact(
         &mut self,
-        vm: Option<&msb_krun::VmControl>,
+        #[cfg(feature = "runner")] vm: Option<&msb_krun::VmControl>,
         runtime: &tokio::runtime::Handle,
         layers: Option<usize>,
         dry_run: bool,
@@ -337,35 +326,61 @@ impl RuntimeOwnedRootDisk {
             next.layers.push(replacement);
         }
         sync_directory(stage.path()).map_err(RootDiskRolloverError::pre_rebind)?;
-        let paused_at = Instant::now();
-        let pause = vm
-            .map(|vm| vm.pause())
-            .transpose()
-            .map_err(RootDiskRolloverError::pre_rebind)?;
-        let prepared = prepare_backend(&next);
-        let backend = match prepared {
-            Ok(backend) => backend,
-            Err(error) => {
-                if let (Some(vm), Some(pause)) = (vm, pause) {
-                    vm.resume(pause)
-                        .map_err(RootDiskRolloverError::post_journal)?;
+        #[cfg(feature = "runner")]
+        let (pause, backend, paused_at) = {
+            let paused_at = Instant::now();
+            let pause = vm
+                .map(|vm| vm.pause())
+                .transpose()
+                .map_err(RootDiskRolloverError::pre_rebind)?;
+            let prepared = prepare_backend(&next);
+            let backend = match prepared {
+                Ok(backend) => backend,
+                Err(error) => {
+                    if let (Some(vm), Some(pause)) = (vm, pause) {
+                        vm.resume(pause)
+                            .map_err(RootDiskRolloverError::post_journal)?;
+                    }
+                    return Err(RootDiskRolloverError::pre_rebind(error));
                 }
-                return Err(RootDiskRolloverError::pre_rebind(error));
-            }
+            };
+
+            (pause, backend, paused_at)
         };
+        #[cfg(not(feature = "runner"))]
+        {
+            // Stopped SDK maintenance validates the same explicit closure without importing
+            // hypervisor types. No header-selected backing paths may be opened implicitly.
+            let layers = next
+                .layers
+                .iter()
+                .map(|layer| CompactLayer {
+                    path: layer.path.clone(),
+                    qcow2: layer.format == RootDiskFormat::Qcow2,
+                })
+                .collect::<Vec<_>>();
+            runtime
+                .block_on(microsandbox_image::checkpoint::validate_compact_chain(
+                    &layers,
+                ))
+                .map_err(RootDiskRolloverError::pre_rebind)?;
+        }
         // Preserve the files before attempting the durable commit. Even a directory fsync error
         // may occur after rename, so uncertain publication must retain data and recover forward.
         let _published_directory = stage.keep();
         write_state(&self.state_path, &next).map_err(RootDiskRolloverError::post_journal)?;
         let old = std::mem::replace(&mut self.state, next);
-        if let (Some(vm), Some(pause)) = (vm, pause) {
-            vm.replace_block_backend(&self.state.device_id, backend)
-                .map_err(RootDiskRolloverError::post_journal)?;
-            vm.resume(pause)
-                .map_err(RootDiskRolloverError::post_journal)?;
-            result.pause_us = paused_at.elapsed().as_micros() as u64;
-        } else {
-            drop(backend);
+        #[cfg(feature = "runner")]
+        {
+            if let (Some(vm), Some(pause)) = (vm, pause) {
+                vm.replace_block_backend(&self.state.device_id, backend)
+                    .map_err(RootDiskRolloverError::post_journal)?;
+                vm.resume(pause)
+                    .map_err(RootDiskRolloverError::post_journal)?;
+                result.pause_us = paused_at.elapsed().as_micros() as u64;
+            } else {
+                drop(backend);
+            }
         }
         // Only retire this sandbox's directory entries. Other snapshots/children keep their own
         // hardlinks. Failed unlinks are harmless retained storage, never a reason to undo commit.
@@ -379,6 +394,7 @@ impl RuntimeOwnedRootDisk {
     }
 
     /// Seal the current head, publish its closure, and switch the paused device to a fresh head.
+    #[cfg(feature = "runner")]
     pub(crate) fn rollover(
         &mut self,
         vm: &msb_krun::VmControl,
@@ -530,6 +546,7 @@ impl RootDiskState {
         Ok(())
     }
 
+    #[cfg(feature = "runner")]
     fn disk_spec(&self) -> UpperSpec {
         UpperSpec {
             layers: self
@@ -563,6 +580,7 @@ impl RootDiskFormat {
     }
 }
 
+#[cfg(feature = "runner")]
 impl TryFrom<msb_krun::DiskImageFormat> for RootDiskFormat {
     type Error = String;
 
@@ -577,6 +595,7 @@ impl TryFrom<msb_krun::DiskImageFormat> for RootDiskFormat {
     }
 }
 
+#[cfg(feature = "runner")]
 impl From<RootDiskFormat> for msb_krun::DiskImageFormat {
     fn from(value: RootDiskFormat) -> Self {
         match value {
@@ -586,6 +605,7 @@ impl From<RootDiskFormat> for msb_krun::DiskImageFormat {
     }
 }
 
+#[cfg(feature = "runner")]
 impl From<RootDiskFormat> for msb_krun::BlockImageFormat {
     fn from(value: RootDiskFormat) -> Self {
         match value {
@@ -599,6 +619,7 @@ impl RootDiskRolloverError {
     pub(super) fn pre_rebind(error: impl fmt::Display) -> Self {
         Self {
             message: error.to_string(),
+            #[cfg(feature = "runner")]
             keep_paused: false,
         }
     }
@@ -606,6 +627,7 @@ impl RootDiskRolloverError {
     pub(crate) fn post_journal(error: impl fmt::Display) -> Self {
         Self {
             message: error.to_string(),
+            #[cfg(feature = "runner")]
             keep_paused: true,
         }
     }
@@ -624,6 +646,7 @@ impl std::error::Error for RootDiskRolloverError {}
 //--------------------------------------------------------------------------------------------------
 
 /// Apply the durable forward chain before VM construction after a runtime restart.
+#[cfg(feature = "runner")]
 pub(crate) fn recover_runtime_owned_root(
     runtime_dir: &Path,
     vm: &mut VmConfig,
@@ -823,14 +846,21 @@ pub fn compact_stopped_root(
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    disk.compact(None, runtime.handle(), layers, dry_run)
-        .map_err(|error| error.to_string())
+    disk.compact(
+        #[cfg(feature = "runner")]
+        None,
+        runtime.handle(),
+        layers,
+        dry_run,
+    )
+    .map_err(|error| error.to_string())
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "runner")]
 fn configured_layout(vm: &VmConfig) -> Option<RootDiskLayout> {
     if vm.rootfs_vmdk.is_some() {
         Some(RootDiskLayout::ManagedUpper)
@@ -841,6 +871,7 @@ fn configured_layout(vm: &VmConfig) -> Option<RootDiskLayout> {
     }
 }
 
+#[cfg(feature = "runner")]
 fn configured_layers(vm: &VmConfig, layout: RootDiskLayout) -> Result<Vec<UpperLayerSpec>, String> {
     let (spec, path, format) = match layout {
         RootDiskLayout::ManagedUpper => (
@@ -868,6 +899,7 @@ fn configured_layers(vm: &VmConfig, layout: RootDiskLayout) -> Result<Vec<UpperL
         .unwrap_or_default())
 }
 
+#[cfg(feature = "runner")]
 fn prepare_backend(state: &RootDiskState) -> Result<msb_krun::PreparedBlockBackend, String> {
     // Linux raw uppers use bounded buffered writeback. Their qcow2 successors must bypass the
     // page cache because raw guest offsets cannot account for qcow2 metadata and allocation I/O.
@@ -886,6 +918,7 @@ fn prepare_backend(state: &RootDiskState) -> Result<msb_krun::PreparedBlockBacke
         .map_err(|error| format!("prepare runtime-owned root backend: {error}"))
 }
 
+#[cfg(feature = "runner")]
 fn publish_layer_closure(root: &Path, layers: &[RootDiskLayer]) -> Result<Vec<String>, String> {
     let directory = root.join("layers");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -925,6 +958,7 @@ fn publish_layer_closure(root: &Path, layers: &[RootDiskLayer]) -> Result<Vec<St
     Ok(integrities)
 }
 
+#[cfg(feature = "runner")]
 fn publish_sealed_layer(source: &Path, target: &Path, expected: &str) -> Result<(), String> {
     match std::fs::hard_link(source, target) {
         Ok(()) => Ok(()),
@@ -978,6 +1012,7 @@ fn write_state(path: &Path, state: &RootDiskState) -> Result<(), String> {
     sync_directory(parent).map_err(|error| error.to_string())
 }
 
+#[cfg(feature = "runner")]
 fn next_overlay_path(previous: &Path, layout: RootDiskLayout) -> PathBuf {
     let parent = previous.parent().unwrap_or_else(|| Path::new("."));
     let prefix = match layout {
@@ -1204,15 +1239,13 @@ mod tests {
         }
     }
 
-    use super::{
-        FLAT_ROOT_DEVICE_ID, MANAGED_ROOT_DEVICE_ID, ROOT_DISK_STATE_SCHEMA, RootDiskFormat,
-        RootDiskLayer, RootDiskLayout, RootDiskState, load_runtime_owned_root_chain, new_id,
-        next_overlay_path, read_state, write_state,
-    };
+    use super::*;
 
+    #[cfg(feature = "runner")]
     use crate::vm::UpperLayerSpec;
 
     #[test]
+    #[cfg(feature = "runner")]
     fn journal_round_trip_preserves_the_forward_chain() {
         let directory = tempfile::tempdir().unwrap();
         let base = directory.path().join("upper.ext4");
@@ -1262,6 +1295,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "runner")]
     fn flat_journal_uses_root_device_and_root_overlay_names() {
         let directory = tempfile::tempdir().unwrap();
         let base = directory.path().join("rootfs.raw");

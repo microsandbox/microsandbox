@@ -15,6 +15,7 @@ pub enum MicrosandboxError {
     Io(#[from] std::io::Error),
 
     /// An HTTP request error occurred.
+    #[cfg(any(feature = "cloud", feature = "local"))]
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 
@@ -33,7 +34,16 @@ pub enum MicrosandboxError {
     #[error("libkrunfw not found: {0}")]
     LibkrunfwNotFound(String),
 
+    /// Neither member of the host runtime pair is installed.
+    #[error("microsandbox runtime is not installed: {0}")]
+    RuntimeNotInstalled(String),
+
+    /// Only one member of the host runtime pair is available.
+    #[error("microsandbox runtime installation is incomplete: {0}")]
+    RuntimeIncomplete(String),
+
     /// A database error occurred.
+    #[cfg(feature = "local")]
     #[error("database error: {0}")]
     Database(#[from] sea_orm::DbErr),
 
@@ -59,6 +69,20 @@ pub enum MicrosandboxError {
     #[error("sandbox already exists: {0}")]
     SandboxAlreadyExists(String),
 
+    /// A receiver was bound to an older sandbox that has since been replaced
+    /// by another sandbox using the same name.
+    #[error(
+        "sandbox {name:?} was replaced (expected identity {expected}, found {actual}); refusing stale lifecycle operation"
+    )]
+    SandboxReplaced {
+        /// Reused sandbox name.
+        name: String,
+        /// Identity captured by the receiver.
+        expected: String,
+        /// Identity currently associated with the name.
+        actual: String,
+    },
+
     /// The sandbox is still running and cannot be removed.
     #[error("sandbox still running: {0}")]
     SandboxStillRunning(String),
@@ -75,6 +99,7 @@ pub enum MicrosandboxError {
     /// available. Carries the sandbox name and the structured
     /// `boot-error.json` record so the CLI can render a useful inline
     /// error with hints.
+    #[cfg(feature = "local")]
     #[error("failed to start {name:?}: {}", .err.message)]
     BootStart {
         /// The name of the sandbox that failed to start.
@@ -96,12 +121,12 @@ pub enum MicrosandboxError {
     AgentClient(#[from] crate::agent::AgentClientError),
 
     /// A nix/errno error occurred.
-    #[cfg(unix)]
+    #[cfg(all(feature = "local", unix))]
     #[error("nix error: {0}")]
     Nix(#[from] nix::errno::Errno),
 
     /// A Windows host prerequisite is missing for local sandbox execution.
-    #[cfg(windows)]
+    #[cfg(all(feature = "local", windows))]
     #[error("{0}")]
     WindowsHostSetup(#[from] crate::setup::WindowsHostSetupError),
 
@@ -142,6 +167,7 @@ pub enum MicrosandboxError {
     VolumeAlreadyExists(String),
 
     /// An OCI image operation failed.
+    #[cfg(feature = "local")]
     #[error("image error: {0}")]
     Image(#[from] microsandbox_image::ImageError),
 
@@ -539,6 +565,7 @@ impl From<microsandbox_types::CommandResolutionError> for MicrosandboxError {
     }
 }
 
+#[cfg(feature = "local")]
 impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
     fn is_sqlite_busy(&self) -> bool {
         matches!(self, MicrosandboxError::Database(db_err) if microsandbox_db::retry::is_sqlite_busy(db_err))

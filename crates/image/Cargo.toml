@@ -20,6 +20,7 @@ hex.workspace = true
 imago.workspace = true
 libc.workspace = true
 microsandbox-utils.workspace = true
+microsandbox-types.workspace = true
 oci-client.workspace = true
 oci-spec.workspace = true
 rand.workspace = true
@@ -31,7 +32,6 @@ sha2.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
-tokio-util.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]

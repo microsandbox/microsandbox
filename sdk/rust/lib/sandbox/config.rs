@@ -4,21 +4,24 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZero;
 use std::path::PathBuf;
 
-use microsandbox_runtime::{
-    launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig},
-    logging::LogLevel,
-};
+#[cfg(feature = "local")]
+use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
+use microsandbox_types::SandboxLogLevel as LogLevel;
 use microsandbox_types::{
     EnvVar, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
     TransparentHugePagePolicy,
 };
 use serde::{Deserialize, Serialize};
 
-use microsandbox_image::{ImageConfig, RegistryAuth};
+#[cfg(feature = "local")]
+use microsandbox_image::ImageConfig;
 use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES};
+use microsandbox_types::RegistryAuth;
 use typed_path::Utf8UnixPath;
 
-use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
+#[cfg(feature = "local")]
+use super::types::RootDisk;
+use super::types::{MountOptions, RootfsSource, VolumeMount};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -50,18 +53,18 @@ pub const DEFAULT_REPLACE_TIMEOUT: std::time::Duration = std::time::Duration::fr
 
 // Compile-time defaults for `SandboxConfig` serde. Serde's `#[serde(default
 // = "fn")]` attribute can't take parameters, so these can't consult a
-// `LocalBackend`. They intentionally mirror `LocalConfig::default()` /
+// `LocalBackend`. They intentionally mirror `GlobalConfig::default()` /
 // `SandboxDefaults::default()` for the same fields, so DB-row
 // deserialization (and `sandbox_config_from_cloud`) are side-effect-free.
 // A `LocalBackend` with non-default sandbox defaults applies them through
 // `SandboxBuilder` at create time, not via serde.
 
 fn default_cpus() -> u8 {
-    crate::config::DEFAULT_CPUS
+    microsandbox_types::DEFAULT_SANDBOX_CPUS
 }
 
 fn default_memory_mib() -> u32 {
-    crate::config::DEFAULT_MEMORY_MIB
+    microsandbox_types::DEFAULT_SANDBOX_MEMORY_MIB
 }
 
 fn default_log_level() -> Option<SandboxLogLevel> {
@@ -69,7 +72,7 @@ fn default_log_level() -> Option<SandboxLogLevel> {
 }
 
 fn default_metrics_sample_interval_ms() -> Option<NonZero<u64>> {
-    crate::config::default_metrics_sample_interval()
+    NonZero::new(microsandbox_types::DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
 }
 
 fn default_disable_metrics_sample() -> bool {
@@ -198,6 +201,7 @@ pub struct SandboxConfig {
     /// Transient: paths remain read-only sources until local create copies or links them and adds
     /// a private writable qcow2 head.
     #[serde(skip)]
+    #[cfg(feature = "local")]
     pub(crate) snapshot_root_layer_sources: Vec<RootfsUpperLayerConfig>,
 
     /// Guest-visible capacity of `snapshot_root_layer_sources`.
@@ -218,6 +222,7 @@ pub struct SandboxConfig {
     /// The builder initially points this at an installed snapshot. The local create path copies
     /// the closure into child staging and rewrites the path before spawning the runtime.
     #[serde(skip)]
+    #[cfg(feature = "local")]
     pub(crate) checkpoint_restore: Option<CheckpointRestoreConfig>,
 
     /// Transient checkpoint materialization policy selected by the caller.
@@ -230,6 +235,7 @@ pub struct SandboxConfig {
 
     /// Child-owned oldest-to-head root-disk chain prepared for checkpoint restore.
     #[serde(skip)]
+    #[cfg(feature = "local")]
     pub(crate) snapshot_upper_layers: Vec<RootfsUpperLayerConfig>,
 
     /// Explicit builder choices retained until a deferred archive descriptor is available.
@@ -276,12 +282,21 @@ impl SandboxConfig {
     /// transient launch markers and any workload argv routed through an inherited init are removed.
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
-        config.checkpoint_restore = None;
+        #[cfg(feature = "local")]
+        {
+            config.checkpoint_restore = None;
+        }
         config.snapshot_restore_mode = SnapshotRestoreMode::Full;
         config.resumed_from_full_snapshot = false;
-        config.snapshot_root_layer_sources.clear();
+        #[cfg(feature = "local")]
+        {
+            config.snapshot_root_layer_sources.clear();
+        }
         config.snapshot_root_virtual_size = None;
-        config.snapshot_upper_layers.clear();
+        #[cfg(feature = "local")]
+        {
+            config.snapshot_upper_layers.clear();
+        }
         config.restore_overrides = RestoreOverrideIntent::default();
         config.launch_intent = LaunchIntent::None;
         config.launch_cmd_before_override = None;
@@ -364,6 +379,7 @@ impl SandboxConfig {
     /// - `labels`: image labels form the base; user labels override by key.
     /// - `cmd`, `entrypoint`, `workdir`, `user`: image value used only if user did not set one.
     /// - `init`: an `auto` init may resolve from a known init at the start of the image entrypoint and inherit the effective entrypoint env.
+    #[cfg(feature = "local")]
     pub fn merge_image_defaults(&mut self, image: &ImageConfig) {
         self.spec.env = merge_env(&image.env, &self.spec.env);
         self.spec.labels = merge_image_labels(&image.labels, &self.spec.labels);
@@ -498,6 +514,7 @@ impl SandboxConfig {
     /// The backend default may select the complete root-disk shape. The deprecated upper-size
     /// setting remains managed-disk size sugar and cannot be combined with `root_disk`. An absent
     /// root disk resolves to managed; a sizeless tmpfs resolves to half the sandbox memory.
+    #[cfg(feature = "local")]
     pub(crate) fn apply_rootfs_defaults(
         &mut self,
         defaults: &crate::config::OciSandboxDefaults,
@@ -700,65 +717,6 @@ impl SandboxConfig {
     }
 }
 
-/// Resolve reference-model secret entries (host-side `source` references) into
-/// concrete values for this spawn.
-///
-/// The durable sandbox config stores only the source reference; the resolved
-/// value exists in the returned copy, which travels to the sandbox process
-/// over the private launch-config fd and never returns to the database.
-/// Returns `None` when no entry needs resolution so callers can skip the
-/// config clone.
-#[cfg(feature = "net")]
-pub(crate) fn resolve_config_secret_sources(
-    config: &SandboxConfig,
-) -> crate::MicrosandboxResult<Option<SandboxConfig>> {
-    use microsandbox_network::secrets::config::SecretSource;
-
-    if !config.spec.network.enabled {
-        return Ok(None);
-    }
-    let mut network = config.local_network_config()?;
-    let mut resolved_any = false;
-    for secret in &mut network.secrets.secrets {
-        let Some(source) = &secret.source else {
-            continue;
-        };
-        match source {
-            SecretSource::Env { var } => {
-                let value = std::env::var(var).map_err(|_| {
-                    crate::MicrosandboxError::InvalidConfig(format!(
-                        "secret {}: host environment variable {var} is not set",
-                        secret.env_var
-                    ))
-                })?;
-                if value.is_empty() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                        "secret {}: host environment variable {var} is empty",
-                        secret.env_var
-                    )));
-                }
-                // Move the plaintext into the zeroizing wrapper; the source
-                // `String` is consumed by the move, leaving no separate copy.
-                secret.value = zeroize::Zeroizing::new(value);
-                resolved_any = true;
-            }
-            SecretSource::Store { .. } => {
-                return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                    "secret {}: store-backed secret sources are not supported yet",
-                    secret.env_var
-                )));
-            }
-        }
-    }
-    if !resolved_any {
-        return Ok(None);
-    }
-
-    let mut resolved = config.clone();
-    resolved.set_local_network_config(network)?;
-    Ok(Some(resolved))
-}
-
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -804,13 +762,16 @@ impl Default for SandboxConfig {
             slug: None,
             manifest_digest: None,
             snapshot_upper_source: None,
+            #[cfg(feature = "local")]
             snapshot_root_layer_sources: Vec::new(),
             snapshot_root_virtual_size: None,
             snapshot_archive_source: None,
             snapshot_base: None,
+            #[cfg(feature = "local")]
             checkpoint_restore: None,
             snapshot_restore_mode: SnapshotRestoreMode::Full,
             resumed_from_full_snapshot: false,
+            #[cfg(feature = "local")]
             snapshot_upper_layers: Vec::new(),
             restore_overrides: RestoreOverrideIntent::default(),
             launch_intent: LaunchIntent::None,
@@ -825,7 +786,7 @@ impl Default for SandboxConfig {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use std::path::PathBuf;
 
@@ -1904,6 +1865,22 @@ mod tests {
         assert!(config.spec.mounts.is_empty());
     }
 
+    #[cfg(feature = "net")]
+    #[test]
+    fn unspecified_network_policy_uses_engine_public_default() {
+        use microsandbox_network::policy::{NetworkPolicy, NetworkProfile};
+
+        let config = SandboxConfig::default();
+        assert!(config.spec.network.policy.is_none());
+
+        let actual = config.local_network_config().unwrap().policy;
+        let expected = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
     //----------------------------------------------------------------------------------------------
     // Tests: Secret source references (create path + spawn resolution)
     //----------------------------------------------------------------------------------------------
@@ -1917,7 +1894,7 @@ mod tests {
     #[cfg(feature = "net")]
     fn config_with_source_secret(source_var: Option<&str>) -> SandboxConfig {
         use microsandbox_network::secrets::config::{
-            HostPattern, SecretEntry, SecretInjection, SecretSource,
+            HostPattern, SecretEntry, SecretSource, SecretSubstitution,
         };
 
         let mut config = SandboxConfig::default();
@@ -1935,12 +1912,57 @@ mod tests {
             }),
             placeholder: "$MSB_API_KEY".into(),
             allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
-            injection: SecretInjection::default(),
-            on_violation: None,
+            substitution: SecretSubstitution::default(),
+            passthrough_hosts: Vec::new(),
+            violation_action: None,
             require_tls_identity: true,
         });
         config.set_local_network_config(network).unwrap();
         config
+    }
+
+    #[cfg(feature = "net")]
+    fn config_with_socks5_password_source() -> SandboxConfig {
+        use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
+        use microsandbox_types::SecretSource;
+
+        let mut config = SandboxConfig::default();
+        config.spec.network.enabled = true;
+        let mut network = config.local_network_config().unwrap();
+        network.outbound_proxy = Some(
+            OutboundProxyBuilder::new()
+                .socks5("127.0.0.1:1080")
+                .credentials("sandbox", SecretSource::env("MSB_TEST_SOCKS5_PASSWORD"))
+                .build()
+                .unwrap(),
+        );
+        config.set_local_network_config(network).unwrap();
+        config
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn socks5_password_uses_resolved_network_launch_type() {
+        let _env_guard = crate::test_support::lock_env();
+        let config = config_with_socks5_password_source();
+        let durable_json = serde_json::to_string(&config).unwrap();
+        assert!(durable_json.contains("MSB_TEST_SOCKS5_PASSWORD"));
+        assert!(!durable_json.contains(SECRET_SENTINEL));
+
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
+        unsafe { std::env::set_var("MSB_TEST_SOCKS5_PASSWORD", SECRET_SENTINEL) };
+        let resolved = config
+            .local_network_config()
+            .unwrap()
+            .resolve(&microsandbox_network::config::EnvNetworkSecretResolver)
+            .unwrap();
+        let launch_json = serde_json::to_string(&resolved).unwrap();
+        assert!(launch_json.contains(SECRET_SENTINEL));
+
+        let persisted_json = serde_json::to_string(&config.clone_for_persistence()).unwrap();
+        assert!(persisted_json.contains("MSB_TEST_SOCKS5_PASSWORD"));
+        assert!(!persisted_json.contains(SECRET_SENTINEL));
+        unsafe { std::env::remove_var("MSB_TEST_SOCKS5_PASSWORD") };
     }
 
     /// The create path persists a source reference, never the resolved value:
@@ -1977,12 +1999,15 @@ mod tests {
         unsafe { std::env::set_var("MSB_TEST_RESOLVE_SOURCE", SECRET_SENTINEL) };
 
         let config = config_with_source_secret(Some("MSB_TEST_RESOLVE_SOURCE"));
-        let resolved = super::resolve_config_secret_sources(&config)
+        let resolved = config
+            .local_network_config()
             .unwrap()
-            .expect("a source entry must be resolved");
-
-        let network = resolved.local_network_config().unwrap();
-        assert_eq!(network.secrets.secrets[0].value.as_str(), SECRET_SENTINEL);
+            .resolve(&microsandbox_network::config::EnvNetworkSecretResolver)
+            .unwrap();
+        assert_eq!(
+            resolved.config().secrets.secrets[0].value.as_str(),
+            SECRET_SENTINEL
+        );
         // The durable input still stores only the reference.
         let durable = config.local_network_config().unwrap();
         assert!(durable.secrets.secrets[0].value.is_empty());
@@ -1991,21 +2016,21 @@ mod tests {
     }
 
     /// Back-compat: a legacy config that inlined the value (no `source`) still
-    /// spawns. The resolver treats a present non-empty value as the material
-    /// and returns `None` so the caller reuses the config as-is.
+    /// spawns. The resolver leaves the present non-empty value in the
+    /// declarative launch config and has no separate value to apply.
     #[cfg(feature = "net")]
     #[test]
     fn spawn_resolver_preserves_legacy_inlined_value() {
         let config = config_with_source_secret(None);
-        let resolved = super::resolve_config_secret_sources(&config).unwrap();
-        assert!(
-            resolved.is_none(),
-            "legacy inlined values need no resolution"
+        let resolved = config
+            .local_network_config()
+            .unwrap()
+            .resolve(&microsandbox_network::config::EnvNetworkSecretResolver)
+            .unwrap();
+        assert_eq!(
+            resolved.config().secrets.secrets[0].value.as_str(),
+            SECRET_SENTINEL
         );
-
-        // The legacy value is still usable directly from the durable config.
-        let network = config.local_network_config().unwrap();
-        assert_eq!(network.secrets.secrets[0].value.as_str(), SECRET_SENTINEL);
     }
     #[test]
     fn test_sandbox_config_deserializes_legacy_readonly_mounts() {
