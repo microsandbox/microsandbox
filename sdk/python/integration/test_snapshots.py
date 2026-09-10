@@ -24,7 +24,8 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
 
     await remove_sandbox(fork_name)
     await remove_sandbox(base_name)
-    await remove_snapshot(snapshot_name)
+    snapshot_selector = f"{base_name}:{snapshot_name}"
+    await remove_snapshot(snapshot_selector)
 
     base = await Sandbox.create(base_name, image=IMAGE, cpus=1, memory=512, replace=True)
     fork = None
@@ -44,11 +45,18 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
         verify_result = await snapshot.verify()
         assert isinstance(verify_result, dict)
 
-        handle = await Snapshot.get(snapshot_name)
+        handle = await Snapshot.get(snapshot_selector)
         assert handle.digest == snapshot.digest
         assert handle.state_kind is SnapshotStateKind.FILE
         assert handle.format is SnapshotFormat.RAW
         assert handle.scope is SnapshotScope.DISK
+        assert handle.group == base_name
+        assert snapshot.head_update["reason"] == "initialized"
+        head = await Snapshot.group_head(base_name)
+        assert head["head"] == snapshot.id
+        assert head["changed"] is False
+        selected = await Snapshot.group_head(snapshot_selector)
+        assert selected["head"] == snapshot.id
         opened = await handle.open()
         assert opened.digest == snapshot.digest
         assert opened.state_kind is SnapshotStateKind.FILE
@@ -58,7 +66,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
 
         fork = await Sandbox.create(
             fork_name,
-            from_snapshot=snapshot_name,
+            from_snapshot=snapshot_selector,
             cpus=1,
             memory=512,
             replace=True,
@@ -72,4 +80,4 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
                 await fork.stop()
         await remove_sandbox(fork_name)
         await remove_sandbox(base_name)
-        await remove_snapshot(snapshot_name)
+        await remove_snapshot(snapshot_selector)

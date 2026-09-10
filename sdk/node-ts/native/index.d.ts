@@ -1509,7 +1509,12 @@ export declare class Snapshot {
    */
   static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
   static load(archive: string, dest?: string | undefined | null, base?: string | undefined | null): Promise<SnapshotHandle>
+  static loadWithOptions(archive: string, opts?: LoadOpts | undefined | null): Promise<SnapshotHandle>
+  /** Read a group's head, or select `group:member` as its head. */
+  static groupHead(selector: string): Promise<HeadUpdate>
   get path(): string
+  /** Outcome of the group head update performed by this capture. */
+  get headUpdate(): HeadUpdate | null
   get id(): string
   get digest(): string
   get sizeBytes(): bigint | null
@@ -1550,14 +1555,16 @@ export declare class SnapshotBuilder {
   constructor(name: string)
   /**
    * Create the artifact under this parent directory instead of the
-   * default snapshots store. The artifact lands at `destDir/<name>`.
+   * default snapshots store. The snapshot group is created under this root.
    */
   destDir(destDir: string): this
+  /** Install the snapshot in this group (defaults to the source sandbox's name). */
+  group(group: string): this
   /** Set the source sandbox to snapshot. Required. */
   fromSandbox(sourceSandbox: string): this
   /** Attach a key-value label. May be called multiple times. */
   label(key: string, value: string): this
-  /** Overwrite an existing artifact at the destination. */
+  /** Overwrite an archive destination; installed group members are immutable. */
   force(): this
   /** Compute and record content integrity at create time. */
   recordIntegrity(): this
@@ -1582,6 +1589,8 @@ export type JsSnapshotBuilder = SnapshotBuilder
 
 /** Lightweight snapshot handle from the local index. */
 export declare class SnapshotHandle {
+  get group(): string | null
+  get headUpdate(): HeadUpdate | null
   get id(): string
   get digest(): string
   get name(): string | null
@@ -1849,6 +1858,15 @@ export interface FsMetadata {
   created?: number
 }
 
+/** Outcome of reading or selecting a snapshot group's head. */
+export interface HeadUpdate {
+  group: string
+  previous?: string
+  head: string
+  reason: string
+  changed: boolean
+}
+
 /** OCI config fields extracted from the database. */
 export interface ImageConfigDetail {
   digest: string
@@ -1956,6 +1974,18 @@ export interface JsBackendInfo {
 export interface JsSandboxPage {
   sandboxes: Array<JsSandboxHandle>
   nextCursor?: string
+}
+
+/** Options for importing an archive into a snapshot group. */
+export interface LoadOpts {
+  /** Parent directory containing snapshot groups. */
+  dest?: string
+  /** Exact base snapshot or standalone archive for a dependent archive. */
+  base?: string
+  /** Destination group (generated when omitted). */
+  group?: string
+  /** Select the imported member even when it is not a fast-forward. */
+  setHead?: boolean
 }
 
 /** One captured log entry from `exec.log`. */
@@ -2360,6 +2390,7 @@ export declare function setRuntimeMsbPath(path: string): void
 /** Built snapshot configuration produced by `SnapshotBuilder.build()`. */
 export interface SnapshotConfig {
   name: string
+  group?: string
   sourceSandbox?: string
   destDir?: string
   labels: Array<JsSnapshotLabel>
@@ -2373,6 +2404,8 @@ export interface SnapshotInfo {
   id: string
   digest: string
   name?: string
+  group?: string
+  headUpdate?: HeadUpdate
   parentDigest?: string
   imageRef: string
   /** `"disk"` for file state or `"full"` for a complete VM checkpoint. */

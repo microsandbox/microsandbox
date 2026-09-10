@@ -831,17 +831,8 @@ async fn publish_index_component(
         transaction
             .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
-                "DELETE FROM snapshot_index WHERE digest = ? OR artifact_path = ?",
-                [
-                    candidate
-                        .inspected
-                        .pinned
-                        .source
-                        .source_digest
-                        .clone()
-                        .into(),
-                    path.clone().into(),
-                ],
+                "DELETE FROM snapshot_index WHERE artifact_path = ?",
+                [path.clone().into()],
             ))
             .await?;
         insert_canonical_index_row(&transaction, candidate).await?;
@@ -859,7 +850,7 @@ async fn publish_index_component(
     }
     transaction
         .execute_unprepared(
-            "UPDATE snapshot_index SET child_count = (SELECT COUNT(*) FROM snapshot_index child WHERE child.parent_digest = snapshot_index.snapshot_id)",
+            "UPDATE snapshot_index SET child_count = (SELECT COUNT(DISTINCT COALESCE(child.snapshot_id, child.digest)) FROM snapshot_index child WHERE child.parent_digest = snapshot_index.snapshot_id)",
         )
         .await?;
     transaction.commit().await?;

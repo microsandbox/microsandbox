@@ -727,29 +727,31 @@ pub struct SandboxPolicy {
 
 /// Inputs to create a snapshot.
 ///
-/// The snapshot's name is its identity; the artifact directory is
-/// `dest_dir.join(name)`, with `dest_dir` defaulting to the snapshots
-/// store. Archive movement happens through save/load (the artifact
-/// directory is also self-contained and safe to move directly).
+/// Installed artifacts live at `dest_dir/<group>/<snapshot_id>`. A friendly name
+/// is scoped to the group; it does not change the portable snapshot identity.
+/// Save/load moves artifacts between stores without starting a VM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SnapshotSpec {
-    /// Snapshot name. Always the artifact directory's basename.
+    /// Friendly member name within a group; empty selects a generated name.
     pub name: String,
 
-    /// Parent directory to create the artifact in. `None` = the default
-    /// snapshots directory.
+    /// Local snapshot group; defaults to the source sandbox's name.
+    #[serde(default)]
+    pub group: Option<String>,
+
+    /// Group-store root. `None` selects the default snapshots directory.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub dest_dir: Option<PathBuf>,
 
-    /// Name of the source sandbox. Must be stopped.
+    /// Source sandbox. Disk capture accepts running, paused, or stopped sources.
     pub source_sandbox: String,
 
     /// User-supplied labels.
     pub labels: Vec<(String, String)>,
 
-    /// Overwrite an existing artifact at the destination.
+    /// Overwrite a direct archive destination; installed members remain immutable.
     pub force: bool,
 
     /// Compute and record upper-layer content integrity at creation time.

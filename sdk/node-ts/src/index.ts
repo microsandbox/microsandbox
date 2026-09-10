@@ -107,14 +107,16 @@ import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapsh
  */
 export const SnapshotBuilder = function SnapshotBuilder(
   this: unknown,
-  name: string,
+  name = "",
 ) {
   return _Snapshot.builder(name);
-} as unknown as new (name: string) => _SnapBT;
+} as unknown as new (name?: string) => _SnapBT;
 export type SnapshotBuilder = _SnapBT;
 export { SnapshotHandle } from "./snapshot-handle.js";
 export type {
   SaveOpts,
+  LoadOpts,
+  HeadUpdate,
   SnapshotScope,
   SnapshotState,
   SnapshotVerifyReport,

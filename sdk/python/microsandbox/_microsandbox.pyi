@@ -829,9 +829,10 @@ class ImagePruneReport:
 class Snapshot:
     @staticmethod
     async def create(
-        name: str,
+        name: str = "",
         *,
         from_sandbox: str,
+        group: str | None = None,
         dest_dir: str | os.PathLike[str] | None = None,
         labels: dict[str, str] | None = None,
         force: bool = False,
@@ -844,6 +845,7 @@ class Snapshot:
         archive: str | os.PathLike[str],
         *,
         from_sandbox: str,
+        group: str | None = None,
         labels: dict[str, str] | None = None,
         force: bool = False,
         record_integrity: bool = False,
@@ -879,7 +881,13 @@ class Snapshot:
         *,
         dest: str | os.PathLike[str] | None = None,
         base: str | None = None,
+        group: str | None = None,
+        set_head: bool = False,
     ) -> SnapshotHandle: ...
+    @staticmethod
+    async def group_head(selector: str) -> dict[str, str | bool | None]: ...
+    @property
+    def head_update(self) -> dict[str, str | bool | None] | None: ...
     @property
     def id(self) -> str: ...
     @property
@@ -923,6 +931,10 @@ class SnapshotArchive:
     def path(self) -> str: ...
 
 class SnapshotHandle:
+    @property
+    def group(self) -> str | None: ...
+    @property
+    def head_update(self) -> dict[str, str | bool | None] | None: ...
     @property
     def id(self) -> str: ...
     @property

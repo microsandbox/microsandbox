@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use microsandbox::snapshot::SaveOpts as RustSaveOpts;
+use microsandbox::snapshot::{
+    HeadUpdateReason, LoadOpts as RustLoadOpts, SaveOpts as RustSaveOpts,
+};
 use microsandbox::{
     Snapshot as RustSnapshot, SnapshotArchive as RustSnapshotArchive,
     SnapshotFormat as RustSnapshotFormat, SnapshotHandle as RustSnapshotHandle,
@@ -51,6 +53,30 @@ pub struct JsSaveOpts {
     pub last_layers: Option<f64>,
 }
 
+/// Options for importing an archive into a snapshot group.
+#[derive(Default)]
+#[napi(object, js_name = "LoadOpts")]
+pub struct JsLoadOpts {
+    /// Parent directory containing snapshot groups.
+    pub dest: Option<String>,
+    /// Exact base snapshot or standalone archive for a dependent archive.
+    pub base: Option<String>,
+    /// Destination group (generated when omitted).
+    pub group: Option<String>,
+    /// Select the imported member even when it is not a fast-forward.
+    pub set_head: Option<bool>,
+}
+
+/// Outcome of reading or selecting a snapshot group's head.
+#[napi(object, js_name = "HeadUpdate")]
+pub struct JsHeadUpdate {
+    pub group: String,
+    pub previous: Option<String>,
+    pub head: String,
+    pub reason: String,
+    pub changed: bool,
+}
+
 /// Result of `Snapshot.verify()`.
 ///
 /// `upperKind` is `"notRecorded"` when integrity is absent or `"verified"`
@@ -79,6 +105,8 @@ pub struct JsSnapshotInfo {
     pub id: String,
     pub digest: String,
     pub name: Option<String>,
+    pub group: Option<String>,
+    pub head_update: Option<JsHeadUpdate>,
     pub parent_digest: Option<String>,
     pub image_ref: String,
     /// `"disk"` for file state or `"full"` for a complete VM checkpoint.
@@ -199,6 +227,35 @@ impl JsSnapshot {
         Ok(JsSnapshotHandle::from_rust(h))
     }
 
+    #[napi(js_name = "loadWithOptions")]
+    pub async fn load_with_options(
+        archive: String,
+        opts: Option<JsLoadOpts>,
+    ) -> Result<JsSnapshotHandle> {
+        let opts = opts.unwrap_or_default();
+        let h = RustSnapshot::load_with_options(
+            &PathBuf::from(archive),
+            RustLoadOpts {
+                dest: opts.dest.map(PathBuf::from),
+                base: opts.base,
+                group: opts.group,
+                set_head: opts.set_head.unwrap_or(false),
+            },
+        )
+        .await
+        .map_err(to_napi_error)?;
+        Ok(JsSnapshotHandle::from_rust(h))
+    }
+
+    /// Read a group's head, or select `group:member` as its head.
+    #[napi(js_name = "groupHead")]
+    pub async fn group_head(selector: String) -> Result<JsHeadUpdate> {
+        let update = RustSnapshot::group_head(&selector)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(head_update_to_js(&update))
+    }
+
     //----------------------------------------------------------------------------------------------
     // Instance accessors (mirror PyVolume's getter style)
     //----------------------------------------------------------------------------------------------
@@ -206,6 +263,12 @@ impl JsSnapshot {
     #[napi(getter)]
     pub fn path(&self) -> String {
         self.inner.path().display().to_string()
+    }
+
+    /// Outcome of the group head update performed by this capture.
+    #[napi(getter)]
+    pub fn head_update(&self) -> Option<JsHeadUpdate> {
+        self.inner.head_update().map(head_update_to_js)
     }
 
     #[napi(getter)]
@@ -411,6 +474,15 @@ impl JsSnapshot {
 #[napi]
 impl JsSnapshotHandle {
     #[napi(getter)]
+    pub fn group(&self) -> Option<String> {
+        self.inner.group().map(str::to_string)
+    }
+
+    #[napi(getter)]
+    pub fn head_update(&self) -> Option<JsHeadUpdate> {
+        self.inner.head_update().map(head_update_to_js)
+    }
+    #[napi(getter)]
     pub fn id(&self) -> String {
         self.inner.id().to_string()
     }
@@ -537,6 +609,8 @@ fn snapshot_handle_to_info(h: &RustSnapshotHandle) -> JsSnapshotInfo {
         id: h.id().to_string(),
         digest: h.digest().to_string(),
         name: h.name().map(|s| s.to_string()),
+        group: h.group().map(str::to_string),
+        head_update: h.head_update().map(head_update_to_js),
         parent_digest: h.parent_digest().map(|s| s.to_string()),
         image_ref: h.image_ref().to_string(),
         scope: format_scope(h.scope()).into(),
@@ -551,6 +625,25 @@ fn snapshot_handle_to_info(h: &RustSnapshotHandle) -> JsSnapshotInfo {
         migration_error_code: h.migration_error_code().map(str::to_string),
         created_at: h.created_at().and_utc().timestamp_millis() as f64,
         path: h.path().display().to_string(),
+    }
+}
+
+fn head_update_to_js(update: &microsandbox::snapshot::HeadUpdate) -> JsHeadUpdate {
+    // Match the stable serde spelling without losing the closed reason variants.
+    let reason = match update.reason {
+        HeadUpdateReason::Initialized => "initialized",
+        HeadUpdateReason::FastForwarded => "fast_forwarded",
+        HeadUpdateReason::Selected => "selected",
+        HeadUpdateReason::Unchanged => "unchanged",
+        HeadUpdateReason::Diverged => "diverged",
+        HeadUpdateReason::UnknownAncestry => "unknown_ancestry",
+    };
+    JsHeadUpdate {
+        group: update.group.clone(),
+        previous: update.previous.clone(),
+        head: update.head.clone(),
+        reason: reason.into(),
+        changed: update.changed,
     }
 }
 

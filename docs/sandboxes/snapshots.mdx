@@ -18,7 +18,7 @@ Disk snapshots work with running, paused, stopped, or crashed sandboxes. A runni
 
 | Mode | Source | Captured state | Restore behavior |
 | ---- | ------ | -------------- | ---------------- |
-| Disk (default) | Stopped or crashed sandbox | Writable disk closure and pinned image | Cold-boots a fresh VM |
+| Disk (default) | Running, paused, stopped, or crashed sandbox | Writable disk closure and pinned image | Cold-boots a fresh VM |
 | Full | Running or user-paused sandbox | Disk, memory, vCPU, device, and admitted resource state | Resumes the captured execution in a child VM |
 
 Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `state.kind` is either `file` or `checkpoint`, and `root_disk.layout` records `managed`, `flat`, or `tmpfs`. Checkpoint payloads live in a content-addressed closure rather than a standalone disk file. A tmpfs root has no stopped disk snapshot because its writable state exists only in memory, but it is included in a running full snapshot; such a snapshot must be resumed and cannot use `--disk-only`.
@@ -30,8 +30,8 @@ On supported Linux, macOS, and Windows hosts, add `--forked` when restoring a fu
 ```bash
 msb create alpine --name baseline --root-disk flat:1G
 msb snapshot create ready --from baseline --full
-msb create --name worker-a --from-snapshot ready --forked
-msb create --name worker-b --from-snapshot ready --forked
+msb create --name worker-a --from-snapshot baseline:ready --forked
+msb create --name worker-b --from-snapshot baseline:ready --forked
 ```
 
 The SDK creation options are Rust `.forked()`, Python `forked=True`, TypeScript `.forked()`, and Go `WithForked()`. The option requires a full snapshot and cannot be combined with `--disk-only` or an image cold boot.
@@ -68,17 +68,52 @@ msb stop baseline
 msb snapshot create after-pip-install --from baseline
 
 # 3. Boot a fresh sandbox from the snapshot
-msb run --name worker --from-snapshot after-pip-install \
+msb run --name worker --from-snapshot baseline:after-pip-install \
     -- python -c "import requests; print(requests.__version__)"
 ```
 
 <Tip>
-By default, the snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`. That whole directory is the snapshot.
+The snapshot belongs to the source's group, `baseline`, and lives at `~/.microsandbox/snapshots/baseline/snap_<id>/`. Its friendly name is `baseline:after-pip-install`.
 </Tip>
 
 ## Snapshot a sandbox
 
-Snapshot under a bare name, resolved to `~/.microsandbox/snapshots/<name>/` by default. The name is a local alias; the descriptor carries a stable `snap_...` identity. Pass a destination directory to create the artifact on a different volume (`DIR/<name>`). Either way the directory is the whole artifact; move it with save/load (or plain `mv`):
+Each capture is an immutable member of a snapshot group. The group defaults to the source sandbox's name; use `--group` to choose another. Member names are local aliases, while the descriptor carries a stable `snap_...` identity. Omitting the member name generates one. A destination directory selects another group-store root (`DIR/<group>/<snapshot_id>`).
+
+## Groups and head selection
+
+Use a bare group to restore its selected head, or `group:member` for an exact checkpoint:
+
+```bash
+msb snapshot create cp01 --from baseline --group work
+msb snapshot create cp02 --from baseline --group work
+msb create --name latest --from-snapshot work
+msb create --name earlier --from-snapshot work:cp01
+
+msb snapshot head work           # Show the selected snapshot ID
+msb snapshot head work:cp01      # Explicitly select an earlier checkpoint
+```
+
+The first snapshot initializes the head. Later captures or imports advance it only when known ancestry proves they descend from the current head. Importing an older checkpoint, a sibling, or one with missing history keeps the head unchanged. Both members remain available. Concurrent siblings use the first successful head update; the other capture still succeeds. There is no special main branch and timestamps do not decide the winner.
+
+```text
+work:cp01 ---- work:cp02 ---- work:cp03  <- head
+                    \
+                     +------ work:experiment
+```
+
+`msb snapshot head work:experiment` selects the other branch. Import with `--set-head` to explicitly select the imported archive's head. Missing historical checkpoints are allowed if the snapshot's disk and RAM dependencies are complete; missing payload dependencies still require `--base`.
+
+```bash
+msb snapshot load checkpoint.msnap --group work
+msb snapshot load experiment.msnap --group work --set-head
+```
+
+Loading without `--group` creates a fresh generated group. The same archive can be imported into different groups without overwriting either copy. Within a group, an identical ID/descriptor is reusable; conflicting IDs or names fail. A current head cannot be removed while other members remain—select another first. Existing flat snapshot directories can still be opened by explicit path.
+
+An interrupted call may already have published its snapshot. Inspect the group before retrying; member publication never overwrites an existing snapshot.
+
+## Capture from the SDK
 
 <CodeGroup>
 ```rust Rust
@@ -86,7 +121,7 @@ use microsandbox::Sandbox;
 
 let h = Sandbox::get("baseline").await?;
 
-// Resolves under ~/.microsandbox/snapshots/<name>/
+// Installs in baseline's group; snap.path() is the exact artifact directory.
 let snap = h.snapshot("after-pip-install").await?;
 
 println!("{}", snap.digest()); // sha256:...
@@ -97,7 +132,7 @@ import { Sandbox } from "microsandbox";
 
 const h = await Sandbox.get("baseline");
 
-// Resolves under ~/.microsandbox/snapshots/<name>/
+// Installs in baseline's group; snap.path is the exact artifact directory.
 const snap = await h.snapshot("after-pip-install");
 
 console.log(snap.digest); // sha256:...
@@ -108,7 +143,7 @@ from microsandbox import Sandbox
 
 h = await Sandbox.get("baseline")
 
-# Resolves under ~/.microsandbox/snapshots/<name>/
+# Installs in baseline's group; snap.path is the exact artifact directory.
 snap = await h.snapshot("after-pip-install")
 
 print(snap.digest)  # sha256:...
@@ -120,7 +155,7 @@ if err != nil {
     return err
 }
 
-// Resolves under ~/.microsandbox/snapshots/<name>/
+// Installs in baseline's group; snap.Path() is the exact artifact directory.
 snap, err := h.Snapshot(ctx, "after-pip-install")
 
 fmt.Println(snap.Digest()) // sha256:...
@@ -128,9 +163,9 @@ fmt.Println(snap.Digest()) // sha256:...
 
 ```bash CLI
 msb snapshot create after-pip-install --from baseline
-msb snapshot create after-pip-install --from baseline --label stage=ready
+msb snapshot create ready-with-label --from baseline --label stage=ready
 
-# Create the artifact on another volume: lands at /mnt/big/after-pip-install
+# Use another group-store root: /mnt/big/baseline/snap_<id>/
 msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
 ```
 
@@ -189,7 +224,7 @@ Repeated full checkpoints add disk layers. You choose when to export changes and
 
 ```bash
 msb snapshot create checkpoint-b --from worker --full
-msb snapshot save checkpoint-b changes.msnap --since checkpoint-a
+msb snapshot save worker:checkpoint-b changes.msnap --since worker:checkpoint-a
 msb modify worker --compact --layers 3 --dry-run
 msb modify worker --compact --layers 3
 ```
@@ -199,8 +234,8 @@ msb modify worker --compact --layers 3
 `--since` omits disk layers and, for full checkpoints, RAM objects already supplied by the base. The disk base must be an exact physical prefix. Each archive still includes its complete memory map and CPU/device state; it does not replay earlier memory images. Alternatively, `--last-layers 2` selects only disk layers and keeps all required RAM objects. These smaller archives require an explicit base when loading or restoring:
 
 ```bash
-msb snapshot load changes.msnap --base checkpoint-a
-msb create --name child --from-snapshot changes.msnap --snapshot-base checkpoint-a
+msb snapshot load changes.msnap --base worker:checkpoint-a --group imported
+msb create --name child --from-snapshot changes.msnap --snapshot-base worker:checkpoint-a
 ```
 
 The base can also be a standalone snapshot archive. Load a dependent base first, then pass the installed path printed by `snapshot load` to the next load or restore. Loads resolve disk and RAM dependencies without starting a VM; only the final sandbox creation resumes execution. Missing or incorrect dependencies fail before execution. Loaded snapshots and restored children own their required files, so removing the base later does not break them. Direct restore skips installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compaction, export a new standalone baseline before resuming incremental exports: the old physical prefix no longer matches. Do not combine compaction with unrelated `modify` options, or incremental export with `--with-parents`.
@@ -277,7 +312,7 @@ A snapshot already pins its image, so booting from one is mutually exclusive wit
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
-    .from_snapshot("after-pip-install")
+    .from_snapshot("baseline:after-pip-install")
     .create()
     .await?;
 ```
@@ -286,7 +321,7 @@ let sb = Sandbox::builder("worker")
 import { Sandbox } from "microsandbox";
 
 const sb = await Sandbox.builder("worker")
-    .fromSnapshot("after-pip-install")
+    .fromSnapshot("baseline:after-pip-install")
     .create();
 ```
 
@@ -294,17 +329,17 @@ const sb = await Sandbox.builder("worker")
 from microsandbox import Sandbox
 
 # `from_snapshot=` is a peer of `image=` and mutually exclusive with it
-sb = await Sandbox.create("worker", from_snapshot="after-pip-install")
+sb = await Sandbox.create("worker", from_snapshot="baseline:after-pip-install")
 ```
 
 ```go Go
 sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithFromSnapshot("after-pip-install"),
+    m.WithFromSnapshot("baseline:after-pip-install"),
 )
 ```
 
 ```bash CLI
-msb run --name worker --from-snapshot after-pip-install -- python -V
+msb run --name worker --from-snapshot baseline:after-pip-install -- python -V
 ```
 
 </CodeGroup>
@@ -318,7 +353,7 @@ To discard the captured execution and cold-boot only its filesystem state, selec
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .from_snapshot("worker-checkpoint")
+    .from_snapshot("worker:worker-checkpoint")
     .disk_only()
     .create()
     .await?;
@@ -326,7 +361,7 @@ let sb = Sandbox::builder("worker")
 
 ```typescript TypeScript
 const sb = await Sandbox.builder("worker")
-  .fromSnapshot("worker-checkpoint")
+  .fromSnapshot("worker:worker-checkpoint")
   .diskOnly()
   .create();
 ```
@@ -334,20 +369,20 @@ const sb = await Sandbox.builder("worker")
 ```python Python
 sb = await Sandbox.create(
     "worker",
-    from_snapshot="worker-checkpoint",
+    from_snapshot="worker:worker-checkpoint",
     disk_only=True,
 )
 ```
 
 ```go Go
 sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithFromSnapshot("worker-checkpoint"),
+    m.WithFromSnapshot("worker:worker-checkpoint"),
     m.WithSnapshotDiskOnly(),
 )
 ```
 
 ```bash CLI
-msb run --name worker --from-snapshot worker-checkpoint --disk-only
+msb run --name worker --from-snapshot worker:worker-checkpoint --disk-only
 ```
 </CodeGroup>
 
@@ -360,10 +395,10 @@ Disk-only restore copies only the checkpoint's disk chain, creates a fresh writa
 use microsandbox::Snapshot;
 
 let all = Snapshot::list().await?; // Indexed snapshots
-let h = Snapshot::get("after-pip-install").await?; // By name, digest, or path
+let h = Snapshot::get("baseline:after-pip-install").await?; // By group/member selector or explicit path
 println!("{} ({})", h.name().unwrap_or("-"), h.digest());
 
-Snapshot::remove("after-pip-install", false).await?;
+Snapshot::remove("baseline:after-pip-install", false).await?;
 Snapshot::reindex("/data/snapshots").await?;
 ```
 
@@ -371,10 +406,10 @@ Snapshot::reindex("/data/snapshots").await?;
 import { Snapshot } from "microsandbox";
 
 const all = await Snapshot.list();                       // Indexed snapshots
-const h = await Snapshot.get("after-pip-install");       // By name, digest, or path
+const h = await Snapshot.get("baseline:after-pip-install");       // By group/member selector or explicit path
 console.log(`${h.name ?? "-"} (${h.digest})`);
 
-await Snapshot.remove("after-pip-install");
+await Snapshot.remove("baseline:after-pip-install");
 await Snapshot.reindex();                               // Default snapshots directory
 ```
 
@@ -382,34 +417,34 @@ await Snapshot.reindex();                               // Default snapshots dir
 from microsandbox import Snapshot
 
 all = await Snapshot.list()                              # Indexed snapshots
-h = await Snapshot.get("after-pip-install")              # By name, digest, or path
+h = await Snapshot.get("baseline:after-pip-install")              # By group/member selector or explicit path
 print(f"{h.name or '-'} ({h.digest})")
 
-await Snapshot.remove("after-pip-install")
+await Snapshot.remove("baseline:after-pip-install")
 await Snapshot.reindex()                                 # Default snapshots directory
 ```
 
 ```go Go
 all, err := m.Snapshot.List(ctx)            // Indexed snapshots
 fmt.Printf("%d snapshots\n", len(all))
-h, err := m.Snapshot.Get(ctx, "after-pip-install") // By name, digest, or path
+h, err := m.Snapshot.Get(ctx, "baseline:after-pip-install") // By group/member selector or explicit path
 name := "-"
 if h.Name() != nil {
     name = *h.Name()
 }
 fmt.Printf("%s (%s)\n", name, h.Digest())
 
-err = m.Snapshot.Remove(ctx, "after-pip-install", false)
+err = m.Snapshot.Remove(ctx, "baseline:after-pip-install", false)
 _, err = m.Snapshot.Reindex(ctx, "/data/snapshots")
 ```
 
 ```bash CLI
 msb snapshots                  # Also: msb snaps, msb snapshot ls
-msb snapshot inspect after-pip-install
-msb snapshot rm after-pip-install
+msb snapshot inspect baseline:after-pip-install
+msb snapshot rm baseline:after-pip-install
 
 # Also if it has indexed children
-msb snapshot rm after-pip-install --force
+msb snapshot rm baseline:after-pip-install --force
 
 # Rebuild the index from artifacts on disk
 msb snapshot reindex
@@ -417,7 +452,7 @@ msb snapshot reindex
 
 </CodeGroup>
 
-`list` and `get` use a local index for fast lookup. If the index gets out of sync, `reindex` rebuilds it from the snapshot artifacts on disk.
+`list` uses a rebuildable local index; group/head selection comes from the artifacts on disk. If the index gets out of sync, `reindex` rebuilds it. Global ID or digest lookup refuses ambiguity when several local copies exist—use a group selector or explicit path. `--force` does not bypass the current-head removal guard.
 
 ## Move snapshots between machines
 
@@ -425,16 +460,16 @@ The snapshot directory is the whole artifact; there is no hidden daemon state. C
 
 ```bash
 # Copy the directory directly with scp (image must be cached or pullable on the target)
-scp -r ~/.microsandbox/snapshots/after-pip-install \
-    other-host:~/.microsandbox/snapshots/
+scp -r ~/.microsandbox/snapshots/baseline/snap_<id> other-host:/tmp/saved-snapshot
+# Open that copied artifact by its explicit path; use archive load to add it to a group.
 
 # Bundle into a .msnap, transport, then load
-msb snapshot save after-pip-install /tmp/snap.msnap
+msb snapshot save baseline:after-pip-install /tmp/snap.msnap
 scp /tmp/snap.msnap other-host:
 ssh other-host msb snapshot load /tmp/snap.msnap
 
 # Fully offline: include the OCI image cache so the target needs no network
-msb snapshot save after-pip-install /tmp/snap.msnap --with-image
+msb snapshot save baseline:after-pip-install /tmp/snap.msnap --with-image
 ssh other-host msb snapshot load /tmp/snap.msnap
 ```
 
@@ -445,11 +480,15 @@ Archives use tar + zstd by default; `.msnap` is the recommended filename extensi
 Current file snapshots use a stable opaque snapshot ID, a separate SHA-256 descriptor digest, and one ordered physical layer closure. A normal raw ext4 snapshot is still one layer, whether those bytes represent a managed upper or a complete flat root:
 
 ```text
-after-pip-install/
-├── snapshot.json
-├── metadata.json        # present when local labels exist
-└── layers/
-    └── layer_....raw
+snapshots/
+└── baseline/
+    ├── group.json                    # selected head ID
+    └── snap_<id>/
+        ├── snapshot.json             # stable ID + parent ID + disk/state references
+        ├── group-member.json         # local name: after-pip-install
+        ├── metadata.json             # optional labels
+        └── layers/
+            └── layer_....raw
 ```
 
 `metadata.json` contains mutable local labels and does not participate in the descriptor digest or snapshot identity. The descriptor names each layer by `DiskLayerId`. Once a full snapshot has rolled the sandbox onto qcow2, a later disk snapshot carries the complete oldest-first raw/qcow2 chain in this same artifact family; archive save/load and direct archive restore preserve every member.
@@ -520,8 +559,8 @@ report, err := snap.Verify(ctx)
 msb snapshot create after-pip-install --from baseline --integrity
 
 # Verify a snapshot's recorded integrity on demand
-msb snapshot verify after-pip-install
-msb snapshot inspect after-pip-install --verify
+msb snapshot verify baseline:after-pip-install
+msb snapshot inspect baseline:after-pip-install --verify
 ```
 
 </CodeGroup>

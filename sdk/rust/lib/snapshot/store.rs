@@ -24,9 +24,8 @@ use super::{Snapshot, SnapshotFormat, SnapshotHandle, SnapshotScope, UpperIntegr
 
 /// Open and validate snapshot artifact metadata.
 ///
-/// `path_or_name` is treated as a path if it contains `/` or starts
-/// with `.` or `~`; otherwise as a bare name resolved under the
-/// passed-in `local` backend's snapshots directory.
+/// Explicit paths remain valid. Bare selectors resolve a group's head; qualified selectors
+/// resolve a group member. Global portable identities must identify exactly one local copy.
 pub(super) async fn open_snapshot(
     local: &LocalBackend,
     path_or_name: &str,
@@ -37,11 +36,7 @@ pub(super) async fn open_snapshot(
         ));
     }
 
-    let dir = if looks_like_path(path_or_name) {
-        PathBuf::from(path_or_name)
-    } else {
-        local.snapshots_dir().join(path_or_name)
-    };
+    let dir = resolve_path(local, path_or_name).await?;
 
     if !dir.exists() {
         return Err(MicrosandboxError::SnapshotNotFound(
@@ -129,14 +124,22 @@ pub(super) async fn open_snapshot(
     let labels = super::metadata::read(&dir, &manifest, translated_labels).await?;
     let snap = Snapshot::from_parts(dir.clone(), digest.clone(), manifest, labels);
 
-    // Opportunistic auto-reindex: if the artifact lives under the
-    // configured snapshots dir but its digest isn't in the local
-    // index, insert it. Keeps the cache aligned with reality without
-    // forcing the user to think about it. Best-effort — errors are
-    // logged, not propagated.
+    // Published managed members and explicitly opened flat artifacts remain discoverable for
+    // parent traversal. Archive/capture staging must never replace durable index entries.
     let snapshots_dir = local.snapshots_dir();
-    if dir.parent() == Some(snapshots_dir.as_path())
-        && let Ok(None) = lookup_by_digest(local, &digest).await
+    let managed = dir
+        .strip_prefix(&snapshots_dir)
+        .ok()
+        .is_some_and(|relative| {
+            relative
+                .components()
+                .all(|part| !part.as_os_str().to_string_lossy().starts_with('.'))
+        });
+    if managed
+        && (super::group::group_path(&dir).is_some()
+            || dir.parent() == Some(snapshots_dir.as_path()))
+        && let Ok(existing) = indexed_path(local, &dir).await
+        && existing.as_ref().is_none_or(|row| row.digest != digest)
         && let Err(e) = index_upsert(local, snap.path(), snap.digest(), snap.manifest()).await
     {
         tracing::debug!(error = %e, snapshot = %digest, "auto-reindex skipped");
@@ -159,42 +162,31 @@ pub(super) async fn index_upsert(
         .unwrap_or_else(|_| Utc::now().naive_utc());
     let indexed_at = Utc::now().naive_utc();
 
+    let artifact_path = canonical_path(artifact_path);
     let artifact_path_str = artifact_path.display().to_string();
-    let artifact_name = artifact_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string());
+    let group_path = super::group::group_path(&artifact_path);
+    let group_name = group_path
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned());
+    let artifact_name = super::group::member_name(&artifact_path)?.or_else(|| {
+        artifact_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    });
+    let group_path = group_path.map(|path| path.display().to_string());
 
-    // Delete any prior row for this digest, name, or path, then insert.
-    // This keeps the rebuildable index aligned when an artifact is
-    // replaced in-place or when a manifest rewrite changes its digest.
-    // The superseded rows' parent edges disappear with them, so their
-    // parents' child_count must come down first; the fresh insert re-adds
-    // its own edge below.
+    // Portable identities may occur in multiple groups. Replace only this local address,
+    // never another copy that happens to share descriptor bytes, identity, or member name.
     let mut supersede = sea_orm::Condition::any()
-        .add(snapshot_entity::Column::Digest.eq(digest.to_string()))
-        .add(snapshot_entity::Column::SnapshotId.eq(manifest.snapshot_id.to_string()))
         .add(snapshot_entity::Column::ArtifactPath.eq(artifact_path_str.clone()));
-    if let Some(name) = artifact_name.as_ref() {
-        supersede = supersede.add(snapshot_entity::Column::Name.eq(name.clone()));
+    if let (Some(group), Some(name)) = (&group_path, &artifact_name) {
+        supersede = supersede.add(
+            sea_orm::Condition::all()
+                .add(snapshot_entity::Column::GroupPath.eq(group.clone()))
+                .add(snapshot_entity::Column::Name.eq(name.clone())),
+        );
     }
-    let superseded = snapshot_entity::Entity::find()
-        .filter(supersede.clone())
-        .all(db)
-        .await?;
-    for row in &superseded {
-        if let Some(parent) = row.parent_digest.as_ref() {
-            db.execute_unprepared(&format!(
-                "UPDATE snapshot_index SET child_count = MAX(0, child_count - 1) WHERE snapshot_id = '{}'",
-                parent.replace('\'', "''")
-            ))
-            .await?;
-        }
-    }
-    snapshot_entity::Entity::delete_many()
-        .filter(supersede)
-        .exec(db)
-        .await?;
 
     let (state_kind, format, fstype, checkpoint_manifest_digest, size_bytes) = match &manifest.state
     {
@@ -233,6 +225,8 @@ pub(super) async fn index_upsert(
         snapshot_id: Set(Some(manifest.snapshot_id.to_string())),
         descriptor_digest: Set(Some(digest.to_string())),
         name: Set(artifact_name),
+        group_name: Set(group_name),
+        group_path: Set(group_path),
         parent_digest: Set(manifest.parent.as_ref().map(ToString::to_string)),
         scope: Set(scope_str.into()),
         state_kind: Set(state_kind.into()),
@@ -252,17 +246,20 @@ pub(super) async fn index_upsert(
         indexed_at: Set(indexed_at),
         child_count: Set(0),
     };
-    row.insert(db).await?;
-
-    // If this snapshot has a parent, bump the parent's child_count.
-    if let Some(parent) = manifest.parent.as_ref() {
-        use sea_orm::ConnectionTrait;
-        db.execute_unprepared(&format!(
-            "UPDATE snapshot_index SET child_count = child_count + 1 WHERE snapshot_id = '{}'",
-            parent.as_str().replace('\'', "''")
-        ))
-        .await?;
-    }
+    db.transaction::<_, _, _, sea_orm::DbErr>(|transaction| {
+        let row = row.clone();
+        let supersede = supersede.clone();
+        async move {
+            snapshot_entity::Entity::delete_many()
+                .filter(supersede)
+                .exec(&transaction)
+                .await?;
+            row.insert(&transaction).await?;
+            recompute_children(&transaction).await?;
+            Ok((transaction, ()))
+        }
+    })
+    .await?;
 
     Ok(())
 }
@@ -308,11 +305,11 @@ pub(super) async fn list_dir(
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    let mut out = Vec::new();
+    let mut candidates = Vec::new();
     let mut entries = tokio::fs::read_dir(dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if !path.is_dir() {
+        if !entry.file_type().await?.is_dir() {
             continue;
         }
         // Dot-prefixed directories are never artifacts; create() stages
@@ -325,6 +322,23 @@ pub(super) async fn list_dir(
         {
             continue;
         }
+        if path.join(super::group::GROUP_FILENAME).is_file() {
+            // Groups are exactly one level deep. Do not recursively walk arbitrary folders,
+            // symlink trees, checkpoint stores, or failed staging directories.
+            let mut members = tokio::fs::read_dir(&path).await?;
+            while let Some(member) = members.next_entry().await? {
+                if member.file_type().await?.is_dir()
+                    && !member.file_name().to_string_lossy().starts_with('.')
+                {
+                    candidates.push(member.path());
+                }
+            }
+        } else {
+            candidates.push(path);
+        }
+    }
+    let mut out = Vec::new();
+    for path in candidates {
         if !path.join(DESCRIPTOR_FILENAME).exists() && !path.join(V066_DESCRIPTOR_FILENAME).exists()
         {
             continue;
@@ -348,41 +362,12 @@ pub(super) async fn remove_snapshot(
     let read_db = pools.read();
     let write_db = pools.write();
 
-    // Resolve the target row. Accept digest, name, or path.
-    let (digest, artifact_path) = if path_or_name.starts_with("snap_") {
-        let row = snapshot_entity::Entity::find()
-            .filter(snapshot_entity::Column::SnapshotId.eq(path_or_name.to_string()))
-            .one(read_db)
-            .await?
-            .ok_or_else(|| MicrosandboxError::SnapshotNotFound(path_or_name.into()))?;
-        (row.digest.clone(), PathBuf::from(row.artifact_path))
-    } else if path_or_name.starts_with("sha256:") || path_or_name.starts_with("sha512:") {
-        let row = snapshot_entity::Entity::find_by_id(path_or_name.to_string())
-            .one(read_db)
-            .await?
-            .ok_or_else(|| MicrosandboxError::SnapshotNotFound(path_or_name.into()))?;
-        (row.digest.clone(), PathBuf::from(row.artifact_path))
-    } else if looks_like_path(path_or_name) {
-        // Path: open to read the digest, then drop both row and dir.
-        let snap = open_snapshot(local, path_or_name).await?;
-        (snap.digest.clone(), snap.path.clone())
-    } else {
-        // Bare name: prefer the index lookup; fall back to default-dir resolution.
-        let row = snapshot_entity::Entity::find()
-            .filter(snapshot_entity::Column::Name.eq(path_or_name.to_string()))
-            .one(read_db)
-            .await?;
-        if let Some(row) = row {
-            (row.digest.clone(), PathBuf::from(row.artifact_path))
-        } else {
-            let dir = local.snapshots_dir().join(path_or_name);
-            let snap = open_snapshot(local, dir.to_string_lossy().as_ref()).await?;
-            (snap.digest.clone(), snap.path.clone())
-        }
-    };
+    let snapshot = open_snapshot(local, path_or_name).await?;
+    let artifact_path = canonical_path(snapshot.path());
+    let artifact_key = artifact_path.display().to_string();
 
     // Check children unless --force.
-    let row = snapshot_entity::Entity::find_by_id(digest.clone())
+    let row = snapshot_entity::Entity::find_by_id(artifact_key.clone())
         .one(read_db)
         .await?;
     if let Some(ref row) = row
@@ -391,28 +376,20 @@ pub(super) async fn remove_snapshot(
     {
         return Err(MicrosandboxError::Custom(format!(
             "snapshot {} has {} indexed child snapshot(s); pass --force to remove anyway",
-            digest, row.child_count
+            snapshot.id(),
+            row.child_count
         )));
     }
 
-    // Drop the index row and decrement parent's child_count if any.
-    let parent = row.as_ref().and_then(|r| r.parent_digest.clone());
-    snapshot_entity::Entity::delete_by_id(digest.clone())
-        .exec(write_db)
-        .await?;
-    if let Some(p) = parent {
-        write_db
-            .execute_unprepared(&format!(
-                "UPDATE snapshot_index SET child_count = MAX(0, child_count - 1) WHERE snapshot_id = '{}'",
-                p.replace('\'', "''")
-            ))
-            .await?;
-    }
-
-    // Delete the artifact directory.
-    if artifact_path.exists() {
+    // The group helper validates head removal and removes the member under its publication
+    // lock. Even --force must not leave a group's head dangling while other members remain.
+    if !super::group::remove_member(&artifact_path).await? && artifact_path.exists() {
         tokio::fs::remove_dir_all(&artifact_path).await?;
     }
+    snapshot_entity::Entity::delete_by_id(artifact_key)
+        .exec(write_db)
+        .await?;
+    recompute_children(write_db).await?;
     Ok(())
 }
 
@@ -429,47 +406,41 @@ pub(super) async fn reindex_dir(local: &LocalBackend, dir: &Path) -> Microsandbo
     // After upserts, recompute child_count from parent edges in one pass
     // to keep the cache honest about the current set of artifacts.
     let db = local.db().await?.write();
-    db.execute_unprepared(
-        "UPDATE snapshot_index SET child_count = (\
-            SELECT COUNT(*) FROM snapshot_index AS c \
-            WHERE c.parent_digest = snapshot_index.snapshot_id)",
-    )
-    .await?;
+    recompute_children(db).await?;
     Ok(indexed)
 }
 
-/// Look up a snapshot by digest, name, or path in the local index.
+/// Resolve a local address and refresh its rebuildable index row before returning a handle.
 pub(super) async fn get_handle(
     local: &LocalBackend,
     needle: &str,
 ) -> MicrosandboxResult<SnapshotHandle> {
-    let db = local.db().await?.read();
-
-    let row = if needle.starts_with("snap_") {
-        snapshot_entity::Entity::find()
-            .filter(snapshot_entity::Column::SnapshotId.eq(needle.to_string()))
-            .one(db)
-            .await?
-    } else if needle.starts_with("sha256:") || needle.starts_with("sha512:") {
-        snapshot_entity::Entity::find_by_id(needle.to_string())
-            .one(db)
-            .await?
-    } else if looks_like_path(needle) {
-        // Path lookup: match by artifact_path.
-        let canon = std::fs::canonicalize(needle)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| needle.to_string());
-        snapshot_entity::Entity::find()
-            .filter(snapshot_entity::Column::ArtifactPath.eq(canon))
-            .one(db)
-            .await?
-    } else {
-        snapshot_entity::Entity::find()
-            .filter(snapshot_entity::Column::Name.eq(needle.to_string()))
-            .one(db)
-            .await?
-    };
-
+    let snapshot = open_snapshot(local, needle).await?;
+    let artifact_path = canonical_path(snapshot.path());
+    let alias = super::group::member_name(&artifact_path)?.or_else(|| {
+        artifact_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    });
+    if let Some(row) = indexed_path(local, &artifact_path).await?
+        && row.digest == snapshot.digest()
+        && row.name == alias
+        && row.group_path
+            == super::group::group_path(&artifact_path).map(|path| path.display().to_string())
+    {
+        return Ok(handle_from_model(row));
+    }
+    index_upsert(
+        local,
+        snapshot.path(),
+        snapshot.digest(),
+        snapshot.manifest(),
+    )
+    .await?;
+    let row =
+        snapshot_entity::Entity::find_by_id(canonical_path(snapshot.path()).display().to_string())
+            .one(local.db().await?.read())
+            .await?;
     row.map(handle_from_model)
         .ok_or_else(|| MicrosandboxError::SnapshotNotFound(needle.into()))
 }
@@ -480,15 +451,78 @@ pub(super) async fn lookup_by_digest(
     digest: &str,
 ) -> MicrosandboxResult<Option<SnapshotHandle>> {
     let db = local.db().await?.read();
-    let row = snapshot_entity::Entity::find()
+    let rows = snapshot_entity::Entity::find()
         .filter(
             sea_orm::Condition::any()
                 .add(snapshot_entity::Column::Digest.eq(digest.to_string()))
                 .add(snapshot_entity::Column::SnapshotId.eq(digest.to_string())),
         )
-        .one(db)
+        .all(db)
         .await?;
-    Ok(row.map(handle_from_model))
+    unique_identity_match(rows, digest).map(|row| row.map(handle_from_model))
+}
+
+async fn resolve_path(local: &LocalBackend, selector: &str) -> MicrosandboxResult<PathBuf> {
+    if looks_like_path(selector) {
+        return Ok(PathBuf::from(selector));
+    }
+    if microsandbox_image::snapshot::SnapshotId::new(selector).is_ok()
+        || selector.starts_with("sha256:")
+        || selector.starts_with("sha512:")
+    {
+        return lookup_by_digest(local, selector)
+            .await?
+            .map(|handle| handle.artifact_path)
+            .ok_or_else(|| MicrosandboxError::SnapshotNotFound(selector.into()));
+    }
+    if !selector.contains(':') {
+        let flat = local.snapshots_dir().join(selector);
+        if flat.join(DESCRIPTOR_FILENAME).is_file() || flat.join(V066_DESCRIPTOR_FILENAME).is_file()
+        {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "'{selector}' is an ungrouped snapshot; bare names now select group heads, so open this artifact by its explicit path: {}",
+                flat.display()
+            )));
+        }
+    }
+    super::group::resolve(&local.snapshots_dir(), selector).await
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+async fn indexed_path(
+    local: &LocalBackend,
+    path: &Path,
+) -> MicrosandboxResult<Option<snapshot_entity::Model>> {
+    Ok(
+        snapshot_entity::Entity::find_by_id(canonical_path(path).display().to_string())
+            .one(local.db().await?.read())
+            .await?,
+    )
+}
+
+fn unique_identity_match(
+    mut rows: Vec<snapshot_entity::Model>,
+    identity: &str,
+) -> MicrosandboxResult<Option<snapshot_entity::Model>> {
+    if rows.len() > 1 {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "snapshot identity {identity} has {} local copies; use group:member or an explicit artifact path",
+            rows.len()
+        )));
+    }
+    Ok(rows.pop())
+}
+
+async fn recompute_children<C: ConnectionTrait>(db: &C) -> Result<(), sea_orm::DbErr> {
+    // Repeated imports are instances, not additional lineage edges. Apply the same number of
+    // distinct child identities to every local copy of a parent.
+    db.execute_unprepared(
+        "UPDATE snapshot_index SET child_count = (SELECT COUNT(DISTINCT COALESCE(c.snapshot_id, c.digest)) FROM snapshot_index c WHERE c.parent_digest = snapshot_index.snapshot_id)",
+    ).await?;
+    Ok(())
 }
 
 fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
@@ -510,6 +544,8 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
         snapshot_id: m.snapshot_id.unwrap_or_else(|| m.digest.clone()),
         digest: m.digest,
         name: m.name,
+        group: m.group_name,
+        head_update: None,
         parent_digest: m.parent_digest,
         scope,
         image_ref: m.image_ref,
@@ -533,7 +569,180 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_path;
+    use std::collections::BTreeMap;
+
+    use microsandbox_image::snapshot::{
+        CheckpointSnapshotState, ImageRef, SCHEMA, SnapshotCapture, SnapshotConsistency,
+        SnapshotId, SnapshotRootDisk,
+    };
+
+    use super::*;
+
+    fn manifest(id: u128, parent: Option<&Manifest>) -> Manifest {
+        Manifest {
+            schema: SCHEMA.into(),
+            snapshot_id: SnapshotId::new(format!("snap_{id:032x}")).unwrap(),
+            scope: SnapshotScope::Full,
+            // These tests exercise addressing and indexing, not checkpoint restoration.
+            state: SnapshotState::Checkpoint(CheckpointSnapshotState {
+                checkpoint_id: "checkpoint_test".into(),
+                checkpoint_root: format!("sha256:{}", "a".repeat(64)),
+                restore_intents: vec!["resume".into()],
+                requirements_summary: BTreeMap::new(),
+            }),
+            capture: SnapshotCapture {
+                created_at: "2026-09-10T00:00:00Z".into(),
+                source_lineage: None,
+                source_checkpoint: None,
+                consistency: SnapshotConsistency::CrashConsistent,
+            },
+            image: ImageRef {
+                reference: "docker.io/library/alpine:3.20".into(),
+                manifest_digest: format!("sha256:{}", "b".repeat(64)),
+            },
+            root_disk: SnapshotRootDisk::Managed,
+            parent: parent.map(|parent| parent.snapshot_id.clone()),
+            extensions: BTreeMap::new(),
+            requires: Vec::new(),
+        }
+    }
+
+    async fn install(
+        local: &LocalBackend,
+        group: &str,
+        name: &str,
+        manifest: &Manifest,
+    ) -> PathBuf {
+        let directory = super::super::group::ensure(&local.snapshots_dir(), Some(group))
+            .await
+            .unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let artifact = stage.path().join("member");
+        std::fs::create_dir(&artifact).unwrap();
+        std::fs::write(
+            artifact.join(DESCRIPTOR_FILENAME),
+            manifest.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        super::super::group::publish(
+            &directory,
+            stage.path(),
+            &BTreeMap::from([(manifest.snapshot_id.to_string(), name.into())]),
+            &manifest.snapshot_id,
+            false,
+        )
+        .await
+        .unwrap();
+        directory.join(manifest.snapshot_id.as_str())
+    }
+
+    #[tokio::test]
+    async fn duplicate_identities_keep_group_addresses_and_remove_only_selected_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        let snapshot = manifest(1, None);
+        let first = install(&local, "first", "baseline", &snapshot).await;
+        let second = install(&local, "second", "baseline", &snapshot).await;
+        assert_eq!(
+            reindex_dir(&local, &local.snapshots_dir()).await.unwrap(),
+            2
+        );
+        let first_handle = get_handle(&local, "first:baseline").await.unwrap();
+        let second_handle = get_handle(&local, "second").await.unwrap();
+        assert_eq!(first_handle.digest(), second_handle.digest());
+        assert_eq!(first_handle.group(), Some("first"));
+        assert_eq!(second_handle.group(), Some("second"));
+        assert!(
+            get_handle(&local, snapshot.snapshot_id.as_str())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("local copies")
+        );
+        assert!(
+            get_handle(&local, first_handle.digest())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("local copies")
+        );
+        remove_snapshot(&local, "first:baseline", false)
+            .await
+            .unwrap();
+        assert!(!first.exists());
+        assert!(second.exists());
+        assert_eq!(list_indexed(&local).await.unwrap().len(), 1);
+        assert_eq!(
+            get_handle(&local, "second").await.unwrap().digest(),
+            snapshot.digest().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_child_counts_and_head_guard_survive_reindex() {
+        let home = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        let parent = manifest(1, None);
+        let child = manifest(2, Some(&parent));
+        for group in ["first", "second"] {
+            install(&local, group, "base", &parent).await;
+            install(&local, group, "child", &child).await;
+        }
+        reindex_dir(&local, &local.snapshots_dir()).await.unwrap();
+        reindex_dir(&local, &local.snapshots_dir()).await.unwrap();
+        let rows = snapshot_entity::Entity::find()
+            .filter(snapshot_entity::Column::SnapshotId.eq(parent.snapshot_id.as_str()))
+            .all(local.db().await.unwrap().read())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.child_count == 1));
+        assert!(
+            remove_snapshot(&local, "first:child", true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("current head")
+        );
+        assert_eq!(
+            get_handle(&local, "first").await.unwrap().id(),
+            child.snapshot_id.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn flat_artifact_requires_explicit_path() {
+        let home = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        let artifact = local.snapshots_dir().join("flat");
+        std::fs::create_dir_all(&artifact).unwrap();
+        let snapshot = manifest(1, None);
+        std::fs::write(
+            artifact.join(DESCRIPTOR_FILENAME),
+            snapshot.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        assert!(open_snapshot(&local, "flat").await.is_err());
+        assert_eq!(
+            open_snapshot(&local, artifact.to_str().unwrap())
+                .await
+                .unwrap()
+                .id(),
+            &snapshot.snapshot_id
+        );
+    }
 
     #[test]
     fn bare_names_are_not_paths() {

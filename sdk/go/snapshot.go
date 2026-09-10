@@ -14,13 +14,14 @@ type snapshotFactory struct{}
 
 // SnapshotCreateOptions configures Snapshot.Create.
 type SnapshotCreateOptions struct {
-	// Snapshot name, resolved under the default snapshots directory
-	// (or under DestDir when set).
+	// Snapshot member name; generated when empty.
 	Name string
+	// Group to install the member in; defaults to the source sandbox's name.
+	Group string
 	// Source sandbox to snapshot. Disk capture preserves running/paused state. Required.
 	FromSandbox string
 	// Parent directory to create the artifact in; empty = the default
-	// snapshots directory. The artifact lands at DestDir/<name>.
+	// snapshots directory. The group is created under this root.
 	DestDir         string
 	Labels          map[string]string
 	Force           bool
@@ -37,6 +38,27 @@ type SnapshotSaveOptions struct {
 	WithParents bool
 	WithImage   bool
 	PlainTar    bool
+}
+
+// SnapshotLoadOptions configures importing an archive into a snapshot group.
+type SnapshotLoadOptions struct {
+	// Parent directory containing snapshot groups; empty selects the default.
+	Dest string
+	// Exact base snapshot or standalone archive for a dependent archive.
+	Base string
+	// Destination group; generated when empty.
+	Group string
+	// Select the imported member even when it is not a fast-forward.
+	SetHead bool
+}
+
+// SnapshotHeadUpdate reports the result of reading or selecting a group head.
+type SnapshotHeadUpdate struct {
+	Group    string
+	Previous *string
+	Head     string
+	Reason   string
+	Changed  bool
 }
 
 // SnapshotArchiveOptions configures direct sandbox-to-archive capture.
@@ -117,6 +139,7 @@ type SnapshotIntegrity struct {
 
 // SnapshotArtifact is a snapshot artifact on disk.
 type SnapshotArtifact struct {
+	headUpdate          *SnapshotHeadUpdate
 	id                  string
 	path                string
 	digest              string
@@ -133,6 +156,7 @@ type SnapshotArtifact struct {
 
 func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 	return &SnapshotArtifact{
+		headUpdate:          snapshotHeadUpdateFromInfo(info.HeadUpdate),
 		id:                  info.ID,
 		path:                info.Path,
 		digest:              info.Digest,
@@ -173,6 +197,11 @@ func (s *SnapshotArtifact) CreatedAt() string         { return s.createdAt }
 func (s *SnapshotArtifact) Labels() map[string]string { return cloneMap(s.labels) }
 func (s *SnapshotArtifact) SourceSandbox() *string    { return cloneStringPtr(s.sourceSandbox) }
 
+// HeadUpdate returns the group head outcome recorded by this capture, if any.
+func (s *SnapshotArtifact) HeadUpdate() *SnapshotHeadUpdate {
+	return cloneSnapshotHeadUpdate(s.headUpdate)
+}
+
 // Verify recomputes recorded content integrity for the snapshot.
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error) {
 	report, err := ffi.SnapshotVerify(ctx, s.path)
@@ -184,6 +213,8 @@ func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, e
 
 // SnapshotHandle is a lightweight handle backed by the snapshot index.
 type SnapshotHandle struct {
+	group                    *string
+	headUpdate               *SnapshotHeadUpdate
 	id                       string
 	digest                   string
 	name                     *string
@@ -205,6 +236,8 @@ type SnapshotHandle struct {
 
 func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
 	return &SnapshotHandle{
+		group:                    info.Group,
+		headUpdate:               snapshotHeadUpdateFromInfo(info.HeadUpdate),
 		id:                       info.ID,
 		digest:                   info.Digest,
 		name:                     info.Name,
@@ -225,9 +258,17 @@ func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
 	}
 }
 
-func (h *SnapshotHandle) ID() string            { return h.id }
-func (h *SnapshotHandle) Digest() string        { return h.digest }
-func (h *SnapshotHandle) Name() *string         { return cloneStringPtr(h.name) }
+func (h *SnapshotHandle) ID() string     { return h.id }
+func (h *SnapshotHandle) Digest() string { return h.digest }
+func (h *SnapshotHandle) Name() *string  { return cloneStringPtr(h.name) }
+
+// Group returns the local group containing this indexed snapshot.
+func (h *SnapshotHandle) Group() *string { return cloneStringPtr(h.group) }
+
+// HeadUpdate returns the group head outcome recorded by this import, if any.
+func (h *SnapshotHandle) HeadUpdate() *SnapshotHeadUpdate {
+	return cloneSnapshotHeadUpdate(h.headUpdate)
+}
 func (h *SnapshotHandle) ParentDigest() *string { return cloneStringPtr(h.parentDigest) }
 func (h *SnapshotHandle) Scope() string         { return h.scope }
 func (h *SnapshotHandle) ImageRef() string      { return h.imageRef }
@@ -250,18 +291,17 @@ func (h *SnapshotHandle) Open(ctx context.Context) (*SnapshotArtifact, error) {
 }
 
 func (h *SnapshotHandle) Remove(ctx context.Context, force bool) error {
-	return Snapshot.Remove(ctx, h.digest, force)
+	// Copies in different groups share a digest; the handle owns one exact artifact path.
+	return Snapshot.Remove(ctx, h.path, force)
 }
 
 func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (*SnapshotArtifact, error) {
-	if opts.Name == "" {
-		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot create requires a non-empty Name"}
-	}
 	if opts.FromSandbox == "" {
 		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot create requires a source sandbox (FromSandbox)"}
 	}
 	info, err := ffi.SnapshotCreate(ctx, opts.FromSandbox, ffi.SnapshotCreateOptions{
 		Name:            opts.Name,
+		Group:           opts.Group,
 		DestDir:         opts.DestDir,
 		Labels:          opts.Labels,
 		Force:           opts.Force,
@@ -277,9 +317,6 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 // CreateArchive captures a disk or full snapshot directly into one archive file.
 // It does not create an installed snapshot directory or index row.
 func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
-	if opts.Name == "" {
-		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot archive create requires a non-empty Name"}
-	}
 	if opts.FromSandbox == "" {
 		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot archive create requires a source sandbox (FromSandbox)"}
 	}
@@ -290,6 +327,7 @@ func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOp
 	create.DestDir = ""
 	info, err := ffi.SnapshotCreateArchive(ctx, opts.FromSandbox, opts.ArchivePath, ffi.SnapshotCreateOptions{
 		Name:            create.Name,
+		Group:           create.Group,
 		Labels:          create.Labels,
 		Force:           create.Force,
 		RecordIntegrity: create.RecordIntegrity,
@@ -379,6 +417,51 @@ func (snapshotFactory) LoadWithBase(ctx context.Context, archive, dest, base str
 		return nil, wrapFFI(err)
 	}
 	return snapshotHandleFromInfo(info), nil
+}
+
+// LoadWithOptions imports an archive into a selected or generated group.
+func (snapshotFactory) LoadWithOptions(ctx context.Context, archive string, opts SnapshotLoadOptions) (*SnapshotHandle, error) {
+	info, err := ffi.SnapshotLoadWithOptions(ctx, archive, ffi.SnapshotLoadOptions{
+		Dest:    opts.Dest,
+		Base:    opts.Base,
+		Group:   opts.Group,
+		SetHead: opts.SetHead,
+	})
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return snapshotHandleFromInfo(info), nil
+}
+
+// GroupHead reads a group head, or selects a group:member as its head.
+func (snapshotFactory) GroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {
+	update, err := ffi.SnapshotGroupHead(ctx, selector)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return snapshotHeadUpdateFromInfo(update), nil
+}
+
+func snapshotHeadUpdateFromInfo(update *ffi.SnapshotHeadUpdate) *SnapshotHeadUpdate {
+	if update == nil {
+		return nil
+	}
+	return &SnapshotHeadUpdate{
+		Group:    update.Group,
+		Previous: update.Previous,
+		Head:     update.Head,
+		Reason:   update.Reason,
+		Changed:  update.Changed,
+	}
+}
+
+func cloneSnapshotHeadUpdate(update *SnapshotHeadUpdate) *SnapshotHeadUpdate {
+	if update == nil {
+		return nil
+	}
+	copy := *update
+	copy.Previous = cloneStringPtr(update.Previous)
+	return &copy
 }
 
 func normalizeSnapshotScope(scope string) string {

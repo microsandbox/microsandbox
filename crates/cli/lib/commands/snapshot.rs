@@ -45,21 +45,27 @@ pub enum SnapshotCommands {
 
     /// Load a snapshot archive into the snapshots directory.
     Load(SnapshotLoadArgs),
+
+    /// Read a group's head, or select a member as its head.
+    Head(SnapshotHeadArgs),
 }
 
 /// Arguments for `msb snapshot create`.
 #[derive(Debug, Args)]
 pub struct SnapshotCreateArgs {
-    /// Snapshot name, resolved under `~/.microsandbox/snapshots/<name>/`
-    /// (or under `--dest-dir` when given).
-    pub name: String,
+    /// Snapshot member name (generated when omitted).
+    pub name: Option<String>,
+
+    /// Snapshot group to create or add to (defaults to the source sandbox name).
+    #[arg(long, value_name = "GROUP")]
+    pub group: Option<String>,
 
     /// Source sandbox name. Disk capture also supports running and user-paused sources.
     #[arg(long, value_name = "SANDBOX")]
     pub from: String,
 
     /// Parent directory to create the artifact in, instead of the
-    /// default snapshots directory. The artifact lands at `DIR/<name>`.
+    /// default snapshots directory. The group is created under this root.
     #[arg(long = "dest-dir", value_name = "DIR")]
     pub dest_dir: Option<std::path::PathBuf>,
 
@@ -75,7 +81,7 @@ pub struct SnapshotCreateArgs {
     #[arg(long = "label", value_name = "K=V")]
     pub labels: Vec<String>,
 
-    /// Overwrite an existing artifact at the destination.
+    /// Overwrite an existing archive file; installed group members are immutable.
     #[arg(short = 'f', long)]
     pub force: bool,
 
@@ -186,6 +192,25 @@ pub struct SnapshotLoadArgs {
     /// Exact base snapshot or standalone base archive for a dependent archive.
     #[arg(long)]
     pub base: Option<String>,
+
+    /// Import into this group (generated when omitted).
+    #[arg(long, value_name = "GROUP")]
+    pub group: Option<String>,
+
+    /// Select the imported member as head even if it is not a fast-forward.
+    #[arg(long)]
+    pub set_head: bool,
+}
+
+/// Arguments for `msb snapshot head`.
+#[derive(Debug, Args)]
+pub struct SnapshotHeadArgs {
+    /// Group to read, or GROUP:MEMBER to select a new head.
+    pub selector: String,
+
+    /// Output format (json).
+    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
+    pub format: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -203,11 +228,15 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
         SnapshotCommands::Reindex(args) => reindex(args).await,
         SnapshotCommands::Save(args) => save(args).await,
         SnapshotCommands::Load(args) => load(args).await,
+        SnapshotCommands::Head(args) => head(args).await,
     }
 }
 
 async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
-    let mut builder = Snapshot::builder(&args.name).from_sandbox(&args.from);
+    let mut builder = Snapshot::builder(args.name.unwrap_or_default()).from_sandbox(&args.from);
+    if let Some(group) = args.group {
+        builder = builder.group(group);
+    }
     if let Some(ref dest_dir) = args.dest_dir {
         builder = builder.dest_dir(dest_dir);
     }
@@ -247,6 +276,9 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
         Ok(snap) => {
             spinner.finish_success("Snapshotted");
             if !args.quiet {
+                if let Some(update) = snap.head_update() {
+                    report_head_update(update);
+                }
                 println!("{}", snap.id());
                 println!("{}", snap.path().display());
             }
@@ -267,8 +299,10 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
             .iter()
             .map(|s| {
                 serde_json::json!({
+                    "snapshot_id": s.id(),
                     "digest": s.digest(),
                     "name": s.name(),
+                    "group": s.group(),
                     "parent_digest": s.parent_digest(),
                     "scope": format_scope(s.scope()),
                     "state_kind": s.state_kind(),
@@ -312,7 +346,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
         "DIGEST",
     ]);
     for s in &snapshots {
-        let name = s.name().unwrap_or("-").to_string();
+        let name = format_member_selector(s.group(), s.name(), s.id());
         let size = s
             .size_bytes()
             .map(format_size)
@@ -469,19 +503,57 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
 }
 
 async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
-    let handle = if let Some(base) = args.base.as_deref() {
-        Snapshot::load_with_base(&args.archive, args.dest.as_deref(), base).await?
-    } else {
-        Snapshot::load(&args.archive, args.dest.as_deref()).await?
-    };
+    let handle = Snapshot::load_with_options(
+        &args.archive,
+        microsandbox::snapshot::LoadOpts {
+            dest: args.dest,
+            base: args.base,
+            group: args.group,
+            set_head: args.set_head,
+        },
+    )
+    .await?;
+    if let Some(update) = handle.head_update() {
+        report_head_update(update);
+    }
     println!("{}", handle.digest());
+    // Keep the installed path as the final stdout line for shell consumers.
     println!("{}", handle.path().display());
+    Ok(())
+}
+
+async fn head(args: SnapshotHeadArgs) -> anyhow::Result<()> {
+    let update = Snapshot::group_head(&args.selector).await?;
+    if args.format.as_deref() == Some("json") {
+        println!("{}", serde_json::to_string_pretty(&update)?);
+    } else {
+        ui::detail_kv("Group", &update.group);
+        ui::detail_kv("Previous head", update.previous.as_deref().unwrap_or("-"));
+        ui::detail_kv("Head", &update.head);
+        ui::detail_kv("Reason", &format!("{:?}", update.reason));
+    }
     Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+fn format_member_selector(group: Option<&str>, name: Option<&str>, id: &str) -> String {
+    let member = name.unwrap_or(id);
+    // Friendly member names are scoped to one group; qualify them so rows stay distinct.
+    match group {
+        Some(group) => format!("{group}:{member}"),
+        None => member.to_string(),
+    }
+}
+
+fn report_head_update(update: &microsandbox::snapshot::HeadUpdate) {
+    eprintln!(
+        "group {}: head {} ({:?})",
+        update.group, update.head, update.reason
+    );
+}
 
 fn format_str(f: microsandbox::SnapshotFormat) -> &'static str {
     match f {
@@ -570,7 +642,7 @@ mod tests {
         let SnapshotCommands::Create(args) = args.command else {
             panic!("expected create command");
         };
-        assert_eq!(args.name, "clean");
+        assert_eq!(args.name.as_deref(), Some("clean"));
         assert_eq!(args.from, "box");
         assert!(args.full);
     }
@@ -644,5 +716,62 @@ mod tests {
             args.dest.as_deref(),
             Some(std::path::Path::new("/tmp/snaps"))
         );
+    }
+
+    #[test]
+    fn create_accepts_generated_member_in_explicit_group() {
+        let parsed = parse_snapshot_args(&["create", "--from", "box", "--group", "work"]);
+        let SnapshotCommands::Create(args) = parsed.command else {
+            panic!("expected create command");
+        };
+        assert!(args.name.is_none());
+        assert_eq!(args.group.as_deref(), Some("work"));
+        assert_eq!(args.from, "box");
+    }
+
+    #[test]
+    fn load_accepts_group_and_explicit_head_selection() {
+        let parsed = parse_snapshot_args(&[
+            "load",
+            "changes.msnap",
+            "--base",
+            "work:base",
+            "--group",
+            "work",
+            "--set-head",
+        ]);
+        let SnapshotCommands::Load(args) = parsed.command else {
+            panic!("expected load command");
+        };
+        assert_eq!(args.base.as_deref(), Some("work:base"));
+        assert_eq!(args.group.as_deref(), Some("work"));
+        assert!(args.set_head);
+    }
+
+    #[test]
+    fn head_accepts_member_selector_and_json_format() {
+        let parsed = parse_snapshot_args(&["head", "work:baseline", "--format", "json"]);
+        let SnapshotCommands::Head(args) = parsed.command else {
+            panic!("expected head command");
+        };
+        assert_eq!(args.selector, "work:baseline");
+        assert_eq!(args.format.as_deref(), Some("json"));
+    }
+
+    #[test]
+    fn list_disambiguates_aliases_and_unnamed_members_by_group() {
+        assert_eq!(
+            format_member_selector(Some("work"), Some("base"), "snap_1"),
+            "work:base"
+        );
+        assert_eq!(
+            format_member_selector(Some("copy"), Some("base"), "snap_1"),
+            "copy:base"
+        );
+        assert_eq!(
+            format_member_selector(Some("copy"), None, "snap_1"),
+            "copy:snap_1"
+        );
+        assert_eq!(format_member_selector(None, None, "snap_1"), "snap_1");
     }
 }

@@ -15,9 +15,9 @@ it.skipIf(process.env.MSB_COW_LIVE !== "1")("captures a resident pause and resto
     const branched = await paused.branch(`${name}-paused-branch`);
     branches.push(branched);
     expect((await branched.exec("cat", ["/dev/shm/sdk-marker"])).stdout().trim()).toBe("source");
-    await Snapshot.builder(`${name}-full`).fromSandbox(name).full().create();
+    const snapshot = await Snapshot.builder(`${name}-full`).fromSandbox(name).full().create();
     await paused.resume();
-    child = await Sandbox.builder(`${name}-child`).fromSnapshot(`${name}-full`).forked().create();
+    child = await Sandbox.builder(`${name}-child`).fromSnapshot(snapshot.path).forked().create();
     expect((await child.exec("cat", ["/dev/shm/sdk-marker"])).stdout().trim()).toBe("source");
     await child.exec("sh", ["-c", "echo child > /dev/shm/sdk-marker"]);
     const descendant = await child.branch(`${name}-branch`);

@@ -71,11 +71,109 @@ impl Drop for SnapshotDiskClosure {
 
 pub(super) async fn create_snapshot(
     local: &LocalBackend,
+    mut config: SnapshotConfig,
+) -> MicrosandboxResult<Snapshot> {
+    if config.force {
+        return Err(MicrosandboxError::InvalidConfig(
+            "grouped snapshots are immutable; choose another member name or remove the existing member explicitly".into(),
+        ));
+    }
+    let generated_name = config.name.is_empty();
+    if generated_name {
+        config.name = format!("msb-{:08x}", rand::random::<u32>());
+    }
+    validate_snapshot_name(&config.name)?;
+    let lineage = super::lineage::begin(local, &config.source_sandbox).await?;
+    let root = config
+        .dest_dir
+        .take()
+        .unwrap_or_else(|| local.snapshots_dir());
+    let group_name = config
+        .group
+        .take()
+        .unwrap_or_else(|| config.source_sandbox.clone());
+    let group_dir = super::group::ensure(&root, Some(&group_name)).await?;
+    let staging = tempfile::Builder::new()
+        .prefix(".capture-")
+        .tempdir_in(&group_dir)?;
+    let name = config.name.clone();
+    let source_sandbox = config.source_sandbox.clone();
+    config.dest_dir = Some(staging.path().to_path_buf());
+    let mut captured = capture_installed(local, config, lineage.sandbox_id()).await?;
+    lineage.validate_source(local, &source_sandbox).await?;
+    // Ancestry belongs to the immutable descriptor, not to the group head or export base.
+    captured.manifest.parent = lineage.parent.clone();
+    captured.digest = captured
+        .manifest
+        .digest()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let descriptor = captured
+        .manifest
+        .to_canonical_bytes()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    write_descriptor(captured.path(), &descriptor).await?;
+    // Publication owns its staging and ancestry sequencer. Dropping an SDK future must not
+    // release the source lock while a blocking group commit is still running in the background.
+    let captured = tokio::spawn(async move {
+        let update = publish_with_name_retry(
+            &group_dir,
+            staging.path(),
+            captured.id(),
+            name,
+            generated_name,
+            || format!("msb-{:08x}", rand::random::<u32>()),
+        ).await?;
+        captured.path = group_dir.join(captured.id().as_str());
+        lineage.commit(captured.id()).await?;
+        tracing::info!(group = %update.group, head = %update.head, reason = ?update.reason, "snapshot group publication");
+        captured.head_update = Some(update);
+        Ok::<_, MicrosandboxError>(captured)
+    }).await.map_err(|error| MicrosandboxError::Runtime(format!("snapshot publication task: {error}")))??;
+    if let Err(error) = index_upsert(
+        local,
+        captured.path(),
+        captured.digest(),
+        captured.manifest(),
+    )
+    .await
+    {
+        tracing::warn!(%error, "snapshot index update failed after group publication");
+    }
+    Ok(captured)
+}
+
+/// Retry generated local names against the same captured artifact; explicit names remain strict.
+pub(super) async fn publish_with_name_retry(
+    group_dir: &Path,
+    staged: &Path,
+    snapshot_id: &SnapshotId,
+    mut name: String,
+    generated_name: bool,
+    mut next_name: impl FnMut() -> String,
+) -> MicrosandboxResult<super::group::HeadUpdate> {
+    loop {
+        let aliases = BTreeMap::from([(snapshot_id.to_string(), name)]);
+        match super::group::publish(group_dir, staged, &aliases, snapshot_id, false).await {
+            Err(MicrosandboxError::SnapshotAlreadyExists(_)) if generated_name => {
+                // Alias conflicts are preflight errors: no staged payload was moved and the
+                // descriptor's identity/ancestry remain unchanged, so no recapture is needed.
+                name = next_name();
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Build a complete artifact in operation-owned staging; group publication happens afterward.
+async fn capture_installed(
+    local: &LocalBackend,
     config: SnapshotConfig,
+    expected_source_id: i32,
 ) -> MicrosandboxResult<Snapshot> {
     let total_started = Instant::now();
     let SnapshotConfig {
         name,
+        group: _,
         dest_dir,
         source_sandbox,
         labels,
@@ -102,6 +200,11 @@ pub(super) async fn create_snapshot(
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
 
+    if model.id != expected_source_id {
+        return Err(MicrosandboxError::InvalidConfig(
+            "source sandbox changed before snapshot capture".into(),
+        ));
+    }
     if full {
         return create_full_snapshot(
             local,
@@ -227,13 +330,6 @@ pub(super) async fn create_snapshot(
     promote_snapshot_directory(&staging_dir, &dest_dir, force).await?;
     let promote_us = promote_started.elapsed().as_micros();
 
-    // Best-effort index upsert. Failures are logged, not propagated —
-    // the artifact on disk is the source of truth.
-    let index_started = Instant::now();
-    if let Err(e) = index_upsert(local, &dest_dir, &digest, &manifest).await {
-        tracing::warn!(error = %e, snapshot = %digest, "snapshot_index upsert failed");
-    }
-    let index_us = index_started.elapsed().as_micros();
     tracing::info!(
         target: "microsandbox_checkpoint_timing",
         operation = "snapshot_create_installed_disk",
@@ -241,7 +337,6 @@ pub(super) async fn create_snapshot(
         total_us = total_started.elapsed().as_micros(),
         artifact_build_us,
         promote_us,
-        index_us,
         "disk snapshot creation timing"
     );
 
@@ -273,7 +368,7 @@ async fn create_full_snapshot(
     // The runtime owns capture and recovery even if this client disappears. Do not allocate an
     // artifact staging directory while waiting for it: there is nothing to stage until capture
     // succeeds. The guard also removes partial materialization on ordinary errors/cancellation.
-    let captured = capture_full_snapshot(source_sandbox, labels, model).await?;
+    let captured = capture_full_snapshot(local, source_sandbox, labels, model).await?;
     let capture_us = capture_started.elapsed().as_micros();
     let staging = tempfile::Builder::new()
         .prefix(&format!(".{name}."))
@@ -317,11 +412,6 @@ async fn create_full_snapshot(
     let promote_started = Instant::now();
     promote_snapshot_directory(&staging_dir, dest_dir, force).await?;
     let promote_us = promote_started.elapsed().as_micros();
-    let index_started = Instant::now();
-    if let Err(error) = index_upsert(local, dest_dir, &digest, &captured.manifest).await {
-        tracing::warn!(error = %error, snapshot = %digest, "snapshot_index upsert failed");
-    }
-    let index_us = index_started.elapsed().as_micros();
     tracing::info!(
         target: "microsandbox_checkpoint_timing",
         operation = "snapshot_create_installed_full",
@@ -332,7 +422,6 @@ async fn create_full_snapshot(
         closure_verify_us,
         metadata_descriptor_us,
         promote_us,
-        index_us,
         "installed full snapshot creation timing"
     );
     Ok(Snapshot::from_parts(
@@ -353,7 +442,8 @@ pub(super) async fn create_snapshot_archive(
 ) -> MicrosandboxResult<SnapshotArchive> {
     let total_started = Instant::now();
     let SnapshotConfig {
-        name,
+        mut name,
+        group,
         dest_dir,
         source_sandbox,
         labels,
@@ -361,37 +451,57 @@ pub(super) async fn create_snapshot_archive(
         record_integrity,
         full,
     } = config;
-    if dest_dir.is_some() {
+    if dest_dir.is_some() || group.is_some() {
         return Err(MicrosandboxError::InvalidConfig(
-            "direct archive capture is mutually exclusive with dest_dir".into(),
+            "direct archive capture does not install a group; omit group and dest_dir".into(),
         ));
     }
+    if name.is_empty() {
+        name = format!("msb-{:08x}", rand::random::<u32>());
+    }
     validate_snapshot_name(&name)?;
+    let lineage = super::lineage::begin(local, &source_sandbox).await?;
     let db = local.db().await?.read();
     let model = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
         .one(db)
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
+    if model.id != lineage.sandbox_id() {
+        return Err(MicrosandboxError::InvalidConfig(
+            "source sandbox changed before snapshot capture".into(),
+        ));
+    }
     if full {
         let capture_started = Instant::now();
-        let captured = capture_full_snapshot(&source_sandbox, labels, model).await?;
+        let mut captured = capture_full_snapshot(local, &source_sandbox, labels, model).await?;
+        lineage.validate_source(local, &source_sandbox).await?;
+        captured.manifest.parent = lineage.parent.clone();
         let capture_us = capture_started.elapsed().as_micros();
         let digest = captured
             .manifest
             .digest()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
         let archive_started = Instant::now();
-        super::archive::save_direct_checkpoint_snapshot(
-            &captured.manifest,
-            &captured.labels,
-            &name,
-            &captured.checkpoint_path,
-            out,
-            plain_tar,
-            force,
-        )
-        .await?;
+        let owned_out = out.to_path_buf();
+        let captured = tokio::spawn(async move {
+            super::archive::save_direct_checkpoint_snapshot(
+                &captured.manifest,
+                &captured.labels,
+                &name,
+                &captured.checkpoint_path,
+                &owned_out,
+                plain_tar,
+                force,
+            )
+            .await?;
+            lineage.commit(&captured.manifest.snapshot_id).await?;
+            Ok::<_, MicrosandboxError>(captured)
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Runtime(format!("snapshot archive publication: {error}"))
+        })??;
         let archive_us = archive_started.elapsed().as_micros();
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
@@ -465,6 +575,7 @@ pub(super) async fn create_snapshot_archive(
         &root_disk,
     )
     .await?;
+    lineage.validate_source(local, &source_sandbox).await?;
     let integrity_started = Instant::now();
     let integrities = vec![None; disk.sources.len()];
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
@@ -476,6 +587,7 @@ pub(super) async fn create_snapshot_archive(
         &source_sandbox,
         root_disk,
     )?;
+    manifest.parent = lineage.parent.clone();
     if record_integrity && let SnapshotState::File(file) = &mut manifest.state {
         for index in 0..file.layers.len() {
             let source = &disk.sources[index].path;
@@ -502,16 +614,30 @@ pub(super) async fn create_snapshot_archive(
         .iter()
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
-    super::archive::save_direct_file_snapshot(
-        &manifest,
-        &labels,
-        &name,
-        &source_paths,
-        out,
-        plain_tar,
-        force,
-    )
-    .await?;
+    let owned_out = out.to_path_buf();
+    let logical_bytes = disk.virtual_size;
+    let (manifest, labels) = tokio::spawn(async move {
+        // A stopped disk remains locked and a live immutable cut remains pinned until the
+        // background writer finishes, even if the caller stops awaiting this operation.
+        let _disk = disk;
+        let _lifecycle_guard = _lifecycle_guard;
+        super::archive::save_direct_file_snapshot(
+            &manifest,
+            &labels,
+            &name,
+            &source_paths,
+            &owned_out,
+            plain_tar,
+            force,
+        )
+        .await?;
+        lineage.commit(&manifest.snapshot_id).await?;
+        Ok::<_, MicrosandboxError>((manifest, labels))
+    })
+    .await
+    .map_err(|error| {
+        MicrosandboxError::Runtime(format!("snapshot archive publication: {error}"))
+    })??;
     let archive_us = archive_started.elapsed().as_micros();
     tracing::info!(
         target: "microsandbox_checkpoint_timing",
@@ -519,7 +645,7 @@ pub(super) async fn create_snapshot_archive(
         source_sandbox,
         plain_tar,
         record_integrity,
-        logical_bytes = disk.virtual_size,
+        logical_bytes,
         total_us = total_started.elapsed().as_micros(),
         integrity_us,
         archive_us,
@@ -538,6 +664,7 @@ pub(super) async fn create_snapshot_archive(
 /// Installed snapshots and direct archives share this boundary so both publish byte-for-byte the
 /// same descriptor and checkpoint closure.
 async fn capture_full_snapshot(
+    local: &LocalBackend,
     source_sandbox: &str,
     labels: Vec<(String, String)>,
     model: sandbox_entity::Model,
@@ -560,7 +687,8 @@ async fn capture_full_snapshot(
 
     let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
     let checkpoint =
-        crate::sandbox::control_checkpoint_create(source_sandbox, checkpoint_id.clone()).await?;
+        crate::sandbox::control_checkpoint_create(local, source_sandbox, checkpoint_id.clone())
+            .await?;
     if checkpoint.checkpoint_id != checkpoint_id {
         return Err(MicrosandboxError::SnapshotIntegrity(
             "runtime returned a checkpoint for another capture attempt".into(),

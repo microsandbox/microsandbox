@@ -64,6 +64,27 @@ export interface SaveOpts {
   plainTar?: boolean;
 }
 
+/** Options for importing an archive into a snapshot group. */
+export interface LoadOpts {
+  /** Parent directory containing snapshot groups. */
+  dest?: string;
+  /** Exact base snapshot or standalone archive for a dependent archive. */
+  base?: string;
+  /** Destination group; generated when omitted. */
+  group?: string;
+  /** Select the imported member even when it is not a fast-forward. */
+  setHead?: boolean;
+}
+
+/** Outcome of reading or selecting a snapshot group's head. */
+export interface HeadUpdate {
+  readonly group: string;
+  readonly previous: string | null;
+  readonly head: string;
+  readonly reason: string;
+  readonly changed: boolean;
+}
+
 /** Result of an explicit `Snapshot.verify()` call. */
 export type SnapshotVerifyReport =
   | {
@@ -133,23 +154,20 @@ export class Snapshot {
   }
 
   /**
-   * Begin building a snapshot named `name`, stored under the default
-   * snapshots directory.
+   * Begin building a snapshot member; an omitted name is generated.
    *
    * The source sandbox is required:
    * `Snapshot.builder("clean").fromSandbox("box").create()`.
    *
-   * Use `destDir(dir)` to create the artifact under a different parent
-   * directory instead; it lands at `destDir/<name>`, and the name stays
-   * the snapshot's identity either way.
+   * Use `group(name)` to select a group and `destDir(dir)` to select its
+   * parent directory. The default group is the source sandbox's name.
    */
-  static builder(name: string): SnapshotBuilder {
+  static builder(name = ""): SnapshotBuilder {
     return wrapBuilder(new napi.SnapshotBuilder(name));
   }
 
   /**
-   * Open an existing snapshot artifact. Bare names resolve under the
-   * default snapshots directory; anything else is treated as a path.
+   * Open a snapshot by path, group head, or `group:member` selector.
    *
    * Cheap metadata validation only — does not read the upper file.
    * Use `verify()` for content checks.
@@ -227,6 +245,18 @@ export class Snapshot {
     return new SnapshotHandle(raw);
   }
 
+  /** Import into a selected or generated group, with optional head selection. */
+  static async loadWithOptions(archive: string, opts: LoadOpts = {}): Promise<SnapshotHandle> {
+    const raw = await withMappedErrors(() => napi.Snapshot.loadWithOptions(archive, opts));
+    return new SnapshotHandle(raw);
+  }
+
+  /** Read a group's head, or select `group:member` as its head. */
+  static async groupHead(selector: string): Promise<HeadUpdate> {
+    const update = await withMappedErrors(() => napi.Snapshot.groupHead(selector));
+    return { ...update, previous: update.previous ?? null };
+  }
+
   //--------------------------------------------------------------------------
   // Instance accessors
   //--------------------------------------------------------------------------
@@ -234,6 +264,12 @@ export class Snapshot {
   /** Path to the artifact directory. */
   get path(): string {
     return this.inner.path;
+  }
+
+  /** Outcome of the group head update performed by this capture. */
+  get headUpdate(): HeadUpdate | null {
+    const update = this.inner.headUpdate;
+    return update ? { ...update, previous: update.previous ?? null } : null;
   }
 
   /** Canonical content digest (`sha256:hex`). The snapshot's identity. */

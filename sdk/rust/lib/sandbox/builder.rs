@@ -1254,6 +1254,7 @@ impl SandboxBuilder {
         }
 
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
+        self.config.snapshot_parent = Some(snap.id().to_string());
         let unsupported = snap.manifest().unsupported_requires();
         if !unsupported.is_empty() {
             return Err(crate::MicrosandboxError::unsupported(

@@ -816,6 +816,23 @@ char *msb_snapshot_import_with_base(uint64_t cancel_id,
                                     uintptr_t buf_len);
 
 /**
+ * Import an archive with group selection without changing the existing import ABI.
+ */
+char *msb_snapshot_import_with_options(uint64_t cancel_id,
+                                       const char *archive,
+                                       const char *opts_json,
+                                       unsigned char *buf,
+                                       uintptr_t buf_len);
+
+/**
+ * Read a group head, or select a `group:member` as its head.
+ */
+char *msb_snapshot_group_head(uint64_t cancel_id,
+                              const char *selector,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+/**
  * Open a streaming read from a guest file.
  * Returns `{"stream_handle":<u64>}`.
  */

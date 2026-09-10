@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use microsandbox::snapshot::SaveOpts as RustSaveOpts;
+use microsandbox::snapshot::{LoadOpts as RustLoadOpts, SaveOpts as RustSaveOpts};
 use microsandbox::{
     Snapshot as RustSnapshot, SnapshotArchive as RustSnapshotArchive,
     SnapshotFormat as RustSnapshotFormat, SnapshotHandle as RustSnapshotHandle,
@@ -44,15 +44,17 @@ pub struct PySnapshotHandle {
 impl PySnapshot {
     /// Create a disk snapshot, or include memory and execution state with full=True.
     ///
-    /// The artifact is created under `~/.microsandbox/snapshots/<name>/`,
-    /// or under `dest_dir=` when given; move artifacts with `save`/`load`.
+    /// The artifact is installed in a snapshot group under the default snapshots
+    /// directory or `dest_dir`. Omitted member names are generated; the group
+    /// defaults to the source sandbox's name.
     // PyO3 kwargs map one-to-one onto function parameters; the count is the contract.
     #[allow(clippy::too_many_arguments)]
     #[staticmethod]
     #[pyo3(signature = (
-        name,
+        name = "".to_string(),
         *,
         from_sandbox,
+        group = None,
         dest_dir = None,
         labels = None,
         force = false,
@@ -63,6 +65,7 @@ impl PySnapshot {
         py: Python<'py>,
         name: String,
         from_sandbox: String,
+        group: Option<String>,
         dest_dir: Option<PathBuf>,
         labels: Option<HashMap<String, String>>,
         force: bool,
@@ -71,6 +74,9 @@ impl PySnapshot {
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = RustSnapshot::builder(name).from_sandbox(&from_sandbox);
+            if let Some(group) = group {
+                builder = builder.group(group);
+            }
             if let Some(dest_dir) = dest_dir {
                 builder = builder.dest_dir(dest_dir);
             }
@@ -101,6 +107,7 @@ impl PySnapshot {
         archive,
         *,
         from_sandbox,
+        group = None,
         labels = None,
         force = false,
         record_integrity = false,
@@ -112,6 +119,7 @@ impl PySnapshot {
         name: String,
         archive: PathBuf,
         from_sandbox: String,
+        group: Option<String>,
         labels: Option<HashMap<String, String>>,
         force: bool,
         record_integrity: bool,
@@ -120,6 +128,9 @@ impl PySnapshot {
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = RustSnapshot::builder(name).from_sandbox(from_sandbox);
+            if let Some(group) = group {
+                builder = builder.group(group);
+            }
             if let Some(labels) = labels {
                 for (key, value) in labels {
                     builder = builder.label(key, value);
@@ -142,7 +153,7 @@ impl PySnapshot {
         })
     }
 
-    /// Open an existing snapshot artifact by path or bare name.
+    /// Open a snapshot by path, group head, or `group:member` selector.
     /// Cheap metadata validation only — does not read the upper file.
     #[staticmethod]
     fn open<'py>(py: Python<'py>, path_or_name: String) -> PyResult<Bound<'py, PyAny>> {
@@ -273,21 +284,39 @@ impl PySnapshot {
     /// snapshots directory, preserving recorded integrity for explicit
     /// verification.
     #[staticmethod]
-    #[pyo3(signature = (archive, *, dest = None, base = None))]
+    #[pyo3(signature = (archive, *, dest = None, base = None, group = None, set_head = false))]
     fn load<'py>(
         py: Python<'py>,
         archive: PathBuf,
         dest: Option<PathBuf>,
         base: Option<String>,
+        group: Option<String>,
+        set_head: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let h = if let Some(base) = base {
-                RustSnapshot::load_with_base(&archive, dest.as_deref(), &base).await
-            } else {
-                RustSnapshot::load(&archive, dest.as_deref()).await
-            }
+            let h = RustSnapshot::load_with_options(
+                &archive,
+                RustLoadOpts {
+                    dest,
+                    base,
+                    group,
+                    set_head,
+                },
+            )
+            .await
             .map_err(to_py_err)?;
             Ok(PySnapshotHandle::from_rust(h))
+        })
+    }
+
+    /// Read a group's head, or select `group:member` as its head.
+    #[staticmethod]
+    fn group_head<'py>(py: Python<'py>, selector: String) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let update = RustSnapshot::group_head(&selector)
+                .await
+                .map_err(to_py_err)?;
+            Python::with_gil(|py| head_update_to_py(py, &update))
         })
     }
 
@@ -299,6 +328,15 @@ impl PySnapshot {
     #[getter]
     fn path(&self) -> String {
         self.inner.path().display().to_string()
+    }
+
+    /// Outcome of the group head update performed by this capture.
+    #[getter]
+    fn head_update(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        self.inner
+            .head_update()
+            .map(|update| head_update_to_py(py, update))
+            .transpose()
     }
 
     /// Canonical content digest (`sha256:hex`). The snapshot's identity.
@@ -493,6 +531,20 @@ impl PySnapshot {
 
 #[pymethods]
 impl PySnapshotHandle {
+    /// Local group containing this indexed snapshot.
+    #[getter]
+    fn group(&self) -> Option<&str> {
+        self.inner.group()
+    }
+
+    /// Outcome of the group head update performed by this import.
+    #[getter]
+    fn head_update(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        self.inner
+            .head_update()
+            .map(|update| head_update_to_py(py, update))
+            .transpose()
+    }
     #[getter]
     fn id(&self) -> &str {
         self.inner.id()
@@ -611,6 +663,25 @@ impl PySnapshotHandle {
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+fn head_update_to_py(
+    py: Python<'_>,
+    update: &microsandbox::snapshot::HeadUpdate,
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("group", &update.group)?;
+    result.set_item("previous", &update.previous)?;
+    result.set_item("head", &update.head)?;
+    // Preserve the stable reason spelling used by all serialized API surfaces.
+    let reason = serde_json::to_value(update.reason)
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    let reason = reason.as_str().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("snapshot head reason is not a string")
+    })?;
+    result.set_item("reason", reason)?;
+    result.set_item("changed", update.changed)?;
+    Ok(result.unbind())
+}
 
 fn format_str(f: RustSnapshotFormat) -> &'static str {
     match f {

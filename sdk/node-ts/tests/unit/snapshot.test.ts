@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Snapshot } from "../../dist/snapshot.js";
+import { napi } from "../../dist/internal/napi.js";
+
+vi.mock("../../dist/internal/napi.js", () => ({
+  napi: { Snapshot: { loadWithOptions: vi.fn(), groupHead: vi.fn() } },
+}));
 
 function projectedSnapshot(
   overrides: Record<string, unknown> = {},
@@ -39,6 +44,42 @@ function projectedSnapshot(
 }
 
 describe("Snapshot native projections", () => {
+  it("exposes the create outcome with a nullable previous head", () => {
+    const snapshot = projectedSnapshot({
+      headUpdate: {
+        group: "work", previous: undefined, head: "snapshot-1", reason: "initialized", changed: true,
+      },
+    });
+    expect(snapshot.headUpdate).toEqual({
+      group: "work", previous: null, head: "snapshot-1", reason: "initialized", changed: true,
+    });
+    expect(projectedSnapshot().headUpdate).toBeNull();
+  });
+
+  it("forwards import options and preserves a retained-head outcome", async () => {
+    const headUpdate = {
+      group: "work", previous: "snapshot-1", head: "snapshot-1", reason: "diverged", changed: false,
+    };
+    vi.mocked(napi.Snapshot.loadWithOptions).mockResolvedValue({
+      id: "snapshot-2", digest: "sha256:two", group: "work", headUpdate,
+      name: "other", createdAt: 0, path: "/snapshots/work/snapshot-2",
+    } as never);
+    const options = { dest: "/snapshots", base: "work:base", group: "work", setHead: false };
+    const handle = await Snapshot.loadWithOptions("other.msnap", options);
+    expect(napi.Snapshot.loadWithOptions).toHaveBeenCalledWith("other.msnap", options);
+    expect(handle.group).toBe("work");
+    expect(handle.id).toBe("snapshot-2");
+    expect(handle.headUpdate).toEqual(headUpdate);
+  });
+
+  it("forwards a member selector for explicit head selection", async () => {
+    vi.mocked(napi.Snapshot.groupHead).mockResolvedValue({
+      group: "work", previous: "snapshot-2", head: "snapshot-1", reason: "selected", changed: true,
+    });
+    expect(await Snapshot.groupHead("work:baseline")).toMatchObject({ reason: "selected", changed: true });
+    expect(napi.Snapshot.groupHead).toHaveBeenCalledWith("work:baseline");
+  });
+
   it("returns complete file and checkpoint states", () => {
     expect(projectedSnapshot().state).toMatchObject({
       kind: "file",

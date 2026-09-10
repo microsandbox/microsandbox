@@ -201,6 +201,7 @@ impl LocalBackend {
             ))
             .await?;
             config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
+            config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
             crate::sandbox::apply_snapshot_root_layout(
                 &mut config,

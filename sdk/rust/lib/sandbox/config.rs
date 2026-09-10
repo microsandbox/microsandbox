@@ -213,6 +213,10 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_base: Option<String>,
 
+    /// Snapshot from which this sandbox derives. Later captures retain their own local cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) snapshot_parent: Option<String>,
+
     /// Child-owned checkpoint closure for an unfinished restore construction.
     ///
     /// The builder initially points this at an installed snapshot. The local create path copies
@@ -819,6 +823,7 @@ impl Default for SandboxConfig {
             snapshot_root_layer_sources: Vec::new(),
             snapshot_root_virtual_size: None,
             snapshot_archive_source: None,
+            snapshot_parent: None,
             snapshot_base: None,
             checkpoint_restore: None,
             branch_source: None,

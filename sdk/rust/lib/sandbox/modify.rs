@@ -748,6 +748,21 @@ pub(super) async fn control_request_for(
     name: &str,
     request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    let response = control_request_raw_for(local, name, request).await?;
+    if !response.ok {
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "runtime control refused: {}",
+            response.error.unwrap_or_else(|| "unknown error".into())
+        )));
+    }
+    Ok(response)
+}
+
+async fn control_request_raw_for(
+    local: &crate::backend::LocalBackend,
+    name: &str,
+    request: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
     let candidates = crate::runtime::sandbox_agent_socket_path_candidates_for(local, name)
         .into_iter()
         .map(|path| microsandbox_runtime::control::control_socket_path_for(&path));
@@ -759,14 +774,7 @@ pub(super) async fn control_request_for(
             crate::MicrosandboxError::Runtime("no backend control endpoint".into())
         })?)
         .await?;
-    let response = control_request_over_stream(stream, &request).await?;
-    if !response.ok {
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "runtime control refused: {}",
-            response.error.unwrap_or_else(|| "unknown error".into())
-        )));
-    }
-    Ok(response)
+    control_request_over_stream(stream, &request).await
 }
 
 async fn control_request_raw(
@@ -867,12 +875,17 @@ pub(crate) async fn control_disk_compact(
 /// can finish publishing the requested snapshot. The runtime diagnostic is logged and the source
 /// remains visibly non-running rather than losing the completed capture.
 pub(crate) async fn control_checkpoint_create(
+    local: &crate::backend::LocalBackend,
     name: &str,
     checkpoint_id: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::CheckpointControlState> {
-    let capabilities = control_capabilities(name).await?;
-    if !capabilities.checkpoint_create {
-        return Err(crate::MicrosandboxError::unsupported(
+    let capabilities =
+        control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
+    if !capabilities
+        .capabilities
+        .is_some_and(|capabilities| capabilities.checkpoint_create)
+    {
+        return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,
             UnsupportedReason::NotAvailable(
                 "this running sandbox does not support full checkpoint capture".into(),
@@ -883,9 +896,19 @@ pub(crate) async fn control_checkpoint_create(
         checkpoint_id,
         intent: microsandbox_runtime::control::CheckpointCaptureIntent::FullSnapshot,
     };
-    let mut line = serde_json::to_string(&request)?;
-    line.push('\n');
-    let response = control_request_raw(name, line).await?;
+    let response = control_request_raw_for(
+        local,
+        name,
+        format!("{}\n", serde_json::to_string(&request)?),
+    )
+    .await?;
+    checkpoint_response(name, response)
+}
+
+fn checkpoint_response(
+    name: &str,
+    response: microsandbox_runtime::control::ControlResponse,
+) -> MicrosandboxResult<microsandbox_runtime::control::CheckpointControlState> {
     if let Some(checkpoint) = response.checkpoint {
         if !response.ok {
             tracing::warn!(
@@ -2499,6 +2522,65 @@ mod tests {
     use super::*;
     use crate::backend::LocalBackend;
     use crate::size::SizeExt;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn full_checkpoint_uses_selected_backend_and_retains_post_publish_failure() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let first_home = tempfile::tempdir_in("/tmp").unwrap();
+        let second_home = tempfile::tempdir_in("/tmp").unwrap();
+        let first = LocalBackend::builder()
+            .home(first_home.path())
+            .build()
+            .await
+            .unwrap();
+        let second = LocalBackend::builder()
+            .home(second_home.path())
+            .build()
+            .await
+            .unwrap();
+        let mut servers = Vec::new();
+        for (local, label, resume_ok) in [(&first, "first", true), (&second, "second", false)] {
+            let agent =
+                crate::runtime::sandbox_agent_socket_path_candidates_for(local, "worker").remove(0);
+            let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let listener = tokio::net::UnixListener::bind(path).unwrap();
+            servers.push(tokio::spawn(async move {
+                for request_index in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let response = if request_index == 0 {
+                        assert_eq!(request["op"], "capabilities");
+                        serde_json::json!({"ok":true,"capabilities":{"checkpoint_create":true,"cpu_resize":false,"memory_resize":false,"secrets_update":false}})
+                    } else {
+                        assert_eq!(request["op"], "checkpoint_create");
+                        serde_json::json!({"ok":resume_ok,"error":"source resume failed","checkpoint":{
+                            "checkpoint_id":request["checkpoint_id"], "checkpoint_root":format!("sha256:{}", "a".repeat(64)),
+                            "path":format!("/capture/{label}"), "memory_mode":"full", "memory_logical_bytes":4096, "memory_emitted_bytes":4096
+                        }})
+                    };
+                    stream.get_mut().write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                }
+            }));
+        }
+        let first_capture = control_checkpoint_create(&first, "worker", "first-checkpoint".into())
+            .await
+            .unwrap();
+        let second_capture =
+            control_checkpoint_create(&second, "worker", "second-checkpoint".into())
+                .await
+                .unwrap();
+        assert_eq!(first_capture.path, std::path::Path::new("/capture/first"));
+        assert_eq!(second_capture.path, std::path::Path::new("/capture/second"));
+        for server in servers {
+            server.await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn size_setters_accept_bare_mib_and_typed_sizes() {

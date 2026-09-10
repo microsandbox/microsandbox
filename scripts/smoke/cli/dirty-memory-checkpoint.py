@@ -45,9 +45,13 @@ class Handler(BaseHTTPRequestHandler):
             shared[:8] = b'shared01'; private[:8] = b'private1'; heap[:] = b'heap0001'
             Path('/dev/shm/latch-marker').write_bytes(b'tmpfs001')
         dirty = next(int(x.split()[1]) for x in Path('/proc/meminfo').read_text().splitlines() if x.startswith('Dirty:'))
+        # Poll only the marker: copying 64 MiB per request dirties unrelated heap pages
+        # and can turn this sparse mutation check into a legitimate dense full capture.
+        with open('/dirty-cache', 'rb') as disk_file:
+            disk_cache = disk_file.read(8).decode()
         body = json.dumps(dict(nonce=nonce, heap=heap.decode(), shared=shared[:8].decode(),
             private=private[:8].decode(), tmpfs=Path('/dev/shm/latch-marker').read_text(),
-            disk_cache=Path('/dirty-cache').read_bytes()[:8].decode(), dirty_kib=dirty,
+            disk_cache=disk_cache, dirty_kib=dirty,
             clock=time.time())).encode()
         self.send_response(200); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
 HTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
@@ -139,18 +143,19 @@ def main():
         stop(source)
         for mode in ('eager', 'forked'):
             child = mode; names.append(child)
-            run('restore-' + mode, 'create', '--name', child, '--from-snapshot', 'dirty-full',
+            run('restore-' + mode, 'create', '--name', child, '--from-snapshot', 'source:dirty-full',
                 *(['--forked'] if mode == 'forked' else []))
             active = child
             matches(initial)
             if mode == 'forked':
-                # A restored child starts a fresh capture lineage. Establish its
-                # baseline before mutating, then verify the next capture is incremental.
+                # A restored child starts a fresh dirty-tracking baseline while retaining
+                # snapshot ancestry. Capture before mutating, then verify an incremental cut.
                 run('child-baseline', 'snapshot', 'create', 'child-baseline', '--from', child, '--full')
                 changed = state('/mutate')
                 assert changed['private'] == 'private1'
-                run('incremental-dirty', 'snapshot', 'create', 'dirty-incremental', '--from', child, '--full')
-                checkpoint = home / 'snapshots/dirty-incremental/checkpoint'
+                captured = run('incremental-dirty', 'snapshot', 'create', 'dirty-incremental', '--from', child, '--full')
+                # Capture returns the exact installed member path, independent of its alias.
+                checkpoint = Path(captured.strip().splitlines()[-1]) / 'checkpoint'
                 descriptor = json.loads((checkpoint / 'checkpoint.json').read_text())
                 algorithm, digest = descriptor['memory'].split(':', 1)
                 memory = json.loads((checkpoint / 'objects' / algorithm / digest[:2] / digest).read_text())
@@ -159,11 +164,11 @@ def main():
                 matches(changed)
             stop(child)
         names.append('grandchild')
-        run('restore-incremental', 'create', '--name', 'grandchild', '--from-snapshot', 'dirty-incremental', '--forked')
+        run('restore-incremental', 'create', '--name', 'grandchild', '--from-snapshot', 'forked:dirty-incremental', '--forked')
         active = 'grandchild'
         matches(changed); stop('grandchild')
         names.append('disk-only')
-        run('disk-only', 'create', '--name', 'disk-only', '--from-snapshot', 'dirty-full', '--disk-only')
+        run('disk-only', 'create', '--name', 'disk-only', '--from-snapshot', 'source:dirty-full', '--disk-only')
         assert run('persisted-disk-data', 'exec', 'disk-only', '--', 'cat', '/persisted').strip() == 'persisted-before-checkpoint'
         run('no-tmpfs-in-disk-view', 'exec', 'disk-only', '--', 'test', '!', '-e', '/dev/shm/latch-marker')
         # Unsynced disk bytes are deliberately not asserted either present or absent.

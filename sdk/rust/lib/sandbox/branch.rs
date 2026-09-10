@@ -90,6 +90,9 @@ pub(crate) async fn capture_child(
     source: &str,
     child: &Path,
 ) -> MicrosandboxResult<File> {
+    // Serialize with durable source captures so a child's ancestry describes its actual cut.
+    let lineage = crate::snapshot::lineage::begin(local, source).await?;
+    config.snapshot_parent = lineage.parent.as_ref().map(ToString::to_string);
     let id = format!("branch_{:032x}", rand::random::<u128>());
     // Acquired before publication: source exit or another capture cannot create an unpinned
     // eviction window before this caller opens the completed memory file.
@@ -109,6 +112,7 @@ pub(crate) async fn capture_child(
         format!("{}\n", serde_json::to_string(&request)?),
     )
     .await?;
+    lineage.validate_source(local, source).await?;
     let closure = child.join(".branch-restore");
     if response.branch.as_ref() != Some(&closure) {
         return Err(MicrosandboxError::Runtime(
