@@ -6,10 +6,9 @@ use bytes::Bytes;
 use microsandbox_protocol::codec;
 use microsandbox_protocol::core::ClockSync;
 use microsandbox_protocol::message::{Message, MessageType};
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::relay::ControlWrite;
+use crate::relay::{ControlWrite, ControlWriter};
 use crate::{RuntimeError, RuntimeResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -31,13 +30,13 @@ const CLOCK_SYNC_WAKE_THRESHOLD: Duration = Duration::from_secs(6);
 
 /// Spawns a background task that keeps the guest wall clock aligned with the host.
 pub(crate) fn spawn_clock_sync_task(
-    agent_tx: mpsc::Sender<ControlWrite>,
+    agent_tx: ControlWriter,
     already_synchronized: bool,
 ) -> JoinHandle<()> {
     tokio::spawn(clock_sync_task(agent_tx, already_synchronized))
 }
 
-async fn clock_sync_task(agent_tx: mpsc::Sender<ControlWrite>, already_synchronized: bool) {
+async fn clock_sync_task(agent_tx: ControlWriter, already_synchronized: bool) {
     let mut last_wall = SystemTime::now();
     // Full restore completed the kernel clock barrier before workload thaw. Do not immediately
     // overwrite it with a queued userspace timestamp. Ordinary boot keeps its existing sync.
@@ -79,14 +78,28 @@ async fn clock_sync_task(agent_tx: mpsc::Sender<ControlWrite>, already_synchroni
     }
 }
 
-async fn send_clock_sync(agent_tx: &mpsc::Sender<ControlWrite>) -> RuntimeResult<SystemTime> {
+async fn send_clock_sync(agent_tx: &ControlWriter) -> RuntimeResult<SystemTime> {
     let now = SystemTime::now();
-    let elapsed = now
+    agent_tx
+        .send(ControlWrite::clock_sync()?)
+        .await
+        .map_err(|_| RuntimeError::Custom("agent relay ring writer channel closed".into()))?;
+    Ok(now)
+}
+
+/// Sample only when the ordinary writer can admit the maintenance frame to the console queue.
+pub(crate) fn current_clock_sync_frame() -> RuntimeResult<Bytes> {
+    let elapsed = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| RuntimeError::Custom(format!("clock sync before Unix epoch: {e}")))?;
     let unix_time_nanos = u64::try_from(elapsed.as_nanos()).map_err(|_| {
         RuntimeError::Custom("clock sync timestamp does not fit in u64 nanoseconds".into())
     })?;
+    encode_clock_sync_frame(unix_time_nanos)
+}
+
+/// The queue initially reserves the maximum encoded timestamp size, then sends the actual value.
+pub(crate) fn encode_clock_sync_frame(unix_time_nanos: u64) -> RuntimeResult<Bytes> {
     let sync = ClockSync { unix_time_nanos };
     let msg = Message::with_payload(MessageType::ClockSync, 0, &sync)
         .map_err(|e| RuntimeError::Custom(format!("encode clock sync: {e}")))?;
@@ -94,10 +107,5 @@ async fn send_clock_sync(agent_tx: &mpsc::Sender<ControlWrite>) -> RuntimeResult
     let mut buf = Vec::new();
     codec::encode_to_buf(&msg, &mut buf)
         .map_err(|e| RuntimeError::Custom(format!("encode clock sync frame: {e}")))?;
-    agent_tx
-        .send(Bytes::from(buf).into())
-        .await
-        .map_err(|_| RuntimeError::Custom("agent relay ring writer channel closed".into()))?;
-
-    Ok(now)
+    Ok(Bytes::from(buf))
 }

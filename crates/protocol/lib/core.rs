@@ -8,17 +8,20 @@ use crate::transport::{BulkTransportReady, LocalTransportReady, RelayLeaseReady}
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Complete-frame workload barrier and aggregate input-credit contract.
-pub const WORKLOAD_TRANSPORT_BARRIER_VERSION: u8 = 1;
-/// Maximum outstanding ordinary primary wire bytes, including frame headers.
-pub const WORKLOAD_TRANSPORT_CONTROL_BYTES: u64 = 8 * 1024 * 1024;
-/// Maximum outstanding ordinary primary frames, including empty payloads.
-pub const WORKLOAD_TRANSPORT_CONTROL_FRAMES: u64 = 256;
-/// Maximum outstanding bulk wire bytes, including record headers.
-pub const WORKLOAD_TRANSPORT_BULK_BYTES: u64 = 32 * 1024 * 1024;
-/// Maximum outstanding bulk records, including empty payloads.
+/// Complete-frame workload barrier with logical control/data admission classes.
 ///
-/// Together with primary frames, this fits the existing 512-entry guest input
+/// Version 1 was an unreleased development contract that charged stdin to control. Its captured
+/// debt cannot be reinterpreted by this contract; full restore rejects that development state.
+pub const WORKLOAD_TRANSPORT_BARRIER_VERSION: u8 = 2;
+/// Maximum outstanding command/control wire bytes, including frame headers.
+pub const WORKLOAD_TRANSPORT_CONTROL_BYTES: u64 = 8 * 1024 * 1024;
+/// Maximum outstanding command/control frames, excluding retained workload payloads.
+pub const WORKLOAD_TRANSPORT_CONTROL_FRAMES: u64 = 256;
+/// Maximum outstanding data wire bytes, including raw bulk, stdin and inline FS/TCP payloads.
+pub const WORKLOAD_TRANSPORT_BULK_BYTES: u64 = 32 * 1024 * 1024;
+/// Maximum outstanding data records/messages, including ordered empty EOF messages.
+///
+/// Together with control frames, this fits the existing 512-entry guest input
 /// queues even when all admitted traffic targets one stalled consumer.
 pub const WORKLOAD_TRANSPORT_BULK_FRAMES: u64 = 256;
 
@@ -148,14 +151,14 @@ pub struct WorkloadFrozen {
 /// host-queued input that has not been admitted remains source-owned.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadTransportPosition {
-    /// Ordinary control wire bytes admitted, including length/header bytes.
-    /// Combined-port raw bulk records use `bulk_bytes`, not this counter.
+    /// Command/control wire bytes admitted, including length/header bytes.
+    /// Payload-bearing messages and raw bulk use `bulk_bytes` on either physical port.
     pub control_bytes: u64,
-    /// Ordinary control frames admitted, excluding raw bulk records.
+    /// Command/control frames admitted, excluding payload messages and raw bulk.
     pub control_frames: u64,
-    /// Bulk wire bytes admitted, including record headers and any incarnation prefix.
+    /// Data wire bytes admitted, including stdin, inline payloads, and complete raw bulk headers.
     pub bulk_bytes: u64,
-    /// Bulk records admitted.
+    /// Data records/messages admitted, including ordered EOF.
     pub bulk_frames: u64,
 }
 
@@ -167,13 +170,13 @@ pub struct WorkloadTransportPosition {
 /// a workload consuming stdin or a network socket becoming writable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadTransportCredit {
-    /// Cumulative ordinary primary wire-byte limit.
+    /// Cumulative command/control wire-byte limit.
     pub control_bytes: u64,
-    /// Cumulative ordinary primary frame limit.
+    /// Cumulative command/control frame limit.
     pub control_frames: u64,
-    /// Cumulative bulk wire-byte limit.
+    /// Cumulative data wire-byte limit across both physical ports.
     pub bulk_bytes: u64,
-    /// Cumulative bulk record limit.
+    /// Cumulative data record/message limit across both physical ports.
     pub bulk_frames: u64,
 }
 

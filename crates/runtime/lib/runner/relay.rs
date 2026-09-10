@@ -32,9 +32,11 @@ use microsandbox_protocol::AGENT_RELAY_MAX_CLIENTS;
 use microsandbox_protocol::bulk::BulkRecord;
 use microsandbox_protocol::bulk::{
     BULK_FLOW_MASK_GUEST_TO_HOST, BULK_HEADER_SIZE, BulkAccepted, BulkCancel, BulkCancelReason,
-    BulkFinish, BulkFlow, BulkKind, MAX_BULK_RECORD_PAYLOAD,
+    BulkCredit, BulkFinish, BulkFlow, BulkKind, MAX_BULK_RECORD_PAYLOAD, MAX_BULK_WINDOW,
 };
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE, MAX_WIRE_FRAME};
+#[cfg(test)]
+use microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION;
 use microsandbox_protocol::core::{
     CoreError, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThaw, WorkloadThawed,
 };
@@ -133,9 +135,12 @@ const CLIENT_WRITE_BATCH_BYTES: usize = 256 * 1024;
 /// Maximum frame slices opportunistically coalesced in one client socket batch.
 const CLIENT_WRITE_BATCH_FRAMES: usize = 64;
 
-/// At most eight generation-6 frames may wait between clients and the console.
-/// Since a frame is capped at 4 MiB, this bounds the channel at 32 MiB.
-const AGENT_WRITE_CHANNEL_CAPACITY: usize = 8;
+/// Separate admission reserves share one FIFO. Permits survive dequeue and physical writes, so
+/// credit-starved payload cannot consume the space needed by another client's metadata.
+const AGENT_WRITE_CLASS_FRAMES: usize = 8;
+const AGENT_WRITE_CHANNEL_CAPACITY: usize = 2 * AGENT_WRITE_CLASS_FRAMES;
+const AGENT_WRITE_DATA_BYTES: usize = 32 * 1024 * 1024;
+const AGENT_WRITE_CONTROL_BYTES: usize = 8 * 1024 * 1024;
 
 /// Aggregate client-to-bulk-lane bytes waiting outside the console backend.
 const BULK_WRITE_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
@@ -188,10 +193,42 @@ struct ClientState {
     local_outbound: Option<SharedArenaProducer>,
 }
 
-/// One ordered control-lane write, optionally acknowledged after physical ring admission.
+/// One primary-lane write, optionally acknowledged after physical ring admission.
 pub(crate) struct ControlWrite {
     data: Bytes,
     completion: Option<oneshot::Sender<()>>,
+    uses_data_credit: bool,
+    order: ControlOrder,
+    admission: Option<ControlAdmission>,
+}
+
+/// A client lease transition fences its range; shutdown and unattributed internal traffic fence
+/// the whole FIFO. Ordinary correlations may bypass only unrelated blocked payload.
+#[derive(Clone, Copy)]
+enum ControlOrder {
+    Correlation(u32),
+    MaintenanceClock,
+    TcpInputData(u32),
+    TcpInputFinish(u32),
+    TcpOutputCredit(u32),
+    ClientFence { start: u32, end: u32 },
+    GlobalFence,
+}
+
+struct ControlAdmission {
+    _bytes: tokio::sync::OwnedSemaphorePermit,
+    _frame: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// Bounded, class-reserved admission into the existing ordinary transport queue. No payload is
+/// copied, and cancellation releases reservations without dropping any already accepted frame.
+#[derive(Clone)]
+pub(crate) struct ControlWriter {
+    tx: mpsc::Sender<ControlWrite>,
+    data_bytes: Arc<Semaphore>,
+    data_frames: Arc<Semaphore>,
+    control_bytes: Arc<Semaphore>,
+    control_frames: Arc<Semaphore>,
 }
 
 /// Every exit, including task abortion while waiting for ring capacity, wakes lifecycle waiters.
@@ -463,6 +500,211 @@ struct RestoreActivationRecord<'a> {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl ControlWrite {
+    pub(crate) fn clock_sync() -> RuntimeResult<Self> {
+        // Reserve the largest CBOR integer representation. The scheduler replaces this sentinel
+        // before charging transport bytes, so queued time is never replayed after a long pause.
+        Ok(Self {
+            order: ControlOrder::MaintenanceClock,
+            ..crate::clock::encode_clock_sync_frame(u64::MAX)?.into()
+        })
+    }
+
+    fn ordinary(data: Bytes, id: u32, uses_data_credit: bool) -> Self {
+        let order = if id == 0
+            || data
+                .get(LEN_PREFIX_SIZE + 4)
+                .is_some_and(|flags| flags & FLAG_SHUTDOWN != 0)
+        {
+            ControlOrder::GlobalFence
+        } else {
+            ControlOrder::Correlation(id)
+        };
+        Self {
+            data,
+            completion: None,
+            uses_data_credit,
+            order,
+            admission: None,
+        }
+    }
+
+    fn client_fence(data: Bytes, start: u32, end: u32) -> Self {
+        Self {
+            order: ControlOrder::ClientFence { start, end },
+            ..data.into()
+        }
+    }
+
+    /// Only the independent TCP return-credit flow may cross ordered input. Raw metadata was
+    /// already validated by the client reader; parse only the two small control payloads here.
+    fn classify_tcp_order(
+        &mut self,
+        id: u32,
+        raw: Option<(BulkKind, BulkFlow, u64, usize)>,
+        message: Option<&Message>,
+    ) {
+        if matches!(self.order, ControlOrder::GlobalFence) {
+            return;
+        }
+        if matches!(raw, Some((BulkKind::Tcp, BulkFlow::HostToGuest, _, _))) {
+            self.order = ControlOrder::TcpInputData(id);
+            return;
+        }
+        let Some(message) = message else {
+            return;
+        };
+        match message.t {
+            MessageType::BulkFinish
+                if message.payload::<BulkFinish>().is_ok_and(|finish| {
+                    finish.kind == BulkKind::Tcp && finish.flow == BulkFlow::HostToGuest
+                }) =>
+            {
+                self.order = ControlOrder::TcpInputFinish(id);
+            }
+            MessageType::BulkCredit
+                if message.payload::<BulkCredit>().is_ok_and(|credit| {
+                    credit.kind == BulkKind::Tcp
+                        && credit.flow == BulkFlow::GuestToHost
+                        && credit.credit_limit >= credit.consumed_offset
+                        && credit.credit_limit - credit.consumed_offset <= MAX_BULK_WINDOW
+                }) =>
+            {
+                self.order = ControlOrder::TcpOutputCredit(id);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl ControlOrder {
+    fn conflicts(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::GlobalFence, _) | (_, Self::GlobalFence) => true,
+            (Self::MaintenanceClock, Self::MaintenanceClock) => true,
+            (Self::MaintenanceClock, _) | (_, Self::MaintenanceClock) => false,
+            (Self::ClientFence { start: a, end: b }, Self::ClientFence { start: c, end: d }) => {
+                a < d && c < b
+            }
+            (Self::ClientFence { start, end }, correlation)
+            | (correlation, Self::ClientFence { start, end }) => {
+                (start..end).contains(&correlation.id())
+            }
+            // Credit advances the opposite (guest-to-host) producer, not these input bytes or
+            // their end marker. Reordering only the credit breaks a full-duplex credit cycle;
+            // input data and input finish still conflict with each other in their original FIFO.
+            (Self::TcpInputData(_) | Self::TcpInputFinish(_), Self::TcpOutputCredit(_)) => false,
+            (a, b) => a.id() == b.id(),
+        }
+    }
+
+    fn id(self) -> u32 {
+        match self {
+            Self::Correlation(id)
+            | Self::TcpInputData(id)
+            | Self::TcpInputFinish(id)
+            | Self::TcpOutputCredit(id) => id,
+            Self::ClientFence { .. } | Self::GlobalFence | Self::MaintenanceClock => {
+                unreachable!("fence or maintenance order handled first")
+            }
+        }
+    }
+}
+
+impl ControlWriter {
+    fn new() -> (Self, mpsc::Receiver<ControlWrite>) {
+        let (tx, rx) = mpsc::channel(AGENT_WRITE_CHANNEL_CAPACITY);
+        (Self::from_sender(tx), rx)
+    }
+
+    fn from_sender(tx: mpsc::Sender<ControlWrite>) -> Self {
+        Self {
+            tx,
+            data_bytes: Arc::new(Semaphore::new(AGENT_WRITE_DATA_BYTES)),
+            data_frames: Arc::new(Semaphore::new(AGENT_WRITE_CLASS_FRAMES)),
+            control_bytes: Arc::new(Semaphore::new(AGENT_WRITE_CONTROL_BYTES)),
+            control_frames: Arc::new(Semaphore::new(AGENT_WRITE_CLASS_FRAMES)),
+        }
+    }
+
+    fn budgets(&self, write: &ControlWrite) -> (&Arc<Semaphore>, &Arc<Semaphore>) {
+        if write.uses_data_credit {
+            (&self.data_bytes, &self.data_frames)
+        } else {
+            (&self.control_bytes, &self.control_frames)
+        }
+    }
+
+    pub(crate) async fn send(
+        &self,
+        mut write: ControlWrite,
+    ) -> Result<(), mpsc::error::SendError<ControlWrite>> {
+        let Ok(bytes) = u32::try_from(write.data.len()) else {
+            return Err(mpsc::error::SendError(write));
+        };
+        let (byte_budget, frame_budget) = self.budgets(&write);
+        // Closing the receiver must also wake senders waiting for a class reservation. A canceled
+        // send drops its partial permits; frames already in the canonical queue retain theirs.
+        let reservation = async {
+            let frame = Arc::clone(frame_budget).acquire_owned().await.ok()?;
+            let bytes = Arc::clone(byte_budget)
+                .acquire_many_owned(bytes)
+                .await
+                .ok()?;
+            Some(ControlAdmission {
+                _bytes: bytes,
+                _frame: frame,
+            })
+        };
+        let admission = tokio::select! {
+            biased;
+            _ = self.tx.closed() => None,
+            admission = reservation => admission,
+        };
+        let Some(admission) = admission else {
+            return Err(mpsc::error::SendError(write));
+        };
+        write.admission = Some(admission);
+        self.tx.send(write).await.map_err(|mut error| {
+            error.0.admission.take();
+            error
+        })
+    }
+
+    fn try_send(
+        &self,
+        mut write: ControlWrite,
+    ) -> Result<(), mpsc::error::TrySendError<ControlWrite>> {
+        if self.tx.is_closed() {
+            return Err(mpsc::error::TrySendError::Closed(write));
+        }
+        let Ok(bytes) = u32::try_from(write.data.len()) else {
+            return Err(mpsc::error::TrySendError::Full(write));
+        };
+        let (byte_budget, frame_budget) = self.budgets(&write);
+        let Ok(frame) = Arc::clone(frame_budget).try_acquire_owned() else {
+            return Err(mpsc::error::TrySendError::Full(write));
+        };
+        let Ok(bytes) = Arc::clone(byte_budget).try_acquire_many_owned(bytes) else {
+            return Err(mpsc::error::TrySendError::Full(write));
+        };
+        write.admission = Some(ControlAdmission {
+            _bytes: bytes,
+            _frame: frame,
+        });
+        self.tx.try_send(write).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(mut write) => {
+                write.admission.take();
+                mpsc::error::TrySendError::Full(write)
+            }
+            mpsc::error::TrySendError::Closed(mut write) => {
+                write.admission.take();
+                mpsc::error::TrySendError::Closed(write)
+            }
+        })
+    }
+}
 
 impl GuestFrameMerger {
     /// Register an opening operation before its request can reach agentd.
@@ -1507,7 +1749,7 @@ impl AgentRelay {
 
         // Bounded channel for client reader tasks to send frames to the ring writer.
         // Backpressure prevents unbounded memory growth from client floods.
-        let (agent_tx, agent_rx) = mpsc::channel::<ControlWrite>(AGENT_WRITE_CHANNEL_CAPACITY);
+        let (agent_tx, agent_rx) = ControlWriter::new();
         self.shared
             .workload_control
             .register_ordinary_writer(agent_tx.clone());
@@ -1922,9 +2164,13 @@ impl Drop for AgentRelay {
 
 impl From<Bytes> for ControlWrite {
     fn from(data: Bytes) -> Self {
+        let uses_data_credit = data.get(LEN_PREFIX_SIZE + 4) == Some(&FLAG_BULK);
         Self {
             data,
             completion: None,
+            uses_data_credit,
+            order: ControlOrder::GlobalFence,
+            admission: None,
         }
     }
 }
@@ -2038,15 +2284,15 @@ pub(crate) fn push_guest_frame_until(
 /// without blocking Tokio's channel APIs or bypassing a frozen/credit-starved FIFO head.
 fn push_ordered_guest_frame_until(
     shared: &ConsoleSharedState,
-    writer: &mpsc::Sender<ControlWrite>,
+    writer: &ControlWriter,
     data: Bytes,
     timeout: std::time::Duration,
 ) -> RuntimeResult<()> {
     let deadline = Instant::now() + timeout;
     let (completion, mut completed) = oneshot::channel();
     let mut pending = Some(ControlWrite {
-        data,
         completion: Some(completion),
+        ..data.into()
     });
     loop {
         if let Some(write) = pending.take() {
@@ -2440,7 +2686,8 @@ async fn ring_writer_task(
 
     let workload = &shared.workload_control;
     let mut private = workload.start();
-    let mut pending: Option<ControlWrite> = None;
+    let mut pending = VecDeque::with_capacity(AGENT_WRITE_CHANNEL_CAPACITY);
+    let mut ordinary_closed = false;
     loop {
         let changed = workload.changed.notified();
         tokio::pin!(changed);
@@ -2451,29 +2698,35 @@ async fn ring_writer_task(
         if workload.gated() {
             workload.park(false);
         }
-        // Keep the exact FIFO head (including its completion and Bytes owner) when admission is
-        // gated or credit-starved. Only the trusted, bounded lifecycle mailbox bypasses it.
+        // Moving frames into the bounded scheduler does not release their class admission. A full
+        // data class therefore cannot hide another client's metadata in the canonical mailbox.
+        while pending.len() < AGENT_WRITE_CHANNEL_CAPACITY && !ordinary_closed {
+            match rx.try_recv() {
+                Ok(write) => pending.push_back(write),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => ordinary_closed = true,
+            }
+        }
+        let mut wait_clock_capacity = false;
         let write = if let Ok(write) = private.try_recv() {
             Some(ControlWrite::from(write.0))
-        } else if let Some(write) = pending.as_ref() {
-            if workload
-                .admit(
-                    write.data.get(LEN_PREFIX_SIZE + 4) == Some(&FLAG_BULK),
-                    write.data.len(),
-                )
-                .map_err(RuntimeError::Custom)?
-            {
-                pending.take()
-            } else {
-                None
-            }
         } else {
-            None
+            let (write, wait_capacity) =
+                select_control_write(&mut pending, workload, Some(&shared))
+                    .map_err(RuntimeError::Custom)?;
+            wait_clock_capacity = wait_capacity;
+            write
         };
         if let Some(write) = write {
+            let ControlWrite {
+                data,
+                completion,
+                admission,
+                ..
+            } = write;
             if !push_bulk_fragment(
                 &shared,
-                write.data,
+                data,
                 #[cfg(unix)]
                 &capacity_fd,
             )
@@ -2482,11 +2735,15 @@ async fn ring_writer_task(
                 workload.close();
                 return Err(RuntimeError::Custom("agent console writer closed".into()));
             }
-            if let Some(completion) = write.completion {
+            if let Some(completion) = completion {
                 let _ = completion.send(());
                 shared.rx_capacity_wake.wake();
             }
+            drop(admission);
             continue;
+        }
+        if ordinary_closed && pending.is_empty() {
+            break;
         }
         tokio::select! {
             biased;
@@ -2498,15 +2755,118 @@ async fn ring_writer_task(
                 }
             }
             _ = &mut changed => {}
-            write = rx.recv(), if pending.is_none() && !workload.gated() => {
-                let Some(write) = write else { break; };
-                pending = Some(write);
+            available = wait_console_capacity(&shared, #[cfg(unix)] &capacity_fd), if wait_clock_capacity => {
+                if !available {
+                    return Err(RuntimeError::Custom("agent console capacity watcher closed".into()));
+                }
+            }
+            write = rx.recv(), if pending.len() < AGENT_WRITE_CHANNEL_CAPACITY && !ordinary_closed => {
+                if let Some(write) = write {
+                    pending.push_back(write);
+                } else {
+                    ordinary_closed = true;
+                }
             }
         }
     }
     workload.close();
     tracing::debug!("agent relay: ring writer task exiting");
     Ok(())
+}
+
+/// Keep the common FIFO path constant-time. Only a credit-blocked payload head enables a bounded
+/// scan for unrelated metadata or independent TCP return credit. Input/finish order and all
+/// cancellation, opening, lease and global fences remain intact.
+fn select_control_write(
+    pending: &mut VecDeque<ControlWrite>,
+    workload: &WorkloadControl,
+    shared: Option<&ConsoleSharedState>,
+) -> Result<(Option<ControlWrite>, bool), String> {
+    let mut wait_capacity = false;
+    let Some(head) = pending.front_mut() else {
+        return Ok((None, false));
+    };
+    if admit_control_write(
+        head,
+        workload,
+        shared,
+        &mut wait_capacity,
+        crate::clock::current_clock_sync_frame,
+    )? {
+        return Ok((pending.pop_front(), wait_capacity));
+    }
+    if !head.uses_data_credit || workload.gated() {
+        return Ok((None, wait_capacity));
+    }
+    for index in 1..pending.len() {
+        let candidate = &pending[index];
+        if candidate.uses_data_credit
+            || pending
+                .iter()
+                .take(index)
+                .any(|earlier| earlier.order.conflicts(candidate.order))
+        {
+            continue;
+        }
+        if admit_control_write(
+            &mut pending[index],
+            workload,
+            shared,
+            &mut wait_capacity,
+            crate::clock::current_clock_sync_frame,
+        )? {
+            return Ok((pending.remove(index), wait_capacity));
+        }
+    }
+    Ok((None, wait_capacity))
+}
+
+fn admit_control_write(
+    write: &mut ControlWrite,
+    workload: &WorkloadControl,
+    shared: Option<&ConsoleSharedState>,
+    wait_capacity: &mut bool,
+    clock_frame: impl FnOnce() -> RuntimeResult<Bytes>,
+) -> Result<bool, String> {
+    if matches!(write.order, ControlOrder::MaintenanceClock) {
+        // No transport credit has been charged yet. Refresh before each capacity attempt, including
+        // retries after pause, and charge the actual CBOR length rather than the reserved maximum.
+        write.data = clock_frame().map_err(|error| error.to_string())?;
+        if let Some(shared) = shared {
+            shared.rx_capacity_wake.drain();
+            if !shared.rx_ring.can_fit(write.data.len()) {
+                *wait_capacity = !workload.gated();
+                return Ok(false);
+            }
+            // This is the sole post-Ready producer. No await separates this successful capacity
+            // check, transport admission and the atomic whole-frame queue push, so a clock cannot
+            // acquire a timestamp and then sleep waiting for physical queue capacity.
+        }
+    }
+    workload.admit(write.uses_data_credit, write.data.len())
+}
+
+async fn wait_console_capacity(
+    shared: &Arc<ConsoleSharedState>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = shared;
+        let Ok(mut ready) = capacity_fd.readable().await else {
+            return false;
+        };
+        ready.clear_ready();
+        true
+    }
+    #[cfg(windows)]
+    {
+        // This select branch is cancelable. A blocking wake waiter would survive cancellation
+        // and accumulate across other traffic; only a pending, ring-blocked maintenance clock
+        // needs this bounded retry on platforms without the Unix readiness adapter.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        !shared.is_closed()
+    }
 }
 
 /// Apply deficit round robin before admitting client raw records to the bulk console ring.
@@ -3649,7 +4009,7 @@ fn queue_client_rejection(
 async fn client_reader_task(
     slot: u32,
     mut reader: impl AsyncRead + Unpin + Send + 'static,
-    agent_tx: mpsc::Sender<ControlWrite>,
+    agent_tx: ControlWriter,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
     used_slots: Arc<Mutex<HashSet<u32>>>,
     drain_tx: mpsc::Sender<()>,
@@ -4146,9 +4506,37 @@ async fn client_reader_task(
                 tracing::error!("agent relay: bulk ring writer channel closed");
                 break;
             }
-        } else if agent_tx.send(frame.data.into()).await.is_err() {
-            tracing::error!("agent relay: control ring writer channel closed");
-            break;
+        } else {
+            #[cfg(unix)]
+            let data = if let Some(record) = shared_bulk.take() {
+                // Combined transport has one owned, ordered frame queue rather than the dual
+                // port's split header/payload writer. Materialize a bounded standard raw frame
+                // before releasing its arena slot; the queue then retains this copy through the
+                // complete physical write. The dual-port zero-copy path above is unchanged.
+                let mut encoded = Vec::with_capacity(
+                    LEN_PREFIX_SIZE + FRAME_HEADER_SIZE + BULK_HEADER_SIZE + record.payload.len(),
+                );
+                if let Err(error) = codec::encode_bulk_to_buf(&record, &mut encoded) {
+                    tracing::error!(%error, "agent relay: encode combined shared bulk frame failed");
+                    break;
+                }
+                Bytes::from(encoded)
+            } else {
+                frame.data
+            };
+            #[cfg(not(unix))]
+            let data = frame.data;
+            let mut write = ControlWrite::ordinary(
+                data,
+                frame.id,
+                frame.flags == FLAG_BULK
+                    || message_type.is_some_and(MessageType::uses_workload_data_credit),
+            );
+            write.classify_tcp_order(frame.id, bulk_metadata, decoded_message.as_ref());
+            if agent_tx.send(write).await.is_err() {
+                tracing::error!("agent relay: control ring writer channel closed");
+                break;
+            }
         }
     }
 
@@ -4234,7 +4622,11 @@ async fn client_reader_task(
                 continue;
             }
 
-            if agent_tx.send(Bytes::from(buf).into()).await.is_err() {
+            if agent_tx
+                .send(ControlWrite::ordinary(Bytes::from(buf), session_id, false))
+                .await
+                .is_err()
+            {
                 tracing::error!("agent relay: ring writer channel closed during cleanup");
                 break;
             }
@@ -4304,7 +4696,7 @@ async fn random_unused_client_incarnation(
 
 /// Establish one dual-port range owner before its SDK connection becomes usable.
 async fn send_relay_client_connected(
-    agent_tx: &mpsc::Sender<ControlWrite>,
+    agent_tx: &ControlWriter,
     id_start: u32,
     id_end_exclusive: u32,
     incarnation: ClientIncarnation,
@@ -4315,14 +4707,18 @@ async fn send_relay_client_connected(
         incarnation,
     });
     agent_tx
-        .send(Bytes::copy_from_slice(&frame).into())
+        .send(ControlWrite::client_fence(
+            Bytes::copy_from_slice(&frame),
+            id_start,
+            id_end_exclusive,
+        ))
         .await
         .map_err(|_| RuntimeError::Custom("agent control writer stopped".into()))
 }
 
 /// Send cleanup and, in dual-port mode, register the reverse-lane drain acknowledgement first.
 async fn begin_relay_client_disconnect(
-    agent_tx: &mpsc::Sender<ControlWrite>,
+    agent_tx: &ControlWriter,
     pending_disconnects: &Arc<Mutex<HashMap<ClientIncarnation, PendingClientDisconnect>>>,
     id_start: u32,
     id_end_exclusive: u32,
@@ -4384,42 +4780,37 @@ async fn complete_relay_client_disconnect(
 
 /// Remove exactly the range owner that disconnected, preserving combined-mode compatibility.
 async fn send_relay_client_disconnected(
-    agent_tx: &mpsc::Sender<ControlWrite>,
+    agent_tx: &ControlWriter,
     id_start: u32,
     id_end_exclusive: u32,
     incarnation: Option<ClientIncarnation>,
 ) -> RuntimeResult<()> {
-    send_relay_lifecycle(
-        agent_tx,
+    let message = Message::with_payload(
         MessageType::RelayClientDisconnected,
+        0,
         &RelayClientDisconnected {
             id_start,
             id_end_exclusive,
             incarnation,
         },
     )
-    .await
-}
-
-async fn send_relay_lifecycle<T: serde::Serialize>(
-    agent_tx: &mpsc::Sender<ControlWrite>,
-    message_type: MessageType,
-    payload: &T,
-) -> RuntimeResult<()> {
-    let message = Message::with_payload(message_type, 0, payload)
-        .map_err(|error| RuntimeError::Custom(format!("encode relay lifecycle: {error}")))?;
+    .map_err(|error| RuntimeError::Custom(format!("encode relay lifecycle: {error}")))?;
     let mut frame = Vec::new();
     codec::encode_to_buf(&message, &mut frame)
         .map_err(|error| RuntimeError::Custom(format!("encode relay lifecycle frame: {error}")))?;
     agent_tx
-        .send(Bytes::from(frame).into())
+        .send(ControlWrite::client_fence(
+            Bytes::from(frame),
+            id_start,
+            id_end_exclusive,
+        ))
         .await
         .map_err(|_| RuntimeError::Custom("agent control writer stopped".into()))
 }
 
 /// Publish typed cancellation for every active raw-bulk operation while control is still usable.
 async fn handle_relay_transport_failure(
-    agent_tx: &mpsc::Sender<ControlWrite>,
+    agent_tx: &ControlWriter,
     merge_command_tx: &mpsc::Sender<MergeCommand>,
     clients: &Arc<Mutex<HashMap<u32, ClientState>>>,
     wait_for_terminals: bool,
@@ -4477,8 +4868,8 @@ async fn handle_relay_transport_failure(
         let (completion, completed) = oneshot::channel();
         agent_tx
             .send(ControlWrite {
-                data: Bytes::from(frame),
                 completion: Some(completion),
+                ..ControlWrite::ordinary(Bytes::from(frame), id, false)
             })
             .await
             .map_err(|_| RuntimeError::Custom("agent control writer stopped".into()))?;
@@ -4610,6 +5001,13 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    fn next_control_write(
+        pending: &mut VecDeque<ControlWrite>,
+        workload: &WorkloadControl,
+    ) -> Result<Option<ControlWrite>, String> {
+        select_control_write(pending, workload, None).map(|(write, _)| write)
+    }
 
     #[cfg(unix)]
     use microsandbox_agent_client::local_shm::{
@@ -4822,6 +5220,17 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn client_shared_descriptor_reaches_bulk_scheduler_without_socket_payload() {
+        exercise_shared_descriptor_input(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn client_shared_descriptor_combined_preserves_frame_credit_and_arena_release() {
+        exercise_shared_descriptor_input(false).await;
+    }
+
+    #[cfg(unix)]
+    async fn exercise_shared_descriptor_input(dual_port: bool) {
         let (mut client_socket, server_socket) = tokio::net::UnixStream::pair().unwrap();
         let ancillary_fd = server_socket.as_fd().try_clone_to_owned().unwrap();
         let (server_reader, server_writer) = tokio::io::split(server_socket);
@@ -4853,7 +5262,23 @@ mod tests {
             local_write_rx,
             ancillary_fd,
         ));
-        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let (agent_tx, agent_rx) = ControlWriter::new();
+        let queue_budget = agent_tx.clone();
+        let expected_len = LEN_PREFIX_SIZE
+            + FRAME_HEADER_SIZE
+            + BULK_HEADER_SIZE
+            + MAX_BULK_RECORD_PAYLOAD as usize;
+        let shared = workload_test_shared(expected_len, false);
+        if !dual_port {
+            // Queue entries are whole owned frames. Occupy some capacity so the next full-size
+            // frame must wait, without configuring a queue too small to ever admit that frame.
+            shared
+                .rx_ring
+                .push(Bytes::from_static(b"occupied"))
+                .unwrap();
+        }
+        let ring_writer =
+            (!dual_port).then(|| tokio::spawn(ring_writer_task(Arc::clone(&shared), agent_rx)));
         let used_slots = Arc::new(Mutex::new(HashSet::from([0])));
         let (drain_tx, _drain_rx) = mpsc::channel(1);
         let (bulk_tx, mut bulk_rx) = mpsc::channel(1);
@@ -4868,8 +5293,8 @@ mod tests {
             drain_tx,
             Arc::new(std::sync::Mutex::new(HashMap::new())),
             Arc::new(AtomicU64::new(1)),
-            Some(bulk_tx),
-            Some(Arc::new(Semaphore::new(BULK_WRITE_BYTE_CAPACITY))),
+            dual_port.then_some(bulk_tx),
+            dual_port.then(|| Arc::new(Semaphore::new(BULK_WRITE_BYTE_CAPACITY))),
             merge_tx,
             pending_disconnects,
             1,
@@ -4897,27 +5322,117 @@ mod tests {
             kind: BulkKind::Filesystem,
             flow: BulkFlow::HostToGuest,
             offset: 17,
-            payload: Bytes::from_static(b"arena payload"),
+            payload: if dual_port {
+                Bytes::from_static(b"arena payload")
+            } else {
+                Bytes::from(vec![0x53; MAX_BULK_RECORD_PAYLOAD as usize])
+            },
         };
         let mut prepared = local.outbound.try_prepare(&record).unwrap();
-        let wire = encode_local_bulk_ref(prepared.descriptor()).unwrap();
+        let descriptor = prepared.descriptor();
+        let wire = encode_local_bulk_ref(descriptor).unwrap();
         client_socket.write_all(&wire).await.unwrap();
         prepared.commit();
 
-        let command = tokio::time::timeout(Duration::from_secs(1), bulk_rx.recv())
+        if dual_port {
+            let command = tokio::time::timeout(Duration::from_secs(1), bulk_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let BulkWriterCommand::Write(write) = command else {
+                panic!("shared record did not enter the bulk scheduler");
+            };
+            let BulkWriteData::Shared { payload, .. } = write.data else {
+                panic!("dual-port runtime rebuilt shared input as an in-band socket frame");
+            };
+            assert_eq!(payload, record.payload);
+        } else {
+            // The arena can be released once the fallback owns its copy, even while the console
+            // queue cannot admit that frame. Reusing the slot must not change the owned copy.
+            let release = tokio::time::timeout(
+                Duration::from_secs(1),
+                codec::read_raw_frame(&mut client_socket),
+            )
             .await
             .unwrap()
             .unwrap();
-        let BulkWriterCommand::Write(write) = command else {
-            panic!("shared record did not enter the bulk scheduler");
-        };
-        let BulkWriteData::Shared { payload, .. } = write.data else {
-            panic!("runtime rebuilt shared input as an in-band socket frame");
-        };
-        assert_eq!(payload, record.payload);
+            let LocalShmFrame::BulkRelease(release) = decode_local_body(&release.body).unwrap()
+            else {
+                panic!("copied combined input did not release its arena slot");
+            };
+            assert_eq!(release.slot, descriptor.slot);
+            assert_eq!(release.generation, descriptor.generation);
+            local.outbound.release(release).unwrap();
+            let replacement = BulkRecord {
+                payload: Bytes::from(vec![0xa7; record.payload.len()]),
+                ..record.clone()
+            };
+            let _replacement = local.outbound.try_prepare(&replacement).unwrap();
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while shared.rx_ring.snapshot().full_events == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                queue_budget.data_bytes.available_permits(),
+                AGENT_WRITE_DATA_BYTES - expected_len
+            );
+            assert_eq!(
+                queue_budget.data_frames.available_permits(),
+                AGENT_WRITE_CLASS_FRAMES - 1
+            );
+            assert_eq!(
+                queue_budget.control_bytes.available_permits(),
+                AGENT_WRITE_CONTROL_BYTES
+            );
+            assert_eq!(
+                queue_budget.control_frames.available_permits(),
+                AGENT_WRITE_CLASS_FRAMES
+            );
+            let gate = shared.workload_control.gate();
+            assert_eq!(next_host_fragment(&shared).await.as_ref(), b"occupied");
+            let mut wire = BytesMut::from(next_host_fragment(&shared).await.as_ref());
+            assert_eq!(wire.len(), expected_len);
+            let position = tokio::time::timeout(
+                Duration::from_secs(1),
+                shared.workload_control.parked_position(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(position.bulk_bytes, expected_len as u64);
+            assert_eq!(position.bulk_frames, 1);
+            assert_eq!(position.control_frames, 0);
+            assert_eq!(
+                queue_budget.data_bytes.available_permits(),
+                AGENT_WRITE_DATA_BYTES
+            );
+            assert_eq!(
+                queue_budget.data_frames.available_permits(),
+                AGENT_WRITE_CLASS_FRAMES
+            );
+            let Some(codec::DecodedFrame::Bulk(received)) =
+                codec::try_decode_frame_from_bytes(&mut wire).unwrap()
+            else {
+                panic!("combined descriptor did not produce one complete raw frame");
+            };
+            assert_eq!(received, record);
+            assert!(wire.is_empty());
+            assert!(shared.rx_ring.pop().is_none());
+            gate.release();
+        }
 
         reader.abort();
         writer.abort();
+        if let Some(ring_writer) = ring_writer {
+            ring_writer.abort();
+            let _ = ring_writer.await;
+        }
+        let _ = reader.await;
+        let _ = writer.await;
     }
 
     fn lane_frame(bytes: Vec<u8>, budget: &Arc<Semaphore>) -> LaneFrame {
@@ -5005,8 +5520,8 @@ mod tests {
         let task = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
         let (completion, completed) = oneshot::channel();
         tx.send(ControlWrite {
-            data: Bytes::from_static(b"control frame"),
             completion: Some(completion),
+            ..Bytes::from_static(b"control frame").into()
         })
         .await
         .unwrap();
@@ -5023,6 +5538,7 @@ mod tests {
         let id_start = 1;
         let id_end_exclusive = AGENT_RELAY_ID_RANGE_STEP;
         let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        let agent_tx = ControlWriter::from_sender(agent_tx);
         let pending = Arc::new(Mutex::new(HashMap::new()));
 
         let mut completion = begin_relay_client_disconnect(
@@ -5067,6 +5583,7 @@ mod tests {
         let (id_start, id_end_exclusive) = relay_client_id_range(slot).unwrap();
         let (reader, mut peer) = tokio::io::duplex(4096);
         let (agent_tx, mut agent_rx) = mpsc::channel(4);
+        let agent_tx = ControlWriter::from_sender(agent_tx);
         let (write_tx, mut write_rx) = mpsc::unbounded_channel();
         #[cfg(unix)]
         let (local_write_tx, _local_write_rx) = mpsc::unbounded_channel();
@@ -5140,6 +5657,39 @@ mod tests {
             drop(rejected);
             assert_eq!(write_budget.available_permits(), initial_budget);
         }
+        // Existing streams still enter bounded source-owned admission while paused. Classification
+        // reuses this reader's already decoded envelope, including empty stdin/TCP EOF payloads.
+        for (kind, uses_data_credit) in [
+            (MessageType::ExecStdin, true),
+            (MessageType::FsData, true),
+            (MessageType::TcpData, true),
+            (MessageType::TcpEof, true),
+            (MessageType::BulkFinish, false),
+            (MessageType::BulkCredit, false),
+            (MessageType::Ping, false),
+        ] {
+            let wire = encoded_message_id(kind, id_start, &serde_json::json!({}));
+            peer.write_all(&wire).await.unwrap();
+            let admitted = tokio::time::timeout(Duration::from_secs(1), agent_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(admitted.data.as_ref(), wire);
+            assert_eq!(admitted.uses_data_credit, uses_data_credit, "{kind:?}");
+            assert!(matches!(admitted.order, ControlOrder::Correlation(id) if id == id_start));
+        }
+        active_bulk
+            .lock()
+            .unwrap()
+            .insert(id_start, BulkKind::Filesystem);
+        let raw = encoded_host_raw(id_start, 0, b"raw input");
+        peer.write_all(&raw).await.unwrap();
+        let admitted = tokio::time::timeout(Duration::from_secs(1), agent_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(admitted.uses_data_credit);
+        assert_eq!(admitted.data.as_ref(), raw);
         task.abort();
         let _ = task.await;
     }
@@ -5152,6 +5702,7 @@ mod tests {
         let (reader, peer) = tokio::io::duplex(64);
         drop(peer);
         let (agent_tx, mut agent_rx) = mpsc::channel(4);
+        let agent_tx = ControlWriter::from_sender(agent_tx);
         let (write_tx, _write_rx) = mpsc::unbounded_channel();
         #[cfg(unix)]
         let (local_write_tx, _local_write_rx) = mpsc::unbounded_channel();
@@ -6020,7 +6571,7 @@ mod tests {
                 boot_time_ns: 0,
                 init_time_ns: 0,
                 ready_time_ns: 0,
-                workload_transport_barrier_version: Some(1),
+                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
                 ..Default::default()
             },
         );
@@ -6233,7 +6784,7 @@ mod tests {
                 init_time_ns: 22,
                 ready_time_ns: 33,
                 agent_version: "test-agent".into(),
-                workload_transport_barrier_version: Some(1),
+                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
                 ..Default::default()
             },
             attempt_id: attempt_id.into(),
@@ -6580,7 +7131,7 @@ mod tests {
         shared.workload_control.install_ready(
             9,
             Ready {
-                workload_transport_barrier_version: Some(1),
+                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
                 ..Default::default()
             },
             dual_port,
@@ -6601,6 +7152,737 @@ mod tests {
         })
         .await
         .expect("host writer made no progress")
+    }
+
+    #[tokio::test]
+    async fn workload_restored_payload_debt_allows_fresh_lease_and_exec() {
+        use microsandbox_protocol::core::{
+            WORKLOAD_TRANSPORT_BULK_BYTES, WORKLOAD_TRANSPORT_BULK_FRAMES,
+            WORKLOAD_TRANSPORT_CONTROL_BYTES, WORKLOAD_TRANSPORT_CONTROL_FRAMES,
+            WorkloadTransportCredit, WorkloadTransportPosition,
+        };
+        let shared = workload_test_shared(4096, false);
+        let control = Arc::clone(&shared.workload_control);
+        // The inherited stdin remains unconsumed in guest RAM. Its cumulative debt must not be
+        // forgiven just to make a new lease/exec usable on the restored host's empty queue.
+        let position = WorkloadTransportPosition {
+            bulk_bytes: WORKLOAD_TRANSPORT_BULK_BYTES,
+            bulk_frames: WORKLOAD_TRANSPORT_BULK_FRAMES,
+            ..Default::default()
+        };
+        let mut credit = WorkloadTransportCredit {
+            control_bytes: WORKLOAD_TRANSPORT_CONTROL_BYTES,
+            control_frames: WORKLOAD_TRANSPORT_CONTROL_FRAMES,
+            bulk_bytes: position.bulk_bytes,
+            bulk_frames: position.bulk_frames,
+        };
+        control.restore(position, credit, 0).unwrap();
+        let (tx, rx) = ControlWriter::new();
+        let stdin = Bytes::from(encoded_message_id(
+            MessageType::ExecStdin,
+            1,
+            &microsandbox_protocol::exec::ExecStdin {
+                data: b"retained".to_vec(),
+            },
+        ));
+        let eof = Bytes::from(encoded_message_id(
+            MessageType::ExecStdin,
+            1,
+            &microsandbox_protocol::exec::ExecStdin { data: Vec::new() },
+        ));
+        tx.send(ControlWrite::ordinary(stdin.clone(), 1, true))
+            .await
+            .unwrap();
+        tx.send(ControlWrite::ordinary(eof.clone(), 1, true))
+            .await
+            .unwrap();
+        let finish = Bytes::from(encoded_message_id(MessageType::BulkFinish, 1, &()));
+        tx.send(ControlWrite::ordinary(finish.clone(), 1, false))
+            .await
+            .unwrap();
+        send_relay_client_connected(&tx, 100, 200, TEST_INCARNATION)
+            .await
+            .unwrap();
+        let exec = Bytes::from(encoded_message_id(MessageType::ExecRequest, 100, &()));
+        tx.send(ControlWrite::ordinary(exec.clone(), 100, false))
+            .await
+            .unwrap();
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        assert_eq!(
+            next_host_fragment(&shared).await.as_ref(),
+            encode_relay_client_connected(RelayClientConnected {
+                id_start: 100,
+                id_end_exclusive: 200,
+                incarnation: TEST_INCARNATION,
+            })
+        );
+        assert_eq!(next_host_fragment(&shared).await, exec);
+        assert!(shared.rx_ring.pop().is_none());
+        let gate = control.gate();
+        let parked = control.parked_position().await.unwrap();
+        assert_eq!(parked.bulk_bytes, position.bulk_bytes);
+        assert_eq!(parked.bulk_frames, position.bulk_frames);
+        credit.bulk_bytes += (stdin.len() + eof.len()) as u64;
+        credit.bulk_frames += 2;
+        control.update_credit(credit).unwrap();
+        assert!(shared.rx_ring.pop().is_none());
+        gate.release();
+        // Same-correlation metadata remains behind both bytes and EOF despite spare control credit.
+        assert_eq!(next_host_fragment(&shared).await, stdin);
+        assert_eq!(next_host_fragment(&shared).await, eof);
+        assert_eq!(next_host_fragment(&shared).await, finish);
+        drop(tx);
+        writer.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn workload_metadata_scheduler_preserves_client_and_global_fences() {
+        use microsandbox_protocol::core::{WorkloadTransportCredit, WorkloadTransportPosition};
+        let shared = workload_test_shared(4096, false);
+        let control = &shared.workload_control;
+        control
+            .restore(
+                WorkloadTransportPosition::default(),
+                WorkloadTransportCredit {
+                    control_bytes: 4096,
+                    control_frames: 16,
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        let frame = Bytes::from_static(b"fence");
+        let mut pending = VecDeque::from([
+            ControlWrite::ordinary(frame.clone(), 101, true),
+            ControlWrite::client_fence(frame.clone(), 100, 200),
+            ControlWrite::ordinary(frame.clone(), 102, false),
+            ControlWrite::ordinary(frame.clone(), 201, false),
+            ControlWrite::from(frame.clone()),
+            ControlWrite::ordinary(frame, 301, false),
+        ]);
+        assert!(matches!(
+            next_control_write(&mut pending, control)
+                .unwrap()
+                .unwrap()
+                .order,
+            ControlOrder::Correlation(201)
+        ));
+        assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        assert_eq!(pending.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn workload_maintenance_clock_and_cleanup_do_not_fence_unrelated_clients() {
+        use microsandbox_protocol::core::{
+            ClockSync, WorkloadTransportCredit, WorkloadTransportPosition,
+        };
+        let shared = workload_test_shared(4096, false);
+        let control = &shared.workload_control;
+        let mut credit = WorkloadTransportCredit {
+            control_bytes: 4096,
+            control_frames: 16,
+            ..Default::default()
+        };
+        control
+            .restore(WorkloadTransportPosition::default(), credit, 0)
+            .unwrap();
+        let (tx, rx) = ControlWriter::new();
+        let stdin = Bytes::from(encoded_message_id(MessageType::ExecStdin, 1, &()));
+        let kill = Bytes::from(encoded_message_id(
+            MessageType::ExecSignal,
+            101,
+            &ExecSignal { signal: 9 },
+        ));
+        let same_flow_kill = Bytes::from(encoded_message_id(
+            MessageType::ExecSignal,
+            1,
+            &ExecSignal { signal: 9 },
+        ));
+        let exec = Bytes::from(encoded_message_id(MessageType::ExecRequest, 201, &()));
+        tx.send(ControlWrite::ordinary(stdin.clone(), 1, true))
+            .await
+            .unwrap();
+        tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
+        tx.send(ControlWrite::ordinary(kill.clone(), 101, false))
+            .await
+            .unwrap();
+        tx.send(ControlWrite::ordinary(same_flow_kill.clone(), 1, false))
+            .await
+            .unwrap();
+        send_relay_client_connected(&tx, 200, 300, TEST_INCARNATION)
+            .await
+            .unwrap();
+        tx.send(ControlWrite::ordinary(exec.clone(), 201, false))
+            .await
+            .unwrap();
+        tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+
+        let first_clock = decode_frame(&next_host_fragment(&shared).await).unwrap();
+        assert_eq!(first_clock.t, MessageType::ClockSync);
+        assert_eq!(next_host_fragment(&shared).await, kill);
+        assert_eq!(
+            next_host_fragment(&shared).await.as_ref(),
+            encode_relay_client_connected(RelayClientConnected {
+                id_start: 200,
+                id_end_exclusive: 300,
+                incarnation: TEST_INCARNATION,
+            })
+        );
+        assert_eq!(next_host_fragment(&shared).await, exec);
+        let second_clock = decode_frame(&next_host_fragment(&shared).await).unwrap();
+        assert_eq!(second_clock.t, MessageType::ClockSync);
+        assert!(
+            second_clock.payload::<ClockSync>().unwrap().unix_time_nanos
+                >= first_clock.payload::<ClockSync>().unwrap().unix_time_nanos
+        );
+        let gate = control.gate();
+        let position = control.parked_position().await.unwrap();
+        assert_eq!(
+            position.bulk_frames, 0,
+            "no blocked data was discarded or admitted"
+        );
+        assert!(shared.rx_ring.pop().is_none());
+        credit.bulk_bytes = stdin.len() as u64;
+        credit.bulk_frames = 1;
+        control.update_credit(credit).unwrap();
+        gate.release();
+        assert_eq!(next_host_fragment(&shared).await, stdin);
+        assert_eq!(next_host_fragment(&shared).await, same_flow_kill);
+        drop(tx);
+        writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn workload_maintenance_clock_stays_behind_global_lifecycle_fence() {
+        use microsandbox_protocol::core::{WorkloadTransportCredit, WorkloadTransportPosition};
+        let shared = workload_test_shared(4096, false);
+        let control = &shared.workload_control;
+        let mut credit = WorkloadTransportCredit {
+            control_bytes: 4096,
+            control_frames: 16,
+            ..Default::default()
+        };
+        control
+            .restore(WorkloadTransportPosition::default(), credit, 0)
+            .unwrap();
+        let (tx, rx) = ControlWriter::new();
+        let stdin = Bytes::from(encoded_message_id(MessageType::ExecStdin, 1, &()));
+        let shutdown = Bytes::from(encoded_message_id(MessageType::Shutdown, 0, &()));
+        tx.send(ControlWrite::ordinary(stdin.clone(), 1, true))
+            .await
+            .unwrap();
+        tx.send(shutdown.clone().into()).await.unwrap();
+        tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(shared.rx_ring.pop().is_none());
+        let gate = control.gate();
+        assert_eq!(
+            control.parked_position().await.unwrap(),
+            WorkloadTransportPosition::default()
+        );
+        credit.bulk_bytes = stdin.len() as u64;
+        credit.bulk_frames = 1;
+        control.update_credit(credit).unwrap();
+        assert!(
+            shared.rx_ring.pop().is_none(),
+            "pause still gates maintenance"
+        );
+        gate.release();
+        assert_eq!(next_host_fragment(&shared).await, stdin);
+        assert_eq!(next_host_fragment(&shared).await, shutdown);
+        assert_eq!(
+            decode_frame(&next_host_fragment(&shared).await).unwrap().t,
+            MessageType::ClockSync
+        );
+        drop(tx);
+        writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn workload_clock_refreshes_after_full_ring_and_pause_without_charging_stale_bytes() {
+        use microsandbox_protocol::core::{ClockSync, WorkloadTransportPosition};
+        let shared = workload_test_shared(4096, false);
+        shared.rx_ring.push(Bytes::from(vec![0; 4096])).unwrap();
+        let (tx, rx) = ControlWriter::new();
+        tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let gate = shared.workload_control.gate();
+        assert_eq!(
+            shared.workload_control.parked_position().await.unwrap(),
+            WorkloadTransportPosition::default()
+        );
+        assert_eq!(next_host_fragment(&shared).await.len(), 4096);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(shared.rx_ring.pop().is_none());
+        let not_before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        gate.release();
+        let wire = next_host_fragment(&shared).await;
+        let clock = decode_frame(&wire).unwrap().payload::<ClockSync>().unwrap();
+        assert!(
+            clock.unix_time_nanos >= not_before,
+            "queued clock age must not cross pause"
+        );
+        let gate = shared.workload_control.gate();
+        let position = shared.workload_control.parked_position().await.unwrap();
+        assert_eq!(position.control_bytes, wire.len() as u64);
+        assert_eq!(position.control_frames, 1);
+        assert_eq!(
+            tx.control_bytes.available_permits(),
+            AGENT_WRITE_CONTROL_BYTES
+        );
+        gate.release();
+        drop(tx);
+        writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn workload_clock_credit_uses_actual_cbor_width_not_reserved_maximum() {
+        use microsandbox_protocol::core::{
+            ClockSync, WorkloadTransportCredit, WorkloadTransportPosition,
+        };
+        for timestamp in [0, u32::MAX as u64, u64::MAX] {
+            let shared = workload_test_shared(4096, false);
+            let frame = crate::clock::encode_clock_sync_frame(timestamp).unwrap();
+            shared
+                .workload_control
+                .restore(
+                    WorkloadTransportPosition::default(),
+                    WorkloadTransportCredit {
+                        control_bytes: frame.len() as u64,
+                        control_frames: 1,
+                        ..Default::default()
+                    },
+                    0,
+                )
+                .unwrap();
+            let (tx, mut rx) = ControlWriter::new();
+            let queued = ControlWrite::clock_sync().unwrap();
+            let reservation = queued.data.len();
+            assert!(reservation >= frame.len());
+            tx.send(queued).await.unwrap();
+            let mut write = rx.recv().await.unwrap();
+            assert_eq!(
+                tx.control_bytes.available_permits(),
+                AGENT_WRITE_CONTROL_BYTES - reservation
+            );
+            assert!(
+                admit_control_write(
+                    &mut write,
+                    &shared.workload_control,
+                    Some(&shared),
+                    &mut false,
+                    || crate::clock::encode_clock_sync_frame(timestamp)
+                )
+                .unwrap()
+            );
+            assert_eq!(write.data, frame);
+            assert_eq!(
+                decode_frame(&write.data)
+                    .unwrap()
+                    .payload::<ClockSync>()
+                    .unwrap()
+                    .unix_time_nanos,
+                timestamp
+            );
+            assert!(!shared.workload_control.admit(false, 1).unwrap());
+            drop(write);
+            assert_eq!(
+                tx.control_bytes.available_permits(),
+                AGENT_WRITE_CONTROL_BYTES
+            );
+        }
+    }
+
+    fn ordered_tcp_metadata<T: serde::Serialize>(kind: MessageType, payload: &T) -> ControlWrite {
+        let message = Message::with_payload(kind, 17, payload).unwrap();
+        let mut encoded = Vec::new();
+        codec::encode_to_buf(&message, &mut encoded).unwrap();
+        let mut write = ControlWrite::ordinary(Bytes::from(encoded), 17, false);
+        write.classify_tcp_order(17, None, Some(&message));
+        write
+    }
+
+    fn ordered_tcp_input() -> ControlWrite {
+        let record = microsandbox_protocol::bulk::BulkRecord {
+            id: 17,
+            kind: BulkKind::Tcp,
+            flow: BulkFlow::HostToGuest,
+            offset: 0,
+            payload: Bytes::from_static(b"request tail"),
+        };
+        let mut encoded = Vec::new();
+        codec::encode_bulk_to_buf(&record, &mut encoded).unwrap();
+        let mut write = ControlWrite::ordinary(Bytes::from(encoded), 17, true);
+        write.classify_tcp_order(17, Some(bulk_wire_metadata(&write.data).unwrap()), None);
+        write
+    }
+
+    fn tcp_input_finish() -> ControlWrite {
+        ordered_tcp_metadata(
+            MessageType::BulkFinish,
+            &BulkFinish {
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::HostToGuest,
+                final_offset: b"request tail".len() as u64,
+            },
+        )
+    }
+
+    fn tcp_output_credit() -> ControlWrite {
+        ordered_tcp_metadata(
+            MessageType::BulkCredit,
+            &BulkCredit {
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::GuestToHost,
+                consumed_offset: 0,
+                credit_limit: microsandbox_protocol::bulk::DEFAULT_BULK_WINDOW,
+            },
+        )
+    }
+
+    #[test]
+    fn workload_combined_tcp_credit_passes_blocked_input_and_finish_only() {
+        use microsandbox_protocol::core::{WorkloadTransportCredit, WorkloadTransportPosition};
+        let shared = workload_test_shared(4096, false);
+        let control = &shared.workload_control;
+        let mut credit = WorkloadTransportCredit {
+            control_bytes: 4096,
+            control_frames: 16,
+            ..Default::default()
+        };
+        control
+            .restore(WorkloadTransportPosition::default(), credit, 0)
+            .unwrap();
+        let input = ordered_tcp_input();
+        let input_bytes = input.data.clone();
+        let finish = tcp_input_finish();
+        let finish_bytes = finish.data.clone();
+        let mut pending = VecDeque::from([input, finish, tcp_output_credit()]);
+        let gate = control.gate();
+        assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        gate.release();
+        let returned = next_control_write(&mut pending, control).unwrap().unwrap();
+        assert!(matches!(returned.order, ControlOrder::TcpOutputCredit(17)));
+        assert_eq!(pending.len(), 2);
+        assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        credit.bulk_bytes = input_bytes.len() as u64;
+        credit.bulk_frames = 1;
+        control.update_credit(credit).unwrap();
+        assert_eq!(
+            next_control_write(&mut pending, control)
+                .unwrap()
+                .unwrap()
+                .data,
+            input_bytes
+        );
+        assert_eq!(
+            next_control_write(&mut pending, control)
+                .unwrap()
+                .unwrap()
+                .data,
+            finish_bytes
+        );
+        assert!(pending.is_empty());
+
+        // With input capacity available, the new exception does not turn credit into priority.
+        let shared = workload_test_shared(4096, false);
+        let mut pending =
+            VecDeque::from([ordered_tcp_input(), tcp_input_finish(), tcp_output_credit()]);
+        for expected in [
+            ControlOrder::TcpInputData(17),
+            ControlOrder::TcpInputFinish(17),
+            ControlOrder::TcpOutputCredit(17),
+        ] {
+            let actual = next_control_write(&mut pending, &shared.workload_control)
+                .unwrap()
+                .unwrap()
+                .order;
+            assert_eq!(
+                std::mem::discriminant(&actual),
+                std::mem::discriminant(&expected)
+            );
+        }
+    }
+
+    #[test]
+    fn workload_combined_tcp_credit_never_crosses_control_or_owner_fences() {
+        use microsandbox_protocol::core::{WorkloadTransportCredit, WorkloadTransportPosition};
+        let shared = workload_test_shared(4096, false);
+        let control = &shared.workload_control;
+        control
+            .restore(
+                WorkloadTransportPosition::default(),
+                WorkloadTransportCredit {
+                    control_bytes: 4096,
+                    control_frames: 16,
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        for fence in [
+            ordered_tcp_metadata(MessageType::BulkCancel, &()),
+            ordered_tcp_metadata(MessageType::TcpConnect, &()),
+            ordered_tcp_metadata(MessageType::Ping, &()),
+            ControlWrite::client_fence(Bytes::new(), 1, 100),
+            ControlWrite::from(Bytes::new()),
+        ] {
+            let mut pending = VecDeque::from([ordered_tcp_input(), fence, tcp_output_credit()]);
+            assert!(next_control_write(&mut pending, control).unwrap().is_none());
+            assert_eq!(pending.len(), 3);
+        }
+        let valid = BulkCredit {
+            kind: BulkKind::Tcp,
+            flow: BulkFlow::GuestToHost,
+            consumed_offset: 0,
+            credit_limit: microsandbox_protocol::bulk::DEFAULT_BULK_WINDOW,
+        };
+        for payload in [
+            BulkCredit {
+                kind: BulkKind::Filesystem,
+                ..valid
+            },
+            BulkCredit {
+                flow: BulkFlow::HostToGuest,
+                ..valid
+            },
+            BulkCredit {
+                consumed_offset: 2,
+                credit_limit: 1,
+                ..valid
+            },
+            BulkCredit {
+                credit_limit: MAX_BULK_WINDOW + 1,
+                ..valid
+            },
+        ] {
+            let mut pending = VecDeque::from([
+                ordered_tcp_input(),
+                ordered_tcp_metadata(MessageType::BulkCredit, &payload),
+            ]);
+            assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        }
+        let mut pending = VecDeque::from([
+            ordered_tcp_input(),
+            ordered_tcp_metadata(MessageType::BulkCredit, &()),
+        ]);
+        assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        // The exclusive raw flag is not sufficient: only previously validated TCP input gets
+        // the exception. Filesystem or reverse-direction raw metadata retains strict ordering.
+        for (kind, flow) in [
+            (BulkKind::Filesystem, BulkFlow::HostToGuest),
+            (BulkKind::Tcp, BulkFlow::GuestToHost),
+        ] {
+            let mut input = ControlWrite::ordinary(ordered_tcp_input().data, 17, true);
+            input.classify_tcp_order(17, Some((kind, flow, 0, 12)), None);
+            let mut pending = VecDeque::from([input, tcp_output_credit()]);
+            assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        }
+        // Only the correctly directed TCP finish commutes; unknown/malformed metadata remains a fence.
+        for finish in [
+            BulkFinish {
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::GuestToHost,
+                final_offset: 0,
+            },
+            BulkFinish {
+                kind: BulkKind::Filesystem,
+                flow: BulkFlow::HostToGuest,
+                final_offset: 0,
+            },
+        ] {
+            let mut pending = VecDeque::from([
+                ordered_tcp_input(),
+                ordered_tcp_metadata(MessageType::BulkFinish, &finish),
+                tcp_output_credit(),
+            ]);
+            assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn workload_class_reservations_bound_pending_bytes_and_frames() {
+        let (tx, mut rx) = ControlWriter::new();
+        let data = Bytes::from(vec![0; AGENT_WRITE_DATA_BYTES / AGENT_WRITE_CLASS_FRAMES]);
+        let metadata = Bytes::from(vec![
+            0;
+            AGENT_WRITE_CONTROL_BYTES / AGENT_WRITE_CLASS_FRAMES
+        ]);
+        let mut pending = Vec::new();
+        for id in 1..=AGENT_WRITE_CLASS_FRAMES as u32 {
+            tx.try_send(ControlWrite::ordinary(data.clone(), id, true))
+                .unwrap();
+            pending.push(rx.recv().await.unwrap());
+        }
+        assert_eq!(tx.data_bytes.available_permits(), 0);
+        assert_eq!(tx.data_frames.available_permits(), 0);
+        assert!(matches!(
+            tx.try_send(ControlWrite::ordinary(Bytes::new(), 99, true)),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        for id in 100..100 + AGENT_WRITE_CLASS_FRAMES as u32 {
+            tx.try_send(ControlWrite::ordinary(metadata.clone(), id, false))
+                .unwrap();
+            pending.push(rx.recv().await.unwrap());
+        }
+        assert_eq!(pending.len(), AGENT_WRITE_CHANNEL_CAPACITY);
+        assert_eq!(tx.control_bytes.available_permits(), 0);
+        assert_eq!(tx.control_frames.available_permits(), 0);
+        assert!(matches!(
+            tx.try_send(ControlWrite::ordinary(Bytes::new(), 999, false)),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        drop(pending);
+        assert_eq!(tx.data_bytes.available_permits(), AGENT_WRITE_DATA_BYTES);
+        assert_eq!(
+            tx.control_bytes.available_permits(),
+            AGENT_WRITE_CONTROL_BYTES
+        );
+        assert_eq!(tx.data_frames.available_permits(), AGENT_WRITE_CLASS_FRAMES);
+        assert_eq!(
+            tx.control_frames.available_permits(),
+            AGENT_WRITE_CLASS_FRAMES
+        );
+    }
+
+    #[tokio::test]
+    async fn workload_reservation_waiters_cancel_and_wake_on_receiver_close() {
+        let (tx, mut rx) = ControlWriter::new();
+        let mut retained = Vec::new();
+        for id in 1..=AGENT_WRITE_CLASS_FRAMES as u32 {
+            tx.send(ControlWrite::ordinary(Bytes::new(), id, true))
+                .await
+                .unwrap();
+            retained.push(rx.recv().await.unwrap());
+        }
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                tx.send(ControlWrite::ordinary(Bytes::new(), 99, true))
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(tx.data_frames.available_permits(), 0);
+        let sender = tx.clone();
+        let waiting = tokio::spawn(async move {
+            sender
+                .send(ControlWrite::ordinary(Bytes::new(), 100, true))
+                .await
+        });
+        drop(rx);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), waiting)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        drop(retained);
+        assert_eq!(tx.data_frames.available_permits(), AGENT_WRITE_CLASS_FRAMES);
+    }
+
+    #[tokio::test]
+    async fn workload_private_freeze_bypasses_both_full_admission_classes() {
+        use microsandbox_protocol::core::{
+            WorkloadFreeze, WorkloadFrozen, WorkloadTransportCredit, WorkloadTransportPosition,
+        };
+        let shared = workload_test_shared(4096, false);
+        let control = Arc::clone(&shared.workload_control);
+        control
+            .restore(
+                WorkloadTransportPosition::default(),
+                WorkloadTransportCredit::default(),
+                0,
+            )
+            .unwrap();
+        let gate = control.gate();
+        let (tx, rx) = ControlWriter::new();
+        let mut expected = Vec::new();
+        for uses_data_credit in [true, false] {
+            for id in 1..=AGENT_WRITE_CLASS_FRAMES as u32 {
+                let kind = if uses_data_credit {
+                    MessageType::ExecStdin
+                } else {
+                    MessageType::Ping
+                };
+                let bytes = Bytes::from(encoded_message_id(kind, id, &()));
+                tx.send(ControlWrite::ordinary(bytes.clone(), id, uses_data_credit))
+                    .await
+                    .unwrap();
+                expected.push(bytes);
+            }
+        }
+        assert_eq!(tx.data_frames.available_permits(), 0);
+        assert_eq!(tx.control_frames.available_permits(), 0);
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let position = tokio::time::timeout(Duration::from_secs(1), control.parked_position())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(position, WorkloadTransportPosition::default());
+        let requester = Arc::clone(&control);
+        let request = tokio::spawn(async move {
+            requester
+                .request(
+                    Message::with_payload(
+                        MessageType::WorkloadFreeze,
+                        0,
+                        &WorkloadFreeze {
+                            attempt_id: "full-classes".into(),
+                            host_input: position,
+                        },
+                    )
+                    .unwrap(),
+                    "full-classes",
+                )
+                .await
+        });
+        assert_eq!(
+            decode_frame(&next_host_fragment(&shared).await).unwrap().t,
+            MessageType::WorkloadFreeze
+        );
+        assert!(shared.rx_ring.pop().is_none());
+        control
+            .reply(
+                Message::with_payload(
+                    MessageType::WorkloadFrozen,
+                    WORKLOAD_CONTROL_ID,
+                    &WorkloadFrozen {
+                        attempt_id: "full-classes".into(),
+                        guest_bulk_bytes_target: 0,
+                        input_credit: WorkloadTransportCredit::default(),
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        request.await.unwrap().unwrap();
+        control
+            .update_credit(WorkloadTransportCredit {
+                control_bytes: 4096,
+                control_frames: AGENT_WRITE_CLASS_FRAMES as u64,
+                bulk_bytes: 4096,
+                bulk_frames: AGENT_WRITE_CLASS_FRAMES as u64,
+            })
+            .unwrap();
+        gate.release();
+        for frame in expected {
+            assert_eq!(next_host_fragment(&shared).await, frame);
+        }
+        assert_eq!(tx.data_frames.available_permits(), AGENT_WRITE_CLASS_FRAMES);
+        assert_eq!(
+            tx.control_frames.available_permits(),
+            AGENT_WRITE_CLASS_FRAMES
+        );
+        drop(tx);
+        writer.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -6632,8 +7914,8 @@ mod tests {
         ));
         let (done, mut completed) = oneshot::channel();
         tx.send(ControlWrite {
-            data: first.clone(),
             completion: Some(done),
+            ..first.clone().into()
         })
         .await
         .unwrap();
@@ -6913,7 +8195,7 @@ mod tests {
     async fn workload_post_ready_shutdown_uses_counted_fifo() {
         let shared = workload_test_shared(4096, false);
         let control = Arc::clone(&shared.workload_control);
-        let (tx, rx) = mpsc::channel(2);
+        let (tx, rx) = ControlWriter::new();
         control.register_ordinary_writer(tx.clone());
         let first = Bytes::from(encoded_message_id(
             MessageType::Ping,
@@ -6953,7 +8235,7 @@ mod tests {
     async fn workload_post_ready_shutdown_respects_gate_and_deadline() {
         let shared = workload_test_shared(4096, false);
         let control = Arc::clone(&shared.workload_control);
-        let (tx, rx) = mpsc::channel(2);
+        let (tx, rx) = ControlWriter::new();
         control.register_ordinary_writer(tx);
         let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
         let gate = control.gate();
