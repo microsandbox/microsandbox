@@ -16,6 +16,7 @@ mod store;
 
 pub use compact::{
     CompactLayer, CompactMaterialization, compact_layer_capacity, materialize_compact_prefix,
+    validate_compact_chain,
 };
 pub use layer_selection::{DiskCompactionPlan, DiskLayerExportPlan, LayerSelectionError};
 pub use manifest::{

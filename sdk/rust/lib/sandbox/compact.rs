@@ -1,14 +1,18 @@
 //! Explicit disk-chain maintenance, separate from persisted desired configuration.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+#[cfg(feature = "local")]
+use std::time::Duration;
 
+#[cfg(feature = "local")]
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-use crate::{
-    MicrosandboxError, MicrosandboxResult, backend::Backend, db::entity::sandbox as sandbox_entity,
-};
+use crate::{MicrosandboxError, MicrosandboxResult, backend::Backend};
 
+#[cfg(feature = "local")]
 use super::{SandboxConfig, SandboxStatus};
+#[cfg(feature = "local")]
+use crate::db::entity::sandbox as sandbox_entity;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -53,6 +57,15 @@ impl DiskCompactionBuilder {
         self.execute(false).await
     }
 
+    #[cfg(not(feature = "local"))]
+    async fn execute(self, _dry_run: bool) -> MicrosandboxResult<DiskCompactionResult> {
+        let _ = (&self.backend, &self.name);
+        Err(MicrosandboxError::InvalidConfig(
+            "disk compaction is only supported by the local backend".into(),
+        ))
+    }
+
+    #[cfg(feature = "local")]
     async fn execute(self, dry_run: bool) -> MicrosandboxResult<DiskCompactionResult> {
         let local = self.backend.as_local().ok_or_else(|| {
             MicrosandboxError::InvalidConfig(
@@ -131,4 +144,4 @@ impl DiskCompactionBuilder {
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use microsandbox_runtime::checkpoint::DiskCompactionResult;
+pub use microsandbox_types::DiskCompactionResult;

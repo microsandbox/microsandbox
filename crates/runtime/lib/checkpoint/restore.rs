@@ -291,11 +291,6 @@ fn parse_restored_agent_resource(
             .get(key)
             .ok_or_else(|| format!("checkpoint guest agent is missing {key}"))
     };
-    let parse_u64 = |key: &str| {
-        value(key)?
-            .parse::<u64>()
-            .map_err(|error| format!("checkpoint guest agent has invalid {key}: {error}"))
-    };
     let protocol_generation = value("protocol_generation")?
         .parse::<u8>()
         .map_err(|error| {
@@ -311,12 +306,8 @@ fn parse_restored_agent_resource(
 
     Ok(RestoredAgentState {
         protocol_generation,
-        ready: Ready {
-            boot_time_ns: parse_u64("boot_time_ns")?,
-            init_time_ns: parse_u64("init_time_ns")?,
-            ready_time_ns: parse_u64("ready_time_ns")?,
-            agent_version: value("agent_version")?.clone(),
-        },
+        ready: serde_json::from_str(value("ready")?)
+            .map_err(|error| format!("checkpoint guest readiness is invalid: {error}"))?,
         attempt_id: checkpoint_id.into(),
     })
 }
@@ -343,6 +334,17 @@ mod tests {
                 ("boot_time_ns".into(), "10".into()),
                 ("init_time_ns".into(), "20".into()),
                 ("ready_time_ns".into(), "30".into()),
+                (
+                    "ready".into(),
+                    serde_json::to_string(&Ready {
+                        agent_version: "0.6.16-test".into(),
+                        boot_time_ns: 10,
+                        init_time_ns: 20,
+                        ready_time_ns: 30,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                ),
             ]),
         }
     }
@@ -363,11 +365,11 @@ mod tests {
 
     #[test]
     fn rejects_agent_generation_without_workload_thaw() {
-        let error = parse_restored_agent_resource(&agent_resource(7), "checkpoint-attempt")
+        let error = parse_restored_agent_resource(&agent_resource(8), "checkpoint-attempt")
             .err()
             .unwrap();
 
-        assert!(error.contains("protocol generation 7 is unsupported"));
+        assert!(error.contains("protocol generation 8 is unsupported"));
     }
 
     #[test]

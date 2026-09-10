@@ -155,6 +155,14 @@ pub async fn compact_layer_capacity(layer: CompactLayer) -> io::Result<u64> {
     Ok(open_chain(&[layer]).await?.size())
 }
 
+/// Validate a complete explicit chain without linking a VM runner or following header paths.
+///
+/// The caller must prevent concurrent mutation until publication completes.
+pub async fn validate_compact_chain(layers: &[CompactLayer]) -> io::Result<()> {
+    open_chain(layers).await?;
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------

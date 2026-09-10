@@ -564,6 +564,48 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "net")]
+    #[test]
+    fn net_conf_conflicts_with_policy_cli_flags() {
+        for policy_args in [
+            &["--net", "public"][..],
+            &["--no-net"][..],
+            &["--net-rule", "allow@public"][..],
+            &["--net-default", "deny"][..],
+            &["--net-default-egress", "deny"][..],
+            &["--net-default-ingress", "deny"][..],
+        ] {
+            let argv = ["msb", "--net-conf", "network.yaml"]
+                .into_iter()
+                .chain(policy_args.iter().copied())
+                .chain(["alpine"]);
+            let err = TestCli::try_parse_from(argv).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn net_conf_allows_non_policy_network_overrides() {
+        let args = parse_run_args(&[
+            "--net-conf",
+            "network.yaml",
+            "--net-ipv4-pool",
+            "172.20.0.0/16",
+            "alpine",
+        ]);
+
+        assert_eq!(args.sandbox.net_ipv4_pool.as_deref(), Some("172.20.0.0/16"));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn root_conf_allows_policy_cli_overrides() {
+        let args = parse_run_args(&["--conf", "sandbox.yaml", "--no-net", "alpine"]);
+
+        assert!(args.sandbox.no_net);
+    }
+
     #[test]
     fn config_can_supply_the_image_before_a_trailing_command() {
         let args = parse_run_args(&[
@@ -632,6 +674,64 @@ mod tests {
         let args = parse_run_args(&["--name", "box", "--detach", "--from-snapshot", "clean"]);
 
         assert_eq!(ignored_existing_inputs(&args), Some("--from-snapshot"));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn existing_reuse_warns_for_proxy_creation_flag() {
+        let args = parse_run_args(&[
+            "--name",
+            "box",
+            "--proxy",
+            "socks5://127.0.0.1:1080",
+            "alpine",
+        ]);
+
+        assert_eq!(ignored_existing_inputs(&args), Some("creation flags"));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn protocol_specific_proxy_authentication_flags_parse() {
+        let socks4 = parse_run_args(&[
+            "--proxy",
+            "socks4://127.0.0.1:1080",
+            "--socks4-user-id",
+            "sandbox",
+            "alpine",
+        ]);
+        assert_eq!(socks4.sandbox.socks4_user_id.as_deref(), Some("sandbox"));
+
+        let socks5 = parse_run_args(&[
+            "--proxy",
+            "socks5://127.0.0.1:1080",
+            "--socks5-username",
+            "sandbox",
+            "--socks5-password-env",
+            "SOCKS5_PASSWORD",
+            "alpine",
+        ]);
+        assert_eq!(socks5.sandbox.socks5_username.as_deref(), Some("sandbox"));
+        assert_eq!(
+            socks5.sandbox.socks5_password_env.as_deref(),
+            Some("SOCKS5_PASSWORD")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn socks5_cli_credentials_require_the_complete_pair() {
+        for auth in [
+            &["--socks5-username", "sandbox"][..],
+            &["--socks5-password-env", "SOCKS5_PASSWORD"][..],
+        ] {
+            let argv = ["msb", "--proxy", "socks5://127.0.0.1:1080"]
+                .into_iter()
+                .chain(auth.iter().copied())
+                .chain(["alpine"]);
+            let error = TestCli::try_parse_from(argv).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        }
     }
 
     #[test]
