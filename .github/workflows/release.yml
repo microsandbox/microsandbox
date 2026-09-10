@@ -252,7 +252,7 @@ jobs:
     uses: ./.github/workflows/release-macos.yml
     with:
       target: darwin-aarch64
-      runner: macos-14
+      runner: macos-15
       os: darwin
       arch: aarch64
       agentd_artifact: agentd-aarch64-linux-musl
@@ -484,7 +484,7 @@ jobs:
             node_file: microsandbox.linux-arm64-gnu.node
             npm_dir: linux-arm64-gnu
           - target: darwin-aarch64
-            runner: macos-14
+            runner: macos-15
             arch: aarch64
             os: darwin
             agentd_target: ""

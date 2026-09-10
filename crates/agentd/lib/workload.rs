@@ -375,6 +375,8 @@ fn wait_for_cgroup_event(fd: RawFd, remaining: Duration) -> io::Result<()> {
     // Non-Linux builds only exercise the portable unit-test fallback, never a guest freezer.
     #[cfg(target_os = "linux")]
     let result = {
+        // Keep libc's ABI-sized time_t until its musl transition is complete.
+        #[allow(deprecated)]
         let timeout = libc::timespec {
             tv_sec: remaining.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
             tv_nsec: remaining.subsec_nanos().into(),

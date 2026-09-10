@@ -7,7 +7,7 @@ For contribution guidelines (forking, commit signing, pull requests), see [CONTR
 ## Prerequisites
 
 - **Operating System**:
-  - macOS with Apple Silicon (M1/M2/M3/M4)
+  - macOS 15 or later with Apple Silicon (M1/M2/M3/M4)
   - Linux with KVM enabled
   - Windows 11 (x64 or ARM64) with Windows Hypervisor Platform enabled; Windows Server also needs nested virtualization
 - **Tools**: [`just`](https://github.com/casey/just), `git`, and `pre-commit`

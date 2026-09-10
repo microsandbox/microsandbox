@@ -239,10 +239,10 @@ pub fn sandbox_builder_from_args(
         // Resolution stays deferred until the async build so installed and direct-archive sources
         // share the same disk/full admission path.
         builder = builder.from_snapshot(snap_str);
-        if let Some(base) = kwargs.get_item("snapshot_base")? {
-            if !base.is_none() {
-                builder = builder.snapshot_base(base.extract::<String>()?);
-            }
+        if let Some(base) = kwargs.get_item("snapshot_base")?
+            && !base.is_none()
+        {
+            builder = builder.snapshot_base(base.extract::<String>()?);
         }
         if disk_only {
             builder = builder.disk_only();

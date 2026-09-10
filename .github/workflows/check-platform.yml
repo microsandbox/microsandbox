@@ -186,6 +186,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+
+      # npm 10.9.8 crashes in Arborist while resolving the SDK dev dependencies.
+      - name: Use npm 11 for SDK dependency resolution
+        run: npm install --global npm@11.17.0
       - name: Install build deps (Linux)
         if: inputs.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev

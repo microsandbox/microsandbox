@@ -774,6 +774,8 @@ async fn capture_full_snapshot(
 
 /// Build the artifact contents (upper copy, integrity, descriptor) into
 /// `dir`. Pure staging: the caller promotes or discards the directory.
+// Preserve the explicit artifact inputs without grouping unrelated snapshot metadata.
+#[allow(clippy::too_many_arguments)]
 async fn build_artifact(
     dir: &std::path::Path,
     disk: &SnapshotDiskClosure,
@@ -1110,7 +1112,7 @@ async fn capture_disk_source(
         .filter(sandbox_entity::Column::Name.eq(source))
         .one(local.db().await?.read())
         .await?;
-    if !current.is_some_and(|model| model.id == source_id) {
+    if current.is_none_or(|model| model.id != source_id) {
         return Err(MicrosandboxError::Runtime(
             "snapshot source was replaced during disk capture; retry with the current sandbox"
                 .into(),

@@ -95,10 +95,11 @@ pub enum SnapshotConsistency {
 /// OverlayFS upper or a complete flat root filesystem. Those byte payloads
 /// have different attachment and restore semantics even when their physical
 /// layer shapes happen to match.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "layout", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SnapshotRootDisk {
     /// Immutable OCI lower layers plus a writable managed upper device.
+    #[default]
     Managed,
     /// One complete filesystem attached directly as the guest root device.
     Flat,
@@ -108,12 +109,6 @@ pub enum SnapshotRootDisk {
         #[serde(deserialize_with = "deserialize_required_option")]
         size_mib: Option<u32>,
     },
-}
-
-impl Default for SnapshotRootDisk {
-    fn default() -> Self {
-        Self::Managed
-    }
 }
 
 /// Pinned OCI image reference.

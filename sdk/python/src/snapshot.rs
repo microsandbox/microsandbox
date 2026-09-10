@@ -255,6 +255,8 @@ impl PySnapshot {
         since = None,
         last_layers = None,
     ))]
+    // These parameters mirror the public Python keyword arguments.
+    #[allow(clippy::too_many_arguments)]
     fn save<'py>(
         py: Python<'py>,
         name_or_path: String,

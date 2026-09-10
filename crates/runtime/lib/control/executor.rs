@@ -120,6 +120,8 @@ struct DedupEntry {
 
 impl RuntimeControlExecutor {
     /// Construct an executor and atomically publish a fresh runtime boot identity.
+    // Keep the independently owned runtime services explicit at construction.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         vm: msb_krun::VmControl,
         #[cfg(feature = "net")] secrets: Option<

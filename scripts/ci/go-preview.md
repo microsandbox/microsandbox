@@ -78,3 +78,7 @@ Normal Linux runtime requirements, including access to KVM, still apply.
 Updates are explicit: change both the Go revision and runtime image together.
 Keep old revisions pinned for reproducible builds and rollback; do not use a
 moving branch name or a mutable image tag in the customer's deployment.
+
+The source branch requires macOS 15+ for native macOS runtime builds because
+snapshot capture/restore uses Hypervisor GIC APIs introduced in macOS 15. This
+does not add macOS FFI bundles to the Linux amd64 customer preview.

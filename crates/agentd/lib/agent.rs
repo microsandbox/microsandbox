@@ -479,6 +479,8 @@ pub fn report_init_context(
 //--------------------------------------------------------------------------------------------------
 
 /// Handles a single incoming message from the host.
+// The dispatcher borrows independent event-loop state for each message.
+#[allow(clippy::too_many_arguments)]
 async fn handle_message(
     msg: Message,
     state: &mut AgentState,
