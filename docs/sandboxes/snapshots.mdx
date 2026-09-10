@@ -32,7 +32,7 @@ msb exec baseline -- pip install requests
 msb stop baseline
 
 # 2. Snapshot the stopped sandbox
-msb snapshot create after-pip-install --from baseline
+msb snapshot create after-pip-install --from-sandbox baseline
 
 # 3. Boot a fresh sandbox from the snapshot
 msb run --name worker --from-snapshot after-pip-install \
@@ -94,11 +94,11 @@ fmt.Println(snap.Digest()) // sha256:...
 ```
 
 ```bash CLI
-msb snapshot create after-pip-install --from baseline
-msb snapshot create after-pip-install --from baseline --label stage=ready
+msb snapshot create after-pip-install --from-sandbox baseline
+msb snapshot create after-pip-install --from-sandbox baseline --label stage=ready
 
 # Create the artifact on another volume: lands at /mnt/big/after-pip-install
-msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
+msb snapshot create after-pip-install --from-sandbox baseline --dest-dir /mnt/big
 ```
 
 </CodeGroup>
@@ -142,7 +142,7 @@ snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
 ```
 
 ```bash CLI
-msb snapshot create worker-checkpoint --from worker --full
+msb snapshot create worker-checkpoint --from-sandbox worker --full
 ```
 </CodeGroup>
 
@@ -157,7 +157,7 @@ Full restore preserves captured processes, but not the host connections that con
 Repeated full checkpoints add disk layers. You choose when to export changes and when to compact; neither happens automatically.
 
 ```bash
-msb snapshot create checkpoint-b --from worker --full
+msb snapshot create checkpoint-b --from-sandbox worker --full
 msb snapshot save checkpoint-b changes.tar.zst --since checkpoint-a
 msb modify worker --compact --layers 3 --dry-run
 msb modify worker --compact --layers 3
@@ -218,7 +218,7 @@ archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
 
 ```bash CLI
 msb snapshot create after-pip-install \
-    --from baseline \
+    --from-sandbox baseline \
     --archive /tmp/after-pip-install.tar.zst
 ```
 </CodeGroup>
@@ -486,7 +486,7 @@ report, err := snap.Verify(ctx)
 
 ```bash CLI
 # Compute and record an integrity hash at create time
-msb snapshot create after-pip-install --from baseline --integrity
+msb snapshot create after-pip-install --from-sandbox baseline --integrity
 
 # Verify a snapshot's recorded integrity on demand
 msb snapshot verify after-pip-install

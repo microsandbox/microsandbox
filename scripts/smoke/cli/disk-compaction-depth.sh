@@ -13,7 +13,7 @@ for layout in managed flat; do
  msb exec "$name" -- sh -c 'dd if=/dev/urandom of=/payload bs=1048576 count=4 2>/dev/null; sha256sum /payload >/expected; sync'
  for generation in $(seq 1 64); do
   msb exec "$name" -- sh -c "echo $generation >/version; sync" >/dev/null
-  msb snapshot create "$name-$generation" --from "$name" --full >"$QUAL_ROOT/$layout-$generation.out" 2>&1
+  msb snapshot create "$name-$generation" --from-sandbox "$name" --full >"$QUAL_ROOT/$layout-$generation.out" 2>&1
   case $generation in 1|4|16|64)
    msb modify "$name" --compact --dry-run --format json >"$QUAL_ROOT/$layout-depth-$generation.json"
    msb exec "$name" -- sh -c 'sha256sum -c /expected' >/dev/null;;

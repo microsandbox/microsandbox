@@ -54,9 +54,9 @@ pub struct SnapshotCreateArgs {
     /// (or under `--dest-dir` when given).
     pub name: String,
 
-    /// Source sandbox name. Must be stopped (or crashed).
+    /// Source sandbox name.
     #[arg(long, value_name = "SANDBOX")]
-    pub from: String,
+    pub from_sandbox: String,
 
     /// Parent directory to create the artifact in, instead of the
     /// default snapshots directory. The artifact lands at `DIR/<name>`.
@@ -207,7 +207,7 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
 }
 
 async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
-    let mut builder = Snapshot::builder(&args.name).from_sandbox(&args.from);
+    let mut builder = Snapshot::builder(&args.name).from_sandbox(&args.from_sandbox);
     if let Some(ref dest_dir) = args.dest_dir {
         builder = builder.dest_dir(dest_dir);
     }
@@ -230,7 +230,7 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     let spinner = if args.quiet {
         ui::Spinner::quiet()
     } else {
-        ui::Spinner::start("Snapshotting", &args.from)
+        ui::Spinner::start("Snapshotting", &args.from_sandbox)
     };
 
     if let Some(archive_path) = args.archive.as_ref() {
@@ -565,20 +565,41 @@ mod tests {
     }
 
     #[test]
+    fn create_requires_explicit_source_sandbox_flag() {
+        let error = TestCli::try_parse_from(["msb", "create", "clean"]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(error.to_string().contains("--from-sandbox <SANDBOX>"));
+
+        // This is a clean rename, not an alias: reject the old ambiguous spelling.
+        let error =
+            TestCli::try_parse_from(["msb", "create", "clean", "--from", "box"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
     fn create_parses_full_capture_flag() {
-        let args = parse_snapshot_args(&["create", "clean", "--from", "box", "--full"]);
+        let args = parse_snapshot_args(&["create", "clean", "--from-sandbox", "box", "--full"]);
         let SnapshotCommands::Create(args) = args.command else {
             panic!("expected create command");
         };
         assert_eq!(args.name, "clean");
-        assert_eq!(args.from, "box");
+        assert_eq!(args.from_sandbox, "box");
         assert!(args.full);
     }
 
     #[test]
     fn create_parses_dest_dir() {
-        let args =
-            parse_snapshot_args(&["create", "clean", "--from", "box", "--dest-dir", "/mnt/big"]);
+        let args = parse_snapshot_args(&[
+            "create",
+            "clean",
+            "--from-sandbox",
+            "box",
+            "--dest-dir",
+            "/mnt/big",
+        ]);
         let SnapshotCommands::Create(args) = args.command else {
             panic!("expected create command");
         };
@@ -593,7 +614,7 @@ mod tests {
         let args = parse_snapshot_args(&[
             "create",
             "clean",
-            "--from",
+            "--from-sandbox",
             "box",
             "--archive",
             "/tmp/clean.tar",
