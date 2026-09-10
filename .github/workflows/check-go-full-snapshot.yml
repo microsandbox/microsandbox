@@ -146,7 +146,7 @@ jobs:
             go test -c -o "$container_dir/snapshot.test" .
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$container_dir/guest" ./guest
             mkdir "$container_dir/data"
-            docker run --rm --device /dev/kvm \
+            sudo docker run --rm --device /dev/kvm \
               -v "$container_dir:/preview" -v "$container_dir/data:/tmp" \
               -e MSB_PATH=/usr/local/bin/msb \
               -e MSB_LIBKRUNFW_PATH=/usr/local/lib/libkrunfw.so.5.6.1 \
@@ -154,7 +154,7 @@ jobs:
               --entrypoint /preview/snapshot.test "$image" \
               -test.v -test.timeout=25m 2>&1 | tee "$GITHUB_WORKSPACE/go-full-snapshot.log"
             test_root=$(sed -n 's/^TEST_HOME=//p' "$GITHUB_WORKSPACE/go-full-snapshot.log" | head -1)
-            docker run --rm -v "$container_dir/data:/tmp" \
+            sudo docker run --rm -v "$container_dir/data:/tmp" \
               -e "MSB_HOME=$test_root/home" --entrypoint /usr/local/bin/msb "$image" \
               list --format json | tee "$GITHUB_WORKSPACE/go-full-snapshot-cleanup.json"
 
