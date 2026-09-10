@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
+#[cfg(feature = "net")]
+use microsandbox::OutboundProxy;
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
@@ -11,6 +13,8 @@ use microsandbox::sandbox::{
     RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
     TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
+#[cfg(feature = "net")]
+use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
 #[cfg(feature = "net")]
 use microsandbox_types::NetworkRateLimitDirection;
 
@@ -130,15 +134,15 @@ pub struct SandboxOpts {
 
     /// Explicitly mount a host directory into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     ///
-    /// OPTIONS may include `uid=<N>,gid=<N>` to present host-created files (no
-    /// per-file stat override) as that guest owner; both are required together.
+    /// OPTIONS may include `quota=<size>` and `uid=<N>,gid=<N>` to present
+    /// host-created files as that guest owner; both IDs are required together.
     #[arg(long = "mount-dir", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_dir: Vec<String>,
 
     /// Explicitly mount a host file into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     ///
-    /// OPTIONS may include `uid=<N>,gid=<N>` to present the host file (no
-    /// per-file stat override) as that guest owner; both are required together.
+    /// OPTIONS may include `quota=<size>` and `uid=<N>,gid=<N>` to present the
+    /// host file as that guest owner; both IDs are required together.
     #[arg(long = "mount-file", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_file: Vec<String>,
 
@@ -328,7 +332,12 @@ pub struct SandboxOpts {
     #[cfg(feature = "net")]
     #[arg(
         long = "no-net",
-        conflicts_with_all = ["net_default", "net_default_egress", "net_default_ingress"]
+        conflicts_with_all = [
+            "net_conf",
+            "net_default",
+            "net_default_egress",
+            "net_default_ingress"
+        ]
     )]
     pub no_net: bool,
 
@@ -341,6 +350,7 @@ pub struct SandboxOpts {
         long = "net",
         value_name = "PROFILE",
         conflicts_with_all = [
+            "net_conf",
             "no_net",
             "net_default",
             "net_default_egress",
@@ -392,7 +402,7 @@ pub struct SandboxOpts {
     /// --net-rule "allow@example.com:tcp:443"
     /// --net-rule "deny@*.ads.example.com"
     #[cfg(feature = "net")]
-    #[arg(long = "net-rule", value_name = "TOKENS")]
+    #[arg(long = "net-rule", value_name = "TOKENS", conflicts_with = "net_conf")]
     pub net_rule: Vec<String>,
 
     /// Default action for traffic in both directions that doesn't match
@@ -403,7 +413,7 @@ pub struct SandboxOpts {
     #[arg(
         long = "net-default",
         value_name = "ACTION",
-        conflicts_with_all = ["net_default_egress", "net_default_ingress"],
+        conflicts_with_all = ["net_conf", "net_default_egress", "net_default_ingress"],
     )]
     pub net_default: Option<String>,
 
@@ -411,14 +421,22 @@ pub struct SandboxOpts {
     /// `--net-rule`. Default: deny (with an implicit allow@public rule
     /// when no other rules are present).
     #[cfg(feature = "net")]
-    #[arg(long = "net-default-egress", value_name = "ACTION")]
+    #[arg(
+        long = "net-default-egress",
+        value_name = "ACTION",
+        conflicts_with = "net_conf"
+    )]
     pub net_default_egress: Option<String>,
 
     /// Default action for ingress traffic that doesn't match any
     /// `--net-rule`. Default: allow (preserves today's unfiltered
     /// published-port behavior when no ingress rules are set).
     #[cfg(feature = "net")]
-    #[arg(long = "net-default-ingress", value_name = "ACTION")]
+    #[arg(
+        long = "net-default-ingress",
+        value_name = "ACTION",
+        conflicts_with = "net_conf"
+    )]
     pub net_default_ingress: Option<String>,
 
     /// Limit outbound (egress) bandwidth, e.g. 1M/1s. SIZE accepts
@@ -474,6 +492,11 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub max_connections: Option<usize>,
 
+    /// Require hostname-based network allows to use inspectable request authority.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-strict")]
+    pub net_strict: bool,
+
     /// Ship the host's trusted root CAs into the guest. Opt in to make
     /// outbound TLS work behind corporate MITM proxies (Warp Zero
     /// Trust, Zscaler, etc.) whose gateway CA is installed on the host
@@ -481,6 +504,35 @@ pub struct SandboxOpts {
     #[cfg(feature = "net")]
     #[arg(long)]
     pub trust_host_cas: bool,
+
+    /// Dial all outbound sandbox connections through this proxy.
+    /// Supports the socks4:// and socks5:// protocols.
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "socks[4|5]://IP:PORT")]
+    pub proxy: Option<String>,
+
+    /// Optional user ID for a SOCKS4 proxy.
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "USER_ID", requires = "proxy")]
+    pub socks4_user_id: Option<String>,
+
+    /// Username for SOCKS5 username/password authentication.
+    #[cfg(feature = "net")]
+    #[arg(
+        long,
+        value_name = "USERNAME",
+        requires_all = ["proxy", "socks5_password_env"]
+    )]
+    pub socks5_username: Option<String>,
+
+    /// Host environment variable containing the SOCKS5 password.
+    #[cfg(feature = "net")]
+    #[arg(
+        long,
+        value_name = "ENV_VAR",
+        requires_all = ["proxy", "socks5_username"]
+    )]
+    pub socks5_password_env: Option<String>,
 
     // --- TLS interception ---
     /// Intercept and inspect HTTPS traffic via a built-in TLS proxy.
@@ -532,19 +584,32 @@ pub struct SandboxOpts {
     pub tls_no_verify_upstream_for: Vec<String>,
 
     // --- Secrets ---
-    /// Inject a secret that is only sent to allowed hosts (ENV@HOST[,HOST...]).
+    /// Configure a protected secret (`ENV[:OPTIONS]@HOST[,HOST...]`).
     /// The value is read from the host environment variable ENV at start time
     /// and stored only as a source reference, never inlined in the sandbox
     /// config. Inline `ENV=VALUE@HOST` is rejected; export the value and use
-    /// `ENV@HOST[,HOST...]`.
+    /// `ENV[:OPTIONS]@HOST[,HOST...]`.
     #[cfg(feature = "net")]
     #[arg(long)]
     pub secret: Vec<String>,
 
-    /// Action when a secret is sent to a disallowed host (block, block-and-log, block-and-terminate, passthrough).
+    /// Action when a secret placeholder is blocked (block, block-and-log, block-and-terminate).
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub on_secret_violation: Option<String>,
+    pub secret_violation_action: Option<String>,
+}
+
+/// Parsed `--secret` policy for one environment variable.
+///
+/// Shared with live modification parsing, which uses only wire-model types.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedSecret {
+    pub(crate) env_var: String,
+    pub(crate) allowed_hosts: Vec<String>,
+    pub(crate) passthrough_hosts: Vec<String>,
+    pub(crate) substitute_headers: bool,
+    pub(crate) substitute_query: bool,
+    pub(crate) substitute_body: bool,
 }
 
 /// Parsed public CLI mount options.
@@ -604,6 +669,312 @@ enum CopyKind {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxOpts {
+    /// Builds the protocol-specific proxy selected by the CLI flags.
+    #[cfg(feature = "net")]
+    fn build_outbound_proxy(&self) -> anyhow::Result<Option<OutboundProxy>> {
+        let Some(raw) = self.proxy.as_deref() else {
+            if self.socks4_user_id.is_some()
+                || self.socks5_username.is_some()
+                || self.socks5_password_env.is_some()
+            {
+                anyhow::bail!("proxy authentication flags require --proxy");
+            }
+            return Ok(None);
+        };
+
+        match raw.parse::<OutboundProxy>()? {
+            OutboundProxy::Socks4 { address, .. } => {
+                if self.socks5_username.is_some() || self.socks5_password_env.is_some() {
+                    anyhow::bail!(
+                        "--socks5-username and --socks5-password-env require a socks5:// proxy"
+                    );
+                }
+
+                let proxy = OutboundProxyBuilder::new().socks4(address.to_string());
+                let proxy = match self.socks4_user_id.as_deref() {
+                    Some(user_id) => proxy.user_id(user_id),
+                    None => proxy,
+                };
+                Ok(Some(proxy.build()?))
+            }
+            OutboundProxy::Socks5 { address, .. } => {
+                if self.socks4_user_id.is_some() {
+                    anyhow::bail!("--socks4-user-id requires a socks4:// proxy");
+                }
+
+                let proxy = OutboundProxyBuilder::new().socks5(address.to_string());
+                let proxy = match (
+                    self.socks5_username.as_deref(),
+                    self.socks5_password_env.as_deref(),
+                ) {
+                    (Some(username), Some(password_env)) => {
+                        proxy.credentials(username, microsandbox::SecretSource::env(password_env))
+                    }
+                    (Some(_), None) => {
+                        anyhow::bail!("--socks5-username requires --socks5-password-env")
+                    }
+                    (None, Some(_)) => {
+                        anyhow::bail!("--socks5-password-env requires --socks5-username")
+                    }
+                    (None, None) => proxy,
+                };
+                Ok(Some(proxy.build()?))
+            }
+            _ => anyhow::bail!("unsupported outbound proxy protocol"),
+        }
+    }
+
+    /// Resolves the root disk specification selected by the CLI flags.
+    fn root_disk_spec(&self) -> anyhow::Result<Option<RootDiskSpec>> {
+        self.root_disk
+            .as_deref()
+            .or(self.oci_upper_size.as_deref())
+            .map(parse_root_disk_spec)
+            .transpose()
+    }
+
+    /// Resolves script flags into a deduplicated list preserving argv order.
+    fn collect_scripts(&self) -> anyhow::Result<Vec<(String, String)>> {
+        use std::collections::HashSet;
+
+        let mut scripts =
+            Vec::with_capacity(self.script.len() + self.script_raw.len() + self.script_path.len());
+        let mut seen = HashSet::new();
+
+        for spec in &self.script {
+            let (name, body) = parse_script_spec(spec, "script")?;
+            if !seen.insert(name.clone()) {
+                anyhow::bail!("script name '{name}' specified more than once");
+            }
+            let decoded = decode_script_escapes(&body);
+            scripts.push((name, wrap_shell_script(self.shell.as_deref(), &decoded)));
+        }
+        for spec in &self.script_raw {
+            let (name, body) = parse_script_spec(spec, "script-raw")?;
+            if !seen.insert(name.clone()) {
+                anyhow::bail!("script name '{name}' specified more than once");
+            }
+            scripts.push((name, body));
+        }
+        for spec in &self.script_path {
+            let (name, content) = parse_script_path(spec)?;
+            if !seen.insert(name.clone()) {
+                anyhow::bail!("script name '{name}' specified more than once");
+            }
+            scripts.push((name, content));
+        }
+
+        Ok(scripts)
+    }
+
+    /// Returns true when any CLI flag requires building network configuration.
+    #[cfg(feature = "net")]
+    fn has_network_config(&self) -> bool {
+        self.no_dns_rebind_protection
+            || !self.dns_nameserver.is_empty()
+            || self.dns_query_timeout_ms.is_some()
+            || !self.net_rule.is_empty()
+            || !self.net.is_empty()
+            || self.no_net
+            || self.net_default.is_some()
+            || self.net_default_egress.is_some()
+            || self.net_default_ingress.is_some()
+            || self.net_ipv4_pool.is_some()
+            || self.net_ipv6_pool.is_some()
+            || self.net_egress_bandwidth.is_some()
+            || self.net_egress_bandwidth_burst.is_some()
+            || self.net_egress_ops.is_some()
+            || self.net_egress_ops_burst.is_some()
+            || self.net_ingress_bandwidth.is_some()
+            || self.net_ingress_bandwidth_burst.is_some()
+            || self.net_ingress_ops.is_some()
+            || self.net_ingress_ops_burst.is_some()
+            || self.max_connections.is_some()
+            || self.trust_host_cas
+            || self.tls_intercept
+            || !self.tls_intercept_port.is_empty()
+            || !self.tls_bypass.is_empty()
+            || self.no_block_quic
+            || self.tls_intercept_ca_cert.is_some()
+            || self.tls_intercept_ca_key.is_some()
+            || !self.tls_upstream_ca_cert.is_empty()
+            || !self.tls_upstream_ca_cert_for.is_empty()
+            || !self.tls_no_verify_upstream_for.is_empty()
+            || self.secret_violation_action.is_some()
+    }
+
+    /// Builds one direction of the network rate limiter from its related flags.
+    #[cfg(feature = "net")]
+    fn build_rate_limiter(
+        &self,
+        direction: NetworkRateLimitDirection,
+    ) -> anyhow::Result<Option<CliRateLimiter>> {
+        let (bandwidth, bandwidth_burst, ops, ops_burst) = match direction {
+            NetworkRateLimitDirection::Egress => (
+                self.net_egress_bandwidth.as_deref(),
+                self.net_egress_bandwidth_burst.as_deref(),
+                self.net_egress_ops.as_deref(),
+                self.net_egress_ops_burst,
+            ),
+            NetworkRateLimitDirection::Ingress => (
+                self.net_ingress_bandwidth.as_deref(),
+                self.net_ingress_bandwidth_burst.as_deref(),
+                self.net_ingress_ops.as_deref(),
+                self.net_ingress_ops_burst,
+            ),
+        };
+
+        if bandwidth.is_none() && bandwidth_burst.is_none() && ops.is_none() && ops_burst.is_none()
+        {
+            return Ok(None);
+        }
+
+        let bandwidth = bandwidth
+            .map(|spec| {
+                parse_rate(&format!("--net-{direction}-bandwidth"), spec, |s| {
+                    ui::parse_size_bytes(s).map_err(anyhow::Error::msg)
+                })
+            })
+            .transpose()?;
+        let bandwidth_burst = bandwidth_burst
+            .map(|s| {
+                ui::parse_size_bytes(s)
+                    .map_err(|e| anyhow::anyhow!("--net-{direction}-bandwidth-burst: {e}"))
+            })
+            .transpose()?;
+        let ops = ops
+            .map(|spec| {
+                parse_rate(&format!("--net-{direction}-ops"), spec, |s| {
+                    s.parse::<u64>().map_err(anyhow::Error::from)
+                })
+            })
+            .transpose()?;
+
+        Ok(Some(CliRateLimiter {
+            bandwidth,
+            bandwidth_burst,
+            ops,
+            ops_burst,
+        }))
+    }
+
+    /// Builds the network policy selected by the related CLI flags.
+    #[cfg(feature = "net")]
+    fn build_network_policy(
+        &self,
+    ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
+        use microsandbox_network::policy::{Action, NetworkPolicy, NetworkProfile};
+
+        use crate::net_rule::parse_rule_list;
+
+        let no_flags = self.net.is_empty()
+            && self.net_rule.is_empty()
+            && !self.no_net
+            && self.net_default.is_none()
+            && self.net_default_egress.is_none()
+            && self.net_default_ingress.is_none();
+        if no_flags {
+            return Ok(None);
+        }
+
+        let mut rules = Vec::new();
+        for arg in &self.net_rule {
+            let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
+            rules.extend(parsed);
+        }
+
+        if !self.net.is_empty() {
+            let mut profiles = Vec::new();
+            let mut terminal = None;
+            for raw in self
+                .net
+                .iter()
+                .flat_map(|arg| arg.split(','))
+                .map(str::trim)
+            {
+                if raw.is_empty() {
+                    anyhow::bail!(
+                        "empty --net profile; expected public, private, host, all, or none"
+                    );
+                }
+                match raw {
+                    "public" => profiles.push(NetworkProfile::Public),
+                    "private" => profiles.push(NetworkProfile::Private),
+                    "host" => profiles.push(NetworkProfile::Host),
+                    "all" | "none" => {
+                        if let Some(previous) = terminal {
+                            if previous == raw {
+                                anyhow::bail!("--net `{raw}` may only be specified once");
+                            }
+                            anyhow::bail!(
+                                "--net terminal profiles `all` and `none` cannot be combined"
+                            );
+                        }
+                        terminal = Some(raw);
+                    }
+                    other => anyhow::bail!(
+                        "unknown --net profile {other:?}; expected public, private, host, all, or none"
+                    ),
+                }
+            }
+            if let Some(terminal) = terminal {
+                if !profiles.is_empty() {
+                    anyhow::bail!(
+                        "--net `{terminal}` cannot be combined with public, private, or host"
+                    );
+                }
+                let mut policy = match terminal {
+                    "all" => NetworkPolicy::allow_all(),
+                    "none" => NetworkPolicy::none(),
+                    _ => unreachable!("validated terminal profile"),
+                };
+                policy.rules = rules;
+                return Ok(Some(policy));
+            }
+
+            let mut policy = NetworkPolicy::from_profiles(profiles);
+            rules.append(&mut policy.rules);
+            policy.rules = rules;
+            return Ok(Some(policy));
+        }
+
+        let parse_action = |label: &str, raw: &str| -> anyhow::Result<Action> {
+            match raw {
+                "allow" => Ok(Action::Allow),
+                "deny" => Ok(Action::Deny),
+                other => {
+                    anyhow::bail!("unknown {label} value {other:?}; expected `allow` or `deny`")
+                }
+            }
+        };
+
+        let symmetric = if self.no_net {
+            Some(Action::Deny)
+        } else if let Some(raw) = self.net_default.as_deref() {
+            Some(parse_action("--net-default", raw)?)
+        } else {
+            None
+        };
+
+        let baseline = NetworkPolicy::default();
+        let default_egress = match (symmetric, self.net_default_egress.as_deref()) {
+            (_, Some(raw)) => parse_action("--net-default-egress", raw)?,
+            (Some(action), None) => action,
+            (None, None) => baseline.default_egress,
+        };
+        let default_ingress = match (symmetric, self.net_default_ingress.as_deref()) {
+            (_, Some(raw)) => parse_action("--net-default-ingress", raw)?,
+            (Some(action), None) => action,
+            (None, None) => baseline.default_ingress,
+        };
+
+        Ok(Some(NetworkPolicy {
+            default_egress,
+            default_ingress,
+            rules,
+        }))
+    }
+
     /// Returns true if any creation-time configuration flag was set.
     pub fn has_creation_flags(&self) -> bool {
         let base = self.cpus.is_some()
@@ -665,7 +1036,12 @@ impl SandboxOpts {
             || self.net_ingress_ops.is_some()
             || self.net_ingress_ops_burst.is_some()
             || self.max_connections.is_some()
+            || self.net_strict
             || self.trust_host_cas
+            || self.proxy.is_some()
+            || self.socks4_user_id.is_some()
+            || self.socks5_username.is_some()
+            || self.socks5_password_env.is_some()
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
             || !self.tls_bypass.is_empty()
@@ -676,7 +1052,7 @@ impl SandboxOpts {
             || !self.tls_upstream_ca_cert_for.is_empty()
             || !self.tls_no_verify_upstream_for.is_empty()
             || !self.secret.is_empty()
-            || self.on_secret_violation.is_some();
+            || self.secret_violation_action.is_some();
 
         #[cfg(not(feature = "net"))]
         let net = false;
@@ -952,12 +1328,7 @@ fn apply_sandbox_opts_inner(
     }
 
     // --- Scripts ---
-    for (name, content) in collect_scripts(
-        opts.shell.as_deref(),
-        &opts.script,
-        &opts.script_raw,
-        &opts.script_path,
-    )? {
+    for (name, content) in opts.collect_scripts()? {
         builder = builder.script(name, content);
     }
 
@@ -977,8 +1348,7 @@ fn apply_sandbox_opts_inner(
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
     }
-    if let Some(spec) = opts.root_disk.as_deref().or(opts.oci_upper_size.as_deref()) {
-        let spec = parse_root_disk_spec(spec)?;
+    if let Some(spec) = opts.root_disk_spec()? {
         builder = builder.root_disk_with(|d| spec.apply(d));
     }
     if let Some(ref security) = opts.security {
@@ -1536,6 +1906,7 @@ pub fn apply_explicit_file_mount(
         spec,
         CliMountOptionSupport {
             policies: true,
+            quota: true,
             owner: true,
             ..CliMountOptionSupport::default()
         },
@@ -1999,64 +2370,49 @@ fn apply_network_opts(
     // Secrets. `create` persists a host-side source reference, not the raw
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
-    let mut secret_specs: Vec<(String, Vec<String>)> = Vec::new();
+    let mut secret_specs: Vec<ParsedSecret> = Vec::new();
     for secret_str in &opts.secret {
-        let (env_var, hosts) = parse_secret(secret_str, "create")?;
+        let parsed = parse_secret(secret_str, "create")?;
         match secret_specs
             .iter_mut()
-            .find(|(existing, _)| *existing == env_var)
+            .find(|existing| existing.env_var == parsed.env_var)
         {
-            Some((_, existing_hosts)) => existing_hosts.extend(hosts),
-            None => secret_specs.push((env_var, hosts)),
+            Some(existing) => {
+                extend_unique(&mut existing.allowed_hosts, parsed.allowed_hosts);
+                extend_unique(&mut existing.passthrough_hosts, parsed.passthrough_hosts);
+                existing.substitute_headers &= parsed.substitute_headers;
+                existing.substitute_query |= parsed.substitute_query;
+                existing.substitute_body |= parsed.substitute_body;
+            }
+            None => secret_specs.push(parsed),
         }
     }
-    for (env_var, hosts) in secret_specs {
+    for secret in secret_specs {
+        let env_var = secret.env_var;
         let source = microsandbox::sandbox::SecretSource::Env {
             var: env_var.clone(),
         };
         builder = builder.secret(|mut s| {
-            s = s.env(&env_var).source(source);
-            for host in hosts {
+            s = s
+                .env(&env_var)
+                .source(source)
+                .substitute_in_headers(secret.substitute_headers)
+                .substitute_in_query(secret.substitute_query)
+                .substitute_in_body(secret.substitute_body);
+            for host in secret.allowed_hosts {
                 s = allow_secret_host(s, &host);
+            }
+            for host in secret.passthrough_hosts {
+                s = s.allow_passthrough_for(host);
             }
             s
         });
     }
 
-    // DNS, TLS, and other network configuration.
-    let has_network_config = opts.no_dns_rebind_protection
-        || !opts.dns_nameserver.is_empty()
-        || opts.dns_query_timeout_ms.is_some()
-        || !opts.net_rule.is_empty()
-        || !opts.net.is_empty()
-        || opts.no_net
-        || opts.net_default.is_some()
-        || opts.net_default_egress.is_some()
-        || opts.net_default_ingress.is_some()
-        || opts.net_ipv4_pool.is_some()
-        || opts.net_ipv6_pool.is_some()
-        || opts.net_egress_bandwidth.is_some()
-        || opts.net_egress_bandwidth_burst.is_some()
-        || opts.net_egress_ops.is_some()
-        || opts.net_egress_ops_burst.is_some()
-        || opts.net_ingress_bandwidth.is_some()
-        || opts.net_ingress_bandwidth_burst.is_some()
-        || opts.net_ingress_ops.is_some()
-        || opts.net_ingress_ops_burst.is_some()
-        || opts.max_connections.is_some()
-        || opts.trust_host_cas
-        || opts.tls_intercept
-        || !opts.tls_intercept_port.is_empty()
-        || !opts.tls_bypass.is_empty()
-        || opts.no_block_quic
-        || opts.tls_intercept_ca_cert.is_some()
-        || opts.tls_intercept_ca_key.is_some()
-        || !opts.tls_upstream_ca_cert.is_empty()
-        || !opts.tls_upstream_ca_cert_for.is_empty()
-        || !opts.tls_no_verify_upstream_for.is_empty()
-        || opts.on_secret_violation.is_some();
+    let proxy = opts.build_outbound_proxy()?;
 
-    if has_network_config {
+    // DNS, TLS, and other network configuration.
+    if opts.has_network_config() {
         let no_dns_rebind = opts.no_dns_rebind_protection;
         let dns_nameservers = opts
             .dns_nameserver
@@ -2064,22 +2420,15 @@ fn apply_network_opts(
             .map(|s| s.parse::<Nameserver>().map_err(anyhow::Error::from))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let dns_query_timeout_ms = opts.dns_query_timeout_ms;
-        let network_policy = build_network_policy(
-            &opts.net,
-            &opts.net_rule,
-            opts.no_net,
-            opts.net_default.as_deref(),
-            opts.net_default_egress.as_deref(),
-            opts.net_default_ingress.as_deref(),
-        )?;
-        let replaces_configured_base = !opts.net.is_empty()
+        let network_policy = opts.build_network_policy()?;
+        let replaces_configured_policy = !opts.net.is_empty()
             || opts.no_net
             || opts.net_default.is_some()
             || opts.net_default_egress.is_some()
             || opts.net_default_ingress.is_some();
-        if replaces_configured_base {
+        if replaces_configured_policy {
             if let Some(policy) = network_policy {
-                builder = builder.replace_network_policy_preserving_config_rules(policy);
+                builder = builder.network(move |network| network.policy(policy));
             }
         } else if !opts.net_rule.is_empty() {
             let mut rules = Vec::new();
@@ -2106,6 +2455,7 @@ fn apply_network_opts(
             })
             .transpose()?;
         let trust_host_cas = opts.trust_host_cas;
+        let net_strict = opts.net_strict;
         let tls_intercept = opts.tls_intercept;
         let tls_ports = opts.tls_intercept_port.clone();
         let tls_bypass = opts.tls_bypass.clone();
@@ -2119,21 +2469,9 @@ fn apply_network_opts(
             .map(|spec| parse_scoped_upstream_ca_cert(spec))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let no_verify_upstream_for = opts.tls_no_verify_upstream_for.clone();
-        let violation_action = parse_violation_action(&opts.on_secret_violation)?;
-        let egress_rate_limiter = parse_rate_limiter_flags(
-            NetworkRateLimitDirection::Egress,
-            opts.net_egress_bandwidth.as_deref(),
-            opts.net_egress_bandwidth_burst.as_deref(),
-            opts.net_egress_ops.as_deref(),
-            opts.net_egress_ops_burst,
-        )?;
-        let ingress_rate_limiter = parse_rate_limiter_flags(
-            NetworkRateLimitDirection::Ingress,
-            opts.net_ingress_bandwidth.as_deref(),
-            opts.net_ingress_bandwidth_burst.as_deref(),
-            opts.net_ingress_ops.as_deref(),
-            opts.net_ingress_ops_burst,
-        )?;
+        let violation_action = parse_violation_action(&opts.secret_violation_action)?;
+        let egress_rate_limiter = opts.build_rate_limiter(NetworkRateLimitDirection::Egress)?;
+        let ingress_rate_limiter = opts.build_rate_limiter(NetworkRateLimitDirection::Ingress)?;
 
         builder = builder.network(move |mut n| {
             if no_dns_rebind || !dns_nameservers.is_empty() || dns_query_timeout_ms.is_some() {
@@ -2162,6 +2500,9 @@ fn apply_network_opts(
             if trust_host_cas {
                 n = n.trust_host_cas(true);
             }
+            if net_strict {
+                n = n.strict(true);
+            }
             if egress_rate_limiter.is_some() || ingress_rate_limiter.is_some() {
                 n = n.rate_limiter(|mut r| {
                     if let Some(limiter) = &egress_rate_limiter {
@@ -2174,9 +2515,7 @@ fn apply_network_opts(
                 });
             }
             if let Some(action) = violation_action {
-                n = n.on_secret_violation(|_| {
-                    microsandbox_network::builder::ViolationActionBuilder::from_action(action)
-                });
+                n = n.secret_violation_action(action);
             }
 
             // TLS configuration.
@@ -2230,6 +2569,10 @@ fn apply_network_opts(
 
             n
         });
+    }
+
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(|_| proxy);
     }
 
     Ok(builder)
@@ -2306,49 +2649,6 @@ impl CliRateLimiter {
     }
 }
 
-/// Parse one direction's rate limit flags. Returns `None` when none of
-/// the four flags is set.
-#[cfg(feature = "net")]
-fn parse_rate_limiter_flags(
-    direction: NetworkRateLimitDirection,
-    bandwidth: Option<&str>,
-    bandwidth_burst: Option<&str>,
-    ops: Option<&str>,
-    ops_burst: Option<u64>,
-) -> anyhow::Result<Option<CliRateLimiter>> {
-    if bandwidth.is_none() && bandwidth_burst.is_none() && ops.is_none() && ops_burst.is_none() {
-        return Ok(None);
-    }
-
-    let bandwidth = bandwidth
-        .map(|spec| {
-            parse_rate(&format!("--net-{direction}-bandwidth"), spec, |s| {
-                ui::parse_size_bytes(s).map_err(anyhow::Error::msg)
-            })
-        })
-        .transpose()?;
-    let bandwidth_burst = bandwidth_burst
-        .map(|s| {
-            ui::parse_size_bytes(s)
-                .map_err(|e| anyhow::anyhow!("--net-{direction}-bandwidth-burst: {e}"))
-        })
-        .transpose()?;
-    let ops = ops
-        .map(|spec| {
-            parse_rate(&format!("--net-{direction}-ops"), spec, |s| {
-                s.parse::<u64>().map_err(anyhow::Error::from)
-            })
-        })
-        .transpose()?;
-
-    Ok(Some(CliRateLimiter {
-        bandwidth,
-        bandwidth_burst,
-        ops,
-        ops_burst,
-    }))
-}
-
 /// Parse a `VALUE/DURATION` rate spec like `1M/1s` or `1000/1s`. A bare
 /// value means per second.
 #[cfg(feature = "net")]
@@ -2366,136 +2666,6 @@ fn parse_rate(
     };
     let value = parse_value(value.trim()).map_err(|e| anyhow::anyhow!("{flag}: {e}"))?;
     Ok((value, duration))
-}
-
-/// Assemble a [`NetworkPolicy`] from `--net`, `--net-rule`,
-/// `--net-default*`, and `--no-net`. Returns `None` when no flag is set.
-/// Multiple profile and rule invocations concatenate in argv order.
-///
-/// `--no-net` desugars to `--net-default deny`; clap rejects combining
-/// it with the explicit defaults, so the four default-source params are
-/// mutually exclusive on the caller side.
-#[cfg(feature = "net")]
-pub(crate) fn build_network_policy(
-    profile_args: &[String],
-    rule_args: &[String],
-    no_net: bool,
-    default_both: Option<&str>,
-    default_egress: Option<&str>,
-    default_ingress: Option<&str>,
-) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
-    use microsandbox_network::policy::{Action, NetworkPolicy, NetworkProfile};
-
-    use crate::net_rule::parse_rule_list;
-
-    let no_flags = profile_args.is_empty()
-        && rule_args.is_empty()
-        && !no_net
-        && default_both.is_none()
-        && default_egress.is_none()
-        && default_ingress.is_none();
-    if no_flags {
-        return Ok(None);
-    }
-
-    let mut rules = Vec::new();
-    for arg in rule_args {
-        let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
-        rules.extend(parsed);
-    }
-
-    if !profile_args.is_empty() {
-        let mut profiles = Vec::new();
-        let mut terminal = None;
-        for raw in profile_args
-            .iter()
-            .flat_map(|arg| arg.split(','))
-            .map(str::trim)
-        {
-            if raw.is_empty() {
-                anyhow::bail!("empty --net profile; expected public, private, host, all, or none");
-            }
-            match raw {
-                "public" => profiles.push(NetworkProfile::Public),
-                "private" => profiles.push(NetworkProfile::Private),
-                "host" => profiles.push(NetworkProfile::Host),
-                "all" | "none" => {
-                    if let Some(previous) = terminal {
-                        if previous == raw {
-                            anyhow::bail!("--net `{raw}` may only be specified once");
-                        }
-                        anyhow::bail!(
-                            "--net terminal profiles `all` and `none` cannot be combined"
-                        );
-                    }
-                    terminal = Some(raw);
-                }
-                other => anyhow::bail!(
-                    "unknown --net profile {other:?}; expected public, private, host, all, or none"
-                ),
-            }
-        }
-        if let Some(terminal) = terminal {
-            if !profiles.is_empty() {
-                anyhow::bail!(
-                    "--net `{terminal}` cannot be combined with public, private, or host"
-                );
-            }
-            let mut policy = match terminal {
-                "all" => NetworkPolicy::allow_all(),
-                "none" => NetworkPolicy::none(),
-                _ => unreachable!("validated terminal profile"),
-            };
-            policy.rules = rules;
-            return Ok(Some(policy));
-        }
-
-        let mut policy = NetworkPolicy::from_profiles(profiles);
-        rules.append(&mut policy.rules);
-        policy.rules = rules;
-        return Ok(Some(policy));
-    }
-
-    let parse_action = |label: &str, raw: &str| -> anyhow::Result<Action> {
-        match raw {
-            "allow" => Ok(Action::Allow),
-            "deny" => Ok(Action::Deny),
-            other => anyhow::bail!("unknown {label} value {other:?}; expected `allow` or `deny`"),
-        }
-    };
-
-    // `--no-net` and `--net-default` are siblings: both set egress and
-    // ingress symmetrically. clap enforces they're mutex with each
-    // other and with `--net-default-{egress,ingress}`, so at most one
-    // source resolves here.
-    let symmetric = if no_net {
-        Some(Action::Deny)
-    } else if let Some(raw) = default_both {
-        Some(parse_action("--net-default", raw)?)
-    } else {
-        None
-    };
-
-    // When the user sets no defaults explicitly, fall through to
-    // the default public-profile policy's direction defaults so low-level
-    // rule-only behavior remains deny-egress / allow-ingress.
-    let baseline = NetworkPolicy::default();
-    let default_egress = match (symmetric, default_egress) {
-        (_, Some(raw)) => parse_action("--net-default-egress", raw)?,
-        (Some(action), None) => action,
-        (None, None) => baseline.default_egress,
-    };
-    let default_ingress = match (symmetric, default_ingress) {
-        (_, Some(raw)) => parse_action("--net-default-ingress", raw)?,
-        (Some(action), None) => action,
-        (None, None) => baseline.default_ingress,
-    };
-
-    Ok(Some(NetworkPolicy {
-        default_egress,
-        default_ingress,
-        rules,
-    }))
 }
 
 /// Parse a port spec:
@@ -2558,8 +2728,7 @@ pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr
     Ok((bind, host, guest, udp))
 }
 
-/// Parse a `--secret ENV@HOST[,HOST...]` spec into `(env_var, hosts)` for
-/// `command` (`create` or `modify`).
+/// Parse `--secret ENV[:OPTIONS]@HOST[,HOST...]` for `command`.
 ///
 /// The value is NOT read here: the CLI records a host-side source reference
 /// (`{kind: env, var: ENV}`) that is resolved from the host environment when
@@ -2569,33 +2738,111 @@ pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr
 /// The inline `ENV=VALUE@HOST` form is rejected loudly: the shell would leak
 /// the value regardless, so the value path is SDK-only. Users are pointed at
 /// the `ENV@HOST[,HOST...]` env-var form instead.
-pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, Vec<String>)> {
-    if let Some(eq_pos) = spec.find('=') {
-        let env_var = &spec[..eq_pos];
+pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSecret> {
+    let at_pos = spec
+        .rfind('@')
+        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV[:OPTIONS]@HOST[,HOST...]"))?;
+    let policy = &spec[..at_pos];
+    let (env_var, options) = policy
+        .split_once(':')
+        .map_or((policy, None), |(env, options)| (env, Some(options)));
+
+    if let Some((name, _)) = env_var.split_once('=') {
         anyhow::bail!(
-            "inline secret values (`{env_var}=VALUE@HOST`) are not supported by `{command}`: \
+            "inline secret values (`{name}=VALUE@HOST`) are not supported by `{command}`: \
              the value would be stored in the sandbox config at rest. Export the value as a \
-             host environment variable and reference it with `{env_var}@HOST` instead, which \
+             host environment variable and reference it with `{name}@HOST` instead, which \
              is resolved from the environment at start time."
         );
     }
 
-    let at_pos = spec
-        .rfind('@')
-        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV@HOST[,HOST...]"))?;
-    let env_var = spec[..at_pos].to_string();
-    let hosts: Vec<String> = spec[at_pos + 1..]
+    let allowed_hosts: Vec<String> = spec[at_pos + 1..]
         .split(',')
         .map(str::trim)
         .filter(|host| !host.is_empty())
         .map(ToString::to_string)
         .collect();
 
-    if env_var.is_empty() || hosts.is_empty() {
-        anyhow::bail!("secret must be in format ENV@HOST[,HOST...] (all parts required)");
+    if env_var.is_empty() || allowed_hosts.is_empty() {
+        anyhow::bail!("secret must be in format ENV[:OPTIONS]@HOST[,HOST...] (all parts required)");
     }
 
-    Ok((env_var, hosts))
+    let mut parsed = ParsedSecret {
+        env_var: env_var.to_string(),
+        allowed_hosts,
+        passthrough_hosts: Vec::new(),
+        substitute_headers: true,
+        substitute_query: false,
+        substitute_body: false,
+    };
+    if let Some(options) = options {
+        for option in split_secret_options(options)? {
+            match option.as_str() {
+                "no-headers" => parsed.substitute_headers = false,
+                "query" => parsed.substitute_query = true,
+                "body" => parsed.substitute_body = true,
+                value if value.starts_with("passthrough=") => {
+                    let hosts = value.trim_start_matches("passthrough=");
+                    let hosts = hosts
+                        .strip_prefix('[')
+                        .and_then(|value| value.strip_suffix(']'))
+                        .unwrap_or(hosts);
+                    let parsed_hosts = hosts
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|host| !host.is_empty())
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>();
+                    if parsed_hosts.is_empty() {
+                        anyhow::bail!("secret passthrough requires at least one host");
+                    }
+                    extend_unique(&mut parsed.passthrough_hosts, parsed_hosts);
+                }
+                other => anyhow::bail!(
+                    "invalid secret option: {other} (expected: no-headers, query, body, passthrough=HOST, or passthrough=[HOST,...])"
+                ),
+            }
+        }
+    }
+    if !parsed.substitute_headers && !parsed.substitute_query && !parsed.substitute_body {
+        anyhow::bail!("secret must enable at least one substitution location");
+    }
+
+    Ok(parsed)
+}
+
+/// Split comma-separated secret options while retaining bracketed host lists.
+fn split_secret_options(options: &str) -> anyhow::Result<Vec<String>> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    let mut bracketed = false;
+    for (index, ch) in options.char_indices() {
+        match ch {
+            '[' if !bracketed => bracketed = true,
+            ']' if bracketed => bracketed = false,
+            ',' if !bracketed => {
+                result.push(options[start..index].trim().to_string());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if bracketed {
+        anyhow::bail!("secret passthrough host list is missing a closing `]`");
+    }
+    result.push(options[start..].trim().to_string());
+    if result.iter().any(String::is_empty) {
+        anyhow::bail!("secret options must not be empty");
+    }
+    Ok(result)
+}
+
+fn extend_unique(target: &mut Vec<String>, values: impl IntoIterator<Item = String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
 }
 
 #[cfg(feature = "net")]
@@ -2604,10 +2851,8 @@ fn allow_secret_host(
     host: &str,
 ) -> microsandbox::sandbox::SecretBuilder {
     match microsandbox_network::secrets::config::HostPattern::parse(host) {
-        microsandbox_network::secrets::config::HostPattern::Exact(host) => builder.allow_host(host),
-        microsandbox_network::secrets::config::HostPattern::Wildcard(host) => {
-            builder.allow_host_pattern(host)
-        }
+        microsandbox_network::secrets::config::HostPattern::Exact(host)
+        | microsandbox_network::secrets::config::HostPattern::Wildcard(host) => builder.allow(host),
         microsandbox_network::secrets::config::HostPattern::Any => {
             builder.allow_any_host_dangerous(true)
         }
@@ -2629,16 +2874,15 @@ pub(crate) fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(Strin
 #[cfg(feature = "net")]
 pub(crate) fn parse_violation_action(
     s: &Option<String>,
-) -> anyhow::Result<Option<microsandbox_network::secrets::config::ViolationAction>> {
-    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
+) -> anyhow::Result<Option<microsandbox_network::secrets::config::SecretViolationAction>> {
+    use microsandbox_network::secrets::config::SecretViolationAction;
     match s.as_deref() {
         None => Ok(None),
-        Some("block") => Ok(Some(ViolationAction::Block)),
-        Some("block-and-log") => Ok(Some(ViolationAction::BlockAndLog)),
-        Some("block-and-terminate") => Ok(Some(ViolationAction::BlockAndTerminate)),
-        Some("passthrough") => Ok(Some(ViolationAction::Passthrough(vec![HostPattern::Any]))),
+        Some("block") => Ok(Some(SecretViolationAction::Block)),
+        Some("block-and-log") => Ok(Some(SecretViolationAction::BlockAndLog)),
+        Some("block-and-terminate") => Ok(Some(SecretViolationAction::BlockAndTerminate)),
         Some(other) => anyhow::bail!(
-            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate, passthrough)"
+            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate)"
         ),
     }
 }
@@ -2710,47 +2954,6 @@ fn parse_deployment_profile(value: &str) -> anyhow::Result<DeploymentProfile> {
         "multi-tenant" | "multi_tenant" => Ok(DeploymentProfile::MultiTenant),
         other => anyhow::bail!("invalid deployment profile {other:?}"),
     }
-}
-
-/// Resolve `--script` / `--script-raw` / `--script-path` specs into a
-/// deduped list of `(name, content)` pairs preserving argv order:
-/// inline shell snippets first, then raw inline, then path-backed.
-/// Duplicate names across any source are rejected. `shell` is used to
-/// generate the shebang for `--script` entries only.
-fn collect_scripts(
-    shell: Option<&str>,
-    scripts: &[String],
-    raw_scripts: &[String],
-    paths: &[String],
-) -> anyhow::Result<Vec<(String, String)>> {
-    use std::collections::HashSet;
-
-    let mut out = Vec::with_capacity(scripts.len() + raw_scripts.len() + paths.len());
-    let mut seen: HashSet<String> = HashSet::new();
-
-    for spec in scripts {
-        let (name, body) = parse_script_spec(spec, "script")?;
-        if !seen.insert(name.clone()) {
-            anyhow::bail!("script name '{name}' specified more than once");
-        }
-        let decoded = decode_script_escapes(&body);
-        out.push((name, wrap_shell_script(shell, &decoded)));
-    }
-    for spec in raw_scripts {
-        let (name, body) = parse_script_spec(spec, "script-raw")?;
-        if !seen.insert(name.clone()) {
-            anyhow::bail!("script name '{name}' specified more than once");
-        }
-        out.push((name, body));
-    }
-    for spec in paths {
-        let (name, content) = parse_script_path(spec)?;
-        if !seen.insert(name.clone()) {
-            anyhow::bail!("script name '{name}' specified more than once");
-        }
-        out.push((name, content));
-    }
-    Ok(out)
 }
 
 /// Parse a `NAME=BODY` spec for `--script` / `--script-raw`. Splits on
@@ -3080,16 +3283,18 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn parse_rate_limiter_flags_maps_all_four_flags() {
-        let limiter = parse_rate_limiter_flags(
-            NetworkRateLimitDirection::Egress,
-            Some("1M/1s"),
-            Some("512K"),
-            Some("1000/1s"),
-            Some(500),
-        )
-        .unwrap()
-        .expect("limiter should be present");
+    fn build_rate_limiter_maps_all_four_flags() {
+        let opts = SandboxOpts {
+            net_egress_bandwidth: Some("1M/1s".into()),
+            net_egress_bandwidth_burst: Some("512K".into()),
+            net_egress_ops: Some("1000/1s".into()),
+            net_egress_ops_burst: Some(500),
+            ..Default::default()
+        };
+        let limiter = opts
+            .build_rate_limiter(NetworkRateLimitDirection::Egress)
+            .unwrap()
+            .expect("limiter should be present");
 
         assert_eq!(
             limiter.bandwidth,
@@ -3100,7 +3305,8 @@ mod tests {
         assert_eq!(limiter.ops_burst, Some(500));
 
         assert!(
-            parse_rate_limiter_flags(NetworkRateLimitDirection::Ingress, None, None, None, None,)
+            SandboxOpts::default()
+                .build_rate_limiter(NetworkRateLimitDirection::Ingress)
                 .unwrap()
                 .is_none()
         );
@@ -3155,23 +3361,43 @@ mod tests {
     fn parse_secret_returns_env_and_host_reference() {
         // The value is NOT read here: `create` persists a source reference and
         // the spawn resolver reads the host env at start time.
-        let (env_var, hosts) =
-            parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com", "create").unwrap();
+        let secret = parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com", "create").unwrap();
 
-        assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
-        assert_eq!(hosts, vec!["api.example.com"]);
+        assert_eq!(secret.env_var, "MSB_PARSE_SECRET_TOKEN");
+        assert_eq!(secret.allowed_hosts, vec!["api.example.com"]);
     }
 
     #[test]
     fn parse_secret_accepts_multiple_hosts() {
-        let (env_var, hosts) = parse_secret(
+        let secret = parse_secret(
             "MSB_PARSE_SECRET_TOKEN@api.example.com, *.example.org, *",
             "create",
         )
         .unwrap();
 
-        assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
-        assert_eq!(hosts, vec!["api.example.com", "*.example.org", "*"]);
+        assert_eq!(secret.env_var, "MSB_PARSE_SECRET_TOKEN");
+        assert_eq!(
+            secret.allowed_hosts,
+            vec!["api.example.com", "*.example.org", "*"]
+        );
+    }
+
+    #[test]
+    fn parse_secret_supports_substitution_and_passthrough_options() {
+        let secret = parse_secret(
+            "GH_TOKEN:no-headers,query,body,passthrough=api.anthropic.com,passthrough=[example.com,*.example.org]@github.com,api.github.com",
+            "create",
+        )
+        .unwrap();
+
+        assert!(!secret.substitute_headers);
+        assert!(secret.substitute_query);
+        assert!(secret.substitute_body);
+        assert_eq!(
+            secret.passthrough_hosts,
+            vec!["api.anthropic.com", "example.com", "*.example.org"]
+        );
+        assert_eq!(secret.allowed_hosts, vec!["github.com", "api.github.com"]);
     }
 
     #[test]
@@ -3239,6 +3465,93 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn outbound_proxy_builds_socks4_user_id() {
+        let opts = SandboxOpts {
+            proxy: Some("socks4://127.0.0.1:1080".into()),
+            socks4_user_id: Some("sandbox".into()),
+            ..Default::default()
+        };
+
+        let proxy = opts.build_outbound_proxy().unwrap().unwrap();
+        assert_eq!(
+            proxy,
+            OutboundProxy::Socks4 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                user_id: Some("sandbox".into()),
+            }
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn outbound_proxy_builds_socks5_environment_credentials() {
+        let opts = SandboxOpts {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            socks5_username: Some("sandbox".into()),
+            socks5_password_env: Some("SOCKS5_PASSWORD".into()),
+            ..Default::default()
+        };
+
+        let proxy = opts.build_outbound_proxy().unwrap().unwrap();
+        let json = serde_json::to_value(proxy).unwrap();
+        assert_eq!(json["protocol"], "socks5");
+        assert_eq!(json["credentials"]["username"], "sandbox");
+        assert_eq!(json["credentials"]["password"]["kind"], "env");
+        assert_eq!(json["credentials"]["password"]["var"], "SOCKS5_PASSWORD");
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn outbound_proxy_rejects_protocol_specific_auth_on_the_wrong_protocol() {
+        let socks4 = SandboxOpts {
+            proxy: Some("socks4://127.0.0.1:1080".into()),
+            socks5_username: Some("sandbox".into()),
+            socks5_password_env: Some("SOCKS5_PASSWORD".into()),
+            ..Default::default()
+        };
+        assert!(
+            socks4
+                .build_outbound_proxy()
+                .unwrap_err()
+                .to_string()
+                .contains("require a socks5:// proxy")
+        );
+
+        let socks5 = SandboxOpts {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            socks4_user_id: Some("sandbox".into()),
+            ..Default::default()
+        };
+        assert!(
+            socks5
+                .build_outbound_proxy()
+                .unwrap_err()
+                .to_string()
+                .contains("requires a socks4:// proxy")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn outbound_proxy_rejects_incomplete_socks5_credentials() {
+        for opts in [
+            SandboxOpts {
+                proxy: Some("socks5://127.0.0.1:1080".into()),
+                socks5_username: Some("sandbox".into()),
+                ..Default::default()
+            },
+            SandboxOpts {
+                proxy: Some("socks5://127.0.0.1:1080".into()),
+                socks5_password_env: Some("SOCKS5_PASSWORD".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(opts.build_outbound_proxy().is_err());
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn parse_scoped_upstream_ca_cert_accepts_pattern_and_path() {
         let (pattern, path) =
             parse_scoped_upstream_ca_cert("*.internal=/tmp/internal-ca.pem").unwrap();
@@ -3259,15 +3572,8 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn parse_violation_action_accepts_passthrough() {
-        let action = parse_violation_action(&Some("passthrough".to_string()))
-            .expect("passthrough should parse")
-            .expect("action should be present");
-
-        assert!(matches!(
-            action,
-            microsandbox_network::secrets::config::ViolationAction::Passthrough(_)
-        ));
+    fn parse_violation_action_rejects_passthrough() {
+        assert!(parse_violation_action(&Some("passthrough".to_string())).is_err());
     }
 
     #[test]
@@ -3742,19 +4048,21 @@ mod tests {
     #[tokio::test]
     async fn test_apply_explicit_file_mount() {
         let file = write_temp("fixture");
-        let spec = format!("{}:/fixture:ro,noexec", file.display());
+        let spec = format!("{}:/fixture:ro,noexec,quota=32M", file.display());
         let mount = build_explicit(&spec, apply_explicit_file_mount).await;
         match mount {
             VolumeMount::Bind {
                 host,
                 guest,
                 options,
+                quota_mib,
                 ..
             } => {
                 assert_eq!(host, file);
                 assert_eq!(guest, "/fixture");
                 assert!(options.readonly);
                 assert!(options.noexec);
+                assert_eq!(quota_mib, Some(32));
             }
             other => panic!("expected Bind, got {other:?}"),
         }
@@ -4355,6 +4663,21 @@ mod tests {
 
     // --- collect_scripts (duplicate logic) ---
 
+    fn script_opts(
+        shell: Option<&str>,
+        scripts: &[String],
+        raw_scripts: &[String],
+        paths: &[String],
+    ) -> SandboxOpts {
+        SandboxOpts {
+            shell: shell.map(str::to_owned),
+            script: scripts.to_vec(),
+            script_raw: raw_scripts.to_vec(),
+            script_path: paths.to_vec(),
+            ..Default::default()
+        }
+    }
+
     // --- parse_port_mapping ---
 
     #[cfg(feature = "net")]
@@ -4434,7 +4757,9 @@ mod tests {
     #[test]
     fn collect_script_wraps_with_default_shebang() {
         let scripts = vec!["start=echo hello".to_string()];
-        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        let out = script_opts(None, &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert_eq!(
             out,
             vec![("start".to_string(), "#!/bin/sh\necho hello\n".to_string())]
@@ -4444,7 +4769,9 @@ mod tests {
     #[test]
     fn collect_script_decodes_newlines_in_body() {
         let scripts = vec![r#"start=echo hello\npython -c "print(123)""#.to_string()];
-        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        let out = script_opts(None, &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert_eq!(
             out[0].1,
             "#!/bin/sh\necho hello\npython -c \"print(123)\"\n"
@@ -4454,28 +4781,32 @@ mod tests {
     #[test]
     fn collect_script_uses_absolute_shell_path() {
         let scripts = vec!["start=echo hi".to_string()];
-        let out = collect_scripts(Some("/bin/bash"), &scripts, &[], &[]).unwrap();
+        let out = script_opts(Some("/bin/bash"), &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert_eq!(out[0].1, "#!/bin/bash\necho hi\n");
     }
 
     #[test]
     fn collect_script_uses_env_for_bare_shell() {
         let scripts = vec!["start=echo $BASH_VERSION".to_string()];
-        let out = collect_scripts(Some("bash"), &scripts, &[], &[]).unwrap();
+        let out = script_opts(Some("bash"), &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert_eq!(out[0].1, "#!/usr/bin/env bash\necho $BASH_VERSION\n");
     }
 
     #[test]
     fn collect_script_raw_is_exact() {
         let raw = vec!["start=echo hello".to_string()];
-        let out = collect_scripts(None, &[], &raw, &[]).unwrap();
+        let out = script_opts(None, &[], &raw, &[]).collect_scripts().unwrap();
         assert_eq!(out, vec![("start".to_string(), "echo hello".to_string())]);
     }
 
     #[test]
     fn collect_script_raw_preserves_escapes_literally() {
         let raw = vec![r"start=echo hello\nworld".to_string()];
-        let out = collect_scripts(None, &[], &raw, &[]).unwrap();
+        let out = script_opts(None, &[], &raw, &[]).collect_scripts().unwrap();
         assert_eq!(out[0].1, r"echo hello\nworld");
     }
 
@@ -4483,7 +4814,9 @@ mod tests {
     fn collect_script_path_is_exact_file_contents() {
         let p = write_temp("#!/bin/sh\necho from-file\n");
         let paths = vec![format!("start:{}", p.display())];
-        let out = collect_scripts(None, &[], &[], &paths).unwrap();
+        let out = script_opts(None, &[], &[], &paths)
+            .collect_scripts()
+            .unwrap();
         assert_eq!(out[0].1, "#!/bin/sh\necho from-file\n");
         let _ = std::fs::remove_file(&p);
     }
@@ -4491,14 +4824,18 @@ mod tests {
     #[test]
     fn collect_script_preserves_unknown_escapes() {
         let scripts = vec![r"re=grep '\d\+' file".to_string()];
-        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        let out = script_opts(None, &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert_eq!(out[0].1, "#!/bin/sh\ngrep '\\d\\+' file\n");
     }
 
     #[test]
     fn collect_script_always_ends_with_newline() {
         let scripts = vec!["start=echo hello".to_string()];
-        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        let out = script_opts(None, &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert!(out[0].1.ends_with('\n'));
     }
 
@@ -4508,7 +4845,9 @@ mod tests {
         let scripts = vec!["a=echo a".to_string()];
         let raw = vec!["b=echo b".to_string()];
         let paths = vec![format!("c:{}", p.display())];
-        let out = collect_scripts(None, &scripts, &raw, &paths).unwrap();
+        let out = script_opts(None, &scripts, &raw, &paths)
+            .collect_scripts()
+            .unwrap();
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].0, "a");
         assert_eq!(out[1], ("b".to_string(), "echo b".to_string()));
@@ -4519,7 +4858,9 @@ mod tests {
     #[test]
     fn collect_rejects_duplicate_within_script() {
         let scripts = vec!["foo=echo a".to_string(), "foo=echo b".to_string()];
-        let err = collect_scripts(None, &scripts, &[], &[]).unwrap_err();
+        let err = script_opts(None, &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "got: {err}"
@@ -4533,7 +4874,9 @@ mod tests {
             format!("foo:{}", p.display()),
             format!("foo:{}", p.display()),
         ];
-        let err = collect_scripts(None, &[], &[], &paths).unwrap_err();
+        let err = script_opts(None, &[], &[], &paths)
+            .collect_scripts()
+            .unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "got: {err}"
@@ -4548,19 +4891,25 @@ mod tests {
         let raw = vec!["foo=echo b".to_string()];
         let paths = vec![format!("foo:{}", p.display())];
 
-        let err = collect_scripts(None, &scripts, &raw, &[]).unwrap_err();
+        let err = script_opts(None, &scripts, &raw, &[])
+            .collect_scripts()
+            .unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "script vs script-raw: {err}"
         );
 
-        let err = collect_scripts(None, &scripts, &[], &paths).unwrap_err();
+        let err = script_opts(None, &scripts, &[], &paths)
+            .collect_scripts()
+            .unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "script vs script-path: {err}"
         );
 
-        let err = collect_scripts(None, &[], &raw, &paths).unwrap_err();
+        let err = script_opts(None, &[], &raw, &paths)
+            .collect_scripts()
+            .unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "script-raw vs script-path: {err}"
@@ -4571,7 +4920,7 @@ mod tests {
 
     #[test]
     fn collect_empty_inputs_ok() {
-        let out = collect_scripts(None, &[], &[], &[]).unwrap();
+        let out = script_opts(None, &[], &[], &[]).collect_scripts().unwrap();
         assert!(out.is_empty());
     }
 
@@ -4581,16 +4930,39 @@ mod tests {
     use microsandbox_network::policy::Action;
 
     #[cfg(feature = "net")]
+    fn network_policy_opts(
+        profiles: &[String],
+        rules: &[String],
+        no_net: bool,
+        default: Option<&str>,
+        default_egress: Option<&str>,
+        default_ingress: Option<&str>,
+    ) -> SandboxOpts {
+        SandboxOpts {
+            net: profiles.to_vec(),
+            net_rule: rules.to_vec(),
+            no_net,
+            net_default: default.map(str::to_owned),
+            net_default_egress: default_egress.map(str::to_owned),
+            net_default_ingress: default_ingress.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(feature = "net")]
     #[test]
     fn build_policy_no_flags_returns_none() {
-        let p = build_network_policy(&[], &[], false, None, None, None).unwrap();
+        let p = network_policy_opts(&[], &[], false, None, None, None)
+            .build_network_policy()
+            .unwrap();
         assert!(p.is_none());
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_deny_sets_both_directions() {
-        let p = build_network_policy(&[], &[], false, Some("deny"), None, None)
+        let p = network_policy_opts(&[], &[], false, Some("deny"), None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -4601,7 +4973,8 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_allow_sets_both_directions() {
-        let p = build_network_policy(&[], &[], false, Some("allow"), None, None)
+        let p = network_policy_opts(&[], &[], false, Some("allow"), None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Allow);
@@ -4611,7 +4984,8 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_no_net_desugars_to_deny_both() {
-        let p = build_network_policy(&[], &[], true, None, None, None)
+        let p = network_policy_opts(&[], &[], true, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -4622,7 +4996,8 @@ mod tests {
     #[test]
     fn build_policy_no_net_with_allow_rule_yields_allowlist() {
         let rules = vec!["allow@example.com".to_string()];
-        let p = build_network_policy(&[], &rules, true, None, None, None)
+        let p = network_policy_opts(&[], &rules, true, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -4634,7 +5009,9 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_rejects_unknown_action() {
-        let err = build_network_policy(&[], &[], false, Some("maybe"), None, None).unwrap_err();
+        let err = network_policy_opts(&[], &[], false, Some("maybe"), None, None)
+            .build_network_policy()
+            .unwrap_err();
         assert!(
             err.to_string().contains("--net-default"),
             "expected --net-default in error, got: {err}"
@@ -4649,7 +5026,8 @@ mod tests {
         // "rules alone keep the default direction actions" path now that the
         // --deny-domain* flip-to-allow exception is gone.
         let rules = vec!["allow@example.com".to_string()];
-        let p = build_network_policy(&[], &rules, false, None, None, None)
+        let p = network_policy_opts(&[], &rules, false, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         let baseline = microsandbox_network::policy::NetworkPolicy::default();
@@ -4663,7 +5041,8 @@ mod tests {
         use microsandbox_network::policy::{Destination, DestinationGroup, Protocol};
 
         let profiles = vec!["host,private".to_string(), "public,private".to_string()];
-        let p = build_network_policy(&profiles, &[], false, None, None, None)
+        let p = network_policy_opts(&profiles, &[], false, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.rules.len(), 4);
@@ -4682,7 +5061,8 @@ mod tests {
     fn build_policy_places_explicit_rules_before_profile_rules() {
         let profiles = vec!["public".to_string()];
         let rules = vec!["deny@dns".to_string()];
-        let p = build_network_policy(&profiles, &rules, false, None, None, None)
+        let p = network_policy_opts(&profiles, &rules, false, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.rules[0].action, Action::Deny);
@@ -4693,13 +5073,15 @@ mod tests {
     #[test]
     fn build_policy_terminal_all_and_none_reject_composition() {
         let rules = vec!["deny@private".to_string()];
-        let all = build_network_policy(&["all".to_string()], &rules, false, None, None, None)
+        let all = network_policy_opts(&["all".to_string()], &rules, false, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(all.default_egress, Action::Allow);
         assert_eq!(all.rules.len(), 1);
 
-        let err = build_network_policy(&["none,public".to_string()], &[], false, None, None, None)
+        let err = network_policy_opts(&["none,public".to_string()], &[], false, None, None, None)
+            .build_network_policy()
             .unwrap_err();
         assert!(err.to_string().contains("cannot be combined"));
 
@@ -4707,14 +5089,16 @@ mod tests {
             vec!["all".to_string(), "none".to_string()],
             vec!["none,all".to_string()],
         ] {
-            let err = build_network_policy(&profiles, &[], false, None, None, None).unwrap_err();
+            let err = network_policy_opts(&profiles, &[], false, None, None, None)
+                .build_network_policy()
+                .unwrap_err();
             assert_eq!(
                 err.to_string(),
                 "--net terminal profiles `all` and `none` cannot be combined"
             );
         }
 
-        let err = build_network_policy(
+        let err = network_policy_opts(
             &["all".to_string(), "all".to_string()],
             &[],
             false,
@@ -4722,6 +5106,7 @@ mod tests {
             None,
             None,
         )
+        .build_network_policy()
         .unwrap_err();
         assert_eq!(err.to_string(), "--net `all` may only be specified once");
     }

@@ -4,7 +4,9 @@ description: Configure sandboxes created by the CLI with root or scoped YAML fil
 icon: "file-code"
 ---
 
-<Tooltip tip="Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Host-integrated networking, local rootfs forms, snapshots, replace behavior, and several runtime fields are unavailable on microsandbox cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Host-integrated networking, local rootfs forms, snapshots, replace behavior, and several runtime fields are unavailable on microsandbox cloud.
+</Note>
 
 Sandbox configuration is a reusable, sparse definition for one sandbox. Load it with `msb run`, `msb create`, or `msb install`; explicit CLI arguments are applied on top. The file may have any name when passed with `--conf`.
 
@@ -19,9 +21,15 @@ mounts:
 network:
   allow: ["api.openai.com"]
   ports: ["8000:8000"]
+secret_violation_action: block-and-log
 secrets:
   OPENAI_API_KEY:
     allow: ["api.openai.com"]
+    substitution:
+      headers: true
+      query: false
+      body: false
+    passthrough: ["telemetry.example.com"]
 scripts:
   start: "python app.py"
 ```
@@ -61,7 +69,7 @@ Scoped flags accept the contents of one field or field group without its root wr
 | Flag | Accepted fields |
 | --- | --- |
 | `--conf PATH` | Any sandbox configuration field |
-| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `trust_host_cas`, `max_connections` |
+| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `trust_host_cas`, `max_connections` |
 | `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits` |
 | `--runtime-conf PATH` | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
 | `--fs-conf PATH` | `mounts`, `patch_files`, `patches` |
@@ -92,7 +100,9 @@ Configuration resolves from lower to higher precedence:
 2. Every `--conf` and scoped config occurrence, from left to right on the command line
 3. Explicit non-config CLI flags and positional arguments
 
-Higher-precedence scalars replace lower values. Maps merge by key, including nested `init`, `network.dns`, `network.tls`, and secret definitions. A list supplied by a higher-precedence config file replaces the lower list. Repeating the same config flag works exactly like interleaving different config flags: each file overlays everything to its left. Repeatable non-config CLI flags remain additive, and CLI network rules are evaluated before rules loaded from files.
+Higher-precedence scalars replace lower values. Maps merge by key, including nested `init`, `network.dns`, `network.tls`, and secret definitions. A list supplied by a higher-precedence config file replaces the lower list. Network policy is atomic: when a higher config source supplies any of `policy`, `allow`, or `deny`, those values replace the complete lower-layer policy while sibling network fields continue to merge. Repeating the same config flag works exactly like interleaving different config flags: each file overlays everything to its left.
+
+`--net-conf` cannot be combined with `--net`, `--no-net`, `--net-rule`, or `--net-default*`. When network policy is loaded through a root `--conf` file instead, a policy CLI flag replaces it, while `--net-rule` remains additive and is evaluated before rules loaded from the file.
 
 ```bash
 # Files overlay left to right; the explicit CLI value wins over every file.
@@ -106,32 +116,7 @@ msb run python \
 
 Relative host paths are resolved against the file that contains them. Paths inside a file listed by `patch_files` are resolved against that patch file.
 
-## Rust SDK patches
-
-The Rust SDK owns the typed sparse representation used after a file has been parsed. `SandboxConfigPatch` composes root and scoped patches with right-hand-side precedence, and `SandboxBuilder::configure` applies the result before later fluent builder calls:
-
-```rust
-use std::collections::BTreeMap;
-
-use microsandbox::{
-    ResourceConfigPatch, RuntimeConfigPatch, Sandbox, SandboxConfigPatch, SandboxImagePatch,
-};
-
-let patch = SandboxConfigPatch::new()
-    .image(SandboxImagePatch::Image("python:3.12".into()))
-    .overlay(ResourceConfigPatch::new().cpus(2).memory_mib(1024))
-    .overlay(RuntimeConfigPatch::new().env(BTreeMap::from([
-        ("MODE".into(), "production".into()),
-    ])));
-
-let sandbox = Sandbox::builder("agent")
-    .configure(patch)
-    .memory(2048) // Explicit builder calls are higher precedence.
-    .create()
-    .await?;
-```
-
-Scoped patch types implement `Into<SandboxConfigPatch>`, so they pass directly to `overlay` without wrapper constructors. The SDK patch types do not read YAML, resolve relative paths, or expand `${ENV}`; those are CLI file-adapter responsibilities. `SandboxConfig` remains the complete durable configuration, while `SandboxConfigPatch` represents only construction-time fields that were supplied.
+Rust applications can apply the same sparse configuration model without loading YAML. See [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) for the typed API, merge behavior, and migration from the earlier patch types.
 
 ## Schema
 
@@ -277,11 +262,12 @@ network:
     bypass: ["*.internal.example"]
     verify_upstream: true
     block_quic: true
+  strict: false
   trust_host_cas: false
   max_connections: 256
 ```
 
-A non-empty `allow` list implies deny-by-default egress. Top-level `ports` is shorthand for `network.ports`; when both are present, the lists are combined and duplicate host ports are rejected.
+A non-empty `allow` list implies deny-by-default egress. `strict: true` requires hostname-based allow rules to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule. Top-level `ports` is shorthand for `network.ports`; when both are present, the lists are combined and duplicate host ports are rejected.
 
 ### Secrets
 
@@ -294,11 +280,16 @@ secrets:
   DATABASE_URL:
     value: "${DB_DSN}"
     allow: ["db.internal"]
-    inject: [headers]
+    substitution:
+      headers: false
+      query: false
+      body: true
+    passthrough: ["audit.internal"]
+    violation_action: block-and-terminate
     require_tls_identity: true
 ```
 
-`inject` accepts `headers`, `basic_auth`, and `query_params`; it defaults to `headers`. Declaring a secret enables TLS interception and DNS-rebind protection.
+`substitution` controls headers, query parameters, and request bodies independently; it defaults to headers only, and Basic authentication follows the header setting. Disabled locations still block the placeholder unless the destination appears in `passthrough`. `secret_violation_action` sets the sandbox-wide blocking action, while a per-secret `violation_action` overrides it. Declaring a secret enables TLS interception and DNS-rebind protection.
 
 ### Scripts
 

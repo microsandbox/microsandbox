@@ -11,9 +11,11 @@ use std::{iter, mem, ptr};
 use nix::pty;
 use nix::sys::signal::Signal;
 use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
+use microsandbox_protocol::bulk::BulkRecord;
 use microsandbox_protocol::exec::{ExecFailed, ExecFailureKind, ExecRequest};
+use microsandbox_protocol::transport::ClientIncarnation;
 
 use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
@@ -31,6 +33,21 @@ const PR_CAPBSET_DROP: libc::c_int = 24;
 const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_int = 4;
 const DEFAULT_USER_SPEC: &str = "0:0";
+
+/// Aggregate guest-to-host data retained outside the serial output buffer.
+const SESSION_OUTPUT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
+
+/// Allocation granularity used by the data budget.
+const SESSION_OUTPUT_BUDGET_GRANULE: usize = 4096;
+
+/// Maximum number of data or control events waiting for the serial writer.
+const SESSION_OUTPUT_ITEM_CAPACITY: usize = 1024;
+
+/// Maximum number of records waiting for the independently scheduled bulk writer.
+const SESSION_BULK_OUTPUT_ITEM_CAPACITY: usize = 256;
+
+/// Maximum lifecycle commands waiting for the dedicated bulk scheduler.
+const SESSION_BULK_COMMAND_CAPACITY: usize = 128;
 
 //--------------------------------------------------------------------------------------------------
 // Functions: classify
@@ -146,6 +163,59 @@ pub enum SessionOutput {
 
     /// Pre-encoded frame bytes to write directly to the serial output buffer.
     Raw(RawSessionOutput),
+
+    /// Generation-8 raw bulk record whose payload remains separately owned.
+    Bulk(BulkSessionOutput),
+}
+
+/// One queued session event and the data-budget capacity owned by its buffer.
+pub struct SessionOutputEnvelope {
+    /// Correlation ID for the session event.
+    pub id: u32,
+
+    /// Dual-port range owner captured when the session was created.
+    pub incarnation: Option<ClientIncarnation>,
+
+    /// Event consumed by the main serial loop.
+    pub output: SessionOutput,
+
+    /// Capacity follows the allocation and is released only after serial output consumes it.
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// Lifecycle commands processed ahead of queued dedicated-lane output.
+pub enum BulkOutputCommand {
+    /// Release queued records for one cancelled operation.
+    DropFlow {
+        /// Range owner that opened the operation.
+        incarnation: ClientIncarnation,
+        /// Correlation being cancelled.
+        id: u32,
+        /// Resolves after matching queued records and their permits are dropped.
+        completion: oneshot::Sender<()>,
+    },
+
+    /// Release every queued record owned by one disconnected SDK client.
+    DropIncarnation {
+        /// Range ownership period being removed.
+        incarnation: ClientIncarnation,
+        /// Resolves after matching queued records and their permits are dropped.
+        completion: oneshot::Sender<()>,
+    },
+}
+
+/// Capacity reserved before a producer reads or encodes a data-bearing event.
+pub struct SessionOutputPermit(tokio::sync::OwnedSemaphorePermit);
+
+/// Cloneable producer for the byte-bounded session output queue.
+#[derive(Clone)]
+pub struct SessionOutputSender {
+    control_tx: mpsc::Sender<SessionOutputEnvelope>,
+    bulk_tx: Option<mpsc::Sender<SessionOutputEnvelope>>,
+    bulk_command_tx: Option<mpsc::Sender<BulkOutputCommand>>,
+    control_budget: Arc<Semaphore>,
+    bulk_budget: Arc<Semaphore>,
+    incarnation: Option<ClientIncarnation>,
 }
 
 /// Pre-encoded session output plus the accounting metadata known by its producer.
@@ -160,11 +230,20 @@ pub struct RawSessionOutput {
     pub completion: Option<RawSessionCompletion>,
 }
 
+/// Raw bulk output plus activity metadata known by its producer.
+pub struct BulkSessionOutput {
+    /// Validated record whose payload is written with the fixed header via `writev`.
+    pub record: BulkRecord,
+
+    /// Activity represented by the record.
+    pub activity: RawActivity,
+}
+
 /// Activity represented by a pre-encoded session frame.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RawActivity {
-    /// Whether this frame is a meaningful guest-to-host protocol message.
-    pub guest_message: bool,
+    /// Meaningful guest-to-host protocol messages represented by this update.
+    pub guest_messages: usize,
 
     /// Filesystem bytes moved by this frame.
     pub fs_bytes: usize,
@@ -178,6 +257,9 @@ pub struct RawActivity {
 pub enum RawSessionCompletion {
     /// A filesystem read stream completed.
     FsRead,
+
+    /// A filesystem write worker completed.
+    FsWrite,
 
     /// A TCP stream completed.
     Tcp,
@@ -248,11 +330,216 @@ impl RawSessionOutput {
     }
 }
 
+impl BulkSessionOutput {
+    /// Creates a raw bulk output event.
+    pub fn new(record: BulkRecord, activity: RawActivity) -> Self {
+        Self { record, activity }
+    }
+}
+
+impl SessionOutput {
+    /// Bytes retained by this event that count against bulk output capacity.
+    fn budget_bytes(&self) -> usize {
+        let allocation = match self {
+            Self::Stdout(data) | Self::Stderr(data) => data.capacity(),
+            Self::Bulk(output) => output.record.payload.len(),
+            Self::Raw(output)
+                if output.activity.fs_bytes != 0 || output.activity.tcp_bytes != 0 =>
+            {
+                output.frame.capacity()
+            }
+            Self::Exited(_) | Self::Raw(_) => 0,
+        };
+
+        allocation
+            .checked_add(SESSION_OUTPUT_BUDGET_GRANULE - 1)
+            .map(|bytes| bytes / SESSION_OUTPUT_BUDGET_GRANULE * SESSION_OUTPUT_BUDGET_GRANULE)
+            .unwrap_or(usize::MAX)
+    }
+}
+
+impl SessionOutputSender {
+    /// Create one ordered queue with a separate byte budget for data-bearing events.
+    pub fn channel() -> (Self, mpsc::Receiver<SessionOutputEnvelope>) {
+        let (tx, rx) = mpsc::channel(SESSION_OUTPUT_ITEM_CAPACITY);
+        let budget = Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY));
+        (
+            Self {
+                control_tx: tx,
+                bulk_tx: None,
+                bulk_command_tx: None,
+                control_budget: Arc::clone(&budget),
+                bulk_budget: budget,
+                incarnation: None,
+            },
+            rx,
+        )
+    }
+
+    /// Create independently bounded control and raw-bulk producer queues.
+    pub fn split_channel() -> (
+        Self,
+        mpsc::Receiver<SessionOutputEnvelope>,
+        mpsc::Receiver<SessionOutputEnvelope>,
+        mpsc::Receiver<BulkOutputCommand>,
+    ) {
+        let (control_tx, control_rx) = mpsc::channel(SESSION_OUTPUT_ITEM_CAPACITY);
+        let (bulk_tx, bulk_rx) = mpsc::channel(SESSION_BULK_OUTPUT_ITEM_CAPACITY);
+        let (bulk_command_tx, bulk_command_rx) = mpsc::channel(SESSION_BULK_COMMAND_CAPACITY);
+        (
+            Self {
+                control_tx,
+                bulk_tx: Some(bulk_tx),
+                bulk_command_tx: Some(bulk_command_tx),
+                control_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
+                bulk_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
+                incarnation: None,
+            },
+            control_rx,
+            bulk_rx,
+            bulk_command_rx,
+        )
+    }
+
+    /// Scope future producer events to the client incarnation that opened their session.
+    pub fn with_incarnation(&self, incarnation: Option<ClientIncarnation>) -> Self {
+        Self {
+            control_tx: self.control_tx.clone(),
+            bulk_tx: self.bulk_tx.clone(),
+            bulk_command_tx: self.bulk_command_tx.clone(),
+            control_budget: Arc::clone(&self.control_budget),
+            bulk_budget: Arc::clone(&self.bulk_budget),
+            incarnation,
+        }
+    }
+
+    /// Restore one ordered producer queue after boot selected combined mode.
+    pub fn disable_bulk_scheduler(&mut self) {
+        // Combined mode has no cross-lane merger. Raw records, finish markers, and terminal output
+        // must therefore enter one FIFO before sharing the physical console stream.
+        self.bulk_tx = None;
+        self.bulk_command_tx = None;
+    }
+
+    /// Queue a high-priority purge for one operation without awaiting bulk-port progress.
+    pub fn drop_bulk_flow(&self, id: u32) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
+        let Some(incarnation) = self.incarnation else {
+            return Ok(None);
+        };
+        let Some(commands) = self.bulk_command_tx.as_ref() else {
+            return Ok(None);
+        };
+        let (completion, completed) = oneshot::channel();
+        commands
+            .try_send(BulkOutputCommand::DropFlow {
+                incarnation,
+                id,
+                completion,
+            })
+            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
+        Ok(Some(completed))
+    }
+
+    /// Queue a high-priority purge for a disconnected range owner.
+    pub fn drop_bulk_incarnation(
+        &self,
+        incarnation: ClientIncarnation,
+    ) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
+        let Some(commands) = self.bulk_command_tx.as_ref() else {
+            return Ok(None);
+        };
+        let (completion, completed) = oneshot::channel();
+        commands
+            .try_send(BulkOutputCommand::DropIncarnation {
+                incarnation,
+                completion,
+            })
+            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
+        Ok(Some(completed))
+    }
+
+    /// Queue an event after its retained allocation has acquired aggregate capacity.
+    pub async fn send(&self, id: u32, output: SessionOutput) -> bool {
+        let budget_bytes = output.budget_bytes();
+        let permit = if matches!(&output, SessionOutput::Bulk(_)) {
+            self.reserve_bulk(budget_bytes).await
+        } else {
+            self.reserve(budget_bytes).await
+        };
+        let Some(permit) = permit else {
+            eprintln!("agentd session output {id} exceeds byte budget: {budget_bytes} bytes");
+            return false;
+        };
+
+        self.send_reserved(id, output, permit).await
+    }
+
+    /// Reserve capacity before reading or encoding up to `max_bytes` of output.
+    pub async fn reserve(&self, max_bytes: usize) -> Option<SessionOutputPermit> {
+        self.reserve_from(&self.control_budget, max_bytes).await
+    }
+
+    /// Reserve capacity from the raw-bulk budget before allocating a record payload.
+    pub async fn reserve_bulk(&self, max_bytes: usize) -> Option<SessionOutputPermit> {
+        self.reserve_from(&self.bulk_budget, max_bytes).await
+    }
+
+    async fn reserve_from(
+        &self,
+        budget: &Arc<Semaphore>,
+        max_bytes: usize,
+    ) -> Option<SessionOutputPermit> {
+        let budget_bytes = max_bytes.checked_add(SESSION_OUTPUT_BUDGET_GRANULE - 1)?
+            / SESSION_OUTPUT_BUDGET_GRANULE
+            * SESSION_OUTPUT_BUDGET_GRANULE;
+        if budget_bytes > SESSION_OUTPUT_BYTE_CAPACITY {
+            return None;
+        }
+        let permit_count = u32::try_from(budget_bytes).ok()?;
+        Arc::clone(budget)
+            .acquire_many_owned(permit_count)
+            .await
+            .ok()
+            .map(SessionOutputPermit)
+    }
+
+    /// Queue output using capacity obtained before the producer created its allocation.
+    pub async fn send_reserved(
+        &self,
+        id: u32,
+        output: SessionOutput,
+        permit: SessionOutputPermit,
+    ) -> bool {
+        let charged = output.budget_bytes();
+        if charged > permit.0.num_permits() {
+            eprintln!(
+                "agentd session output {id} exceeded its reservation: {charged} > {} bytes",
+                permit.0.num_permits()
+            );
+            return false;
+        }
+
+        let tx = if matches!(&output, SessionOutput::Bulk(_)) {
+            self.bulk_tx.as_ref().unwrap_or(&self.control_tx)
+        } else {
+            &self.control_tx
+        };
+        tx.send(SessionOutputEnvelope {
+            id,
+            incarnation: self.incarnation,
+            output,
+            _permit: (charged != 0).then_some(permit.0),
+        })
+        .await
+        .is_ok()
+    }
+}
+
 impl RawActivity {
     /// A guest-to-host frame with no byte counter.
     pub fn guest_message() -> Self {
         Self {
-            guest_message: true,
+            guest_messages: 1,
             ..Self::default()
         }
     }
@@ -260,7 +547,7 @@ impl RawActivity {
     /// A guest-to-host filesystem data frame.
     pub fn fs_bytes(len: usize) -> Self {
         Self {
-            guest_message: true,
+            guest_messages: 1,
             fs_bytes: len,
             tcp_bytes: 0,
         }
@@ -269,7 +556,7 @@ impl RawActivity {
     /// A guest-to-host TCP data frame.
     pub fn tcp_bytes(len: usize) -> Self {
         Self {
-            guest_message: true,
+            guest_messages: 1,
             fs_bytes: 0,
             tcp_bytes: len,
         }
@@ -284,7 +571,7 @@ impl ExecSession {
     pub fn spawn(
         id: u32,
         req: &ExecRequest,
-        tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        tx: SessionOutputSender,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
     ) -> AgentdResult<Self> {
@@ -371,7 +658,7 @@ impl ExecSession {
     fn spawn_pty(
         id: u32,
         req: &ExecRequest,
-        tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        tx: SessionOutputSender,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
         process_manager: &Arc<ProcessManager>,
@@ -583,7 +870,7 @@ impl ExecSession {
     fn spawn_pipe(
         id: u32,
         req: &ExecRequest,
-        tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        tx: SessionOutputSender,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
         process_manager: &Arc<ProcessManager>,
@@ -1165,9 +1452,10 @@ async fn pty_reader_task(
     id: u32,
     master_fd: OwnedFd,
     exit_watcher: ProcessExitWatcher,
-    tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+    tx: SessionOutputSender,
 ) {
     let tx_output = tx.clone();
+    let runtime_handle = tokio::runtime::Handle::current();
     let read_result = tokio::task::spawn_blocking(move || {
         // PTY masters are safer with a dedicated blocking read loop than with
         // edge-driven readiness. Fast writers followed by process exit can
@@ -1183,10 +1471,16 @@ async fn pty_reader_task(
             let n = unsafe { libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
 
             if n > 0 {
-                if tx_output
-                    .send((id, SessionOutput::Stdout(buf[..n as usize].to_vec())))
-                    .is_err()
-                {
+                let n = n as usize;
+                let sent = runtime_handle.block_on(async {
+                    let Some(permit) = tx_output.reserve(n).await else {
+                        return false;
+                    };
+                    tx_output
+                        .send_reserved(id, SessionOutput::Stdout(buf[..n].to_vec()), permit)
+                        .await
+                });
+                if !sent {
                     break;
                 }
                 continue;
@@ -1209,7 +1503,7 @@ async fn pty_reader_task(
     let _ = read_result;
 
     let code = exit_watcher.await;
-    let _ = tx.send((id, SessionOutput::Exited(code)));
+    let _ = tx.send(id, SessionOutput::Exited(code)).await;
 }
 
 /// Background task that reads from piped stdout/stderr and sends output events.
@@ -1218,7 +1512,7 @@ async fn pipe_reader_task(
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     exit_watcher: ProcessExitWatcher,
-    tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+    tx: SessionOutputSender,
 ) {
     let mut stdout = stdout;
     let mut stderr = stderr;
@@ -1242,7 +1536,19 @@ async fn pipe_reader_task(
                         stdout_eof = true;
                     }
                     Ok(n) => {
-                        let _ = tx.send((id, SessionOutput::Stdout(stdout_buf[..n].to_vec())));
+                        let Some(permit) = tx.reserve(n).await else {
+                            break;
+                        };
+                        if !tx
+                            .send_reserved(
+                                id,
+                                SessionOutput::Stdout(stdout_buf[..n].to_vec()),
+                                permit,
+                            )
+                            .await
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -1258,7 +1564,19 @@ async fn pipe_reader_task(
                         stderr_eof = true;
                     }
                     Ok(n) => {
-                        let _ = tx.send((id, SessionOutput::Stderr(stderr_buf[..n].to_vec())));
+                        let Some(permit) = tx.reserve(n).await else {
+                            break;
+                        };
+                        if !tx
+                            .send_reserved(
+                                id,
+                                SessionOutput::Stderr(stderr_buf[..n].to_vec()),
+                                permit,
+                            )
+                            .await
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -1267,7 +1585,7 @@ async fn pipe_reader_task(
 
     let code = exit_watcher.await;
 
-    let _ = tx.send((id, SessionOutput::Exited(code)));
+    let _ = tx.send(id, SessionOutput::Exited(code)).await;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1298,6 +1616,129 @@ mod tests {
     const RUNTIME_TEST_NAME: &str = "session::tests::test_spawn_survives_runtime_replacement";
     const PIPE_OWNER_HELPER_ENV: &str = "MSB_AGENTD_PIPE_OWNER_HELPER";
     const PIPE_OWNER_HELPER_SENTINEL: &str = "pipe-owner-helper-passed";
+
+    #[tokio::test]
+    async fn session_output_permit_lives_until_envelope_is_consumed() {
+        let (tx, mut rx) = SessionOutputSender::channel();
+        assert!(tx.send(7, SessionOutput::Stdout(vec![0; 4096])).await);
+        assert_eq!(
+            tx.control_budget.available_permits(),
+            SESSION_OUTPUT_BYTE_CAPACITY - 4096
+        );
+
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(
+            tx.control_budget.available_permits(),
+            SESSION_OUTPUT_BYTE_CAPACITY - 4096
+        );
+        drop(envelope);
+        assert_eq!(
+            tx.control_budget.available_permits(),
+            SESSION_OUTPUT_BYTE_CAPACITY
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_output_sender_captures_client_incarnation() {
+        let incarnation = [0x44; 16];
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let scoped = tx.with_incarnation(Some(incarnation));
+
+        assert!(scoped.send(7, SessionOutput::Exited(0)).await);
+        let envelope = rx.recv().await.unwrap();
+
+        assert_eq!(envelope.id, 7);
+        assert_eq!(envelope.incarnation, Some(incarnation));
+    }
+
+    #[tokio::test]
+    async fn split_output_queues_keep_bulk_lifecycle_commands_independent() {
+        let incarnation = [0x55; 16];
+        let (tx, mut control_rx, mut bulk_rx, mut command_rx) =
+            SessionOutputSender::split_channel();
+        let scoped = tx.with_incarnation(Some(incarnation));
+        let record = BulkRecord {
+            id: 9,
+            kind: microsandbox_protocol::bulk::BulkKind::Filesystem,
+            flow: microsandbox_protocol::bulk::BulkFlow::GuestToHost,
+            offset: 0,
+            payload: b"bulk".as_slice().into(),
+        };
+        assert!(
+            scoped
+                .send(
+                    9,
+                    SessionOutput::Bulk(BulkSessionOutput::new(record, RawActivity::fs_bytes(4),)),
+                )
+                .await
+        );
+        assert!(scoped.send(10, SessionOutput::Exited(0)).await);
+        let mut completed = scoped.drop_bulk_flow(9).unwrap().unwrap();
+
+        assert!(matches!(
+            bulk_rx.recv().await.unwrap().output,
+            SessionOutput::Bulk(_)
+        ));
+        assert!(matches!(
+            control_rx.recv().await.unwrap().output,
+            SessionOutput::Exited(0)
+        ));
+        let BulkOutputCommand::DropFlow {
+            incarnation: command_incarnation,
+            id,
+            completion,
+        } = command_rx.recv().await.unwrap()
+        else {
+            panic!("expected flow cleanup command");
+        };
+        assert_eq!(command_incarnation, incarnation);
+        assert_eq!(id, 9);
+        completion.send(()).unwrap();
+        assert_eq!(completed.try_recv(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn combined_mode_restores_one_ordered_output_queue() {
+        let (mut tx, mut control_rx, mut bulk_rx, _command_rx) =
+            SessionOutputSender::split_channel();
+        tx.disable_bulk_scheduler();
+        let record = BulkRecord {
+            id: 9,
+            kind: microsandbox_protocol::bulk::BulkKind::Filesystem,
+            flow: microsandbox_protocol::bulk::BulkFlow::GuestToHost,
+            offset: 0,
+            payload: b"bulk".as_slice().into(),
+        };
+        assert!(
+            tx.send(
+                9,
+                SessionOutput::Bulk(BulkSessionOutput::new(record, RawActivity::fs_bytes(4),)),
+            )
+            .await
+        );
+        assert!(tx.send(9, SessionOutput::Exited(0)).await);
+
+        assert!(matches!(
+            control_rx.recv().await.unwrap().output,
+            SessionOutput::Bulk(_)
+        ));
+        assert!(matches!(
+            control_rx.recv().await.unwrap().output,
+            SessionOutput::Exited(0)
+        ));
+        assert!(bulk_rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn control_output_remains_admissible_when_data_budget_is_exhausted() {
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let full_budget = tx.reserve(SESSION_OUTPUT_BYTE_CAPACITY).await.unwrap();
+
+        assert!(tx.send(9, SessionOutput::Exited(0)).await);
+        let envelope = rx.recv().await.unwrap();
+        assert!(matches!(envelope.output, SessionOutput::Exited(0)));
+        drop(full_budget);
+    }
     const PIPE_OWNER_TEST_NAME: &str =
         "session::tests::test_piped_process_exit_outlives_spawning_runtime";
 
@@ -1347,7 +1788,7 @@ mod tests {
             std::io::Error::last_os_error()
         );
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
             cmd: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "sleep 30 & echo $!".to_string()],
@@ -1366,12 +1807,12 @@ mod tests {
         let mut stdout = Vec::new();
         time::timeout(Duration::from_secs(10), async {
             while !stdout.contains(&b'\n') {
-                let (id, output) = rx.recv().await.expect("session output");
-                assert_eq!(id, 17);
-                match output {
+                let envelope = rx.recv().await.expect("session output");
+                assert_eq!(envelope.id, 17);
+                match envelope.output {
                     SessionOutput::Stdout(data) => stdout.extend_from_slice(&data),
                     SessionOutput::Exited(code) => panic!("session exited early with {code}"),
-                    SessionOutput::Stderr(_) | SessionOutput::Raw(_) => {}
+                    SessionOutput::Stderr(_) | SessionOutput::Raw(_) | SessionOutput::Bulk(_) => {}
                 }
             }
         })
@@ -1415,9 +1856,9 @@ mod tests {
             .expect("signal descendants through completed process registration");
         let exit = time::timeout(Duration::from_secs(5), async {
             loop {
-                let (id, output) = rx.recv().await.expect("session output after signal");
-                assert_eq!(id, 17);
-                if let SessionOutput::Exited(code) = output {
+                let envelope = rx.recv().await.expect("session output after signal");
+                assert_eq!(envelope.id, 17);
+                if let SessionOutput::Exited(code) = envelope.output {
                     break code;
                 }
             }
@@ -1484,7 +1925,7 @@ mod tests {
         const PROCESS_COUNT: u32 = 12;
 
         let runtime_handle = tokio::runtime::Handle::current();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = SessionOutputSender::channel();
         let mut spawn_threads = Vec::new();
         for offset in 0..PROCESS_COUNT {
             let handle = runtime_handle.clone();
@@ -1521,9 +1962,9 @@ mod tests {
         let mut exits = HashMap::new();
         time::timeout(Duration::from_secs(15), async {
             while exits.len() < PROCESS_COUNT as usize {
-                let (id, output) = rx.recv().await.expect("session output");
-                if let SessionOutput::Exited(code) = output {
-                    exits.insert(id, code);
+                let envelope = rx.recv().await.expect("session output");
+                if let SessionOutput::Exited(code) = envelope.output {
+                    exits.insert(envelope.id, code);
                 }
             }
         })
@@ -1580,7 +2021,7 @@ mod tests {
     }
 
     async fn run_single_pipe_spawn(id: u32, code: i32) {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
             cmd: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), format!("exit {code}")],
@@ -1597,9 +2038,9 @@ mod tests {
 
         let actual = time::timeout(Duration::from_secs(5), async {
             loop {
-                let (actual_id, output) = rx.recv().await.expect("session output");
-                assert_eq!(actual_id, id);
-                if let SessionOutput::Exited(actual) = output {
+                let envelope = rx.recv().await.expect("session output");
+                assert_eq!(envelope.id, id);
+                if let SessionOutput::Exited(actual) = envelope.output {
                     break actual;
                 }
             }
@@ -1677,7 +2118,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_reader_drains_ready_fd() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
             cmd: "/bin/sh".to_string(),
             args: vec![
@@ -1700,15 +2141,15 @@ mod tests {
         let mut exit = None;
 
         let recv_result = time::timeout(Duration::from_secs(15), async {
-            while let Some((id, output)) = rx.recv().await {
-                assert_eq!(id, 7);
-                match output {
+            while let Some(envelope) = rx.recv().await {
+                assert_eq!(envelope.id, 7);
+                match envelope.output {
                     SessionOutput::Stdout(data) => stdout.extend_from_slice(&data),
                     SessionOutput::Exited(code) => {
                         exit = Some(code);
                         break;
                     }
-                    SessionOutput::Stderr(_) | SessionOutput::Raw(_) => {}
+                    SessionOutput::Stderr(_) | SessionOutput::Raw(_) | SessionOutput::Bulk(_) => {}
                 }
             }
         })
@@ -1891,7 +2332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_pipe_error_does_not_include_probe_details() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = SessionOutputSender::channel();
         let req = ExecRequest {
             cmd: "/definitely/not/a/real/binary".to_string(),
             args: Vec::new(),

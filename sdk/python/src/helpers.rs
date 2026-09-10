@@ -1,6 +1,6 @@
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder,
-    SecurityProfile, TransparentHugePagePolicy,
+    SecretSource, SecurityProfile, TransparentHugePagePolicy,
 };
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
@@ -50,8 +50,9 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "ports",
     "vsock",
     "network",
+    "proxy",
     "secrets",
-    "on_secret_violation",
+    "secret_violation_action",
     "detached",
 ];
 
@@ -581,6 +582,69 @@ pub fn sandbox_builder_from_args(
         builder = apply_network(builder, &net_dict)?;
     }
 
+    // Outbound proxy.
+    if let Some(proxy) = kwargs.get_item("proxy")?
+        && !proxy.is_none()
+    {
+        let proxy = config_dict(&proxy, "OutboundProxy")?;
+        let protocol = extract_required::<String>(&proxy, "protocol")?;
+        let address = extract_required::<String>(&proxy, "address")?;
+        builder = match protocol.as_str() {
+            "socks4" => {
+                let user_id = extract_opt::<String>(&proxy, "user_id")?;
+                builder.proxy(move |p| {
+                    let proxy = p.socks4(address);
+                    match user_id {
+                        Some(user_id) => proxy.user_id(user_id),
+                        None => proxy,
+                    }
+                })
+            }
+            "socks5" => {
+                let credentials = proxy
+                    .get_item("credentials")?
+                    .filter(|value| !value.is_none())
+                    .map(|value| config_dict(&value, "SOCKS5 credentials"))
+                    .transpose()?;
+                let username = credentials
+                    .as_ref()
+                    .map(|value| extract_required::<String>(value, "username"))
+                    .transpose()?;
+                let password = credentials
+                    .as_ref()
+                    .map(|value| {
+                        let password = value.get_item("password")?.ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(
+                                "SOCKS5 credentials requires password",
+                            )
+                        })?;
+                        let source = config_dict(&password, "SOCKS5 password source")?;
+                        let kind = extract_required::<String>(&source, "kind")?;
+                        if kind != "env" {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "unsupported SOCKS5 password source {kind:?}; only env is supported"
+                            )));
+                        }
+                        let var = extract_required::<String>(&source, "var")?;
+                        Ok(SecretSource::env(var))
+                    })
+                    .transpose()?;
+                builder.proxy(move |p| {
+                    let proxy = p.socks5(address);
+                    match (username, password) {
+                        (Some(username), Some(password)) => proxy.credentials(username, password),
+                        _ => proxy,
+                    }
+                })
+            }
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unsupported outbound proxy protocol {protocol:?}"
+                )));
+            }
+        };
+    }
+
     // Secrets.
     if let Some(secrets) = kwargs.get_item("secrets")?.filter(|v| !v.is_none()) {
         let secrets_iter = secrets.try_iter().map_err(|_| {
@@ -597,15 +661,11 @@ pub fn sandbox_builder_from_args(
 
     // Secret violation action (top-level kwarg). This is applied after
     // `network=` so the explicit shorthand takes precedence when both are set.
-    if let Some(violation_obj) = kwargs.get_item("on_secret_violation")?
+    if let Some(violation_obj) = kwargs.get_item("secret_violation_action")?
         && !violation_obj.is_none()
     {
         let action = parse_violation_action_obj(&violation_obj)?;
-        builder = builder.network(|n| {
-            n.on_secret_violation(|_| {
-                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
-            })
-        });
+        builder = builder.network(|n| n.secret_violation_action(action));
     }
 
     Ok(builder)
@@ -1281,6 +1341,11 @@ fn apply_network(
         builder = builder.network(|n| n.max_connections(max));
     }
 
+    // Strict hostname policy.
+    if let Some(strict) = extract_opt::<bool>(net, "strict")? {
+        builder = builder.network(move |n| n.strict(strict));
+    }
+
     // Rate limiters (egress = guest -> runtime, ingress = runtime -> guest).
     if let Some(rate_limiter) = net.get_item("rate_limiter")?
         && !rate_limiter.is_none()
@@ -1321,15 +1386,11 @@ fn apply_network(
     }
 
     // Secret violation action (sandbox-level, not per-secret).
-    if let Some(violation_obj) = net.get_item("on_secret_violation")?
+    if let Some(violation_obj) = net.get_item("secret_violation_action")?
         && !violation_obj.is_none()
     {
         let action = parse_serialized_violation_action(&violation_obj)?;
-        builder = builder.network(|n| {
-            n.on_secret_violation(|_| {
-                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
-            })
-        });
+        builder = builder.network(|n| n.secret_violation_action(action));
     }
 
     // TLS config.
@@ -1564,15 +1625,13 @@ fn apply_secret(
 ) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
     let env_var: String = extract_required(secret, "env_var")?;
     let value: String = extract_required(secret, "value")?;
-    let allow_hosts: Vec<String> = extract_opt(secret, "allow_hosts")?.unwrap_or_default();
-    let allow_host_patterns: Vec<String> =
-        extract_opt(secret, "allow_host_patterns")?.unwrap_or_default();
-    if allow_hosts.is_empty() && allow_host_patterns.is_empty() {
+    let allow: Vec<String> = extract_opt(secret, "allow")?.unwrap_or_default();
+    if allow.is_empty() {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "SecretEntry requires at least one allowed host or allowed host pattern",
         ));
     }
-    let on_violation = if let Some(violation_obj) = secret.get_item("on_violation")?
+    let violation_action = if let Some(violation_obj) = secret.get_item("violation_action")?
         && !violation_obj.is_none()
     {
         Some(parse_serialized_violation_action(&violation_obj)?)
@@ -1581,33 +1640,35 @@ fn apply_secret(
     };
 
     let placeholder: Option<String> = extract_opt(secret, "placeholder")?;
-    let require_tls: Option<bool> = extract_opt(secret, "require_tls")?;
+    let require_tls: Option<bool> = extract_opt(secret, "require_tls_identity")?;
+    let passthrough: Vec<String> = extract_opt(secret, "passthrough")?.unwrap_or_default();
 
-    let (inject_headers, inject_basic_auth, inject_query_params, inject_body) =
-        if let Some(injection_obj) = secret.get_item("injection")? {
-            let injection: Bound<'_, PyDict> = injection_obj.downcast::<PyDict>()?.clone();
+    let (substitute_headers, substitute_query, substitute_body) =
+        if let Some(substitution_obj) = secret.get_item("substitution")? {
+            let substitution: Bound<'_, PyDict> = substitution_obj.downcast::<PyDict>()?.clone();
             (
-                extract_opt::<bool>(&injection, "headers")?,
-                extract_opt::<bool>(&injection, "basic_auth")?,
-                extract_opt::<bool>(&injection, "query_params")?,
-                extract_opt::<bool>(&injection, "body")?,
+                extract_opt::<bool>(&substitution, "headers")?,
+                extract_opt::<bool>(&substitution, "query")?,
+                extract_opt::<bool>(&substitution, "body")?,
             )
         } else {
-            (None, None, None, None)
+            (None, None, None)
         };
 
     Ok(builder.secret(|s| {
         let mut s = s.env(&env_var).value(value.clone());
-        for host in &allow_hosts {
-            s = s.allow_host(host);
+        for host in &allow {
+            s = if host == "*" {
+                s.allow_any_host_dangerous(true)
+            } else {
+                s.allow(host)
+            };
         }
-        for pattern in &allow_host_patterns {
-            s = s.allow_host_pattern(pattern);
+        for host in &passthrough {
+            s = s.allow_passthrough_for(host);
         }
-        if let Some(action) = on_violation {
-            s = s.on_violation(|_| {
-                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
-            });
+        if let Some(action) = violation_action {
+            s = s.violation_action(action);
         }
         if let Some(ref ph) = placeholder {
             s = s.placeholder(ph);
@@ -1615,17 +1676,14 @@ fn apply_secret(
         if let Some(req) = require_tls {
             s = s.require_tls_identity(req);
         }
-        if let Some(v) = inject_headers {
-            s = s.inject_headers(v);
+        if let Some(v) = substitute_headers {
+            s = s.substitute_in_headers(v);
         }
-        if let Some(v) = inject_basic_auth {
-            s = s.inject_basic_auth(v);
+        if let Some(v) = substitute_query {
+            s = s.substitute_in_query(v);
         }
-        if let Some(v) = inject_query_params {
-            s = s.inject_query(v);
-        }
-        if let Some(v) = inject_body {
-            s = s.inject_body(v);
+        if let Some(v) = substitute_body {
+            s = s.substitute_in_body(v);
         }
         s
     }))
@@ -1936,13 +1994,12 @@ fn maybe_group_destination(raw: &str) -> Option<microsandbox_network::policy::De
 
 fn parse_violation_action(
     s: &str,
-) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
+) -> PyResult<microsandbox_network::secrets::config::SecretViolationAction> {
+    use microsandbox_network::secrets::config::SecretViolationAction;
     match s {
-        "block" => Ok(ViolationAction::Block),
-        "block-and-log" => Ok(ViolationAction::BlockAndLog),
-        "block-and-terminate" => Ok(ViolationAction::BlockAndTerminate),
-        "passthrough" => Ok(ViolationAction::Passthrough(vec![HostPattern::Any])),
+        "block" => Ok(SecretViolationAction::Block),
+        "block-and-log" => Ok(SecretViolationAction::BlockAndLog),
+        "block-and-terminate" => Ok(SecretViolationAction::BlockAndTerminate),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown violation action: {s}"
         ))),
@@ -1951,79 +2008,17 @@ fn parse_violation_action(
 
 fn parse_violation_action_obj(
     obj: &Bound<'_, PyAny>,
-) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    if let Ok(s) = extract_str_enum(obj, "ViolationAction") {
-        return parse_violation_action(&s);
-    }
-    if !is_exact_sdk_type(obj, "ViolationPolicy")? {
-        return Err(pyo3::exceptions::PyTypeError::new_err(
-            "expected ViolationAction or ViolationPolicy",
-        ));
-    }
-
-    // Convert the concrete policy exactly once. Fallback policies flatten to
-    // a ViolationAction member; passthrough policies become a trusted dict.
-    let converted = obj.call_method0("_to_dict")?;
-    parse_serialized_violation_action(&converted)
+) -> PyResult<microsandbox_network::secrets::config::SecretViolationAction> {
+    let s = extract_str_enum(obj, "ViolationAction")?;
+    parse_violation_action(&s)
 }
 
 /// Parse a violation policy after a concrete SDK config has serialized it.
 fn parse_serialized_violation_action(
     obj: &Bound<'_, PyAny>,
-) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    if let Ok(s) = extract_str_enum(obj, "ViolationAction") {
-        return parse_violation_action(&s);
-    }
-
-    let dict = obj.downcast::<PyDict>().map_err(|_| {
-        pyo3::exceptions::PyTypeError::new_err(
-            "serialized violation policy must be ViolationAction or dict",
-        )
-    })?;
-    if let Some(passthrough_obj) = dict.get_item("passthrough")?
-        && !passthrough_obj.is_none()
-    {
-        let passthrough: &Bound<'_, PyDict> = passthrough_obj.downcast()?;
-        return parse_passthrough_policy(passthrough);
-    }
-
-    Err(pyo3::exceptions::PyValueError::new_err(
-        "expected ViolationAction or ViolationPolicy",
-    ))
-}
-
-fn parse_passthrough_policy(
-    dict: &Bound<'_, PyDict>,
-) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
-
-    if let Some(fallback) = extract_opt::<String>(dict, "fallback")?
-        && matches!(
-            parse_violation_action(&fallback)?,
-            ViolationAction::Passthrough(_)
-        )
-    {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "passthrough fallback must be a blocking action",
-        ));
-    }
-
-    let hosts: Vec<String> = extract_opt(dict, "hosts")?.unwrap_or_default();
-    let host_patterns: Vec<String> = extract_opt(dict, "host_patterns")?.unwrap_or_default();
-    let all_hosts = extract_opt::<bool>(dict, "all_hosts")?.unwrap_or(false);
-
-    let mut patterns = Vec::new();
-    for host in hosts {
-        patterns.push(HostPattern::Exact(host));
-    }
-    for pattern in host_patterns {
-        patterns.push(HostPattern::Wildcard(pattern));
-    }
-    if all_hosts {
-        patterns.push(HostPattern::Any);
-    }
-
-    Ok(ViolationAction::Passthrough(patterns))
+) -> PyResult<microsandbox_network::secrets::config::SecretViolationAction> {
+    let s = extract_str_enum(obj, "ViolationAction")?;
+    parse_violation_action(&s)
 }
 
 fn extract_opt<'py, T: FromPyObject<'py>>(

@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::transport::{BulkTransportReady, LocalTransportReady, RelayLeaseReady};
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -34,6 +36,20 @@ pub struct Ready {
     /// carried separately in the message envelope's `v`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent_version: String,
+
+    /// Bound internal data-plane topology, when agentd negotiated one at boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk_transport: Option<BulkTransportReady>,
+
+    /// Optional topology-independent relay correlation-range lease capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_lease: Option<RelayLeaseReady>,
+
+    /// Optional SDK-to-runtime transport capability injected by a local Unix relay.
+    ///
+    /// Agentd leaves this absent because local shared memory is below the guest protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_transport: Option<LocalTransportReady>,
 }
 
 /// Payload for `core.clock.sync` messages.
@@ -157,4 +173,87 @@ pub struct RelayClientDisconnected {
 
     /// Exclusive upper bound of the disconnected client's ID range.
     pub id_end_exclusive: u32,
+
+    /// Exact leased range owner being removed. Absent only for legacy unleased peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<[u8; 16]>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use serde::{Deserialize, Serialize};
+
+    use super::{Ready, RelayClientDisconnected};
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct LegacyReady {
+        boot_time_ns: u64,
+        init_time_ns: u64,
+        ready_time_ns: u64,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        agent_version: String,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct LegacyRelayClientDisconnected {
+        id_start: u32,
+        id_end_exclusive: u32,
+    }
+
+    #[test]
+    fn ready_without_transport_capabilities_is_byte_compatible() {
+        let legacy = LegacyReady {
+            boot_time_ns: 11,
+            init_time_ns: 22,
+            ready_time_ns: 33,
+            agent_version: "0.6.8".into(),
+        };
+        let current = Ready {
+            boot_time_ns: legacy.boot_time_ns,
+            init_time_ns: legacy.init_time_ns,
+            ready_time_ns: legacy.ready_time_ns,
+            agent_version: legacy.agent_version.clone(),
+            bulk_transport: None,
+            relay_lease: None,
+            local_transport: None,
+        };
+        let mut legacy_bytes = Vec::new();
+        ciborium::into_writer(&legacy, &mut legacy_bytes).unwrap();
+        let mut current_bytes = Vec::new();
+        ciborium::into_writer(&current, &mut current_bytes).unwrap();
+
+        assert_eq!(current_bytes, legacy_bytes);
+        let decoded: Ready = ciborium::from_reader(legacy_bytes.as_slice()).unwrap();
+        assert!(decoded.bulk_transport.is_none());
+        assert!(decoded.relay_lease.is_none());
+        assert!(decoded.local_transport.is_none());
+    }
+
+    #[test]
+    fn relay_disconnect_without_incarnation_is_byte_compatible() {
+        let legacy = LegacyRelayClientDisconnected {
+            id_start: 1,
+            id_end_exclusive: 1024,
+        };
+        let current = RelayClientDisconnected {
+            id_start: legacy.id_start,
+            id_end_exclusive: legacy.id_end_exclusive,
+            incarnation: None,
+        };
+        let mut legacy_bytes = Vec::new();
+        ciborium::into_writer(&legacy, &mut legacy_bytes).unwrap();
+        let mut current_bytes = Vec::new();
+        ciborium::into_writer(&current, &mut current_bytes).unwrap();
+
+        assert_eq!(current_bytes, legacy_bytes);
+        let decoded: RelayClientDisconnected =
+            ciborium::from_reader(legacy_bytes.as_slice()).unwrap();
+        assert_eq!(decoded.id_start, current.id_start);
+        assert_eq!(decoded.id_end_exclusive, current.id_end_exclusive);
+        assert_eq!(decoded.incarnation, None);
+    }
 }

@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 use super::CloudBackend;
 use crate::backend::{
     Backend,
-    sandbox::{LogStream, MetricsStream, SandboxBackend},
+    sandbox::{LogStream, MetricsStream, SandboxBackend, SandboxIdentity},
 };
 use crate::error::{Operation, UnsupportedReason};
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
@@ -20,7 +20,7 @@ use crate::sandbox::{
     SandboxStatus,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_image::RegistryAuth;
+use microsandbox_types::RegistryAuth;
 use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, RootDisk,
     SandboxRuntimeOptions, TlsConfig,
@@ -132,6 +132,31 @@ impl SandboxBackend for CloudBackend {
         })
     }
 
+    fn start_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        _name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        Box::pin(async move {
+            let id = cloud_identity(identity)?;
+            let current = CloudBackend::get_sandbox_by_id(self, &id).await?;
+            let config = sandbox_config_from_cloud(&current);
+            let cloud = CloudBackend::start_sandbox_by_id(self, &id).await?;
+            ensure_cloud_sandbox_ready(&cloud)?;
+            Ok(Sandbox::from_cloud(backend, cloud, config))
+        })
+    }
+
+    fn start_detached_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        self.start_identified(backend, name, identity)
+    }
+
     fn get<'a>(
         &'a self,
         backend: Arc<dyn Backend>,
@@ -173,6 +198,18 @@ impl SandboxBackend for CloudBackend {
         })
     }
 
+    fn remove_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            CloudBackend::destroy_sandbox_by_id(self, &cloud_identity(identity)?).await?;
+            Ok(())
+        })
+    }
+
     fn stop<'a>(
         &'a self,
         _backend: Arc<dyn Backend>,
@@ -180,6 +217,18 @@ impl SandboxBackend for CloudBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
             CloudBackend::stop_sandbox(self, name).await?;
+            Ok(())
+        })
+    }
+
+    fn stop_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            CloudBackend::stop_sandbox_by_id(self, &cloud_identity(identity)?).await?;
             Ok(())
         })
     }
@@ -392,6 +441,15 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn cloud_identity(identity: SandboxIdentity) -> MicrosandboxResult<String> {
+    match identity {
+        SandboxIdentity::Cloud(id) => Ok(id),
+        SandboxIdentity::Local(id) => Err(MicrosandboxError::Runtime(format!(
+            "local sandbox identity {id} was routed to the cloud backend"
+        ))),
+    }
+}
+
 fn cloud_create_body_and_config(
     mut config: SandboxConfig,
 ) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
@@ -452,6 +510,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     }
     if config.spec.network.rate_limiter.is_some() {
         return Err(unsupported("network.rate_limiter"));
+    }
+    if config.spec.network.outbound_proxy.is_some() {
+        return Err(unsupported("network.outbound_proxy"));
     }
 
     if config
@@ -780,7 +841,7 @@ mod tests {
     fn cloud_create_body_serializes_slug_and_registry_beside_spec() {
         let mut config = base_cloud_config();
         config.slug = Some("brave-otter".into());
-        config.registry_auth = Some(microsandbox_image::RegistryAuth::Anonymous);
+        config.registry_auth = Some(RegistryAuth::Anonymous);
 
         let req = CloudCreateBody::try_from(config).unwrap();
         let json = serde_json::to_value(&req).unwrap();
@@ -902,7 +963,7 @@ mod tests {
     #[test]
     fn cloud_create_body_maps_basic_registry_auth_to_inline() {
         let mut config = base_cloud_config();
-        config.registry_auth = Some(microsandbox_image::RegistryAuth::Basic {
+        config.registry_auth = Some(RegistryAuth::Basic {
             username: "u".into(),
             password: "p".into(),
         });
@@ -1127,6 +1188,18 @@ mod tests {
         });
         let err = CloudCreateBody::try_from(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn cloud_create_request_rejects_outbound_proxy() {
+        let mut config = base_cloud_config();
+        config.spec.network.outbound_proxy = Some(microsandbox_types::OutboundProxy::Socks5 {
+            address: "127.0.0.1:1080".to_string(),
+            credentials: None,
+        });
+
+        assert_unsupported_config_field(config, "network.outbound_proxy");
     }
 
     #[test]

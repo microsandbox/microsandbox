@@ -864,16 +864,22 @@ async fn install_update_release(
     let bin_dir = base_dir.join(microsandbox_utils::BIN_SUBDIR);
     let lib_dir = base_dir.join(microsandbox_utils::LIB_SUBDIR);
     let spinner = ui::Spinner::start("Updating", &format!("to {display_version}"));
-    let result = microsandbox::setup::Setup::builder()
-        .base_dir(base_dir.to_path_buf())
-        .version(target_version.to_string())
-        .force(true)
-        .build()
-        .install()
-        .await;
+    let config = microsandbox::config::GlobalConfig {
+        home: Some(base_dir.to_path_buf()),
+        ..Default::default()
+    };
+    let result = microsandbox::setup::install_runtime(
+        &config,
+        microsandbox::setup::InstallOptions {
+            version: target_version.to_string(),
+            force: true,
+            ..Default::default()
+        },
+    )
+    .await;
 
     match result {
-        Ok(()) => {
+        Ok(_) => {
             spinner.finish_clear();
             done(&format!("Updated msb in {}", bin_dir.display()));
             done(&format!("Updated libkrunfw in {}/", lib_dir.display()));
@@ -1375,15 +1381,20 @@ async fn prepare_windows_update_recovery(
 
     let result = async {
         let bundle_digest = fetch_release_bundle_digest(target_version).await?;
-        microsandbox::setup::Setup::builder()
-            .base_dir(staged_dir.clone())
-            .version(target_version.to_string())
-            .allow_ci_local_bundle(false)
-            .expected_bundle_sha256(bundle_digest)
-            .force(true)
-            .build()
-            .install()
-            .await?;
+        let config = microsandbox::config::GlobalConfig {
+            home: Some(staged_dir.clone()),
+            ..Default::default()
+        };
+        microsandbox::setup::install_runtime(
+            &config,
+            microsandbox::setup::InstallOptions {
+                version: target_version.to_string(),
+                force: true,
+                expected_archive_sha256: Some(bundle_digest),
+                ..Default::default()
+            },
+        )
+        .await?;
         verify_installed_msb_version(&staged_dir, target_version).await?;
 
         prepare_windows_self_swap_recovery(
@@ -2306,15 +2317,20 @@ async fn prepare_downgrade_operation(
     let staged_target = stage_directory.join("target");
 
     let stage_result = async {
-        microsandbox::setup::Setup::builder()
-            .base_dir(staged_target.clone())
-            .version(target.to_string())
-            .allow_ci_local_bundle(false)
-            .expected_bundle_sha256(bundle_digest)
-            .force(true)
-            .build()
-            .install()
-            .await?;
+        let config = microsandbox::config::GlobalConfig {
+            home: Some(staged_target.clone()),
+            ..Default::default()
+        };
+        microsandbox::setup::install_runtime(
+            &config,
+            microsandbox::setup::InstallOptions {
+                version: target.to_string(),
+                force: true,
+                expected_archive_sha256: Some(bundle_digest),
+                ..Default::default()
+            },
+        )
+        .await?;
         verify_installed_msb_version(&staged_target, target).await?;
         let baseline = load_staged_schema_baseline(&staged_target, target).await?;
 
@@ -3512,7 +3528,7 @@ mod tests {
 
         // Stable snapshot identity is the newest migration. With no snapshot
         // artifacts to translate, rollback removes its two rebuildable index
-        // projections and leaves the earlier compatibility marker applied.
+        // projections before touching any migration from the released prefix.
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let rows = db
@@ -3539,9 +3555,40 @@ mod tests {
             )
         }));
 
-        // The newest owner-compatibility marker has no schema objects of its
-        // own. With no persisted sandboxes, its preflight permits rollback and
-        // removes only the migration record.
+        // The backdated network-slot migration shipped after the owner marker.
+        // Its rollback retains the compatible column but removes its record.
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::SANDBOX_NETWORK_SLOT_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "network slot migration should be rolled back"
+        );
+
+        let columns = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "PRAGMA table_info(sandbox)",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            columns
+                .iter()
+                .any(|row| row.try_get_by_index::<String>(1).unwrap() == "network_slot"),
+            "network slot column should remain compatible after rollback"
+        );
+
+        // The owner-compatibility marker has no schema objects of its own. With
+        // no persisted sandboxes, its preflight permits rollback and removes
+        // only the migration record.
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let rows = db
