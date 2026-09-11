@@ -728,33 +728,18 @@ pub(super) async fn control_capabilities(
     })
 }
 
-/// Open the runtime control pipe, retrying briefly while the single server
-/// instance is serving another client.
+/// Open the runtime control pipe within its connection budget. Restore callers
+/// additionally bound this wait by their remaining startup deadline.
 #[cfg(windows)]
 async fn connect_control_pipe(
     path: &std::path::Path,
 ) -> MicrosandboxResult<tokio::net::windows::named_pipe::NamedPipeClient> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    const ERROR_PIPE_BUSY: i32 = 231;
-    for _ in 0..100 {
-        match ClientOptions::new().open(path.as_os_str()) {
-            Ok(client) => return Ok(client),
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            Err(e) => {
-                return Err(crate::MicrosandboxError::Runtime(format!(
-                    "failed to reach the runtime control pipe at {}: {e}",
-                    path.display()
-                )));
-            }
-        }
-    }
-    Err(crate::MicrosandboxError::Runtime(format!(
-        "the runtime control pipe at {} stayed busy",
-        path.display()
-    )))
+    super::control_pipe::connect(path).await.map_err(|error| {
+        crate::MicrosandboxError::Runtime(format!(
+            "failed to reach the runtime control pipe at {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 /// Send one control request line and parse the reply.

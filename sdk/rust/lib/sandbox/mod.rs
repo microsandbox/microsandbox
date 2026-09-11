@@ -10,6 +10,8 @@ pub(crate) mod branch;
 mod builder;
 mod compact;
 pub(crate) mod config;
+#[cfg(any(windows, test))]
+mod control_pipe;
 pub mod exec;
 #[cfg(feature = "local")]
 pub(crate) mod flat_rootfs;

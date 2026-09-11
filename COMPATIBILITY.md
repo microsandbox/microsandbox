@@ -130,6 +130,8 @@ Compatibility-sensitive elements include newline framing, the tagged `op` names,
 
 Sources: [`crates/runtime/lib/runner/control.rs`](crates/runtime/lib/runner/control.rs) and [`sdk/rust/lib/sandbox/modify.rs`](sdk/rust/lib/sandbox/modify.rs).
 
+Windows control clients retry missing-pipe (`ERROR_FILE_NOT_FOUND`) and busy-pipe errors before sending a request, within one total one-second connection budget. Restore's remaining startup deadline can cancel that wait sooner. Other errors still fail immediately; established requests are never replayed. This tolerates asynchronous listener creation and gaps between pipe instances without changing protocol bytes, endpoint identities, or old-runtime capability semantics. A genuinely absent endpoint may now take up to one second to report unavailable instead of failing immediately.
+
 Add operations and optional fields rather than redefining existing ones. Capability-gate behavior whose absence cannot be interpreted safely by older clients.
 
 Live disk-only snapshots use the distinct `disk_checkpoint_create` operation and capability. An absent capability is false: callers refuse before capture rather than silently capturing RAM or copying a writable disk. The runtime serializes the disk rollover with other control mutations and preserves a user's pause. This does not change the agent protocol or snapshot format; the result uses the existing file-state layer descriptor. Stopped disk capture retains its lifecycle lock and existing behavior.
