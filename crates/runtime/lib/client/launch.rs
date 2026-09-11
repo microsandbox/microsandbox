@@ -200,6 +200,9 @@ pub struct LaunchConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointRestoreConfig {
+    /// Captured virtual gateway identity; never derives from the child's host slot.
+    #[serde(default)]
+    pub network_gateway_mac: Option<[u8; 6]>,
     /// Explicit external-resource failure policy; older launchers default to strict.
     #[serde(default)]
     pub external_mount_policy: microsandbox_types::ExternalMountRestorePolicy,
@@ -390,6 +393,7 @@ mod tests {
         serde_json::to_value(LaunchConfig {
             execution: ExecutionIntent::Restore,
             checkpoint_restore: Some(CheckpointRestoreConfig {
+                network_gateway_mac: None,
                 external_mount_policy: Default::default(),
                 external_mounts: Vec::new(),
                 local_branch: false,

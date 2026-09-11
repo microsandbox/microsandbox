@@ -2351,6 +2351,17 @@ fn build_vm(
         let mut network =
             SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot, vm.deployment_profile)
                 .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
+        if let Some(restore) = &vm.checkpoint_restore {
+            let gateway = restore.network_gateway_mac.ok_or_else(|| {
+                RuntimeError::Custom(
+                    "full restore lacks captured gateway MAC; recapture the development snapshot"
+                        .into(),
+                )
+            })?;
+            network = network
+                .with_captured_gateway_mac(gateway)
+                .map_err(|err| RuntimeError::Custom(format!("restore network: {err}")))?;
+        }
         network_termination_handle = Some(network.termination_handle());
         network_metrics_handle = Some(network.metrics_handle());
         // Only sandboxes that booted with secrets can be live-reconfigured:

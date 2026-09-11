@@ -59,7 +59,7 @@ pub(crate) struct CheckpointCoordinator {
     additional_disks: BTreeMap<String, RuntimeOwnedAdditionalDisk>,
     unsupported_additional_disks: BTreeMap<String, String>,
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
-    network_resource_binding: Option<String>,
+    network_resource_binding: Option<BTreeMap<String, String>>,
     previous_memory: Option<MemoryManifest>,
     previous_memory_objects: Vec<AdmittedObject>,
     memory_cache: Option<super::MemoryCache>,
@@ -362,7 +362,37 @@ impl CheckpointCoordinator {
         let network_resource_binding = guest_bootstrap
             .network
             .as_ref()
-            .map(serde_json::to_string)
+            .map(|network| -> Result<BTreeMap<String, String>, String> {
+                #[cfg(feature = "net")]
+                {
+                    // Recapturing a child retains its original virtual gateway,
+                    // not the child's independently allocated host slot.
+                    let gateway = vm
+                        .checkpoint_restore
+                        .as_ref()
+                        .and_then(|restore| restore.network_gateway_mac)
+                        .unwrap_or_else(|| {
+                            microsandbox_network::network::SmoltcpNetwork::default_gateway_mac(
+                                vm.sandbox_slot,
+                            )
+                        });
+                    Ok(BTreeMap::from([
+                        (
+                            "guest_network".into(),
+                            serde_json::to_string(network).map_err(|error| error.to_string())?,
+                        ),
+                        (
+                            "gateway_mac".into(),
+                            serde_json::to_string(&gateway).map_err(|error| error.to_string())?,
+                        ),
+                    ]))
+                }
+                #[cfg(not(feature = "net"))]
+                {
+                    let _ = network;
+                    Err("network capture requires the net feature".into())
+                }
+            })
             .transpose()
             .map_err(|error| format!("serialize effective guest network binding: {error}"))?;
         Ok(Self {
@@ -573,7 +603,7 @@ impl CheckpointCoordinator {
             &self.fs_resource_bindings,
             &self.additional_disks,
             &self.unsupported_additional_disks,
-            self.network_resource_binding.as_deref(),
+            self.network_resource_binding.as_ref(),
         )
         .map_err(CheckpointFailure::before_pause)?;
         let admission_us = admission_started.elapsed().as_micros();
@@ -1694,7 +1724,7 @@ fn admit_resources(
     fs_resource_bindings: &BTreeMap<String, BTreeMap<String, String>>,
     additional_disks: &BTreeMap<String, RuntimeOwnedAdditionalDisk>,
     unsupported_additional_disks: &BTreeMap<String, String>,
-    network_resource_binding: Option<&str>,
+    network_resource_binding: Option<&BTreeMap<String, String>>,
 ) -> Result<AdmittedResources, String> {
     let inventory = vm
         .virtio_device_inventory()
@@ -1745,7 +1775,7 @@ fn admit_resources(
             let network = network_resource_binding.ok_or_else(|| {
                 format!("active network resource {device_id} has no effective guest binding")
             })?;
-            binding.insert("guest_network".into(), network.into());
+            binding.extend(network.clone());
         }
         if let Some(fs_binding) = fs_binding {
             binding.extend(fs_binding.clone());

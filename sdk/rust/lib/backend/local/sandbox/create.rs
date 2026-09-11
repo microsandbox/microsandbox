@@ -2129,6 +2129,7 @@ mod tests {
         }
         let mut config = builder.build().await.unwrap();
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            network_gateway_mac: None,
             external_mount_policy: Default::default(),
             external_mounts: Vec::new(),
             local_branch: false,
@@ -2506,6 +2507,7 @@ mod tests {
         let pools = open_test_pools(&temp.path().join("test.db")).await;
         let mut config = test_config_with_rootfs("pending", bind_rootfs(temp.path().to_path_buf()));
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            network_gateway_mac: None,
             external_mount_policy: Default::default(),
             external_mounts: Vec::new(),
             local_branch: false,

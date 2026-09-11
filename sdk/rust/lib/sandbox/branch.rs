@@ -257,6 +257,10 @@ pub(crate) async fn capture_child(
     .await?;
     crate::snapshot::apply_additional_disks(config, mounts);
     config.checkpoint_restore = Some(CheckpointRestoreConfig {
+        network_gateway_mac: microsandbox_runtime::checkpoint::captured_gateway_mac(
+            &state.resources,
+        )
+        .map_err(MicrosandboxError::SnapshotIntegrity)?,
         external_mount_policy: config.external_mount_policy,
         external_mounts: Vec::new(),
         local_branch: true,

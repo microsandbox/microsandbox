@@ -1369,6 +1369,16 @@ impl SandboxBuilder {
                 }
                 self.config.checkpoint_restore =
                     Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                        network_gateway_mac: if self.config.snapshot_restore_mode
+                            == SnapshotRestoreMode::Full
+                        {
+                            microsandbox_runtime::checkpoint::captured_gateway_mac(
+                                &opened.resources,
+                            )
+                            .map_err(crate::MicrosandboxError::SnapshotIntegrity)?
+                        } else {
+                            None
+                        },
                         external_mount_policy: self.config.external_mount_policy,
                         external_mounts: Vec::new(),
                         local_branch: false,
@@ -2073,6 +2083,9 @@ pub(crate) fn apply_capture_network(
     config: &mut SandboxConfig,
     captured_resources: &[microsandbox_image::checkpoint::ResourceDescriptor],
 ) -> MicrosandboxResult<()> {
+    // Reject missing gateway identity before creating child-owned disk state.
+    microsandbox_runtime::checkpoint::captured_gateway_mac(captured_resources)
+        .map_err(MicrosandboxError::SnapshotIntegrity)?;
     let mut resources = captured_resources
         .iter()
         .filter(|resource| resource.kind == "network");
@@ -3627,6 +3640,7 @@ mod tests {
         let mut builder = SandboxBuilder::new("forked-child").image("alpine").forked();
         builder.config.checkpoint_restore =
             Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                network_gateway_mac: None,
                 external_mount_policy: Default::default(),
                 external_mounts: Vec::new(),
                 local_branch: false,

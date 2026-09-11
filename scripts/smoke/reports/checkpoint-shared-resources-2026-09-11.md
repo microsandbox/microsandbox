@@ -1,6 +1,6 @@
 # Additional-volume and shared-resource qualification
 
-Follow-up to PR #1557 at `8325189acca123c9a52c1dc2156b68183126e891`, using registry `msb_krun 0.1.37`. This work qualifies managed disks and shared directory semantics; it does not add arbitrary external-disk capture or transparent TCP connection continuity.
+Follow-up to PR #1557 at `8325189acca123c9a52c1dc2156b68183126e891`, using registry `msb_krun 0.1.37`. Initial qualification was committed as `5c644f42`. The subsequently approved gateway-identity fix is described below; the original failing evidence remains intact. This work does not add arbitrary external-disk capture or transparent TCP connection continuity.
 
 ## Managed additional disks
 
@@ -35,7 +35,7 @@ Mac ARM64/HVF, Linux x86-64/KVM, and Windows ARM64/WHP pass the shared-directory
 
 External edits do not invalidate all guest caches synchronously. In the Mac probe, changing an eight-byte tracked file to a longer string produced `host-chan`: new host bytes read using the old cached length. Therefore it is inaccurate to promise only either a complete old value or a complete new value. Strict admission is a restore-time check, not ongoing isolation, a host-directory lock, or a coherence guarantee. The documentation now makes that boundary explicit.
 
-## Newly reproduced network reconnect defect
+## Network reconnect defect: baseline
 
 Mac, Linux, and Windows preserve the source's established TCP connection across full capture. A child does not reuse that connection during the test observation. However, a fresh child TCP connection also fails in the tested restore: this is a bug, not the intended reconnect contract.
 
@@ -46,11 +46,34 @@ The fixture explicitly permits host egress in both VMs. It warms the source's ga
 | New child connection before intervention | Failed after 10 s | Failed after 10 s | Failed after 10 s |
 | New connection after clearing only the disposable child's neighbour cache | Passed in 16 ms | Passed in 11 ms | Passed in 87 ms |
 
-The diagnostic `ip neigh flush dev eth0` is not a product fix, and its success does not turn the preceding failure into a pass. It may also restart resolution rather than preserve identity. A proper fix should retain the captured virtual gateway identity in the destination network construction and validate IPv4 ARP, IPv6 neighbour discovery, unchanged source connectivity, independent children, and host-side isolation. No restore-network behavior was changed in this qualification pass.
+The diagnostic `ip neigh flush dev eth0` is not a product fix, and its success does not turn the preceding failure into a pass. It may also restart resolution rather than preserve identity. The fix therefore retains the captured virtual gateway identity in destination network construction, rather than requiring guest cache invalidation.
 
 Old TCP connection state remains a separate boundary: restored applications need reconnect/retry logic because host proxy sockets are not captured. A restored socket may fail or wait for protocol timeout rather than immediately report disconnection. The fixture's two-second observation of the inherited child socket does not establish a maximum TCP timeout.
 
-The host echo server is IPv4 loopback. These results do not independently qualify IPv6, UDP, inbound published-port restoration, or transparent connection continuity.
+The initial host echo server is IPv4 loopback. The initial results above do not independently qualify IPv6, UDP, inbound published-port restoration, or transparent connection continuity.
+
+## Approved gateway-identity fix and final live results
+
+Capture now records `gateway_mac` in the existing network resource binding. Full installed/archive restore and direct branch pass it through the strict internal restore configuration, then select it before the fresh network poll thread starts. Recapturing a child preserves that same identity. Host sockets, queues, policy and port ownership remain child-owned; cold-boot slot allocation is unchanged. No new socket, daemon, agent protocol, public CLI flag, snapshot schema version, or steady-state packet check was added.
+
+Networked development full snapshots without this field fail explicitly and need recapture; their old gateway MAC cannot reliably be inferred from user-overridable guest addresses. A live Mac negative test rejected a pre-fix full snapshot with the recapture diagnostic, while `--disk-only` from that exact snapshot booted, executed a command, and stopped/removed successfully. Network-free checkpoints do not require the field.
+
+The final fixture warms guest IPv4 ARP and IPv6 neighbour caches before capture. It then tests eager restore, forked restore, direct branch, branch-of-branch, and direct full archive capture of a child followed by forked archive restore. All five children remain alive together and each repeats both address-family probes. The source's original TCP connection continues carrying messages after capture and after all children are created. No neighbour-cache flush occurs on a passing run.
+
+| Final gateway-fix coverage | Mac ARM64/HVF | Linux x86-64/KVM | Windows ARM64/WHP |
+|---|---|---|---|
+| Eager/forked restore, IPv4 + IPv6 | Pass | Pass | Pass |
+| Direct branch and branch-of-branch, IPv4 + IPv6 | Pass | Pass | Pass |
+| Child recapture → direct full archive → forked restore | Pass | Pass | Pass |
+| Five retained children; original source TCP connection retained | Pass | Pass | Pass |
+| Cleanup and empty catalog | Pass | Pass | Pass |
+| Previously failing fresh child connection, CLI wall time | 28 ms | 10 ms | 120 ms |
+
+These are debug correctness observations, not latency percentiles. The dual-stack tests also expose a separate performance tail: some first IPv6 probes after restore/branch took about 1.02 s on Mac/Linux, while repeats took roughly 10–60 ms. Windows's source already took about 2.17 s for the IPv6 probe before capture; some restored first probes took about 3.2 s, with repeats around 2.15–2.21 s. The gateway fix removes the demonstrated stale-MAC failure; it is not a claim that all first-connection latency is optimized. These timings include the entire CLI command and its completion, not an isolated TCP handshake measurement.
+
+Focused validation passed: two network identity/isolation tests (including a custom guest MAC), two captured-binding validation tests, six strict launch-contract tests, and 18 SDK checkpoint tests. Strict production Clippy and formatting checks passed. A no-network runtime build also passed with five existing unused-variable/mutability warnings. The first sandboxed SDK test attempt was denied permission to bind a local socket; all 18 passed when rerun with that permission. No whole-workspace pass is claimed.
+
+Final live evidence: Mac `/private/tmp/cbh-shared-5_ycajk1/results.json`; OVH `/dev/shm/cbh-shared-5fli6zk2/results.json`; Surface `C:/Users/Stephen/AppData/Local/Temp/cbh-shared-xmx34iwl/results.json`. Local Linux/Windows copies are `linux-gateway-fixed.json` and `windows-gateway-fixed.json` under `/private/tmp/msb-resource-evidence/`. Final tested CLI SHA-256s are Mac `b6ff597ec009eedddda41f179e327b79d838cf1e42416726dbb16e60b5eaeaaa`, Linux `3a377227ed15a54cb27250b91e167cc47fd8e36aca6f79e784be4d3574aac0b6`, and Windows `962b08526b90c72e74e53025cece85246126552cf64b504d0e1101bbbdc8214b`. Agent and firmware hashes below are unchanged.
 
 ## Separate Windows CLI startup race
 
@@ -86,4 +109,4 @@ Artifact SHA-256s:
 
 Windows hashes are CLI `05becf032b916ac3eeb48f9b8908ec2c9e6b6f729dfbd91a056aa52582eddfd8`, agentd `085e229a324c719a284809a29bc349618b9d056bfe899848512ae9e37f32202a`, and libkrunfw `9b2733b7f2bd759261cb8fca162e137f4d4d98a18cc8e12098254491da93e8be`. The Windows fixture uses the official Python 3.13.13 ARM64 embeddable package, extracted only inside the qualification folder after verifying SHA-256 `1230310118a6330cd6385cfc04de48bc77c7d18c240fd5fa23d054e50b1ebb85`; no system Python installation or persistent PATH change was made.
 
-Validation: all three native debug CLI builds completed; Python syntax compilation and `git diff --check` passed. No Rust product code changed in this follow-up, so a workspace unit-test pass is not claimed. Snapshot artifacts, host fixture files and JSON logs were retained as evidence; no existing user sandbox or volume was removed.
+Initial qualification validation: all three native debug CLI builds completed; Python syntax compilation and `git diff --check` passed. That initial stage changed only tests and documentation; the approved Rust gateway fix and its validation are reported separately above. Snapshot artifacts, host fixture files and JSON logs were retained as evidence; no existing user sandbox or volume was removed.

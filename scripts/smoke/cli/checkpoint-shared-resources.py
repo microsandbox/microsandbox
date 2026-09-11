@@ -23,7 +23,7 @@ root = Path(tempfile.mkdtemp(prefix="cbh-shared-", dir=os.environ.get("CBH_TEST_
 # Windows named pipes are machine-wide. Distinct homes alone do not isolate
 # concurrent fixture sandbox names, so give every run its own logical aliases.
 aliases = {name: f"{mode}-{root.name.removeprefix('cbh-shared-')}-{name}"
-           for name in ("source", "child", "strict-refused")}
+           for name in ("source", "child", "strict-refused", "forked", "branched", "grandchild", "archived")}
 env = dict(os.environ, MSB_HOME=str(root / "home"), MSB_AGENTD_PATH=agent,
            MSB_LIBKRUNFW_PATH=firmware, MSB_PATH=binary)
 owned, records = [], []
@@ -139,7 +139,7 @@ try:
                         messages.append((identity, message))
                     self.wfile.write(f"{identity}:{message}\n".encode())
                     self.wfile.flush()
-                    if message == "child-new":
+                    if message == "child-new" or message.startswith("probe-"):
                         return
 
         class Server(socketserver.ThreadingTCPServer):
@@ -161,6 +161,22 @@ try:
         guest("send-before", "source", "exec 3<>/dev/shm/input; printf 'before\n' >&3")
         wait_until(lambda: any(message == "before" for _, message in messages))
         wait_until(lambda: "before" in guest("confirm-before", "source", "cat /dev/shm/replies").stdout)
+        hosts = guest("source-host-aliases", "source", "cat /etc/hosts").stdout
+        gateways = {"ipv6" if ":" in line.split()[0] else "ipv4": line.split()[0]
+                    for line in hosts.splitlines() if len(line.split()) > 1 and line.split()[1] == "host.microsandbox.internal"}
+        assert set(gateways) == {"ipv4", "ipv6"}, "this dual-stack fixture requires both guest address families"
+
+        def probe(name):
+            for family, address in gateways.items():
+                message = f"probe-{name}-{family}"
+                reply = guest(f"{name}-{family}-reconnect", name,
+                              f"printf '{message}\n' | nc -w 3 {address} {port}")
+                assert message in reply.stdout
+            guest(name + "-neighbours", name, "ip neigh; ip -6 neigh")
+
+        # Warm both ARP and IPv6 ND before capture. A fresh cache would hide
+        # the gateway identity mismatch this regression is meant to catch.
+        probe("source")
         run("capture", "snapshot", "create", "baseline", "--group", "network",
             "--from-sandbox", "source", "--full")
         guest("send-source-after", "source", "exec 3<>/dev/shm/input; printf 'source-after\n' >&3")
@@ -190,6 +206,27 @@ try:
         assert new.returncode == 0, "new child TCP connection failed"
         assert "child-new" in new.stdout
         assert any(message == "child-new" and identity not in source_ids for identity, message in messages)
+        probe("child")
+        create("forked", "--from-snapshot", "network:baseline", "--forked", "--net-rule", "allow@host")
+        probe("forked")
+        owned.append("branched")
+        run("branch-source", "branch", "source", "--name", "branched")
+        probe("branched")
+        owned.append("grandchild")
+        run("branch-child", "branch", "branched", "--name", "grandchild")
+        probe("grandchild")
+        archive = root / "network.msb"
+        run("capture-archive", "snapshot", "create", "portable", "--from-sandbox", "child", "--full", "-o", str(archive))
+        create("archived", "--from-snapshot", str(archive), "--forked", "--net-rule", "allow@host")
+        probe("archived")
+        # Keep siblings alive together and prove fresh host TCP state remains
+        # independent even though all retain one virtual gateway identity.
+        for name in ("child", "forked", "branched", "grandchild", "archived"):
+            probe(name)
+        guest("source-after-all-children", "source", "exec 3<>/dev/shm/input; printf 'source-final-again\n' >&3")
+        wait_until(lambda: any(message == "source-final-again" for _, message in messages))
+        assert all(identity in source_ids for identity, message in messages if message.startswith("source-"))
+        record(dict(label="dual-stack-restores-and-branches", messages=messages))
 finally:
     for name in reversed(owned):
         try:

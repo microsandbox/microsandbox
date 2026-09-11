@@ -256,6 +256,8 @@ Full restore preserves captured processes, but not the host connections that con
 
 Application TCP connections also depend on host-side proxy state that is not captured. Applications need reconnect/retry handling; a restored socket can wait for its protocol timeout instead of failing immediately. This is separate from reconnecting the SDK or CLI client.
 
+Full restore and branching preserve the virtual gateway's identity so cached ARP/IPv6 neighbour entries still work. Each child gets an independent host network backend, not the source's connections. Older development full snapshots without a captured gateway identity must be recaptured; `--disk-only` does not require it.
+
 ## Export changes and compact a disk chain
 
 Repeated full checkpoints add disk layers. You choose when to export changes and when to compact; neither happens automatically.

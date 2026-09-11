@@ -4360,6 +4360,7 @@ mod tests {
             },
         ];
         config.checkpoint_restore = Some(CheckpointRestoreConfig {
+            network_gateway_mac: None,
             external_mount_policy: Default::default(),
             external_mounts: Vec::new(),
             local_branch: false,
