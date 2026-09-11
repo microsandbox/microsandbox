@@ -1458,7 +1458,9 @@ jobs:
           scripts/smoke/cli/split-irqchip-bind-net.sh
 
       - name: Snapshot smoke runner unit tests
-        run: python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
+        run: |
+          python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_restore_resource_intent.py
 
       - name: Snapshot and branch live smoke
         # The short operation deadline excludes image setup and bounded cleanup.

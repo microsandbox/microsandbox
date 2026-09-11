@@ -125,6 +125,16 @@ impl SandboxBuilder {
 
     /// Overlay sparse sandbox configuration on the hardcoded and global defaults.
     pub fn overlay(mut self, patch: SandboxConfigPatch) -> Self {
+        // Full restore may inherit omitted geometry, but must reject explicit mismatches.
+        // Preserve field presence before applying the patch; comparing resulting values with
+        // defaults would lose explicit requests that happen to equal those defaults.
+        let patch = patch.modify_resources(|resources| {
+            self.cpus_explicit |= resources.has_cpus();
+            self.memory_explicit |= resources.has_memory_mib();
+            self.max_cpus_explicit |= resources.has_max_cpus();
+            self.max_memory_explicit |= resources.has_max_memory_mib();
+            resources
+        });
         patch.apply_to(&mut self.config.spec);
         self
     }
@@ -2154,8 +2164,8 @@ mod tests {
     #[cfg(feature = "net")]
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretSubstitution};
     use microsandbox_types::{
-        CpuPlacement, DeploymentProfile, SandboxLogLevel, TransparentHugePagePolicy, VolumeMount,
-        VsockSocketType,
+        CpuPlacement, DeploymentProfile, SandboxConfigPatch, SandboxLogLevel,
+        SandboxResourcesPatch, TransparentHugePagePolicy, VolumeMount, VsockSocketType,
     };
     #[cfg(feature = "net")]
     use microsandbox_types::{PortProtocol, SecretSource};
@@ -2661,6 +2671,136 @@ mod tests {
                 .to_string()
                 .contains("captured CPU and memory geometry")
         );
+    }
+
+    #[test]
+    fn checkpoint_restore_checks_each_explicit_patch_resource() {
+        let state = checkpoint_state_with_geometry(4, 8, 2048, 4096);
+        let cases = [
+            ("cpus", SandboxResourcesPatch::new().cpus(4), false),
+            ("cpus", SandboxResourcesPatch::new().cpus(2), true),
+            ("max_cpus", SandboxResourcesPatch::new().max_cpus(8), false),
+            ("max_cpus", SandboxResourcesPatch::new().max_cpus(4), true),
+            (
+                "memory",
+                SandboxResourcesPatch::new().memory_mib(2048),
+                false,
+            ),
+            ("memory", SandboxResourcesPatch::new().memory_mib(512), true),
+            (
+                "max_memory",
+                SandboxResourcesPatch::new().max_memory_mib(4096),
+                false,
+            ),
+            (
+                "max_memory",
+                SandboxResourcesPatch::new().max_memory_mib(2048),
+                true,
+            ),
+        ];
+
+        for (field, patch, conflicting) in cases {
+            let mut builder =
+                SandboxBuilder::new("restore").overlay(SandboxConfigPatch::new().resources(patch));
+            let intent = builder.restore_override_intent();
+            assert_eq!(intent.cpus, field == "cpus");
+            assert_eq!(intent.max_cpus, field == "max_cpus");
+            assert_eq!(intent.memory, field == "memory");
+            assert_eq!(intent.max_memory, field == "max_memory");
+            let result = apply_checkpoint_resources(&mut builder.config, &state, intent);
+            if conflicting {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("captured CPU and memory geometry"),
+                    "{field}"
+                );
+            } else {
+                result.unwrap();
+                assert_eq!(builder.config.spec.resources.cpus, 4);
+                assert_eq!(builder.config.spec.resources.max_cpus, 8);
+                assert_eq!(builder.config.spec.resources.memory_mib, 2048);
+                assert_eq!(builder.config.spec.resources.max_memory_mib, 4096);
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_restore_patch_preserves_omission_and_prior_intent() {
+        // Clearing a patch field means omission, not resetting a previous builder request.
+        let absent = SandboxConfigPatch::new().resources(
+            SandboxResourcesPatch::new()
+                .cpus(2)
+                .clear_cpus()
+                .memory_mib(512)
+                .clear_memory_mib(),
+        );
+        let mut omitted = SandboxBuilder::new("restore").overlay(absent.clone());
+        let intent = omitted.restore_override_intent();
+        assert!(!intent.cpus && !intent.max_cpus && !intent.memory && !intent.max_memory);
+        apply_checkpoint_resources(
+            &mut omitted.config,
+            &checkpoint_state_with_geometry(4, 8, 2048, 4096),
+            intent,
+        )
+        .unwrap();
+
+        let explicit = SandboxBuilder::new("restore")
+            .cpus(4)
+            .max_cpus(8)
+            .memory(2048)
+            .max_memory(4096)
+            .overlay(absent)
+            .overlay(SandboxConfigPatch::new());
+        let intent = explicit.restore_override_intent();
+        assert!(intent.cpus && intent.max_cpus && intent.memory && intent.max_memory);
+        assert_eq!(explicit.config.spec.resources.memory_mib, 2048);
+    }
+
+    #[test]
+    fn checkpoint_restore_patch_tracks_requests_equal_to_defaults() {
+        let mut builder = SandboxBuilder::new("restore");
+        let default_memory = builder.config.spec.resources.memory_mib;
+        builder = builder.overlay(
+            SandboxConfigPatch::new()
+                .resources(SandboxResourcesPatch::new().memory_mib(default_memory)),
+        );
+        let intent = builder.restore_override_intent();
+        assert!(intent.memory);
+        let state =
+            checkpoint_state_with_geometry(4, 8, default_memory + 512, default_memory + 1024);
+        assert!(apply_checkpoint_resources(&mut builder.config, &state, intent).is_err());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_archive_build_retains_patch_resource_intent() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("saved.msnap");
+        std::fs::write(&archive, b"archive validation is deferred to the backend").unwrap();
+        let config = SandboxBuilder::new("restore")
+            .from_snapshot(archive.to_string_lossy())
+            .overlay(
+                SandboxConfigPatch::new().resources(
+                    SandboxResourcesPatch::new()
+                        .cpus(2)
+                        .max_cpus(4)
+                        .memory_mib(512)
+                        .max_memory_mib(1024),
+                ),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // Direct archives cross the builder/backend boundary before geometry is checked.
+        // Both routes must carry the same intent into that later validation.
+        assert_eq!(
+            config.snapshot_archive_source.as_deref(),
+            Some(archive.as_path())
+        );
+        let intent = config.restore_overrides;
+        assert!(intent.cpus && intent.max_cpus && intent.memory && intent.max_memory);
     }
 
     #[test]
