@@ -4,6 +4,11 @@
 //! user-facing intent, so disk sizing sits beside CPU and memory; conversion
 //! into the domain spec moves that value onto the OCI rootfs where the runtime
 //! realizes it.
+//!
+//! Cloud request objects ignore unknown fields so SDK and server releases can
+//! evolve independently. Missing fields keep their documented defaults; known
+//! fields and enum variants are still validated. Acceptance of a request does
+//! not imply support for settings unknown to the receiving server.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -730,12 +735,12 @@ impl From<VolumeMount> for CloudVolumeMount {
 
 /// Cloud network specification: a subset of the domain [`NetworkSpec`].
 /// Interface overrides, host port mapping, DNS, TLS interception, rate limits,
-/// and host-CA trust are not part of this type. `deny_unknown_fields` — posting
-/// an omitted field is an error, not a silent drop.
+/// and host-CA trust are not part of this type. Unknown fields are ignored for
+/// compatibility with newer clients; accepting them does not enable their behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct CloudNetworkSpec {
     /// Whether networking is enabled for this sandbox.
     pub enabled: bool,
@@ -770,11 +775,11 @@ impl Default for CloudNetworkSpec {
 
 /// Cloud guest runtime options: a subset of [`SandboxRuntimeOptions`]. The
 /// hostname and the metrics-sampling knobs are not part of this type.
-/// `deny_unknown_fields`.
+/// Unknown fields are ignored for compatibility with newer clients.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct CloudSandboxRuntimeOptions {
     /// Working directory for guest commands.
     pub workdir: Option<String>,
@@ -1411,17 +1416,114 @@ mod tests {
     }
 
     #[test]
-    fn cloud_network_rejects_rate_limit_configuration() {
-        let error = serde_json::from_value::<CloudNetworkSpec>(serde_json::json!({
+    fn cloud_network_ignores_unsupported_options() {
+        let network: CloudNetworkSpec = serde_json::from_value(serde_json::json!({
+            "enabled": false,
+            "max_connections": 64,
             "rate_limiter": {
                 "egress": {
                     "bandwidth": {"size": 1024, "refill_time_ms": 1000}
                 }
             }
         }))
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("unknown field `rate_limiter`"));
+        assert!(!network.enabled);
+        assert_eq!(network.max_connections, Some(64));
+        assert!(
+            serde_json::to_value(network)
+                .unwrap()
+                .get("rate_limiter")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn create_request_ignores_future_fields_at_nested_boundaries() {
+        let baseline = serde_json::json!({
+            "name": "agent-1",
+            "image": {"type": "oci", "reference": "alpine"},
+            "resources": {"vcpus": 2},
+            "network": {
+                "enabled": false,
+                "max_connections": 64,
+                "secrets": {"entries": [], "on_violation": {"type": "block"}}
+            },
+            "runtime": {"workdir": "/app"},
+            "mounts": [{"type": "tmpfs", "guest": "/tmp", "options": {}}],
+            "patches": [{"type": "text", "path": "/hello", "content": "world", "replace": false}],
+            "rlimits": [{"resource": "nofile", "soft": 64, "hard": 128}],
+            "lifecycle": {}
+        });
+        let expected: CloudCreateSandboxRequest = serde_json::from_value(baseline.clone()).unwrap();
+        let expected = serde_json::to_value(expected).unwrap();
+        for pointer in [
+            "",
+            "/image",
+            "/resources",
+            "/network",
+            "/network/secrets",
+            "/network/secrets/on_violation",
+            "/runtime",
+            "/mounts/0",
+            "/mounts/0/options",
+            "/patches/0",
+            "/rlimits/0",
+            "/lifecycle",
+        ] {
+            let mut future = baseline.clone();
+            future
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(
+                    "future_option".into(),
+                    serde_json::json!({"nested": [true, null, "future"]}),
+                );
+            let request: CloudCreateSandboxRequest = serde_json::from_value(future)
+                .unwrap_or_else(|error| panic!("future field at {pointer}: {error}"));
+            assert_eq!(
+                serde_json::to_value(request).unwrap(),
+                expected,
+                "{pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_request_defaults_fields_missing_from_older_clients() {
+        let request: CloudCreateSandboxRequest = serde_json::from_value(serde_json::json!({
+            "name": "older-client",
+            "image": {"type": "oci", "reference": "alpine"},
+            "network": {"enabled": true}
+        }))
+        .unwrap();
+
+        assert!(request.spec.network.enabled);
+        assert!(!request.spec.network.strict);
+        assert_eq!(request.spec.network.max_connections, None);
+        assert_eq!(request.spec.runtime.workdir, None);
+    }
+
+    #[test]
+    fn create_request_still_validates_known_fields_and_variants() {
+        for invalid in [
+            serde_json::json!({"network": {"enabled": "yes"}}),
+            serde_json::json!({"network": {"strict": "yes"}}),
+            serde_json::json!({"network": {"max_connections": -1}}),
+            serde_json::json!({"runtime": {"workdir": 42}}),
+            serde_json::json!({"resources": {"vcpus": 256}}),
+            serde_json::json!({"image": {"type": "oci"}}),
+            serde_json::json!({"image": {"type": "future_source"}}),
+            serde_json::json!({"pull_policy": "future_policy"}),
+            serde_json::json!({"rlimits": [{"resource": "nofile", "soft": 64}]}),
+        ] {
+            assert!(
+                serde_json::from_value::<CloudCreateSandboxRequest>(invalid.clone()).is_err(),
+                "invalid known configuration was accepted: {invalid}"
+            );
+        }
     }
 
     #[test]

@@ -47,3 +47,11 @@ cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate 
 - Validation helpers: sandbox-name and hostname rules shared across SDK, CLI, and cloud.
 
 Backend-private materialized state (registry credentials, local cache paths, DB rows, resolved manifest digests, process handles) deliberately stays out of these packages. See each language's README for details.
+
+## Cloud Request Compatibility
+
+Cloud request objects ignore unknown fields, including fields inside network and runtime options. This allows newer SDKs to send additive options before the receiving Cloud release understands them. Unknown settings have no effect until that server supports them; request success does not confirm that every supplied setting was applied.
+
+Missing fields retain their documented defaults. Required fields, recognized field types and values, and enum variants still undergo validation. Ignoring unknown object keys does not make new enum variants, renamed fields, or changed field types compatible.
+
+This policy applies to public Cloud wire types, not host or operator configuration. SDK checks for runtime-only options remain separate from the server's treatment of future Cloud fields.
