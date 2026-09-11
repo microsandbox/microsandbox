@@ -50,6 +50,7 @@ pub(crate) async fn materialize_checkpoint_for_child(
     source: &CheckpointRestoreConfig,
     child_stage: &Path,
     root_disk: &SnapshotRootDisk,
+    choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<CheckpointChildMaterialization> {
     // Validate once after obtaining child-owned files. Validating the source first neither
     // protects against a later source mutation nor substitutes for validation of the child.
@@ -69,6 +70,7 @@ pub(crate) async fn materialize_checkpoint_for_child(
         &source.checkpoint_id,
         child_stage,
         root_disk,
+        choices,
     )
     .await
 }
@@ -81,6 +83,7 @@ pub(crate) async fn materialize_checkpoint_disk_for_child(
     source: &CheckpointRestoreConfig,
     child_stage: &Path,
     root_disk: &SnapshotRootDisk,
+    choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<CheckpointDiskMaterialization> {
     let expected = ObjectId::new(&source.checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -91,7 +94,8 @@ pub(crate) async fn materialize_checkpoint_disk_for_child(
     tokio::fs::create_dir_all(child_stage).await?;
     let upper_layers =
         materialize_checkpoint_disk_layers(&source_closure, child_stage, root_disk).await?;
-    let disk_mounts = materialize_closure_disks(&source_closure, child_stage, root_disk).await?;
+    let disk_mounts =
+        materialize_closure_disks(&source_closure, child_stage, root_disk, choices).await?;
     Ok(CheckpointDiskMaterialization {
         upper_layers,
         disk_mounts,
@@ -109,6 +113,7 @@ pub(crate) async fn materialize_checkpoint_child_state(
     checkpoint_id: &str,
     child_stage: &Path,
     root_disk: &SnapshotRootDisk,
+    choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<CheckpointChildMaterialization> {
     let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -118,7 +123,8 @@ pub(crate) async fn materialize_checkpoint_child_state(
     validate_root_disk_closure(&child_closure, root_disk, false)?;
     let upper_layers =
         materialize_checkpoint_disk_layers(&child_closure, child_stage, root_disk).await?;
-    let disk_mounts = materialize_closure_disks(&child_closure, child_stage, root_disk).await?;
+    let disk_mounts =
+        materialize_closure_disks(&child_closure, child_stage, root_disk, choices).await?;
 
     Ok(CheckpointChildMaterialization {
         restore: CheckpointRestoreConfig {
@@ -146,6 +152,7 @@ pub(crate) async fn materialize_checkpoint_child_disk_state(
     checkpoint_id: &str,
     child_stage: &Path,
     root_disk: &SnapshotRootDisk,
+    choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<CheckpointDiskMaterialization> {
     let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -155,7 +162,8 @@ pub(crate) async fn materialize_checkpoint_child_disk_state(
     validate_root_disk_closure(&child_closure, root_disk, true)?;
     let upper_layers =
         materialize_checkpoint_disk_layers(&child_closure, child_stage, root_disk).await?;
-    let disk_mounts = materialize_closure_disks(&child_closure, child_stage, root_disk).await?;
+    let disk_mounts =
+        materialize_closure_disks(&child_closure, child_stage, root_disk, choices).await?;
     Ok(CheckpointDiskMaterialization {
         upper_layers,
         disk_mounts,
@@ -218,6 +226,7 @@ async fn materialize_closure_disks(
     closure: &CheckpointClosure,
     child: &Path,
     root: &SnapshotRootDisk,
+    choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<Vec<microsandbox_types::VolumeMount>> {
     let Some(layer) = closure.disks().first().and_then(|disk| disk.layers.first()) else {
         return Ok(Vec::new());
@@ -232,6 +241,7 @@ async fn materialize_closure_disks(
         source,
         child,
         root_device(root),
+        choices,
     )
     .await
 }
@@ -533,10 +543,14 @@ mod tests {
         let child = temp.path().join("child");
         let disk_child = temp.path().join("disk-child");
 
-        let disk_materialized =
-            materialize_checkpoint_disk_for_child(&restore, &disk_child, &SnapshotRootDisk::Flat)
-                .await
-                .unwrap();
+        let disk_materialized = materialize_checkpoint_disk_for_child(
+            &restore,
+            &disk_child,
+            &SnapshotRootDisk::Flat,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(disk_materialized.upper_layers.len(), 2);
         assert_eq!(
             disk_materialized.upper_layers[0]
@@ -555,10 +569,14 @@ mod tests {
         );
         assert!(!disk_child.join(CHILD_CHECKPOINT_DIRECTORY).exists());
 
-        let materialized =
-            materialize_checkpoint_for_child(&restore, &child, &SnapshotRootDisk::Flat)
-                .await
-                .unwrap();
+        let materialized = materialize_checkpoint_for_child(
+            &restore,
+            &child,
+            &SnapshotRootDisk::Flat,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         std::fs::remove_dir_all(source).unwrap();
 
         assert_eq!(materialized.upper_layers.len(), 2);

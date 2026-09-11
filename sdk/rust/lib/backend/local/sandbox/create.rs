@@ -218,9 +218,13 @@ impl LocalBackend {
                 &sandbox_dir,
                 disk_only,
                 config.snapshot_base.as_deref(),
+                &config.restore_resources,
             ))
             .await?;
             config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
+            if config.spec.runtime.user.is_none() {
+                config.spec.runtime.user = materialized.manifest.restore_defaults()?.user;
+            }
             config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
             crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
@@ -287,6 +291,7 @@ impl LocalBackend {
                         &source,
                         &sandbox_dir,
                         &root_layout,
+                        &config.restore_resources,
                     )
                     .await?;
                     config.checkpoint_restore = Some(materialized.restore);
@@ -299,6 +304,7 @@ impl LocalBackend {
                         &source,
                         &sandbox_dir,
                         &root_layout,
+                        &config.restore_resources,
                     )
                     .await?;
                     crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);

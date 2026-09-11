@@ -455,10 +455,16 @@ async fn chain(disk: bool) {
         if generation == 12 {
             // Direct archive restore must use the same dependency resolver, without installation.
             let child = temp.path().join("child");
-            let result =
-                materialize_archive_for_child_with_base(&local, &archive, &child, false, base)
-                    .await
-                    .unwrap();
+            let result = materialize_archive_for_child_with_base(
+                &local,
+                &archive,
+                &child,
+                false,
+                base,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
             assert!(result.checkpoint_restore.is_some());
             let closure =
                 CheckpointClosure::open_portable(child.join(".checkpoint-restore"), None).unwrap();
@@ -948,7 +954,8 @@ async fn standalone_base_archive_resolves_ram_but_dependent_base_archive_is_refu
             &delta,
             &child,
             false,
-            Some(base_archive.to_str().unwrap())
+            Some(base_archive.to_str().unwrap()),
+            &Default::default(),
         )
         .await
         .unwrap()

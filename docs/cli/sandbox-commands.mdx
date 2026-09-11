@@ -200,8 +200,6 @@ msb run alpine --net public --net-rule "deny@dns"
 
 ## msb sandbox create
 
-Snapshot restores show RAM-backing preparation, cache waits/reuse, syncing, and activation in the terminal. Slow preparation does not consume the activation timeout. `--quiet` hides progress; stdout remains scriptable.
-
 <Tooltip tip="The core create workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Create and boot a sandbox without running a command. Takes the same flags as `msb run` (except `--detach`).
@@ -212,6 +210,29 @@ msb create --replace python --name worker            # Replace existing
 msb create --replace-with-timeout 30s python --name worker  # Give the old one 30s to exit
 msb create --replace-with-timeout 0 python --name worker    # SIGKILL immediately
 ```
+
+<a id="msb-restore"></a>
+
+## msb sandbox restore
+
+Restore a saved snapshot into a new local sandbox. Use `msb restore`, `msb sandbox restore`, or `msb sbx restore`; all three accept the same flags. Full snapshots resume captured processes; disk snapshots boot from the saved disk. Run new commands separately with `msb exec`.
+
+```bash
+msb restore devbox:ready --name worker --forked
+msb exec worker -- echo hello
+msb sbx restore ./saved.msb --name disk-copy --disk-only
+```
+
+| Flag | Description |
+|------|-------------|
+| `--name` | Required destination sandbox name |
+| `--forked` | Restore full snapshots using private CoW memory |
+| `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--forked` |
+| `--snapshot-base` | Exact base snapshot or archive for a dependent export |
+| `-u`, `--user` | Override the default user for new exec commands |
+| `-q`, `--quiet` | Hide progress, but not unavailable-resource warnings |
+
+Restore progress covers RAM-backing preparation, cache waits/reuse, syncing, and activation. Slow preparation does not consume the activation timeout. `create` and `run` no longer accept `--from-snapshot`.
 
 <a id="msb-start"></a>
 

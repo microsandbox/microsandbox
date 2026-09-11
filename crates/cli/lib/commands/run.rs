@@ -20,28 +20,8 @@ use crate::{sandbox_config, ui};
 pub struct RunArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     ///
-    /// Mutually exclusive with `--from-snapshot`. May be omitted when a config file supplies
-    /// `image`.
-    #[arg(conflicts_with = "from_snapshot")]
+    /// May be omitted when a config file supplies `image`.
     pub image: Option<String>,
-
-    /// Create from a snapshot artifact (path or name).
-    ///
-    /// Disk snapshots cold-boot a fresh VM. Full snapshots resume captured execution unless
-    /// `--disk-only` is selected.
-    #[arg(
-        long = "from-snapshot",
-        alias = "from-snap",
-        value_name = "PATH_OR_NAME"
-    )]
-    pub from_snapshot: Option<String>,
-
-    /// Cold-boot only the disk state when the source is a full snapshot.
-    #[arg(long, requires = "from_snapshot")]
-    pub disk_only: bool,
-    /// Exact base snapshot or standalone base archive required by a dependent snapshot archive.
-    #[arg(long, requires = "from_snapshot")]
-    pub snapshot_base: Option<String>,
 
     /// Run the resolved image command in the background and print the sandbox name.
     ///
@@ -178,15 +158,12 @@ async fn run_new(
 ) -> anyhow::Result<()> {
     let launch_started_at = chrono::Utc::now();
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
-    let image = resolved.image(args.image.as_deref(), args.from_snapshot.as_deref())?;
+    let image = resolved.image(args.image.as_deref(), None)?;
+    if matches!(image, sandbox_config::ResolvedImage::Snapshot(_)) {
+        anyhow::bail!("snapshot sources require `msb restore SNAPSHOT --name NAME`");
+    }
     let builder = resolved.apply(Sandbox::builder(&name))?;
-    let mut builder = image.apply(builder)?;
-    if args.disk_only {
-        builder = builder.disk_only();
-    }
-    if let Some(base) = &args.snapshot_base {
-        builder = builder.snapshot_base(base);
-    }
+    let builder = image.apply(builder)?;
     if args.sandbox.log_level.is_none()
         && let Some(log_level) = log_level
     {
@@ -442,15 +419,9 @@ fn handle_exit(exit_code: i32) -> anyhow::Result<()> {
 /// Describe creation-only inputs that are ignored when reusing an
 /// existing named sandbox.
 fn ignored_existing_inputs(args: &RunArgs) -> Option<&'static str> {
-    match (
-        args.from_snapshot.is_some(),
-        args.sandbox.has_creation_flags(),
-    ) {
-        (true, true) => Some("--from-snapshot and creation flags"),
-        (true, false) => Some("--from-snapshot"),
-        (false, true) => Some("creation flags"),
-        (false, false) => None,
-    }
+    args.sandbox
+        .has_creation_flags()
+        .then_some("creation flags")
 }
 
 /// Warn when a detached run reuses an existing sandbox and includes a command.
@@ -672,10 +643,18 @@ mod tests {
     }
 
     #[test]
-    fn existing_reuse_warns_for_snapshot() {
-        let args = parse_run_args(&["--name", "box", "--detach", "--from-snapshot", "clean"]);
-
-        assert_eq!(ignored_existing_inputs(&args), Some("--from-snapshot"));
+    fn existing_reuse_cannot_silently_ignore_a_snapshot_source() {
+        assert!(
+            TestCli::try_parse_from([
+                "msb",
+                "--name",
+                "box",
+                "--detach",
+                "--from-snapshot",
+                "clean"
+            ])
+            .is_err()
+        );
     }
 
     #[cfg(feature = "net")]
@@ -737,38 +716,21 @@ mod tests {
     }
 
     #[test]
-    fn from_snap_is_an_alias_for_from_snapshot() {
-        let args = parse_run_args(&["--name", "box", "--from-snap", "clean"]);
-
-        assert_eq!(args.from_snapshot.as_deref(), Some("clean"));
+    fn snapshot_source_and_discarded_alias_are_rejected() {
+        for flag in ["--from-snapshot", "--from-snap"] {
+            assert!(TestCli::try_parse_from(["msb", "--name", "box", flag, "clean"]).is_err());
+        }
     }
 
     #[test]
-    fn disk_only_requires_and_accepts_snapshot_source() {
-        let args = parse_run_args(&[
-            "--name",
-            "box",
-            "--from-snapshot",
-            "checkpoint",
-            "--disk-only",
-        ]);
-
-        assert!(args.disk_only);
-        assert_eq!(args.from_snapshot.as_deref(), Some("checkpoint"));
+    fn restore_only_flags_are_rejected_by_run() {
+        for flag in ["--disk-only", "--forked"] {
+            assert!(TestCli::try_parse_from(["msb", "alpine", flag]).is_err());
+        }
     }
 
     #[test]
     fn external_mount_policy_is_explicit_and_requires_full_restore() {
-        let args = parse_run_args(&[
-            "--from-snapshot",
-            "saved",
-            "--external-mount-policy",
-            "relaxed",
-        ]);
-        assert_eq!(
-            args.sandbox.external_mount_policy.as_deref(),
-            Some("relaxed")
-        );
         for args in [
             vec!["msb", "alpine", "--external-mount-policy", "relaxed"],
             vec![
@@ -799,24 +761,14 @@ mod tests {
             .unwrap();
         let help = String::from_utf8(help).unwrap();
 
-        assert!(help.contains("--from-snapshot"));
+        assert!(!help.contains("--from-snapshot"));
         assert!(!help.contains("--from-snap "));
     }
 
     #[test]
-    fn existing_reuse_warns_for_snapshot_and_creation_flags() {
-        let args = parse_run_args(&[
-            "--name",
-            "box",
-            "--memory",
-            "1G",
-            "--from-snapshot",
-            "clean",
-        ]);
+    fn existing_reuse_warns_for_creation_flags() {
+        let args = parse_run_args(&["--name", "box", "--memory", "1G"]);
 
-        assert_eq!(
-            ignored_existing_inputs(&args),
-            Some("--from-snapshot and creation flags")
-        );
+        assert_eq!(ignored_existing_inputs(&args), Some("creation flags"));
     }
 }

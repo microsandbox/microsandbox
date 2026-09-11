@@ -63,6 +63,7 @@ struct FileSnapshotMetadata<'a> {
     manifest_digest: String,
     source_sandbox: &'a str,
     root_disk: SnapshotRootDisk,
+    user: Option<String>,
 }
 
 #[derive(Clone)]
@@ -380,6 +381,7 @@ async fn capture_installed(
             manifest_digest: manifest_digest_str,
             source_sandbox: &source_sandbox,
             root_disk,
+            user: sandbox_config.spec.runtime.user.clone(),
         },
     )
     .await;
@@ -670,6 +672,9 @@ pub(super) async fn create_snapshot_archive(
         root_disk,
     )?;
     manifest.parent = lineage.parent.clone();
+    manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults {
+        user: sandbox_config.spec.runtime.user.clone(),
+    })?;
     if record_integrity && let SnapshotState::File(file) = &mut manifest.state {
         for index in 0..file.layers.len() {
             let source = &disk.sources[index].path;
@@ -889,7 +894,7 @@ async fn capture_full_snapshot(
                 serde_json::Value::from(geometry.max_memory_mib),
             ),
         ]);
-        let manifest = Manifest {
+        let mut manifest = Manifest {
             schema: SCHEMA.into(),
             snapshot_id,
             scope: SnapshotScope::Full,
@@ -914,6 +919,9 @@ async fn capture_full_snapshot(
             requires: Vec::new(),
             extensions: BTreeMap::new(),
         };
+        manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults {
+            user: sandbox_config.spec.runtime.user.clone(),
+        })?;
         manifest
             .validate()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -1005,6 +1013,7 @@ async fn build_artifact(
         manifest_digest: manifest_digest_str,
         source_sandbox,
         root_disk,
+        user,
     } = metadata;
     let total_started = Instant::now();
     let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
@@ -1063,7 +1072,7 @@ async fn build_artifact(
     // descriptor is published so they never alter snapshot identity.
     let descriptor_started = Instant::now();
     super::metadata::write(dir, labels).await?;
-    let manifest = new_file_manifest_with_id(
+    let mut manifest = new_file_manifest_with_id(
         snapshot_id,
         disk,
         captured
@@ -1076,6 +1085,7 @@ async fn build_artifact(
         source_sandbox,
         root_disk,
     )?;
+    manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults { user })?;
     let canonical = manifest
         .to_canonical_bytes()
         .map_err(|e| MicrosandboxError::Custom(format!("manifest serialize: {e}")))?;
@@ -1752,6 +1762,7 @@ mod tests {
             manifest_digest: format!("sha256:{}", "a".repeat(64)),
             source_sandbox: "box",
             root_disk,
+            user: None,
         }
     }
 

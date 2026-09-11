@@ -356,9 +356,17 @@ pub(crate) async fn materialize_archive_for_child(
     child_stage: &Path,
     disk_only: bool,
     base: Option<&str>,
+    choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<archive::ArchiveChildMaterialization> {
-    archive::materialize_archive_for_child_with_base(local, archive, child_stage, disk_only, base)
-        .await
+    archive::materialize_archive_for_child_with_base(
+        local,
+        archive,
+        child_stage,
+        disk_only,
+        base,
+        choices,
+    )
+    .await
 }
 
 pub(crate) use restore::{

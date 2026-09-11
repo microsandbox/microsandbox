@@ -18,7 +18,40 @@ pub(crate) async fn materialize_additional_disks(
     source: &Path,
     child: &Path,
     root_device: Option<&str>,
+    choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<Vec<VolumeMount>> {
+    // Resolve the complete selection before copying even the first additional disk. A
+    // typo must not silently create an empty disk or leave a partially useful child.
+    let available: BTreeSet<&str> = disks
+        .iter()
+        .filter(|disk| Some(disk.device_id.as_str()) != root_device)
+        .filter_map(|disk| {
+            resources
+                .iter()
+                .find(|resource| resource.binding.get("device_id") == Some(&disk.device_id))
+                .and_then(|resource| resource.binding.get("guest_path"))
+                .map(String::as_str)
+        })
+        .collect();
+    let unknown: Vec<_> = choices
+        .captured
+        .iter()
+        .filter(|guest| !available.contains(guest.as_str()))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(invalid(&format!(
+            "no captured disk at selected guest paths: {unknown:?}"
+        )));
+    }
+    let missing: Vec<_> = available
+        .iter()
+        .filter(|guest| !choices.inherit && !choices.captured.contains(**guest))
+        .collect();
+    if !missing.is_empty() {
+        return Err(invalid(&format!(
+            "additional disks require explicit captured-content selection at {missing:?}; use volume(path, |m| m.captured()) or -v GUEST_PATH"
+        )));
+    }
     let mut mounts = Vec::new();
     let mut guests = BTreeSet::new();
     for disk in disks
@@ -281,12 +314,17 @@ mod tests {
             ]),
         };
         let child = temporary.path().join("child");
+        let choices = crate::sandbox::restore_resources::RestoreResources {
+            captured: BTreeSet::from(["/data".into()]),
+            ..Default::default()
+        };
         let mounts = materialize_additional_disks(
             std::slice::from_ref(&disk),
             std::slice::from_ref(&resource),
             &source,
             &child,
             Some("vdb"),
+            &choices,
         )
         .await
         .unwrap();
@@ -305,7 +343,8 @@ mod tests {
                 std::slice::from_ref(&resource),
                 &source,
                 &temporary.path().join("bad"),
-                Some("vdb")
+                Some("vdb"),
+                &choices,
             )
             .await
             .is_err()
@@ -351,6 +390,7 @@ mod tests {
                 &source,
                 &temporary.path().join(label),
                 Some("vdb"),
+                &choices,
             )
             .await
             .unwrap_err();

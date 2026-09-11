@@ -147,14 +147,6 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
     pub thp: Option<String>,
 
-    /// Restore a full snapshot with private copy-on-write memory.
-    #[arg(long, requires = "from_snapshot", conflicts_with = "disk_only")]
-    pub forked: bool,
-
-    /// External filesystem admission for full restore (strict by default).
-    #[arg(long, value_parser = ["strict", "relaxed"], requires = "from_snapshot", conflicts_with_all = ["disk_only", "image"])]
-    pub external_mount_policy: Option<String>,
-
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     /// OPTIONS may include paired `uid=<N>,gid=<N>` for directory-backed mounts.
     #[arg(short, long)]
@@ -1012,8 +1004,6 @@ impl SandboxOpts {
             || self.memory.is_some()
             || self.max_memory.is_some()
             || self.thp.is_some()
-            || self.forked
-            || self.external_mount_policy.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -1288,17 +1278,6 @@ fn apply_sandbox_opts_inner(
             .parse::<TransparentHugePagePolicy>()
             .map_err(anyhow::Error::msg)?;
         builder = builder.thp(policy);
-    }
-    if opts.forked {
-        builder = builder.forked();
-    }
-    if let Some(policy) = opts.external_mount_policy.as_deref() {
-        let policy = match policy {
-            "strict" => microsandbox::sandbox::ExternalMountRestorePolicy::Strict,
-            "relaxed" => microsandbox::sandbox::ExternalMountRestorePolicy::Relaxed,
-            _ => anyhow::bail!("external mount policy must be strict or relaxed"),
-        };
-        builder = builder.external_mount_policy(policy);
     }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);
@@ -1826,6 +1805,23 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
     Ok(builder.volume(guest, move |mount| {
         configure_volume_mount(mount, &source, is_path, options)
     }))
+}
+
+/// Restore-only guest-path shorthand; explicit mappings retain the existing path grammar.
+pub(crate) fn parse_restore_volume(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
+    if spec.starts_with('/') && !spec.contains(':') {
+        return Ok((spec.into(), MountBuilder::new(spec).captured()));
+    }
+    let parsed = parse_volume_mount_spec(spec)?;
+    let guest = parsed.guest.to_string();
+    let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
+    let mount = configure_volume_mount(
+        MountBuilder::new(&guest),
+        parsed.source,
+        is_path,
+        parsed.options,
+    );
+    Ok((guest, mount))
 }
 
 /// Parse and materialize a bind mount with the shared `-v/--volume` options.

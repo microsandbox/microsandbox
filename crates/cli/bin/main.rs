@@ -21,9 +21,9 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         heading: "Sandboxes",
         commands: &[
-            "run", "create", "modify", "start", "stop", "pause", "resume", "branch", "restart",
-            "ping", "touch", "list", "status", "metrics", "remove", "exec", "copy", "logs", "ssh",
-            "inspect", "sandbox",
+            "run", "create", "restore", "modify", "start", "stop", "pause", "resume", "branch",
+            "restart", "ping", "touch", "list", "status", "metrics", "remove", "exec", "copy",
+            "logs", "ssh", "inspect", "sandbox",
         ],
     },
     CommandGroup {
@@ -820,12 +820,46 @@ mod sandbox_command_tests {
         let cases: &[&[&str]] = &[
             &["run", "alpine", "--name", "demo", "--", "echo", "--help"],
             &["create", "alpine", "--name", "demo"],
+            &["restore", "source:ready", "--name", "child"],
+            &[
+                "restore",
+                "./saved.msb",
+                "--name",
+                "child",
+                "--forked",
+                "--snapshot-base",
+                "source:base",
+                "-v",
+                "/data",
+                "-u",
+                "1000",
+                "-q",
+            ],
+            &["restore", "source:ready", "--name", "child", "--disk-only"],
+            #[cfg(feature = "net")]
+            &[
+                "restore",
+                "source:ready",
+                "--name",
+                "child",
+                "-v",
+                "/srv/work:/workspace",
+                "-p",
+                "127.0.0.1:8081:80",
+                "--external-mount-policy",
+                "relaxed",
+                "--dangerously-inherit-resources",
+            ],
             &["modify", "demo", "--cpus", "2"],
             &["start", "demo"],
             &["stop", "demo", "--timeout", "3"],
             &["pause", "demo"],
             &["resume", "demo"],
             &["branch", "demo", "--name", "child"],
+            #[cfg(feature = "net")]
+            &[
+                "branch", "demo", "--name", "child", "-v", "/data", "-p", "8081:80",
+            ],
             &["restart", "demo"],
             &["ping", "demo"],
             &["touch", "demo"],
@@ -939,6 +973,68 @@ mod sandbox_command_tests {
     }
 
     #[test]
+    fn restore_rejects_boot_inputs_and_uses_the_creation_executor() {
+        for prefix in [&[][..], &["sandbox"][..], &["sbx"][..]] {
+            let restored = parse_sandbox(prefix, &["restore", "saved", "--name", "child"]);
+            assert!(matches!(restored, sandbox::SandboxCommands::Restore(_)));
+            assert!(!restored.is_resident_control());
+            for extra in [
+                &["--forked", "--disk-only"][..],
+                &["--memory", "512M"][..],
+                &["--cpus", "2"][..],
+                &["--", "sh"][..],
+                &["--replace"][..],
+            ] {
+                let argv = ["msb"]
+                    .into_iter()
+                    .chain(prefix.iter().copied())
+                    .chain(["restore", "saved", "--name", "child"])
+                    .chain(extra.iter().copied());
+                assert!(
+                    Cli::try_parse_from(argv).is_err(),
+                    "accepted {prefix:?} restore {extra:?}"
+                );
+            }
+            // The old create/run route must fail, not parse as an ordinary fresh boot.
+            for verb in ["create", "run"] {
+                let argv = ["msb"].into_iter().chain(prefix.iter().copied()).chain([
+                    verb,
+                    "--from-snapshot",
+                    "saved",
+                    "--name",
+                    "child",
+                ]);
+                assert!(Cli::try_parse_from(argv).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn restore_preserves_global_flags_through_all_public_forms() {
+        for argv in [
+            vec!["msb", "--debug", "restore", "saved", "--name", "child"],
+            vec![
+                "msb", "sandbox", "--debug", "restore", "saved", "--name", "child",
+            ],
+            vec![
+                "msb", "sbx", "restore", "saved", "--name", "child", "--debug",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert!(cli.logs.debug);
+            let command = cli.command.into_canonical();
+            assert!(!command.is_resident_control());
+            assert!(!is_backend_independent_maintenance_command(&command));
+            assert!(matches!(
+                command,
+                Commands::Sandbox(sandbox::SandboxArgs {
+                    command: sandbox::SandboxCommands::Restore(_)
+                })
+            ));
+        }
+    }
+
+    #[test]
     fn help_exposes_the_group_and_shortcuts_but_hides_machine() {
         Cli::command().debug_assert();
         let command = Cli::command();
@@ -954,6 +1050,8 @@ mod sandbox_command_tests {
         assert!(help.contains("sandbox"));
         assert!(help.contains("sbx"));
         assert!(help.contains("branch"));
+        assert!(help.contains("restore"));
+        assert!(group.find_subcommand("restore").is_some());
         assert!(!help.contains("machine"));
     }
 }

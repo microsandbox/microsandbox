@@ -252,6 +252,10 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub(crate) external_mount_policy: microsandbox_types::ExternalMountRestorePolicy,
 
+    /// Resource choices apply to this restore/branch only, never later starts or branches.
+    #[serde(skip)]
+    pub(crate) restore_resources: super::restore_resources::RestoreResources,
+
     /// Whether this create operation resumed execution from a full snapshot.
     #[serde(skip)]
     pub(crate) resumed_from_full_snapshot: bool,
@@ -312,6 +316,7 @@ impl SandboxConfig {
             config.forked = false;
         }
         config.snapshot_restore_mode = SnapshotRestoreMode::Full;
+        config.restore_resources = Default::default();
         config.resumed_from_full_snapshot = false;
         #[cfg(feature = "local")]
         {
@@ -802,6 +807,7 @@ impl Default for SandboxConfig {
             forked: false,
             snapshot_restore_mode: SnapshotRestoreMode::Full,
             external_mount_policy: microsandbox_types::ExternalMountRestorePolicy::Strict,
+            restore_resources: Default::default(),
             resumed_from_full_snapshot: false,
             #[cfg(feature = "local")]
             snapshot_upper_layers: Vec::new(),

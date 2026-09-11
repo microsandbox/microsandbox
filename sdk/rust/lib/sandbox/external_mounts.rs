@@ -69,12 +69,14 @@ pub(crate) async fn resolve_external_mounts(
             .iter()
             .find(|candidate| candidate.guest() == mount.guest_path)
             .cloned();
+        let explicitly_mapped = explicit.is_some();
         let (selected, remapped) = match explicit {
             Some(selected) => (Some(selected), !restore.local_branch),
-            None => (
+            None if config.restore_resources.inherit => (
                 authorized_source_mount(local, resource, &mount.guest_path).await?,
                 false,
             ),
+            None => (None, false),
         };
         let selected = admit_existing_named_mount(local, selected).await?;
         let unavailable = selected.is_none();
@@ -114,9 +116,11 @@ pub(crate) async fn resolve_external_mounts(
             } else {
                 config.spec.mounts.push(selected);
             }
-        } else if config.external_mount_policy == ExternalMountRestorePolicy::Strict {
+        } else if explicitly_mapped
+            && config.external_mount_policy == ExternalMountRestorePolicy::Strict
+        {
             return Err(MicrosandboxError::InvalidConfig(format!(
-                "external mount {} has no available source-local authorization; provide a volume mapping at the captured guest path",
+                "explicit external mount {} is unavailable; provide an existing compatible volume or select relaxed validation",
                 mount.guest_path
             )));
         } else {

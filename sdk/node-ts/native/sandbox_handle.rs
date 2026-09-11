@@ -197,7 +197,11 @@ impl JsSandboxHandle {
     #[napi]
     pub async fn branch(&self, name: String) -> Result<crate::sandbox::Sandbox> {
         Ok(crate::sandbox::Sandbox::from_rust(
-            self.inner.branch(name).await.map_err(to_napi_error)?,
+            self.inner
+                .branch(name)
+                .branch()
+                .await
+                .map_err(to_napi_error)?,
         ))
     }
 

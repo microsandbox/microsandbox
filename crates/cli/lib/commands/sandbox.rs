@@ -5,7 +5,7 @@ use microsandbox::LogLevel;
 
 use super::{
     branch, copy, create, exec, inspect, list, logs, metrics, modify, pause, ping, ps, remove,
-    restart, run, start, stop, touch,
+    restart, restore, run, start, stop, touch,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -29,6 +29,9 @@ pub enum SandboxCommands {
 
     /// Create a sandbox and boot it in the background.
     Create(create::CreateArgs),
+
+    /// Restore a snapshot into a new detached sandbox.
+    Restore(restore::RestoreArgs),
 
     /// Modify sandbox configuration.
     #[command(visible_alias = "mod")]
@@ -107,6 +110,7 @@ pub async fn run(command: SandboxCommands, log_level: Option<LogLevel>) -> anyho
     match command {
         SandboxCommands::Run(args) => run::run(args, log_level).await,
         SandboxCommands::Create(args) => create::run(args, log_level).await,
+        SandboxCommands::Restore(args) => restore::run(args, log_level).await,
         SandboxCommands::Modify(args) => modify::run(args).await,
         SandboxCommands::Start(args) => start::run(args).await,
         SandboxCommands::Stop(args) => stop::run(args).await,

@@ -1959,12 +1959,8 @@ fn build_vm(
     for (file_mount, restore_binding) in file_inputs {
         let Some(file_mount) = file_mount else {
             let binding = restore_binding.expect("only restore omits backing");
-            if !relaxed {
-                return Err(RuntimeError::Custom(format!(
-                    "file mount {} is unavailable",
-                    binding.mount.guest_path
-                )));
-            }
+            // An intentionally unmapped resource is distinct from a supplied mapping
+            // failing strict validation. Keep its guest device but grant no host access.
             let tag = binding.mount.tag.clone();
             builder = builder.fs(move |fs| {
                 fs.tag(&tag)
@@ -2098,12 +2094,8 @@ fn build_vm(
         });
         let Some(mount_spec) = mount_spec else {
             let binding = restore_binding.expect("only restores have unavailable bindings");
-            if !relaxed {
-                return Err(RuntimeError::Custom(format!(
-                    "mount {} is unavailable",
-                    binding.mount.guest_path
-                )));
-            }
+            // Missing authorization is represented by an error-serving device, not an
+            // empty directory, fallback host path, or removal of the captured mount.
             {
                 let tag = binding.mount.tag.clone();
                 builder = builder.fs(move |fs| {

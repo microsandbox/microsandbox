@@ -997,7 +997,15 @@ pub(crate) async fn materialize_archive_for_child(
     child_stage: &Path,
     disk_only: bool,
 ) -> MicrosandboxResult<ArchiveChildMaterialization> {
-    materialize_archive_for_child_with_base(local, archive, child_stage, disk_only, None).await
+    materialize_archive_for_child_with_base(
+        local,
+        archive,
+        child_stage,
+        disk_only,
+        None,
+        &Default::default(),
+    )
+    .await
 }
 
 pub(crate) async fn materialize_archive_for_child_with_base(
@@ -1006,6 +1014,7 @@ pub(crate) async fn materialize_archive_for_child_with_base(
     child_stage: &Path,
     disk_only: bool,
     base: Option<&str>,
+    choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<ArchiveChildMaterialization> {
     let total_started = Instant::now();
     tokio::fs::create_dir_all(child_stage).await?;
@@ -1124,6 +1133,7 @@ pub(crate) async fn materialize_archive_for_child_with_base(
                 &state.checkpoint_id,
                 child_stage,
                 &manifest.root_disk,
+                choices,
             )
             .await?;
             install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
@@ -1148,6 +1158,7 @@ pub(crate) async fn materialize_archive_for_child_with_base(
             &state.checkpoint_id,
             child_stage,
             &manifest.root_disk,
+            choices,
         )
         .await?;
         install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
@@ -4018,7 +4029,10 @@ mod tests {
             .unwrap();
         let archive = temporary.path().join("unused.msb");
         let child = temporary.path().join("unused-child");
-        let future = materialize_archive_for_child_with_base(&local, &archive, &child, false, None);
+        let choices = Default::default();
+        let future = materialize_archive_for_child_with_base(
+            &local, &archive, &child, false, None, &choices,
+        );
         let bytes = std::mem::size_of_val(&future);
         assert!(
             bytes < 32 * 1024,

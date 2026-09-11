@@ -45,9 +45,9 @@ use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, Operation, size::Me
 
 /// Builder for constructing a [`SandboxConfig`] with a fluent API.
 pub struct SandboxBuilder {
-    config: SandboxConfig,
+    pub(crate) config: SandboxConfig,
     detached: bool,
-    build_error: Option<crate::MicrosandboxError>,
+    pub(crate) build_error: Option<crate::MicrosandboxError>,
     cpus_explicit: bool,
     memory_explicit: bool,
     max_cpus_explicit: bool,
@@ -1313,6 +1313,9 @@ impl SandboxBuilder {
         }
 
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
+        if self.config.spec.runtime.user.is_none() {
+            self.config.spec.runtime.user = snap.manifest().restore_defaults()?.user;
+        }
         self.config.snapshot_parent = Some(snap.id().to_string());
         let unsupported = snap.manifest().unsupported_requires();
         if !unsupported.is_empty() {

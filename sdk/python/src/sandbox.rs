@@ -1046,7 +1046,7 @@ impl PySandbox {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
             Ok(PySandbox::from_rust(
-                sandbox.branch(name).await.map_err(to_py_err)?,
+                sandbox.branch(name).branch().await.map_err(to_py_err)?,
             ))
         })
     }

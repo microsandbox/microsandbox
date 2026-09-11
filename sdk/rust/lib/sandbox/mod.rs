@@ -28,6 +28,8 @@ mod patch;
 pub(crate) mod pause;
 #[cfg(all(feature = "local", windows))]
 mod reap;
+mod restore_builder;
+pub(crate) mod restore_resources;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 // Windows-only in shipping builds, but kept compiled under `test` so the
@@ -127,6 +129,7 @@ pub(crate) use types::validate_volume_mounts;
 
 pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
+pub use branch::BranchBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use compact::{DiskCompactionBuilder, DiskCompactionResult};
 pub use config::SandboxConfig;
@@ -177,6 +180,7 @@ pub use microsandbox_types::{
     VsockSpecPatch,
 };
 pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
+pub use restore_builder::RestoreBuilder;
 
 #[cfg(feature = "local")]
 mod external_mounts;

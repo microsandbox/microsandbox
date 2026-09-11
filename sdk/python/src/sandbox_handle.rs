@@ -383,7 +383,7 @@ impl PySandboxHandle {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.clone();
             Ok(PySandbox::from_rust(
-                guard.branch(name).await.map_err(to_py_err)?,
+                guard.branch(name).branch().await.map_err(to_py_err)?,
             ))
         })
     }

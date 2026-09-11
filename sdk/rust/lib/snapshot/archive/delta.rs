@@ -1103,6 +1103,7 @@ mod tests {
             &child,
             false,
             Some(base_name),
+            &Default::default(),
         )
         .await
         .unwrap();

@@ -430,7 +430,7 @@ mod tests {
             ));
         }
         assert!(matches!(
-            stale.branch("child").await,
+            stale.branch("child").branch().await,
             Err(MicrosandboxError::SandboxReplaced { .. })
         ));
         for result in [
@@ -444,7 +444,7 @@ mod tests {
             ));
         }
         assert!(matches!(
-            live.branch("child").await,
+            live.branch("child").branch().await,
             Err(MicrosandboxError::SandboxReplaced { .. })
         ));
         assert!(!backend.sandboxes_dir().join("child").exists());

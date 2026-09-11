@@ -3362,7 +3362,7 @@ pub unsafe extern "C" fn msb_sandbox_branch(
         };
         Ok(Box::pin(async move {
             let sb = if let Some(live) = live {
-                live.branch(child).await.map_err(FfiError::from)?
+                live.branch(child).branch().await.map_err(FfiError::from)?
             } else {
                 Sandbox::get(&source)
                     .await

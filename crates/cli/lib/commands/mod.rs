@@ -29,6 +29,7 @@ pub mod pull;
 pub mod registry;
 pub mod remove;
 pub mod restart;
+pub mod restore;
 pub mod run;
 pub mod sandbox;
 pub mod self_cmd;

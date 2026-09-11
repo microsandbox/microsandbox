@@ -548,7 +548,7 @@ impl Sandbox {
     pub async fn branch(&self, name: String) -> Result<Sandbox> {
         let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         Ok(Sandbox::from_rust(
-            sb.branch(name).await.map_err(to_napi_error)?,
+            sb.branch(name).branch().await.map_err(to_napi_error)?,
         ))
     }
 
