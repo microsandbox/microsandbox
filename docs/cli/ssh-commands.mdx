@@ -7,7 +7,11 @@ icon: "lock"
 
 SSH commands expose sandbox shells, remote commands, and SFTP through the SSH protocol. For usage flows, see [SSH](/sandboxes/ssh).
 
-## msb ssh
+SSH operations are also available as `msb sandbox ssh` and `msb sbx ssh`, including nested operations such as `msb sbx ssh serve`. The examples use the recommended short form, `msb ssh`.
+
+<a id="msb-ssh"></a>
+
+## msb sandbox ssh
 
 Start a native SSH client session into a sandbox. With no remote command, this opens an interactive shell. With `--`, the remaining tokens are joined into the remote shell command.
 
@@ -25,7 +29,9 @@ msb ssh --name serve -- uptime
 | `--no-inactivity-timeout` | Disable the SSH inactivity timeout |
 | `-- COMMAND...` | Remote command to run through the sandbox shell |
 
-## msb ssh authorize
+<a id="msb-ssh-authorize"></a>
+
+## msb sandbox ssh authorize
 
 Add a public key to microsandbox's SSH authorization file.
 
@@ -43,7 +49,9 @@ cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
 
 The default authorization file is `<MSB_HOME>/ssh/authorized_keys`, or `~/.microsandbox/ssh/authorized_keys` when `MSB_HOME` is unset or empty. The file is created with private permissions.
 
-## msb ssh serve
+<a id="msb-ssh-serve"></a>
+
+## msb sandbox ssh serve
 
 <Tooltip tip="Not available on microsandbox cloud; use msb ssh native sessions instead."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -82,7 +90,9 @@ Host devbox.msb
   ProxyCommand msb ssh serve devbox --stdio
 ```
 
-## msb ssh connect
+<a id="msb-ssh-connect"></a>
+
+## msb sandbox ssh connect
 
 Explicit subcommand form for native SSH client sessions.
 

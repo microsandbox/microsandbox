@@ -30,6 +30,7 @@ pub mod registry;
 pub mod remove;
 pub mod restart;
 pub mod run;
+pub mod sandbox;
 pub mod self_cmd;
 pub mod snapshot;
 #[cfg(feature = "ssh")]

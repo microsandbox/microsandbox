@@ -412,7 +412,7 @@ impl SandboxBuilder {
 
     /// Set the runtime log level for the sandbox process.
     ///
-    /// This controls the verbosity of the `msb sandbox` process.
+    /// This controls the verbosity of the `msb machine` process.
     pub fn log_level(mut self, level: LogLevel) -> Self {
         self.config.spec.runtime.log_level = Some(sandbox_log_level_from_runtime(level));
         self

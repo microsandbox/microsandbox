@@ -4,6 +4,14 @@ This guide covers everything you need to build, test, and release microsandbox f
 
 For contribution guidelines (forking, commit signing, pull requests), see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
+## v0.7.0 CLI migration
+
+Sandbox commands share one definition and dispatcher under `crates/cli/lib/commands/sandbox.rs`. `msb sandbox <command>` is the canonical group, `msb sbx <command>` is its visible alias, and `msb <command>` is the recommended everyday shortcut. Keep all forms equivalent when adding commands or flags; README and quickstart examples should continue to prefer the top-level verbs.
+
+The hidden VM process entry point is now `msb machine`, implemented in `crates/cli/lib/machine_cmd.rs`. The SDK invokes it directly, and it must still execute before the CLI's async runtime starts. This is a coordinated v0.7.0 launcher rename: use a matching SDK/runtime pair, including when setting `MSB_PATH` or supplying a runtime through SDK configuration. The old internal `msb sandbox [flags]` invocation is no longer accepted. Guest configuration transport and the boot/restore intent checks are unchanged.
+
+Regenerate installed shell completion scripts after upgrading so they include the new group and alias. See [the launcher compatibility contract](COMPATIBILITY.md#5-launcher-to-runtime-process-protocol).
+
 ## Prerequisites
 
 - **Operating System**:

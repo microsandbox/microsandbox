@@ -561,7 +561,7 @@ impl LocalBackend {
 }
 
 // Stale-sandbox reaping is no longer owned by the SDK/CLI. Host runtime
-// processes (`msb sandbox`) now perform lifecycle maintenance: stale active
+// processes (`msb machine`) now perform lifecycle maintenance: stale active
 // reconciliation and terminal ephemeral cleanup, on startup under a
 // read-gated DB lease (see `microsandbox_runtime::maintenance`). The lazy
 // read-time reconciliation in `reconcile_sandbox_runtime_state` below still

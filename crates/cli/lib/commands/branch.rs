@@ -10,7 +10,7 @@ use crate::ui;
 //--------------------------------------------------------------------------------------------------
 
 /// Create an independent child from a running or user-paused local sandbox.
-#[derive(Args)]
+#[derive(Debug, Args)]
 pub struct BranchArgs {
     /// Source sandbox name.
     pub source: String,
