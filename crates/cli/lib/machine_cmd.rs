@@ -527,7 +527,7 @@ fn validate_open_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), Str
     Ok(())
 }
 
-/// Parse `--disk id:host_path:format[:ro]` entries into typed specs.
+/// Parse `--disk id:host_path:format[:ro][:snapshot-owned]` entries into typed specs.
 ///
 /// `guest` and `fstype` are not in this arg. They travel in the typed guest
 /// bootstrap consumed by agentd, so the runtime only needs what `DiskBuilder`
@@ -550,6 +550,12 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
         return Err(format!("invalid --disk entry with empty id: {entry:?}"));
     }
 
+    // This must-understand suffix is emitted only by the trusted launcher after ownership
+    // resolution. Older runtimes reject it as an unknown format instead of assuming ownership.
+    let (rest, snapshot_owned) = match rest.strip_suffix(":snapshot-owned") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
     let (rest, readonly) = match rest.strip_suffix(":ro") {
         Some(rest) => (rest, true),
         None => (rest, false),
@@ -578,6 +584,7 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
         format,
         fstype: None, // ditto
         readonly,
+        snapshot_owned,
     })
 }
 
@@ -587,6 +594,22 @@ mod tests {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     use super::*;
+
+    #[test]
+    fn snapshot_disk_ownership_requires_the_explicit_suffix() {
+        for (value, owned, readonly) in [
+            ("disk:/host:raw", false, false),
+            ("disk:/host:raw:ro", false, true),
+            ("disk:/host:raw:snapshot-owned", true, false),
+            ("disk:/host:qcow2:ro:snapshot-owned", true, true),
+        ] {
+            let parsed = parse_one_disk_arg(value).unwrap();
+            assert_eq!(parsed.snapshot_owned, owned);
+            assert_eq!(parsed.readonly, readonly);
+        }
+        assert!(parse_one_disk_arg("disk:/host:raw:snapshot-owned:ro").is_err());
+        assert!(parse_one_disk_arg("disk:/host:raw:snapshot-owned:snapshot-owned").is_err());
+    }
 
     fn fmt(s: &str) -> String {
         format!(

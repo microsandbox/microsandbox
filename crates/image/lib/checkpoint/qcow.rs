@@ -19,6 +19,36 @@ const QCOW_CLUSTER_SIZE: usize = 64 * 1024;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Require a qcow2 header without implicit backing or external data-file dependencies.
+///
+/// Explicit `backing(None)` can suppress a header path in format readers, so denying implicit
+/// opens during capacity inspection alone does not prove a captured image is self-contained.
+/// Call this on integrity-verified private copies before ordinary writable image attachment.
+pub fn validate_standalone_qcow2(file: &std::fs::File) -> std::io::Result<()> {
+    let mut file = file.try_clone()?;
+    file.rewind()?;
+    let mut header = [0u8; 80];
+    file.read_exact(&mut header)?;
+    let invalid = |message| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+    let version = u32::from_be_bytes(header[4..8].try_into().unwrap());
+    if &header[..4] != b"QFI\xfb" || !matches!(version, 2 | 3) {
+        return Err(invalid("invalid qcow2 header"));
+    }
+    let backing_offset = u64::from_be_bytes(header[8..16].try_into().unwrap());
+    let backing_length = u32::from_be_bytes(header[16..20].try_into().unwrap());
+    if backing_offset != 0 || backing_length != 0 {
+        return Err(invalid(
+            "standalone qcow2 image must not name a backing file",
+        ));
+    }
+    if version == 3 && u64::from_be_bytes(header[72..80].try_into().unwrap()) & (1 << 2) != 0 {
+        return Err(invalid(
+            "standalone qcow2 image must not use an external data file",
+        ));
+    }
+    Ok(())
+}
+
 /// Build a replacement first cluster with a portable backing filename.
 ///
 /// Only the name changes: callers must keep the same predecessor bytes and format. Applying the

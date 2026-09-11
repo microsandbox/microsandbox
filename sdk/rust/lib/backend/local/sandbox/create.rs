@@ -5,6 +5,8 @@
 //! impl's `create`/`create_detached` and the pull-progress shims on
 //! [`Sandbox`] and `SandboxBuilder` all dispatch here.
 
+mod cleanup;
+
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,6 +40,7 @@ use crate::sandbox::{
     remove_dir_if_exists, validate_env, validate_hostname, validate_labels, validate_sandbox_name,
     validate_volume_mounts,
 };
+use cleanup::CreationCleanup;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -219,6 +222,7 @@ impl LocalBackend {
             .await?;
             config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
             config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
+            crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
             crate::sandbox::apply_snapshot_root_layout(
                 &mut config,
@@ -286,6 +290,7 @@ impl LocalBackend {
                     )
                     .await?;
                     config.checkpoint_restore = Some(materialized.restore);
+                    crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
                     config.snapshot_upper_layers = materialized.upper_layers;
                     config.suppress_launch_for_full_restore();
                 }
@@ -296,10 +301,13 @@ impl LocalBackend {
                         &root_layout,
                     )
                     .await?;
+                    crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
                     config.snapshot_upper_layers = materialized.upper_layers;
                 }
             }
         }
+        crate::sandbox::resolve_external_mounts(self, &mut config).await?;
+
         // Archive descriptors are resolved here, after the builder's initial validation.
         // Do not let a disk archive turn an explicit CoW restore into a fresh boot.
         if config.forked && config.checkpoint_restore.is_none() {
@@ -619,7 +627,13 @@ impl LocalBackend {
         // Sandbox-time named-volume creation is one-shot create intent. Provision
         // before inserting the sandbox row so volume conflicts or incompatibilities
         // cannot leave a stopped sandbox that never booted.
-        let created_named_volumes = ensure_named_volumes(self, &config).await?;
+        let created_named_volumes = Arc::new(ensure_named_volumes(self, &config).await?);
+        let mut creation_cleanup = CreationCleanup::new(
+            backend.clone(),
+            config.spec.name.clone(),
+            _transition_guard,
+            created_named_volumes.clone(),
+        );
 
         // Claim the persisted identity in Starting state. Running is published only after the
         // guest agent and all create-time validation are ready for callers.
@@ -665,6 +679,7 @@ impl LocalBackend {
                 return Err(e);
             }
         };
+        creation_cleanup.retain_process(local_state.handle.clone());
         returned_config.checkpoint_restore = None;
         returned_config.snapshot_upper_layers.clear();
         let mut sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
@@ -702,13 +717,16 @@ impl LocalBackend {
             Self::persist_oci_manifest_pin(write_db, sandbox_id, manifest_digest).await
         {
             sandbox.terminate_creation_owner().await;
-            if created_named_volumes.is_empty() {
-                let _ =
-                    Self::update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
-            } else {
-                rollback_created_named_volumes(self, &created_named_volumes).await;
-                let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
-            }
+            // A bounded termination attempt can expire before runtime ownership ends.
+            // Keep the original failure, but never remove storage without the lifecycle lock.
+            self.rollback_failed_startup(
+                write_db,
+                sandbox_id,
+                sandbox.name(),
+                &created_named_volumes,
+            )
+            .await
+            .map_err(|cleanup| crate::MicrosandboxError::Runtime(format!("{err}; {cleanup}")))?;
             return Err(err);
         }
 
@@ -719,38 +737,38 @@ impl LocalBackend {
             match sandbox.fs().stat(workdir).await {
                 Ok(metadata) if metadata.kind == FsEntryKind::Directory => {}
                 Ok(_) => {
-                    sandbox.terminate_creation_owner().await;
-                    if created_named_volumes.is_empty() {
-                        let _ = Self::update_sandbox_status(
-                            write_db,
-                            sandbox_id,
-                            SandboxStatus::Stopped,
-                        )
-                        .await;
-                    } else {
-                        rollback_created_named_volumes(self, &created_named_volumes).await;
-                        let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
-                    }
-                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    let error = crate::MicrosandboxError::InvalidConfig(format!(
                         "workdir is not a directory in guest: {workdir}"
-                    )));
+                    ));
+                    sandbox.terminate_creation_owner().await;
+                    self.rollback_failed_startup(
+                        write_db,
+                        sandbox_id,
+                        sandbox.name(),
+                        &created_named_volumes,
+                    )
+                    .await
+                    .map_err(|cleanup| {
+                        crate::MicrosandboxError::Runtime(format!("{error}; {cleanup}"))
+                    })?;
+                    return Err(error);
                 }
                 Err(_) => {
-                    sandbox.terminate_creation_owner().await;
-                    if created_named_volumes.is_empty() {
-                        let _ = Self::update_sandbox_status(
-                            write_db,
-                            sandbox_id,
-                            SandboxStatus::Stopped,
-                        )
-                        .await;
-                    } else {
-                        rollback_created_named_volumes(self, &created_named_volumes).await;
-                        let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
-                    }
-                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    let error = crate::MicrosandboxError::InvalidConfig(format!(
                         "workdir does not exist in guest: {workdir}"
-                    )));
+                    ));
+                    sandbox.terminate_creation_owner().await;
+                    self.rollback_failed_startup(
+                        write_db,
+                        sandbox_id,
+                        sandbox.name(),
+                        &created_named_volumes,
+                    )
+                    .await
+                    .map_err(|cleanup| {
+                        crate::MicrosandboxError::Runtime(format!("{error}; {cleanup}"))
+                    })?;
+                    return Err(error);
                 }
             }
         }
@@ -776,6 +794,7 @@ impl LocalBackend {
         if matches!(mode, SpawnMode::Detached) {
             sandbox.finish_detached_creation().await?;
         }
+        creation_cleanup.disarm();
         Ok(sandbox)
     }
 
@@ -819,7 +838,7 @@ impl LocalBackend {
             let _ = Self::compare_and_set_sandbox_status(
                 write_db,
                 sandbox_id,
-                &[SandboxStatus::Starting],
+                &[SandboxStatus::Starting, SandboxStatus::Running],
                 SandboxStatus::Stopped,
             )
             .await;
@@ -903,7 +922,9 @@ impl LocalBackend {
                     "{error}; {cleanup}"
                 )));
             }
-            return Err(error);
+            // A legacy runtime can close telemetry before publishing its error. Once this
+            // exact child is reaped, one final read also covers publication during teardown.
+            return Err(Self::read_boot_start_error(&log_dir, &config.spec.name).unwrap_or(error));
         }
         // Cold backing construction and lock waits do not consume activation's budget.
         let startup_deadline = tokio::time::Instant::now() + AGENT_RELAY_READY_TIMEOUT;
@@ -2087,7 +2108,7 @@ mod tests {
         assert!(error.contains("deadline has elapsed"), "{error}");
     }
 
-    async fn exercise_failed_startup_rollback(with_created_volume: bool) {
+    async fn exercise_failed_startup_rollback(with_created_volume: bool, status: SandboxStatus) {
         use crate::db::entity::volume as volume_entity;
         use crate::runtime::ensure_named_volumes;
         use crate::sandbox::SandboxBuilder;
@@ -2106,7 +2127,16 @@ mod tests {
                 mount.named_with("created-during-startup", |volume| volume.ensure_exists())
             });
         }
-        let config = builder.build().await.unwrap();
+        let mut config = builder.build().await.unwrap();
+        config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            external_mount_policy: Default::default(),
+            external_mounts: Vec::new(),
+            local_branch: false,
+            forked: true,
+            closure: directory.path().join("pending-checkpoint"),
+            checkpoint_root: "blake3:pending".into(),
+            checkpoint_id: "pending".into(),
+        });
         let pools = local.db().await.unwrap();
         let write_db = pools.write();
         let _transition = microsandbox_runtime::ipc::try_acquire_transition_guard(
@@ -2117,6 +2147,9 @@ mod tests {
         .unwrap();
         let created = ensure_named_volumes(&local, &config).await.unwrap();
         let sandbox_id = LocalBackend::insert_starting_sandbox_record(write_db, &config)
+            .await
+            .unwrap();
+        LocalBackend::update_sandbox_status(write_db, sandbox_id, status)
             .await
             .unwrap();
         let active_run = run_entity::Entity::insert(run_entity::ActiveModel {
@@ -2251,12 +2284,20 @@ mod tests {
 
     #[tokio::test]
     async fn failed_startup_rollback_waits_for_runtime_before_stopping_record() {
-        exercise_failed_startup_rollback(false).await;
+        exercise_failed_startup_rollback(false, SandboxStatus::Starting).await;
     }
 
     #[tokio::test]
     async fn failed_startup_rollback_preserves_owned_volumes_then_reconciles_before_deletion() {
-        exercise_failed_startup_rollback(true).await;
+        exercise_failed_startup_rollback(true, SandboxStatus::Starting).await;
+    }
+
+    #[tokio::test]
+    async fn post_readiness_rollback_preserves_live_row_restore_intent_and_storage() {
+        // Pin/workdir validation occurs after Running publication. Both the no-volume
+        // and created-volume paths must keep this live state until the owner releases it.
+        exercise_failed_startup_rollback(false, SandboxStatus::Running).await;
+        exercise_failed_startup_rollback(true, SandboxStatus::Running).await;
     }
 
     #[test]
@@ -2465,6 +2506,8 @@ mod tests {
         let pools = open_test_pools(&temp.path().join("test.db")).await;
         let mut config = test_config_with_rootfs("pending", bind_rootfs(temp.path().to_path_buf()));
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            external_mount_policy: Default::default(),
+            external_mounts: Vec::new(),
             local_branch: false,
             forked: true,
             closure: temp.path().join("checkpoint"),

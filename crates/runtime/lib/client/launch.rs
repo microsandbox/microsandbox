@@ -197,9 +197,15 @@ pub struct LaunchConfig {
 }
 
 /// Pinned child-owned checkpoint closure delivered to the sandbox process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointRestoreConfig {
+    /// Explicit external-resource failure policy; older launchers default to strict.
+    #[serde(default)]
+    pub external_mount_policy: microsandbox_types::ExternalMountRestorePolicy,
+    /// Captured external mount topology; host paths come only from trusted launch mounts.
+    #[serde(default)]
+    pub external_mounts: Vec<ExternalMountRestoreBinding>,
     /// Restore a local branch handoff instead of a durable checkpoint closure.
     pub local_branch: bool,
     /// Require private CoW memory rather than eager restoration.
@@ -211,6 +217,24 @@ pub struct CheckpointRestoreConfig {
     pub checkpoint_root: String,
     /// Stable source checkpoint identifier retained for diagnostics.
     pub checkpoint_id: String,
+}
+
+/// One externally bound filesystem retained in a full restore's device topology.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalMountRestoreBinding {
+    /// Exact captured virtio transport identity.
+    pub device_id: String,
+    /// Captured guest namespace and mount flags.
+    pub mount: microsandbox_protocol::bootstrap::BootstrapDirMount,
+
+    /// Captured synthetic file name, or `None` for a directory export.
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// User explicitly selected a destination binding through a volume declaration.
+    pub remapped: bool,
+    /// No trusted destination mapping was available; relaxed mode must retain an error backend.
+    pub unavailable: bool,
 }
 
 /// Required process-construction intent, independent of any guest startup command.
@@ -366,6 +390,8 @@ mod tests {
         serde_json::to_value(LaunchConfig {
             execution: ExecutionIntent::Restore,
             checkpoint_restore: Some(CheckpointRestoreConfig {
+                external_mount_policy: Default::default(),
+                external_mounts: Vec::new(),
                 local_branch: false,
                 forked: true,
                 closure: "/owned/child/restore".into(),

@@ -83,6 +83,7 @@ pub async fn run(
     match task.await {
         Ok(Ok(sandbox)) => {
             display.finish();
+            super::common::display_restore_warnings(&sandbox).await;
             sandbox.detach().await;
             // Print auto-generated name to stdout so it's scriptable.
             if !is_named {

@@ -248,6 +248,10 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_restore_mode: SnapshotRestoreMode,
 
+    /// Explicit failure policy for external resources during full execution restore.
+    #[serde(default)]
+    pub(crate) external_mount_policy: microsandbox_types::ExternalMountRestorePolicy,
+
     /// Whether this create operation resumed execution from a full snapshot.
     #[serde(skip)]
     pub(crate) resumed_from_full_snapshot: bool,
@@ -797,6 +801,7 @@ impl Default for SandboxConfig {
             branch_source: None,
             forked: false,
             snapshot_restore_mode: SnapshotRestoreMode::Full,
+            external_mount_policy: microsandbox_types::ExternalMountRestorePolicy::Strict,
             resumed_from_full_snapshot: false,
             #[cfg(feature = "local")]
             snapshot_upper_layers: Vec::new(),
@@ -1774,6 +1779,8 @@ mod tests {
                 },
                 snapshot_restore_mode: restore_mode,
                 checkpoint_restore: Some(CheckpointRestoreConfig {
+                    external_mount_policy: Default::default(),
+                    external_mounts: Vec::new(),
                     local_branch: false,
                     forked: false,
                     closure: PathBuf::from("/tmp/checkpoint"),

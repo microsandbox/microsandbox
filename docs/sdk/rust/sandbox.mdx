@@ -26,6 +26,10 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ## Sandbox
 
+### External mount restore
+
+Full restores use `ExternalMountRestorePolicy::Strict` by default. Opt into `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` on the sandbox builder to accept supported external-filesystem mismatches. `sandbox.restore_warnings().await?` returns structured `ExternalMountWarning` values with `guest_path`, `reason`, and `stale_inodes`; inspect them before relying on resumed file handles. Existing volume bindings select the destination paths. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+
 ### Creation progress
 
 `create_with_progress()` reports image preparation, snapshot RAM backing preparation, and activation. Await the task for the result; ignoring or dropping progress does not cancel creation.

@@ -455,6 +455,7 @@ mod error_kind {
     pub const VOLUME_NOT_FOUND: &str = "volume_not_found";
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
+    pub const STOP_TIMEOUT: &str = "stop_timeout";
     pub const NO_DEFAULT_COMMAND: &str = "no_default_command";
     pub const INVALID_CONFIG: &str = "invalid_config";
     pub const INVALID_ARGUMENT: &str = "invalid_argument";
@@ -536,6 +537,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
+            MicrosandboxError::StopTimeout { .. } => error_kind::STOP_TIMEOUT,
             MicrosandboxError::NoDefaultCommand => error_kind::NO_DEFAULT_COMMAND,
             MicrosandboxError::InvalidConfig(_) => error_kind::INVALID_CONFIG,
             MicrosandboxError::SandboxFsOps(_) => error_kind::FILESYSTEM,
@@ -1067,6 +1069,7 @@ struct SandboxCreateOpts {
     placement_profile: Option<String>,
     thp: Option<String>,
     forked: Option<bool>,
+    external_mount_policy: Option<microsandbox::sandbox::ExternalMountRestorePolicy>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -2307,6 +2310,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if opts.forked.unwrap_or(false) {
                 builder = builder.forked();
             }
+            if let Some(policy) = opts.external_mount_policy {
+                builder = builder.external_mount_policy(policy);
+            }
             if let Some(w) = opts.workdir {
                 builder = builder.workdir(w);
             }
@@ -3202,6 +3208,23 @@ pub unsafe extern "C" fn msb_sandbox_detach(
 // ---------------------------------------------------------------------------
 // Sandbox — stop (graceful) and stop_and_wait
 // ---------------------------------------------------------------------------
+
+/// Read structured filesystem warnings retained by relaxed full restore.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_restore_warnings(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sandbox = get(handle)?;
+        Ok(Box::pin(async move {
+            let warnings = sandbox.restore_warnings().await.map_err(FfiError::from)?;
+            serde_json::to_string(&warnings).map_err(|error| FfiError::internal(error.to_string()))
+        }))
+    })
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_stop(

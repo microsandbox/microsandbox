@@ -1477,6 +1477,9 @@ impl AgentRelay {
             ));
         };
         let wait_paused_us = wait_paused_started.elapsed().as_micros();
+        restored
+            .publish_mount_warnings(runtime_dir)
+            .map_err(RuntimeError::Custom)?;
 
         let generation_bytes: [u8; 16] = rand::random();
         let prepared_persist_started = Instant::now();
@@ -6778,6 +6781,7 @@ mod tests {
     }
     fn restored_agent(attempt_id: &str) -> RestoredAgentState {
         RestoredAgentState {
+            external_mount_reports: Vec::new(),
             protocol_generation: microsandbox_protocol::message::PROTOCOL_VERSION,
             ready: Ready {
                 boot_time_ns: 11,
@@ -7835,6 +7839,7 @@ mod tests {
                         MessageType::WorkloadFreeze,
                         0,
                         &WorkloadFreeze {
+                            external_mount_tags: Vec::new(),
                             attempt_id: "full-classes".into(),
                             host_input: position,
                         },
@@ -7855,6 +7860,7 @@ mod tests {
                     MessageType::WorkloadFrozen,
                     WORKLOAD_CONTROL_ID,
                     &WorkloadFrozen {
+                        external_mounts_synced: false,
                         attempt_id: "full-classes".into(),
                         guest_bulk_bytes_target: 0,
                         input_credit: WorkloadTransportCredit::default(),
@@ -7932,6 +7938,7 @@ mod tests {
             MessageType::WorkloadFreeze,
             0,
             &WorkloadFreeze {
+                external_mount_tags: Vec::new(),
                 attempt_id: "fifo".into(),
                 host_input: position,
             },
@@ -7949,6 +7956,7 @@ mod tests {
                     MessageType::WorkloadFrozen,
                     WORKLOAD_CONTROL_ID,
                     &WorkloadFrozen {
+                        external_mounts_synced: false,
                         attempt_id: "fifo".into(),
                         guest_bulk_bytes_target: 0,
                         input_credit: Default::default(),
@@ -8023,6 +8031,7 @@ mod tests {
                         MessageType::WorkloadFreeze,
                         0,
                         &WorkloadFreeze {
+                            external_mount_tags: Vec::new(),
                             attempt_id: "cancel".into(),
                             host_input: Default::default(),
                         },
@@ -8057,6 +8066,7 @@ mod tests {
             MessageType::WorkloadFrozen,
             WORKLOAD_CONTROL_ID,
             &WorkloadFrozen {
+                external_mounts_synced: false,
                 attempt_id: "cancel".into(),
                 guest_bulk_bytes_target: 0,
                 input_credit: Default::default(),
@@ -8101,6 +8111,7 @@ mod tests {
                         MessageType::WorkloadFreeze,
                         0,
                         &WorkloadFreeze {
+                            external_mount_tags: Vec::new(),
                             attempt_id: "private".into(),
                             host_input: Default::default(),
                         },
@@ -8115,6 +8126,7 @@ mod tests {
             MessageType::WorkloadFrozen,
             WORKLOAD_CONTROL_ID,
             &WorkloadFrozen {
+                external_mounts_synced: false,
                 attempt_id: "private".into(),
                 guest_bulk_bytes_target: 0,
                 input_credit: Default::default(),
@@ -8304,6 +8316,7 @@ mod tests {
                         MessageType::WorkloadFreeze,
                         0,
                         &WorkloadFreeze {
+                            external_mount_tags: Vec::new(),
                             attempt_id: "abort".into(),
                             host_input: Default::default(),
                         },

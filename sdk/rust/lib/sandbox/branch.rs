@@ -204,9 +204,15 @@ pub(crate) async fn capture_child(
         },
         _ => crate::snapshot::SnapshotRootDisk::Managed,
     };
-    match state.disks.as_slice() {
+    let root_device = crate::snapshot::root_device(&layout);
+    let root_disks = state
+        .disks
+        .iter()
+        .filter(|disk| matches!(disk.device_id.as_str(), "vda" | "vdb"))
+        .collect::<Vec<_>>();
+    match root_disks.as_slice() {
         [] if matches!(layout, crate::snapshot::SnapshotRootDisk::Tmpfs { .. }) => {}
-        [disk] => {
+        [disk] if Some(disk.device_id.as_str()) == root_device => {
             disk.to_canonical_bytes()
                 .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
             if disk.pause_generation != state.pause_generation {
@@ -241,7 +247,18 @@ pub(crate) async fn capture_child(
             ));
         }
     }
+    let mounts = crate::snapshot::materialize_additional_disks(
+        &state.disks,
+        &state.resources,
+        &closure,
+        child,
+        root_device,
+    )
+    .await?;
+    crate::snapshot::apply_additional_disks(config, mounts);
     config.checkpoint_restore = Some(CheckpointRestoreConfig {
+        external_mount_policy: config.external_mount_policy,
+        external_mounts: Vec::new(),
         local_branch: true,
         forked: true,
         closure,

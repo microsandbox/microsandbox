@@ -25,6 +25,10 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ## Functions
 
+### External mount restore
+
+Full restores use strict external-filesystem admission by default. Pass `WithExternalMountPolicy(ExternalMountRelaxed)` to accept supported mismatches, then inspect `sandbox.RestoreWarnings(ctx)`. Each `ExternalMountWarning` has `GuestPath`, `Reason`, and `StaleInodes []uint64`. `ExternalMountStrict` explicitly selects the default. Existing mount options select the destination paths. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+
 ### Creation progress
 
 `CreateSandboxWithProgress` returns a bounded event channel and a single-result channel. Ignoring events does not delay creation. Always receive the result and close the sandbox when finished; cancel `ctx` to cancel creation.

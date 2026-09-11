@@ -856,6 +856,9 @@ where
 {
     let sandboxes = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Status.is_in([
+            // A cancelled create can retain its provisional row while the runtime still
+            // owns startup. Its named mounts are no less live than a Running sandbox's.
+            SandboxStatus::Starting,
             SandboxStatus::Running,
             SandboxStatus::Draining,
             SandboxStatus::Paused,
@@ -1017,9 +1020,8 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
     #[cfg(feature = "local")]
-    async fn test_remove_local_rejects_active_named_volume_reference() {
+    async fn exercise_active_named_volume_reference(status: SandboxStatus) {
         let temp = tempfile::tempdir().unwrap();
         let local = Arc::new(
             LocalBackend::builder()
@@ -1042,7 +1044,7 @@ mod tests {
         .await
         .unwrap();
 
-        let config = SandboxConfig {
+        let mut config = SandboxConfig {
             spec: microsandbox_types::SandboxSpec {
                 name: "active-sandbox".to_string(),
                 mounts: vec![VolumeMount::Named {
@@ -1058,10 +1060,22 @@ mod tests {
             },
             ..Default::default()
         };
-        sandbox_entity::ActiveModel {
+        if status == SandboxStatus::Starting {
+            config.checkpoint_restore =
+                Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                    external_mount_policy: Default::default(),
+                    external_mounts: Vec::new(),
+                    local_branch: false,
+                    forked: true,
+                    closure: temp.path().join("pending-checkpoint"),
+                    checkpoint_root: "blake3:pending".into(),
+                    checkpoint_id: "pending".into(),
+                });
+        }
+        let sandbox = sandbox_entity::ActiveModel {
             name: Set("active-sandbox".to_string()),
             config: Set(serde_json::to_string(&config).unwrap()),
-            status: Set(SandboxStatus::Running),
+            status: Set(status),
             ephemeral: Set(false),
             created_at: Set(Some(chrono::Utc::now().naive_utc())),
             updated_at: Set(Some(chrono::Utc::now().naive_utc())),
@@ -1070,10 +1084,42 @@ mod tests {
         .insert(local.db().await.unwrap().write())
         .await
         .unwrap();
+        let sentinel = local.volume_path("active-cache").join("sentinel");
+        std::fs::write(&sentinel, b"runtime-owned data").unwrap();
 
         let err = remove_local(backend, "active-cache").await.unwrap_err();
 
         assert!(err.to_string().contains("attached to active sandbox"));
-        assert!(local.volume_path("active-cache").exists());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"runtime-owned data");
+        let pools = local.db().await.unwrap();
+        assert!(
+            volume_entity::Entity::find()
+                .filter(volume_entity::Column::Name.eq("active-cache"))
+                .one(pools.read())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Removal refusal must leave both the active status and any incomplete restore
+        // discriminator untouched; releasing transient creator leases is not completion.
+        assert_eq!(
+            sandbox_entity::Entity::find_by_id(sandbox.id)
+                .one(pools.read())
+                .await
+                .unwrap(),
+            Some(sandbox)
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "local")]
+    async fn test_remove_local_rejects_active_named_volume_reference() {
+        exercise_active_named_volume_reference(SandboxStatus::Running).await;
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "local")]
+    async fn test_remove_local_preserves_starting_restore_named_volume_reference() {
+        exercise_active_named_volume_reference(SandboxStatus::Starting).await;
     }
 }

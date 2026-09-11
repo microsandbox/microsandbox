@@ -44,6 +44,7 @@ export type {
   SandboxPage,
   SandboxPingResult,
   SandboxTouchResult,
+  ExternalMountWarning,
 } from "./sandbox.js";
 export type {
   ChangeKind,
@@ -429,6 +430,7 @@ export {
   CloudHttpError,
   DatabaseError,
   ExecTimeoutError,
+  StopTimeoutError,
   HttpError,
   ImageError,
   ImageInUseError,

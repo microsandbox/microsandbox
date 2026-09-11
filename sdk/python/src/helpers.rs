@@ -26,6 +26,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "placement_profile",
     "thp",
     "forked",
+    "external_mount_policy",
     "workdir",
     "shell",
     "security",
@@ -330,6 +331,18 @@ pub fn sandbox_builder_from_args(
     }
     if extract_opt::<bool>(kwargs, "forked")?.unwrap_or(false) {
         builder = builder.forked();
+    }
+    if let Some(policy) = extract_opt::<String>(kwargs, "external_mount_policy")? {
+        let policy = match policy.as_str() {
+            "strict" => microsandbox::sandbox::ExternalMountRestorePolicy::Strict,
+            "relaxed" => microsandbox::sandbox::ExternalMountRestorePolicy::Relaxed,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "external_mount_policy must be strict or relaxed",
+                ));
+            }
+        };
+        builder = builder.external_mount_policy(policy);
     }
     if let Some(workdir) = extract_opt::<String>(kwargs, "workdir")? {
         builder = builder.workdir(workdir);

@@ -30,6 +30,20 @@ func TestForkedRestoreOption(t *testing.T) {
 	}
 }
 
+func TestExternalMountPolicyIsConstructionOnly(t *testing.T) {
+	var config SandboxConfig
+	WithExternalMountPolicy(ExternalMountRelaxed)(&config)
+	if buildFFICreateOptions(config).ExternalMountPolicy != "relaxed" {
+		t.Fatal("external mount policy was not forwarded")
+	}
+	if err := json.Unmarshal([]byte(`{"resources":{"cpus":1,"memory_mib":128}}`), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.ExternalMountPolicy != "" {
+		t.Fatal("restore-only policy leaked into persisted configuration")
+	}
+}
+
 func TestWithRootDiskManaged(t *testing.T) {
 	o := SandboxConfig{}
 	WithRootDisk(RootDisk.Managed(8192))(&o)

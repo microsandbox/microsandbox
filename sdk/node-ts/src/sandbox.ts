@@ -92,6 +92,13 @@ export interface SandboxTouchResult {
   readonly activitySeq: number;
 }
 
+/** A mismatch admitted by explicit relaxed full restore. */
+export interface ExternalMountWarning {
+  readonly guestPath: string;
+  readonly reason: string;
+  readonly staleInodes: readonly bigint[];
+}
+
 /** One page returned by `Sandbox.list()` or `Sandbox.listWith()`. */
 export interface SandboxPage {
   sandboxes: SandboxHandle[];
@@ -150,13 +157,9 @@ export class PullProgressCreate {
   /** @internal */
   private readonly name: string;
   /** @internal */
-  private readonly attached: boolean;
-
-  /** @internal */
-  constructor(inner: NapiPullProgressCreate, name: string, attached: boolean) {
+  constructor(inner: NapiPullProgressCreate, name: string) {
     this.inner = inner;
     this.name = name;
-    this.attached = attached;
   }
 
   /**
@@ -178,7 +181,9 @@ export class PullProgressCreate {
   /** Await the sandbox. Resolves once pull + boot finishes. */
   async awaitSandbox(): Promise<Sandbox> {
     const inner = await withMappedErrors(() => this.inner.awaitSandbox());
-    return new Sandbox(inner, this.name, this.attached);
+    // Full restores can auto-detach even without an explicit detached builder option.
+    // Only the completed native handle knows whether disposal owns this lifecycle.
+    return new Sandbox(inner, this.name);
   }
 }
 
@@ -186,8 +191,8 @@ export class PullProgressCreate {
 export class CreationProgressCreate {
   private readonly creation: PullProgressCreate;
   /** @internal */
-  constructor(inner: NapiPullProgressCreate, name: string, attached: boolean) {
-    this.creation = new PullProgressCreate(inner, name, attached);
+  constructor(inner: NapiPullProgressCreate, name: string) {
+    this.creation = new PullProgressCreate(inner, name);
   }
   get progress(): import("./creation-progress.js").CreationProgressStream {
     return this.creation.progress as unknown as import("./creation-progress.js").CreationProgressStream;
@@ -228,24 +233,14 @@ export class Sandbox implements AsyncDisposable {
   /** Begin building a new sandbox. Names are limited to 128 UTF-8 bytes. */
   static builder(name: string): SandboxBuilder {
     const nb = new napi.SandboxBuilder(name);
-    let detached = false;
-    const origDetached = nb.detached.bind(nb);
     const origCreate = nb.create.bind(nb);
     const origConnectOrCreate = nb.connectOrCreate.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
     const origCreateWithProgress = nb.createWithProgress?.bind(nb);
-    const wrapped = nb as unknown as {
-      detached: (enabled: boolean) => SandboxBuilder;
-    };
-    wrapped.detached = (enabled: boolean) => {
-      detached = enabled;
-      origDetached(enabled);
-      return nb as unknown as SandboxBuilder;
-    };
     // Override the terminals so they return a TS Sandbox.
     (nb as unknown as { create: () => Promise<Sandbox> }).create = async () => {
       const inner = await withMappedErrors(() => origCreate());
-      return new Sandbox(inner, name, /*ownsLifecycle*/ !detached);
+      return new Sandbox(inner, name);
     };
     (
       nb as unknown as { connectOrCreate: () => Promise<Sandbox> }
@@ -261,12 +256,12 @@ export class Sandbox implements AsyncDisposable {
       }
     ).createWithPullProgress = async () => {
       const raw = await withMappedErrors(() => origCreateWithPP());
-      return new PullProgressCreate(raw, name, /*attached*/ !detached);
+      return new PullProgressCreate(raw, name);
     };
     (nb as unknown as { createWithProgress: () => Promise<CreationProgressCreate> }).createWithProgress = async () => {
       if (!origCreateWithProgress) throw new Error("Installed native SDK does not support creation progress");
       const raw = await withMappedErrors(() => origCreateWithProgress());
-      return new CreationProgressCreate(raw, name, !detached);
+      return new CreationProgressCreate(raw, name);
     };
     return nb as unknown as SandboxBuilder;
   }
@@ -542,6 +537,11 @@ export class Sandbox implements AsyncDisposable {
   }
 
   // -- lifecycle ----------------------------------------------------------
+
+  /** Read structured external-filesystem warnings from a relaxed full restore. */
+  async restoreWarnings(): Promise<ExternalMountWarning[]> {
+    return withMappedErrors(() => this.inner.restoreWarnings());
+  }
 
   async stop(): Promise<void> {
     await withMappedErrors(() => this.inner.stop());

@@ -42,6 +42,18 @@ Snapshots are still manual. CoW uses a protected local memory cache; the first u
 
 If a restore fails after creating a child record, remove that child and create a new one from the snapshot. An incomplete restore cannot be started as a fresh VM or modified; the original snapshot remains reusable.
 
+## External mounts
+
+Full snapshots preserve the guest's open-handle state for directory bind mounts, named directory volumes, and isolated single-file binds. Their host filesystem contents remain external dependencies: capturing a snapshot does not copy or freeze later host edits. Restore validates the captured binding and object identities before resuming. Use the existing mount options, keyed by guest path, when the destination needs an explicit replacement binding; a path recorded by another host is not permission to access it. A remapped single-file bind may use a different host basename while keeping the captured guest filename and sibling isolation.
+
+Capture supports tracked objects that can be reopened safely. Guest-renamed objects are preserved when still reopenable, but open-unlinked files and special objects fail capture explicitly; snapshots do not copy host data to make those cases portable. Symlink validation checks link text without reading target files or recursively copying or hashing target contents.
+
+Strict admission is the default. `msb create --from-snapshot saved --external-mount-policy relaxed` explicitly allows supported mismatches and prints structured warnings. The SDK equivalents are Rust `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)`, Python `external_mount_policy="relaxed"`, TypeScript `.externalMountPolicy("relaxed")`, and Go `WithExternalMountPolicy(ExternalMountRelaxed)`. Read warnings with Rust/Python `restore_warnings`, TypeScript `restoreWarnings`, or Go `RestoreWarnings`; each identifies the guest path, reason, and stale inode IDs. Stale captured objects fail with `ESTALE` when an operation reaches the filesystem backend; unavailable exports similarly return `EIO`. Relaxed mode does not recreate missing files or grant access to unmapped paths.
+
+Full snapshots also retain clean guest filesystem cache pages. Reads or memory mappings may therefore return previously captured bytes before reaching the backend; relaxed restore does not promise immediate cache invalidation. Capture synchronizes dirty guest writes before admitting external mounts, so the saved cache is not permission to replay stale dirty writes onto a changed destination.
+
+Named disk volumes are captured as immutable disk generations. Restored children receive private copies; the source volume is unchanged. Arbitrary external disk-image mounts are not implicitly converted into snapshot-owned volumes.
+
 ## Branch a running sandbox
 
 Use `branch` for an independent local child without first saving a full snapshot:
@@ -50,7 +62,7 @@ Use `branch` for an independent local child without first saving a full snapshot
 msb branch baseline --name worker
 ```
 
-The child resumes the captured processes, memory, and disk state. Its writes do not affect the source. CoW memory is built in—no `--forked` flag is needed. A running source resumes after capture; a user-paused source stays paused. Branches work on supported Linux, macOS, and Windows hosts, require a new child name, and cannot inherit published host ports.
+The child resumes the captured processes, memory, and disk state. Its private memory and managed-disk writes do not affect the source; external mounts remain shared host dependencies unless explicitly remapped. CoW memory is built in—no `--forked` flag is needed. A running source resumes after capture; a user-paused source stays paused. Branches work on supported Linux, macOS, and Windows hosts, require a new child name, and cannot inherit published host ports.
 
 The SDK methods are Rust `source.branch("worker").await?`, Python `await source.branch("worker")`, TypeScript `await source.branch("worker")`, and Go `source.Branch(ctx, "worker")`. They also work on sandbox handles returned by `get`.
 
@@ -322,7 +334,7 @@ msb run --name worker --from-snapshot ./after-pip-install.msb -- python -V
 The same archive path works with the SDK restore methods shown below. The archive is unpacked into child-owned staging, so no intermediate installed snapshot is loaded into `~/.microsandbox/snapshots`.
 
 <Note>
-Direct capture records the pinned image identity, but does not bundle the cached OCI image. A flat snapshot already contains the complete disk, so restore only needs the pinned image's configuration from cache or the registry; it does not download the original disk layers again. Layered snapshots still need their base image artifacts. For an offline target, create an installed snapshot and use `msb snapshot save --with-image` instead.
+Direct capture records the pinned image identity, but does not bundle the cached OCI image. A flat snapshot already contains the complete disk, so restore only needs the pinned image's configuration from cache or the registry; it does not download the original disk layers again. Layered snapshots still need their base image artifacts. For an offline target, create an installed snapshot and use `msb snapshot save --with-image`: it bundles image configuration for flat roots, and the complete base-image cache for layered roots.
 </Note>
 
 ## Boot from a snapshot

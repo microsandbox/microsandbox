@@ -225,6 +225,7 @@ pub(crate) struct ArchiveChildMaterialization {
     pub(crate) manifest: microsandbox_image::snapshot::Manifest,
     pub(crate) checkpoint_restore: Option<microsandbox_runtime::launch::CheckpointRestoreConfig>,
     pub(crate) upper_layers: Vec<microsandbox_runtime::launch::RootfsUpperLayerConfig>,
+    pub(crate) disk_mounts: Vec<microsandbox_types::VolumeMount>,
 }
 
 /// Updates a member transport hash as the archive writer consumes the source.
@@ -364,20 +365,27 @@ pub(super) async fn save_snapshot(
         let metadata_path = cache.image_metadata_path(&image_ref);
         push_required_cache_file(&mut cache_files, &metadata_path, "manifests")?;
 
-        let fsmeta = cache.fsmeta_erofs_path(&img_digest);
-        push_required_cache_file(&mut cache_files, &fsmeta, "fsmeta")?;
+        // Flat snapshots already own a complete root disk. Their offline dependency is
+        // image configuration, not a second (layered) materialization of the same image.
+        // A bundled ancestor may still need the full layered cache.
+        if snapshots.iter().any(|snapshot| {
+            snapshot.manifest().root_disk != microsandbox_image::snapshot::SnapshotRootDisk::Flat
+        }) {
+            let fsmeta = cache.fsmeta_erofs_path(&img_digest);
+            push_required_cache_file(&mut cache_files, &fsmeta, "fsmeta")?;
 
-        let vmdk = cache.vmdk_path(&img_digest);
-        push_required_cache_file(&mut cache_files, &vmdk, "vmdk")?;
+            let vmdk = cache.vmdk_path(&img_digest);
+            push_required_cache_file(&mut cache_files, &vmdk, "vmdk")?;
 
-        let mut seen_layers = HashSet::new();
-        for layer in &metadata.layers {
-            let diff_id: microsandbox_image::Digest = layer.diff_id.parse().map_err(|e| {
-                MicrosandboxError::Custom(format!("invalid cached layer diff_id: {e}"))
-            })?;
-            let layer_path = cache.layer_erofs_path(&diff_id);
-            if seen_layers.insert(layer_path.clone()) {
-                push_required_cache_file(&mut cache_files, &layer_path, "layers")?;
+            let mut seen_layers = HashSet::new();
+            for layer in &metadata.layers {
+                let diff_id: microsandbox_image::Digest = layer.diff_id.parse().map_err(|e| {
+                    MicrosandboxError::Custom(format!("invalid cached layer diff_id: {e}"))
+                })?;
+                let layer_path = cache.layer_erofs_path(&diff_id);
+                if seen_layers.insert(layer_path.clone()) {
+                    push_required_cache_file(&mut cache_files, &layer_path, "layers")?;
+                }
             }
         }
     }
@@ -1081,6 +1089,7 @@ pub(crate) async fn materialize_archive_for_child_with_base(
             manifest,
             checkpoint_restore: None,
             upper_layers: Vec::new(),
+            disk_mounts: Vec::new(),
         });
     };
     delta::resolve(local, &inventory, child_stage, cache_stage.path(), base).await?;
@@ -1128,6 +1137,7 @@ pub(crate) async fn materialize_archive_for_child_with_base(
                 manifest,
                 checkpoint_restore: None,
                 upper_layers: materialized.upper_layers,
+                disk_mounts: materialized.disk_mounts,
             });
         }
         let child_closure = child_stage.join(".checkpoint-restore");
@@ -1151,6 +1161,7 @@ pub(crate) async fn materialize_archive_for_child_with_base(
             manifest,
             checkpoint_restore: Some(materialized.restore),
             upper_layers: materialized.upper_layers,
+            disk_mounts: materialized.disk_mounts,
         });
     }
     let SnapshotState::File(file) = &manifest.state else {
@@ -1208,6 +1219,7 @@ pub(crate) async fn materialize_archive_for_child_with_base(
         manifest,
         checkpoint_restore: None,
         upper_layers: materialized.upper_layers,
+        disk_mounts: materialized.disk_mounts,
     })
 }
 
@@ -3575,8 +3587,13 @@ async fn install_staged_cache(
         })?;
     validate_cached_metadata(manifest, &metadata)?;
 
-    let expected_files =
-        expected_cache_files(&staged_cache, &image_ref, &metadata, &pinned_digest)?;
+    let expected_files = expected_cache_files(
+        &staged_cache,
+        &image_ref,
+        &metadata,
+        &pinned_digest,
+        manifest.root_disk.clone(),
+    )?;
     ensure_only_expected_cache_files(cache_stage, &expected_files)?;
     ensure_cache_targets_compatible(&expected_files, cache_stage, cache_dir).await?;
 
@@ -3643,6 +3660,7 @@ fn expected_cache_files(
     image_ref: &microsandbox_image::Reference,
     metadata: &microsandbox_image::CachedImageMetadata,
     manifest_digest: &microsandbox_image::Digest,
+    root_disk: microsandbox_image::snapshot::SnapshotRootDisk,
 ) -> MicrosandboxResult<HashSet<PathBuf>> {
     let mut expected = HashSet::new();
     let metadata_path = cache.image_metadata_path(image_ref);
@@ -3653,6 +3671,20 @@ fn expected_cache_files(
         )));
     }
     expected.insert(metadata_path);
+
+    // Metadata-only bundles are complete for a flat root. If any layered payload is
+    // included, validate the whole image cache as usual; partial bundles are not accepted.
+    let has_layered_payload = cache.fsmeta_erofs_path(manifest_digest).exists()
+        || cache.vmdk_path(manifest_digest).exists()
+        || metadata.layers.iter().any(|layer| {
+            layer
+                .diff_id
+                .parse::<microsandbox_image::Digest>()
+                .is_ok_and(|digest| cache.layer_erofs_path(&digest).exists())
+        });
+    if root_disk == microsandbox_image::snapshot::SnapshotRootDisk::Flat && !has_layered_payload {
+        return Ok(expected);
+    }
 
     let fsmeta = cache.fsmeta_erofs_path(manifest_digest);
     if !cache.is_fsmeta_materialized(manifest_digest) {
@@ -3794,7 +3826,10 @@ async fn ensure_cache_target_compatible(source: &Path, target: &Path) -> Microsa
 async fn file_sha256(path: &Path) -> MicrosandboxResult<[u8; 32]> {
     let mut file = tokio::fs::File::open(path).await?;
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
+    // This helper is nested through cache admission and archive restore. An inline array
+    // inflates every enclosing future and its debug poll frames; keep the fixed I/O buffer
+    // on the heap so ordinary Tokio worker stacks suffice without changing chunk size.
+    let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = file.read(&mut buf).await?;
         if n == 0 {
@@ -3972,6 +4007,24 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn direct_materialization_future_has_bounded_stack_footprint() {
+        let temporary = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(temporary.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let archive = temporary.path().join("unused.msb");
+        let child = temporary.path().join("unused-child");
+        let future = materialize_archive_for_child_with_base(&local, &archive, &child, false, None);
+        let bytes = std::mem::size_of_val(&future);
+        assert!(
+            bytes < 32 * 1024,
+            "large nested restore futures must be boxed near their source: {bytes}"
+        );
+    }
 
     fn grouped_archive_manifest(id: u128, parent: Option<&Manifest>) -> Manifest {
         let layer_id = DiskLayerId::new(format!("layer_{id:032x}")).unwrap();
@@ -4172,6 +4225,102 @@ mod tests {
         };
 
         validate_cached_metadata(&manifest, &metadata).unwrap();
+    }
+
+    #[tokio::test]
+    async fn flat_archive_bundles_offline_config_without_layered_materialization() {
+        let directory = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(directory.path().join("source"))
+            .build()
+            .await
+            .unwrap();
+        let destination = LocalBackend::builder()
+            .home(directory.path().join("destination"))
+            .build()
+            .await
+            .unwrap();
+        let mut manifest = grouped_archive_manifest(31, None);
+        manifest.root_disk = SnapshotRootDisk::Flat;
+        let image_ref = manifest.image.reference.parse().unwrap();
+        let digest = manifest.image.manifest_digest.parse().unwrap();
+        let raw_config_json = "{}".to_string();
+        let metadata = microsandbox_image::CachedImageMetadata {
+            manifest_digest: manifest.image.manifest_digest.clone(),
+            config_digest: format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(raw_config_json.as_bytes()))
+            ),
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
+            raw_config_json,
+            config: microsandbox_image::ImageConfig::default(),
+            layers: Vec::new(),
+        };
+        let cache = microsandbox_image::GlobalCache::new_async(&local.cache_dir())
+            .await
+            .unwrap();
+        cache
+            .write_image_metadata_async(&image_ref, &metadata)
+            .await
+            .unwrap();
+        assert!(
+            expected_cache_files(
+                &cache,
+                &image_ref,
+                &metadata,
+                &digest,
+                SnapshotRootDisk::Managed
+            )
+            .is_err(),
+            "a managed root must still require its complete layered base"
+        );
+        let artifact = directory.path().join("flat-snapshot");
+        write_grouped_archive_fixture(&artifact, &manifest);
+        let archive = directory.path().join("flat.msb");
+        save_snapshot(
+            &local,
+            artifact.to_str().unwrap(),
+            &archive,
+            SaveOpts {
+                with_image: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let loaded = load_snapshot(&destination, &archive, None).await.unwrap();
+        assert_eq!(
+            loaded.open().await.unwrap().manifest().root_disk,
+            SnapshotRootDisk::Flat
+        );
+        let imported = microsandbox_image::GlobalCache::new_async(&destination.cache_dir())
+            .await
+            .unwrap();
+        assert_eq!(
+            imported
+                .read_image_metadata_async(&image_ref)
+                .await
+                .unwrap()
+                .unwrap()
+                .manifest_digest,
+            metadata.manifest_digest
+        );
+        assert!(!imported.fsmeta_erofs_path(&digest).exists());
+        assert!(!imported.vmdk_path(&digest).exists());
+
+        // A purported complete cache may not smuggle a truncated layered payload through
+        // the metadata-only exception. The remaining layered closure is still required.
+        std::fs::write(imported.fsmeta_erofs_path(&digest), b"incomplete").unwrap();
+        assert!(
+            expected_cache_files(
+                &imported,
+                &image_ref,
+                &metadata,
+                &digest,
+                SnapshotRootDisk::Flat
+            )
+            .is_err()
+        );
     }
 
     #[test]

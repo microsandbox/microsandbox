@@ -3,13 +3,23 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    io,
-    os::windows::ffi::{OsStrExt, OsStringExt},
+    fs::File,
+    io::{self, Read},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawHandle,
+    },
     path::{Component, PathBuf},
     sync::{Arc, Mutex, RwLock, atomic::Ordering},
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx,
+};
 
 use super::{
     DirHandle, DirSnapshotEntry, HandleData, InodeData, InodeTable, LINUX_O_ACCMODE, PassthroughFs,
@@ -23,6 +33,7 @@ use crate::backends::{mobility, passthroughfs::quota::QuotaState};
 //--------------------------------------------------------------------------------------------------
 
 const KIND: &[u8; 8] = b"MSBPTWIN";
+const EXTERNAL_KIND: &[u8; 8] = b"MSBPTWX1";
 const MAX_PATH_DEPTH: usize = 256;
 const MAX_COMPONENT_UNITS: usize = 255;
 
@@ -38,6 +49,24 @@ struct PassthroughState {
     inodes: Vec<InodeState>,
     files: Vec<FileHandleState>,
     dirs: Vec<DirHandleState>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ExternalState {
+    state: PassthroughState,
+    identities: BTreeMap<u64, ObjectIdentity>,
+    invalid_inodes: BTreeSet<u64>,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
+struct ObjectIdentity {
+    volume: u32,
+    file_id: u64,
+    directory: bool,
+    size: u64,
+    modified: u64,
+    changed: i64,
+    content: Vec<u8>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -74,6 +103,7 @@ struct DirEntryState {
 }
 
 pub(super) struct PreparedState {
+    invalid_inodes: BTreeSet<u64>,
     next_inode: u64,
     next_handle: u64,
     quota: Option<QuotaState>,
@@ -164,23 +194,126 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
         ));
     }
 
+    let state = PassthroughState {
+        next_inode: fs.next_inode.load(Ordering::Acquire),
+        next_handle: fs.next_handle.load(Ordering::Acquire),
+        quota: fs.quota.as_ref().map(|quota| quota.capture_state()),
+        inodes: inode_states,
+        files,
+        dirs,
+    };
+    if fs.cfg.external_checkpoint.is_none() {
+        return mobility::encode(KIND, &state);
+    }
+    if fs
+        .invalid_inodes
+        .read()
+        .unwrap()
+        .contains(&super::ROOT_INODE)
+    {
+        return Err(invalid_state(
+            "unavailable external root cannot establish a new checkpoint",
+        ));
+    }
+    let identities = state
+        .inodes
+        .iter()
+        .map(|saved| {
+            let identity = object_identity(fs, saved)?;
+            // A guest-open file may still refer to a removed/replaced host object.
+            // Never snapshot its path replacement as if it were that live handle.
+            for handle in fs
+                .handles
+                .read()
+                .unwrap()
+                .values()
+                .filter(|handle| handle.inode == saved.inode)
+            {
+                let file = handle.file.lock().unwrap();
+                if file_identity(&file)? != (identity.volume, identity.file_id) {
+                    return Err(invalid_state(
+                        "external open handle no longer matches its captured path",
+                    ));
+                }
+            }
+            Ok((saved.inode, identity))
+        })
+        .collect::<io::Result<BTreeMap<_, _>>>()?;
     mobility::encode(
-        KIND,
-        &PassthroughState {
-            next_inode: fs.next_inode.load(Ordering::Acquire),
-            next_handle: fs.next_handle.load(Ordering::Acquire),
-            quota: fs.quota.as_ref().map(|quota| quota.capture_state()),
-            inodes: inode_states,
-            files,
-            dirs,
+        EXTERNAL_KIND,
+        &ExternalState {
+            state,
+            identities,
+            invalid_inodes: fs.invalid_inodes.read().unwrap().clone(),
         },
     )
 }
 
 pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedState> {
+    if let Some(options) = &fs.cfg.external_checkpoint {
+        let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+        validate_external_shape(&external)?;
+        validate_quota(fs, &external.state)?;
+        validate_shape(
+            &external.state,
+            fs.cfg.readonly,
+            fs.cfg.inject_init,
+            &external.invalid_inodes,
+        )?;
+        let mut invalid = external.invalid_inodes;
+        let mut observed = BTreeMap::new();
+        // Descendants cannot regain validity through a replaced parent directory.
+        external
+            .state
+            .inodes
+            .sort_by_key(|saved| saved.components.len());
+        let mut invalid_paths = Vec::<Vec<Vec<u16>>>::new();
+        for saved in &external.state.inodes {
+            let identity = &external.identities[&saved.inode];
+            let current = if invalid_paths
+                .iter()
+                .any(|path| saved.components.starts_with(path))
+            {
+                None
+            } else {
+                object_identity(fs, saved)
+                    .ok()
+                    .filter(|current| same_object(identity, current, options.remapped))
+            };
+            let valid = current.is_some();
+            if let Some(current) = current {
+                observed.insert(saved.inode, current);
+            }
+            if !valid {
+                if !options.relaxed {
+                    return Err(invalid_state(format!(
+                        "external object {} is missing, replaced, or changed",
+                        saved.inode
+                    )));
+                }
+                invalid.insert(saved.inode);
+                invalid_paths.push(saved.components.clone());
+            }
+        }
+        external
+            .state
+            .inodes
+            .retain(|saved| !invalid.contains(&saved.inode));
+        external
+            .state
+            .files
+            .retain(|saved| !invalid.contains(&saved.inode));
+        external
+            .state
+            .dirs
+            .retain(|saved| !invalid.contains(&saved.inode));
+        let mut prepared = rebuild(fs, external.state, Some(&observed))?;
+        prepared.invalid_inodes = invalid;
+        return Ok(prepared);
+    }
     let state: PassthroughState = mobility::decode(KIND, bytes)?;
     validate_semantics(fs, &state)?;
-    rebuild(fs, state)
+    rebuild(fs, state, None)
 }
 
 pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
@@ -194,20 +327,251 @@ pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
     fs.next_inode.store(prepared.next_inode, Ordering::Release);
     fs.next_handle
         .store(prepared.next_handle, Ordering::Release);
+    if let Some(options) = &fs.cfg.external_checkpoint {
+        *options.invalid_inodes.lock().unwrap() = prepared.invalid_inodes.iter().copied().collect();
+    }
+    *fs.invalid_inodes.write().unwrap() = prepared.invalid_inodes;
     Ok(())
+}
+
+/// Validate a missing export's payload without opening any host paths.
+pub(super) fn validate_unavailable(bytes: &[u8]) -> io::Result<()> {
+    let external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+    validate_external_shape(&external)?;
+    validate_shape(&external.state, false, false, &external.invalid_inodes)
+}
+
+pub(super) fn prepare_single_file_state(
+    bytes: &[u8],
+    source: &std::ffi::CStr,
+    destination: &std::ffi::CStr,
+) -> io::Result<(
+    Vec<u8>,
+    crate::backends::passthroughfs::ExternalSingleFileIndex,
+)> {
+    let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+    validate_external_shape(&external)?;
+    validate_shape(&external.state, false, false, &external.invalid_inodes)?;
+    let source = source
+        .to_str()
+        .map_err(|_| invalid_state("source filename is not UTF-8"))?
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let destination = destination
+        .to_str()
+        .map_err(|_| invalid_state("destination filename is not UTF-8"))?
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    validate_components(std::slice::from_ref(&destination))?;
+    if !external.state.dirs.is_empty()
+        || external
+            .state
+            .files
+            .iter()
+            .any(|handle| handle.inode == super::ROOT_INODE)
+    {
+        return Err(invalid_state("single-file state opens a real directory"));
+    }
+    for inode in &mut external.state.inodes {
+        if inode.inode == super::ROOT_INODE {
+            continue;
+        }
+        if inode.components != [source.clone()]
+            || external.identities[&inode.inode].directory
+            || inode
+                .mode
+                .is_some_and(|mode| mode & super::S_IFMT != super::S_IFREG)
+        {
+            return Err(invalid_state(
+                "single-file state references a sibling or non-file object",
+            ));
+        }
+        inode.components = vec![destination.clone()];
+    }
+    let index = crate::backends::passthroughfs::ExternalSingleFileIndex {
+        inodes: external
+            .state
+            .inodes
+            .iter()
+            .map(|inode| inode.inode)
+            .collect(),
+        files: external
+            .state
+            .files
+            .iter()
+            .map(|handle| (handle.handle, handle.inode))
+            .collect(),
+        invalid_inodes: external.invalid_inodes.clone(),
+    };
+    Ok((mobility::encode(EXTERNAL_KIND, &external)?, index))
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Validation and reconstruction
 //--------------------------------------------------------------------------------------------------
 
+fn validate_external_shape(external: &ExternalState) -> io::Result<()> {
+    if external.identities.len() != external.state.inodes.len()
+        || external
+            .state
+            .inodes
+            .iter()
+            .any(|saved| !external.identities.contains_key(&saved.inode))
+        || external.identities.values().any(|identity| {
+            if identity.directory {
+                !identity.content.is_empty()
+            } else {
+                identity.content.len() != 32
+            }
+        })
+        || external.invalid_inodes.iter().any(|inode| {
+            *inode == 0
+                || *inode == super::INIT_INODE
+                || *inode >= external.state.next_inode
+                || external.identities.contains_key(inode)
+        })
+    {
+        return Err(invalid_state(
+            "invalid external filesystem identity manifest",
+        ));
+    }
+    Ok(())
+}
+
+fn same_object(saved: &ObjectIdentity, current: &ObjectIdentity, remapped: bool) -> bool {
+    saved.directory == current.directory
+        && (remapped || (saved.volume == current.volume && saved.file_id == current.file_id))
+        // New directory lookups intentionally observe the current external namespace;
+        // captured directory iterators retain their saved sequence.
+        && (saved.directory || (saved.size == current.size && saved.content == current.content
+            && (remapped || saved.modified == current.modified)))
+}
+
+fn object_identity(fs: &PassthroughFs, saved: &InodeState) -> io::Result<ObjectIdentity> {
+    let path = path_from_components(fs, &saved.components)?;
+    let metadata = fs.safe_metadata(&path)?;
+    let mut file = open_identity_file(&path)?;
+    let before = file.metadata().map_err(host_error)?;
+    reject_reparse_metadata(&before)?;
+    if before.is_dir() != metadata.is_dir() || (!before.is_dir() && !before.is_file()) {
+        return Err(invalid_state(
+            "external object changed type or is not checkpointable",
+        ));
+    }
+    let (volume, file_id) = file_identity(&file)?;
+    let changed = file_change_time(&file)?;
+    let mut content = Vec::new();
+    if before.is_file() {
+        // Guest symlinks are regular backing files containing the target on Windows;
+        // native reparse points are never followed or admitted.
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 128 * 1024];
+        loop {
+            let count = file.read(&mut buffer).map_err(host_error)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        content = digest.finalize().to_vec();
+    }
+    let after = file.metadata().map_err(host_error)?;
+    if before.file_size() != after.file_size()
+        || before.last_write_time() != after.last_write_time()
+        || before.creation_time() != after.creation_time()
+        || file_identity(&file)? != (volume, file_id)
+        || file_change_time(&file)? != changed
+    {
+        return Err(invalid_state(
+            "external object changed while recording its identity",
+        ));
+    }
+    Ok(ObjectIdentity {
+        volume,
+        file_id,
+        directory: before.is_dir(),
+        size: before.file_size(),
+        modified: before.last_write_time(),
+        changed,
+        content,
+    })
+}
+
+fn open_identity_file(path: &std::path::Path) -> io::Result<File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(super::FILE_FLAG_OPEN_REPARSE_POINT | super::FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(host_error)
+}
+
+fn validate_reopened_file(file: &File, expected: &ObjectIdentity) -> io::Result<()> {
+    let metadata = file.metadata().map_err(host_error)?;
+    reject_reparse_metadata(&metadata)?;
+    if file_identity(file)? != (expected.volume, expected.file_id)
+        || metadata.is_dir() != expected.directory
+        || metadata.file_size() != expected.size
+        || metadata.last_write_time() != expected.modified
+        || file_change_time(file)? != expected.changed
+    {
+        return Err(invalid_state(
+            "external object changed while reconstructing destination handles",
+        ));
+    }
+    Ok(())
+}
+
+fn file_change_time(file: &File) -> io::Result<i64> {
+    let mut info = FILE_BASIC_INFO::default();
+    // Like file_identity, this borrows a live handle and fills the exact ABI struct.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&mut info as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(host_error(io::Error::last_os_error()));
+    }
+    Ok(info.ChangeTime)
+}
+
+fn file_identity(file: &File) -> io::Result<(u32, u64)> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // The borrowed File keeps the handle live for the entire query; the API fills
+    // only this initialized information struct and never takes ownership.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(host_error(io::Error::last_os_error()));
+    }
+    Ok((
+        info.dwVolumeSerialNumber,
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    ))
+}
+
 fn validate_semantics(fs: &PassthroughFs, state: &PassthroughState) -> io::Result<()> {
+    validate_quota(fs, state)?;
+    validate_shape(state, fs.cfg.readonly, fs.cfg.inject_init, &BTreeSet::new())
+}
+
+fn validate_quota(fs: &PassthroughFs, state: &PassthroughState) -> io::Result<()> {
     if state.quota.is_some() != fs.quota.is_some() {
         return Err(invalid_state("passthrough quota configuration differs"));
     }
     if let (Some(quota), Some(saved)) = (&fs.quota, &state.quota) {
         quota.validate_state(saved)?;
     }
+    Ok(())
+}
+
+fn validate_shape(
+    state: &PassthroughState,
+    readonly: bool,
+    inject_init: bool,
+    invalid: &BTreeSet<u64>,
+) -> io::Result<()> {
     let mut inode_ids = BTreeSet::new();
     let mut paths = BTreeSet::new();
     let mut roots = 0;
@@ -233,7 +597,11 @@ fn validate_semantics(fs: &PassthroughFs, state: &PassthroughState) -> io::Resul
         }
         max_inode = max_inode.max(inode.inode);
     }
-    if roots != 1 || state.next_inode <= max_inode {
+    let invalid_root = invalid.contains(&super::ROOT_INODE);
+    if roots + usize::from(invalid_root) != 1
+        || state.next_inode <= max_inode
+        || (invalid_root && !state.inodes.is_empty())
+    {
         return Err(invalid_state("invalid passthrough root or next inode"));
     }
 
@@ -244,7 +612,7 @@ fn validate_semantics(fs: &PassthroughFs, state: &PassthroughState) -> io::Resul
             || !handles.insert(handle.handle)
             || !inode_ids.contains(&handle.inode)
             || handle.flags & LINUX_O_ACCMODE as u32 == LINUX_O_ACCMODE as u32
-            || (fs.cfg.readonly && handle.flags & LINUX_O_ACCMODE as u32 != 0)
+            || (readonly && handle.flags & LINUX_O_ACCMODE as u32 != 0)
         {
             return Err(invalid_state("invalid passthrough file handle"));
         }
@@ -261,12 +629,14 @@ fn validate_semantics(fs: &PassthroughFs, state: &PassthroughState) -> io::Resul
         if let Some(entries) = &handle.entries {
             let mut previous = 0;
             for entry in entries {
-                let synthetic_init = fs.cfg.inject_init
+                let synthetic_init = inject_init
                     && entry.inode == super::INIT_INODE
                     && entry.name == super::INIT_NAME;
                 if entry.offset == 0
                     || entry.offset <= previous
-                    || (!inode_ids.contains(&entry.inode) && !synthetic_init)
+                    || (!inode_ids.contains(&entry.inode)
+                        && !invalid.contains(&entry.inode)
+                        && !synthetic_init)
                     || entry.name.is_empty()
                     || entry.name.len() > 255
                     || entry.name.contains(&0)
@@ -286,12 +656,19 @@ fn validate_semantics(fs: &PassthroughFs, state: &PassthroughState) -> io::Resul
     Ok(())
 }
 
-fn rebuild(fs: &PassthroughFs, state: PassthroughState) -> io::Result<PreparedState> {
+fn rebuild(
+    fs: &PassthroughFs,
+    state: PassthroughState,
+    expected: Option<&BTreeMap<u64, ObjectIdentity>>,
+) -> io::Result<PreparedState> {
     let mut inodes = InodeTable::default();
     let mut inode_paths = BTreeMap::new();
     for saved in &state.inodes {
         let path = path_from_components(fs, &saved.components)?;
         fs.safe_metadata(&path)?;
+        if let Some(expected) = expected {
+            validate_reopened_file(&open_identity_file(&path)?, &expected[&saved.inode])?;
+        }
         let data = Arc::new(InodeData {
             inode: saved.inode,
             path: path.clone(),
@@ -318,6 +695,9 @@ fn rebuild(fs: &PassthroughFs, state: PassthroughState) -> io::Result<PreparedSt
             .open(path)
             .map_err(host_error)?;
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
+        if let Some(expected) = expected {
+            validate_reopened_file(&file, &expected[&saved.inode])?;
+        }
         files.insert(
             saved.handle,
             Arc::new(HandleData {
@@ -360,6 +740,7 @@ fn rebuild(fs: &PassthroughFs, state: PassthroughState) -> io::Result<PreparedSt
     }
 
     Ok(PreparedState {
+        invalid_inodes: BTreeSet::new(),
         next_inode: state.next_inode,
         next_handle: state.next_handle,
         quota: state.quota,
@@ -381,7 +762,10 @@ fn validate_components(components: &[Vec<u16>]) -> io::Result<()> {
         let Some(name) = name.to_str() else {
             return Err(invalid_state("passthrough path is not valid Unicode"));
         };
-        if name == "." || name == ".." || name.contains(['\0', '/', '\\']) || is_reserved_name(name)
+        if name == "."
+            || name == ".."
+            || name.contains(['\0', '/', '\\', ':'])
+            || is_reserved_name(name)
         {
             return Err(invalid_state("invalid passthrough path component"));
         }
@@ -397,6 +781,6 @@ fn path_from_components(fs: &PassthroughFs, components: &[Vec<u16>]) -> io::Resu
     Ok(path)
 }
 
-fn invalid_state(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+fn invalid_state(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }

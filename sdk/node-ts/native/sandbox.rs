@@ -42,6 +42,14 @@ pub struct JsSandboxPage {
     pub next_cursor: Option<String>,
 }
 
+/// A filesystem mismatch explicitly accepted by relaxed restore admission.
+#[napi(object, object_from_js = false)]
+pub struct ExternalMountWarning {
+    pub guest_path: String,
+    pub reason: String,
+    pub stale_inodes: Vec<BigInt>,
+}
+
 /// A streaming subscription for sandbox metrics at a regular interval.
 ///
 /// Supports both manual `recv()` calls and `for await...of` iteration:
@@ -513,6 +521,23 @@ impl Sandbox {
     pub async fn stop(&self) -> Result<()> {
         let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         sb.stop().await.map_err(to_napi_error)
+    }
+
+    /// Structured warnings for external filesystems admitted by relaxed full restore.
+    #[napi]
+    pub async fn restore_warnings(&self) -> Result<Vec<ExternalMountWarning>> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        Ok(sb
+            .restore_warnings()
+            .await
+            .map_err(to_napi_error)?
+            .into_iter()
+            .map(|warning| ExternalMountWarning {
+                guest_path: warning.guest_path,
+                reason: warning.reason,
+                stale_inodes: warning.stale_inodes.into_iter().map(BigInt::from).collect(),
+            })
+            .collect())
     }
 
     /// Create an independent local CoW child without a durable full snapshot.

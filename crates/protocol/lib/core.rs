@@ -125,6 +125,9 @@ pub struct Touched {
 /// operation from accidentally releasing another operation's freeze.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadFreeze {
+    /// External virtiofs tags whose writeback boundary must be proved by the guest.
+    #[serde(default)]
+    pub external_mount_tags: Vec<String>,
     /// Stable checkpoint attempt identity selected by the host.
     pub attempt_id: String,
     /// Complete ordinary frames admitted by the host before gating user input.
@@ -143,6 +146,10 @@ pub struct WorkloadFrozen {
     pub guest_bulk_bytes_target: u64,
     /// Absolute input limits captured with this boundary, not a fresh window.
     pub input_credit: WorkloadTransportCredit,
+    /// Guest virtiofs dirty pages reached backing storage after the workload freeze.
+    /// Older guests omit this evidence and cannot capture external mounts safely.
+    #[serde(default)]
+    pub external_mounts_synced: bool,
 }
 
 /// Cumulative ordinary input admitted at complete frame or record boundaries.
@@ -437,6 +444,7 @@ mod workload_tests {
             bulk_frames: 30_000,
         };
         let freeze = WorkloadFreeze {
+            external_mount_tags: Vec::new(),
             attempt_id: "captured-generation".into(),
             host_input: position,
         };
@@ -448,6 +456,7 @@ mod workload_tests {
         // A restored guest may still own most of the window as pending stdin.
         // Carry absolute grants, not a reset that would admit that much again.
         let frozen = WorkloadFrozen {
+            external_mounts_synced: false,
             attempt_id: freeze.attempt_id,
             guest_bulk_bytes_target: 987_654_321,
             input_credit: WorkloadTransportCredit {

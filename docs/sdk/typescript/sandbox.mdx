@@ -36,6 +36,10 @@ Return one [`SandboxMetrics`](#sandboxmetrics) snapshot for every running sandbo
 
 ## Sandbox
 
+### External mount restore
+
+Full restores use strict external-filesystem admission by default. Select `.externalMountPolicy("relaxed")` on the builder to accept supported mismatches, then inspect `await sandbox.restoreWarnings()`. Each warning has `guestPath`, `reason`, and `staleInodes: readonly bigint[]`. Existing volume bindings select the destination paths. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+
 ### Creation progress
 
 `createWithProgress()` includes image preparation and local snapshot startup. Ignoring events does not delay creation; `awaitSandbox()` supplies the authoritative result.

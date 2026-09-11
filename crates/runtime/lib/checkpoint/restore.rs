@@ -41,6 +41,8 @@ pub(crate) struct PreparedCheckpointRestore {
 
 /// Agent identity and latch attempt restored with the guest memory image.
 pub(crate) struct RestoredAgentState {
+    /// Host-only backend reconstruction diagnostics, populated before activation.
+    pub(crate) external_mount_reports: Vec<ExternalMountReport>,
     /// Protocol generation spoken by the captured agent.
     pub(crate) protocol_generation: u8,
     /// Cached ready payload used for post-activation client handshakes.
@@ -53,6 +55,13 @@ pub(crate) struct RestoredAgentState {
     pub(crate) input_credit: WorkloadTransportCredit,
     /// Complete dedicated guest bulk output observed before capture.
     pub(crate) guest_bulk_bytes_target: u64,
+}
+
+/// One external backend's reconstruction report, shared only within the destination runtime.
+pub(crate) struct ExternalMountReport {
+    pub(crate) guest_path: String,
+    pub(crate) unavailable: Option<String>,
+    pub(crate) stale_inodes: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
 }
 
 enum PreparedDeviceRestore {
@@ -359,6 +368,45 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods: Restore diagnostics
+//--------------------------------------------------------------------------------------------------
+
+impl RestoredAgentState {
+    /// Persist health after backend reconstruction and before public activation.
+    pub(crate) fn publish_mount_warnings(
+        &self,
+        runtime_dir: &std::path::Path,
+    ) -> Result<(), String> {
+        use std::io::Write;
+        let warnings = self.external_mount_reports.iter().filter_map(|report| {
+            let stale_inodes = report.stale_inodes.lock().unwrap().clone();
+            let reason = match &report.unavailable {
+                Some(reason) => reason.clone(),
+                None if !stale_inodes.is_empty() => "captured objects are missing, replaced, or changed; backend requests for their retained handles return ESTALE (clean cached reads may still succeed)".into(),
+                None => return None,
+            };
+            Some(microsandbox_types::ExternalMountWarning { guest_path: report.guest_path.clone(), reason, stale_inodes })
+        }).collect::<Vec<_>>();
+        // The guest can write /.msb (runtime_dir); these host-authored diagnostics
+        // must live outside that share so resumed code cannot erase the warning.
+        let sandbox_dir = runtime_dir
+            .parent()
+            .ok_or("runtime has no host-only parent")?;
+        let path = sandbox_dir.join(".restore-mount-warnings.tmp");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        file.write_all(&serde_json::to_vec(&warnings).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        super::replace_file(&path, &sandbox_dir.join("restore-mount-warnings.json"))
+            .map_err(|e| e.to_string())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -473,6 +521,7 @@ fn parse_restored_agent_resource(
         return Err("combined checkpoint has a dedicated guest bulk counter".into());
     }
     Ok(RestoredAgentState {
+        external_mount_reports: Vec::new(),
         protocol_generation,
         ready,
         host_input,
@@ -547,6 +596,37 @@ mod tests {
         assert_eq!(restored.ready.boot_time_ns, 10);
         assert_eq!(restored.ready.init_time_ns, 20);
         assert_eq!(restored.ready.ready_time_ns, 30);
+    }
+
+    #[test]
+    fn mount_warnings_are_published_outside_the_guest_runtime_share() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let runtime = sandbox.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let mut restored =
+            parse_restored_agent_resource(&agent_resource(PROTOCOL_VERSION), "attempt").unwrap();
+        restored
+            .external_mount_reports
+            .push(super::ExternalMountReport {
+                guest_path: "/external".into(),
+                unavailable: Some("export unavailable".into()),
+                stale_inodes: Default::default(),
+            });
+        restored.publish_mount_warnings(&runtime).unwrap();
+        assert!(!runtime.join("restore-mount-warnings.json").exists());
+        let warnings: Vec<microsandbox_types::ExternalMountWarning> = serde_json::from_slice(
+            &std::fs::read(sandbox.path().join("restore-mount-warnings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].guest_path, "/external");
+        // Writing the guest-visible lookalike cannot replace the host's record.
+        std::fs::write(runtime.join("restore-mount-warnings.json"), b"[]").unwrap();
+        let retained: Vec<microsandbox_types::ExternalMountWarning> = serde_json::from_slice(
+            &std::fs::read(sandbox.path().join("restore-mount-warnings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retained, warnings);
     }
 
     #[test]

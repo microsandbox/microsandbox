@@ -8,6 +8,15 @@ use super::*;
 //--------------------------------------------------------------------------------------------------
 
 impl DynFileSystem for PassthroughFs {
+    fn request_error(&self, inode: u64) -> Option<i32> {
+        // FUSE speaks Linux errno values even when the host is Windows.
+        self.invalid_inodes
+            .read()
+            .unwrap()
+            .contains(&inode)
+            .then_some(116)
+    }
+
     fn capture_state(&self) -> io::Result<Vec<u8>> {
         mobility::capture(self)
     }

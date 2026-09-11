@@ -122,6 +122,7 @@ typedef char *(*msb_sandbox_close_fn)(uint64_t cancel_id, uint64_t handle, uint8
 typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_restore_warnings_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_resume_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
@@ -289,6 +290,7 @@ static msb_sandbox_close_fn      ptr_msb_sandbox_close      = NULL;
 static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
 static msb_sandbox_stop_fn       ptr_msb_sandbox_stop       = NULL;
 static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
+static msb_sandbox_restore_warnings_fn ptr_msb_sandbox_restore_warnings = NULL;
 static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
 static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
 static msb_sandbox_resume_fn ptr_msb_sandbox_resume = NULL;
@@ -479,6 +481,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_detach);
 	RESOLVE(msb_sandbox_stop);
 	RESOLVE(msb_sandbox_request_stop);
+	RESOLVE_OPTIONAL(msb_sandbox_restore_warnings);
 	RESOLVE(msb_sandbox_pause);
 	RESOLVE(msb_sandbox_branch);
 	RESOLVE(msb_sandbox_resume);
@@ -691,6 +694,10 @@ char *call_msb_sandbox_stop(uint64_t cancel_id, uint64_t handle, uint64_t timeou
 }
 char *call_msb_sandbox_request_stop(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_request_stop ? ptr_msb_sandbox_request_stop(cancel_id, handle, buf, buf_len) : NULL;
+}
+bool has_external_mount_restore(void) { return ptr_msb_sandbox_restore_warnings != NULL; }
+char *call_msb_sandbox_restore_warnings(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_restore_warnings ? ptr_msb_sandbox_restore_warnings(cancel_id, handle, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_pause(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_pause ? ptr_msb_sandbox_pause(cancel_id, handle, buf, buf_len) : NULL;
@@ -1215,6 +1222,7 @@ const (
 	KindVolumeNotFound         = "volume_not_found"
 	KindVolumeAlreadyExists    = "volume_already_exists"
 	KindExecTimeout            = "exec_timeout"
+	KindStopTimeout            = "stop_timeout"
 	KindNoDefaultCommand       = "no_default_command"
 	KindInvalidConfig          = "invalid_config"
 	KindInvalidArgument        = "invalid_argument"
@@ -1668,6 +1676,7 @@ type CreateOptions struct {
 	PlacementProfile     string               `json:"placement_profile,omitempty"`
 	THP                  string               `json:"thp,omitempty"`
 	Forked               bool                 `json:"forked,omitempty"`
+	ExternalMountPolicy  string               `json:"external_mount_policy,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
 	SecurityProfile      string               `json:"security_profile,omitempty"`
@@ -1755,21 +1764,21 @@ type MountSpec struct {
 
 // NetworkOptions is the JSON representation of the network config block.
 type NetworkOptions struct {
-	CustomPolicy        *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
-	DNS                 *DNSOptions                `json:"dns,omitempty"`
-	DNSRebindProtection *bool                      `json:"dns_rebind_protection,omitempty"`
-	DenyDomains         []string                   `json:"deny_domains,omitempty"`
-	DenyDomainSuffixes  []string                   `json:"deny_domain_suffixes,omitempty"`
-	TLS                 *TLSOptions                `json:"tls,omitempty"`
-	Strict             *bool                      `json:"strict,omitempty"`
-	Ports               map[uint16]uint16          `json:"ports,omitempty"`
-	PortBindings        []PortBindingOptions       `json:"port_bindings,omitempty"`
-	IPv4Pool            string                     `json:"ipv4_pool,omitempty"`
-	IPv6Pool            string                     `json:"ipv6_pool,omitempty"`
-	MaxConnections      *uint                      `json:"max_connections,omitempty"`
-	RateLimiter         *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
-	SecretViolationAction string                   `json:"secret_violation_action,omitempty"`
-	TrustHostCAs        *bool                      `json:"trust_host_cas,omitempty"`
+	CustomPolicy          *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
+	DNS                   *DNSOptions                `json:"dns,omitempty"`
+	DNSRebindProtection   *bool                      `json:"dns_rebind_protection,omitempty"`
+	DenyDomains           []string                   `json:"deny_domains,omitempty"`
+	DenyDomainSuffixes    []string                   `json:"deny_domain_suffixes,omitempty"`
+	TLS                   *TLSOptions                `json:"tls,omitempty"`
+	Strict                *bool                      `json:"strict,omitempty"`
+	Ports                 map[uint16]uint16          `json:"ports,omitempty"`
+	PortBindings          []PortBindingOptions       `json:"port_bindings,omitempty"`
+	IPv4Pool              string                     `json:"ipv4_pool,omitempty"`
+	IPv6Pool              string                     `json:"ipv6_pool,omitempty"`
+	MaxConnections        *uint                      `json:"max_connections,omitempty"`
+	RateLimiter           *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
+	SecretViolationAction string                     `json:"secret_violation_action,omitempty"`
+	TrustHostCAs          *bool                      `json:"trust_host_cas,omitempty"`
 }
 
 // RateLimiterOptions limits one traffic direction; a nil bucket leaves that
@@ -1876,14 +1885,14 @@ type ScopedVerifyUpstream struct {
 
 // SecretOptions is the JSON representation of a single credential.
 type SecretOptions struct {
-	EnvVar              string                     `json:"env_var"`
-	Value               string                     `json:"value"`
-	Allow               []string                   `json:"allow,omitempty"`
-	Passthrough         []string                   `json:"passthrough,omitempty"`
-	Placeholder         string                     `json:"placeholder,omitempty"`
-	RequireTLSIdentity  *bool                      `json:"require_tls_identity,omitempty"`
-	Substitution        SecretSubstitutionOptions  `json:"substitution,omitempty"`
-	ViolationAction     string                     `json:"violation_action,omitempty"`
+	EnvVar             string                    `json:"env_var"`
+	Value              string                    `json:"value"`
+	Allow              []string                  `json:"allow,omitempty"`
+	Passthrough        []string                  `json:"passthrough,omitempty"`
+	Placeholder        string                    `json:"placeholder,omitempty"`
+	RequireTLSIdentity *bool                     `json:"require_tls_identity,omitempty"`
+	Substitution       SecretSubstitutionOptions `json:"substitution,omitempty"`
+	ViolationAction    string                    `json:"violation_action,omitempty"`
 }
 
 // SecretSubstitutionOptions selects request locations for substitution.
@@ -1908,21 +1917,31 @@ type PatchOptions struct {
 
 // OpenCreationProgress reserves an operation-local, bounded event stream.
 func OpenCreationProgress(ctx context.Context) (uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if err := ensureLoaded(); err != nil {
 		return 0, err
 	}
 	if !bool(C.has_creation_progress()) {
 		return 0, fmt.Errorf("installed native SDK does not support creation progress")
 	}
-	out, err := call(ctx, func(_ C.uint64_t, buf *C.uint8_t, n C.size_t) *C.char { return C.call_creation_progress_open(buf, n) })
-	if err != nil {
-		return 0, err
-	}
-	var reply struct {
-		Handle uint64 `json:"handle"`
-	}
-	err = json.Unmarshal([]byte(out), &reply)
-	return reply.Handle, err
+	return openCreationProgress(ctx, func() (uint64, error) {
+		out, err := callSync(func(buf []byte) error {
+			return errorFromPtr(C.call_creation_progress_open((*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf))))
+		})
+		if err != nil {
+			return 0, err
+		}
+		var reply struct {
+			Handle uint64 `json:"handle"`
+		}
+		err = json.Unmarshal([]byte(out), &reply)
+		if err == nil && reply.Handle == 0 {
+			err = fmt.Errorf("native creation progress returned an invalid handle")
+		}
+		return reply.Handle, err
+	}, CloseCreationProgress)
 }
 
 // ReceiveCreationProgress waits for the next event or context cancellation.
@@ -1935,8 +1954,8 @@ func ReceiveCreationProgress(ctx context.Context, id uint64) (json.RawMessage, e
 
 // CloseCreationProgress releases the operation's stream after its receiver has stopped.
 func CloseCreationProgress(id uint64) error {
-	_, err := call(context.Background(), func(_ C.uint64_t, buf *C.uint8_t, n C.size_t) *C.char {
-		return C.call_creation_progress_close(C.uint64_t(id), buf, n)
+	_, err := callSync(func(buf []byte) error {
+		return errorFromPtr(C.call_creation_progress_close(C.uint64_t(id), (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf))))
 	})
 	return err
 }
@@ -1958,6 +1977,9 @@ func ConnectOrCreateSandbox(ctx context.Context, name string, opts CreateOptions
 func createSandbox(ctx context.Context, name string, opts CreateOptions, connectOrCreate bool) (*Sandbox, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
+	}
+	if opts.ExternalMountPolicy != "" && !bool(C.has_external_mount_restore()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support external mount restore policy; update the native SDK"}
 	}
 	optsJSON, err := json.Marshal(opts)
 	if err != nil {
@@ -2587,6 +2609,19 @@ func (s *Sandbox) RequestStop(ctx context.Context) error {
 		return C.call_msb_sandbox_request_stop(cancelID, s.h(), buf, bufLen)
 	})
 	return err
+}
+
+// RestoreWarnings returns the runtime's structured relaxed-restore warnings as JSON.
+func (s *Sandbox) RestoreWarnings(ctx context.Context) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if !bool(C.has_external_mount_restore()) {
+		return "", &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support external mount restore diagnostics; update the native SDK"}
+	}
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_restore_warnings(cancelID, s.h(), buf, bufLen)
+	})
 }
 
 // Branch creates an independent local child through the host runtime.

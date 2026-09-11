@@ -255,6 +255,23 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Select strict admission (default) or explicit relaxed external-mount restore.
+    #[napi(ts_args_type = "policy: 'strict' | 'relaxed'")]
+    pub fn external_mount_policy(&mut self, policy: String) -> Result<&Self> {
+        let policy = match policy.as_str() {
+            "strict" => microsandbox::sandbox::ExternalMountRestorePolicy::Strict,
+            "relaxed" => microsandbox::sandbox::ExternalMountRestorePolicy::Relaxed,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "external mount policy must be strict or relaxed",
+                ));
+            }
+        };
+        let previous = self.take_inner();
+        self.inner = Some(previous.external_mount_policy(policy));
+        Ok(self)
+    }
+
     /// Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`.
     #[napi(js_name = "logLevel")]
     pub fn log_level(&mut self, level: String) -> Result<&Self> {

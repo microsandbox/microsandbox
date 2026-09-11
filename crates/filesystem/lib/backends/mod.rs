@@ -12,3 +12,4 @@ pub mod passthroughfs;
 #[cfg(unix)]
 pub(crate) mod shared;
 pub mod singlefilefs;
+pub mod unavailable;

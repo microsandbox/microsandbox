@@ -615,6 +615,7 @@ mod tests {
             MessageType::WorkloadFreeze,
             0,
             &WorkloadFreeze {
+                external_mount_tags: Vec::new(),
                 attempt_id: "first".into(),
                 host_input: WorkloadTransportPosition::default(),
             },
@@ -637,6 +638,7 @@ mod tests {
             MessageType::WorkloadFrozen,
             WORKLOAD_CONTROL_ID,
             &WorkloadFrozen {
+                external_mounts_synced: false,
                 attempt_id: "first".into(),
                 guest_bulk_bytes_target: 0,
                 input_credit: WorkloadTransportCredit::default(),

@@ -47,6 +47,8 @@ pub(super) struct Dependencies {
 struct PhysicalLayer {
     required: RequiredLayer,
     source: PathBuf,
+    /// Layer selectors address the root chain. Additional managed disks are exported whole.
+    root_chain: bool,
 }
 
 pub(super) struct BaseSnapshot {
@@ -300,12 +302,20 @@ pub(super) async fn selection(
         ));
     }
     let layers = physical_layers(head.manifest(), head.path())?;
+    let selected_layers = layers
+        .iter()
+        .filter(|layer| layer.root_chain)
+        .collect::<Vec<_>>();
     let mut memory = Vec::new();
     let required = if let Some(base) = &opts.since {
         // Base archives carry buffered decoder/verification futures; keep them off the caller's
         // stack, including when this planner is nested inside a direct restore or SDK call.
         let base = Box::pin(open_base(local, base)).await?;
         let baseline = physical_layers(base.snapshot.manifest(), base.snapshot.path())?;
+        let baseline = baseline
+            .iter()
+            .filter(|layer| layer.root_chain)
+            .collect::<Vec<_>>();
         let available = memory_objects(&base.snapshot)?;
         memory = memory_objects(head)?
             .intersection(&available)
@@ -313,11 +323,11 @@ pub(super) async fn selection(
             .collect();
         // Tmpfs-root full snapshots have no disks, but may still depend on RAM objects.
         // Do not let disk completeness suppress an independent memory dependency.
-        if layers.is_empty() && baseline.is_empty() {
+        if selected_layers.is_empty() && baseline.is_empty() {
             0..0
         } else {
             DiskLayerExportPlan::since(
-                &layers
+                &selected_layers
                     .iter()
                     .map(|layer| &layer.required.identity)
                     .collect::<Vec<_>>(),
@@ -330,15 +340,18 @@ pub(super) async fn selection(
             .required()
         }
     } else {
-        DiskLayerExportPlan::last(layers.len(), opts.last_layers.expect("selector checked"))
-            .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
-            .required()
+        DiskLayerExportPlan::last(
+            selected_layers.len(),
+            opts.last_layers.expect("selector checked"),
+        )
+        .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
+        .required()
     };
     if required.is_empty() && memory.is_empty() {
         return Ok(None);
     }
     Ok(Some(Dependencies {
-        disks: layers[required]
+        disks: selected_layers[required]
             .iter()
             .map(|layer| layer.required.clone())
             .collect(),
@@ -494,6 +507,12 @@ pub(super) async fn resolve(
     })?;
     let base = Box::pin(open_base(local, base)).await?;
     let available = physical_layers(base.snapshot.manifest(), base.snapshot.path())?;
+    // Incremental disk selectors describe only the root chain. Additional managed volumes
+    // are complete independent generations, regardless of their order in the checkpoint.
+    let available = available
+        .iter()
+        .filter(|layer| layer.root_chain)
+        .collect::<Vec<_>>();
     if !dependencies.disks.is_empty()
         && (available.len() != dependencies.disks.len()
             || available
@@ -562,6 +581,10 @@ async fn validate_resolved(
         Manifest::from_bytes(&tokio::fs::read(artifact.join(DESCRIPTOR_FILENAME)).await?)
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let target = physical_layers(&manifest, &artifact)?;
+    let target = target
+        .iter()
+        .filter(|layer| layer.root_chain)
+        .collect::<Vec<_>>();
     if target.len() < dependencies.disks.len()
         || target
             .iter()
@@ -703,6 +726,7 @@ fn physical_layers(
             .iter()
             .map(|layer| {
                 Ok(PhysicalLayer {
+                    root_chain: true,
                     required: RequiredLayer {
                         path: portable_archive_path(&file.layer_path(layer))?,
                         identity: LayerIdentity::File(layer.clone()),
@@ -717,16 +741,13 @@ fn physical_layers(
                 .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
             let closure = CheckpointClosure::open_portable(&root, Some(&expected))
                 .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-            if closure.disks().len() > 1 {
-                return Err(MicrosandboxError::InvalidConfig(
-                    "disk-layer selection supports at most one checkpoint disk".into(),
-                ));
-            }
             Ok(closure
                 .disks()
                 .iter()
-                .flat_map(|disk| &disk.layers)
-                .map(|layer| PhysicalLayer {
+                .flat_map(|disk| disk.layers.iter().map(move |layer| (disk, layer)))
+                .map(|(disk, layer)| PhysicalLayer {
+                    root_chain: Some(disk.device_id.as_str())
+                        == super::super::restore::root_device(&manifest.root_disk),
                     required: RequiredLayer {
                         path: format!(
                             "checkpoints/{}/layers/{}.{}",

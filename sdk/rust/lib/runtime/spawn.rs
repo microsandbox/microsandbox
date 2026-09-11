@@ -2247,6 +2247,19 @@ fn resolve_file_mounts(
         let VolumeMount::Bind { host, guest, .. } = mount else {
             continue;
         };
+        if let Some(binding) = config.checkpoint_restore.as_ref().and_then(|restore| {
+            restore
+                .external_mounts
+                .iter()
+                .find(|binding| binding.mount.guest_path == *guest)
+        }) {
+            // A missing or type-changed export must retain its captured transport,
+            // never be reclassified from a file facade into a directory share.
+            if let Some(filename) = &binding.filename {
+                file_mounts.insert(guest.clone(), (filename.clone(), binding.mount.tag.clone()));
+            }
+            continue;
+        }
         if !host.is_file() {
             continue;
         }
@@ -2328,19 +2341,49 @@ fn push_file_mount_arg(
     });
 }
 
-/// Collect a `id:host_path:format[:ro]` disk entry.
+/// Collect a `id:host_path:format[:ro][:snapshot-owned]` disk entry.
 fn push_disk_mount_arg(
     disks: &mut Vec<String>,
     id: &str,
     host_display: &impl std::fmt::Display,
     format: &DiskImageFormat,
     options: MountOptions,
+    snapshot_owned: bool,
 ) {
     let mut arg = format!("{id}:{host_display}:{}", format.as_str());
     if options.readonly {
         arg.push_str(":ro");
     }
+    if snapshot_owned {
+        arg.push_str(":snapshot-owned");
+    }
     disks.push(arg);
+}
+
+/// Recognize only the exact private file created by additional-disk restore for this sandbox.
+/// Canonical parent equality prevents a symlinked directory or a textual prefix from granting
+/// managed ownership to an external image. The launcher separately retains the file's disk lock.
+fn is_owned_restored_disk(host: &Path, sandbox: &Path, id: &str, format: DiskImageFormat) -> bool {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return false;
+    }
+    let Ok(sandbox) = sandbox.canonicalize() else {
+        return false;
+    };
+    let directory = sandbox.join("additional-disks");
+    let Ok(canonical_directory) = directory.canonicalize() else {
+        return false;
+    };
+    if canonical_directory != directory {
+        return false;
+    }
+    let expected = directory.join(format!("{id}.{}", format.as_str()));
+    host.canonicalize().is_ok_and(|path| path == expected)
+        && std::fs::metadata(&expected).is_ok_and(|metadata| metadata.is_file())
 }
 
 fn mount_option_tokens(options: MountOptions) -> Vec<String> {
@@ -2431,7 +2474,7 @@ fn agentd_path_override(
 /// Output is at most 20 bytes — the kernel's virtio-blk serial length limit.
 /// Layout: `<slug[..11]>_<8-hex>`. The slug-part is a debugging hint; the
 /// 8-hex suffix is what actually disambiguates.
-fn guest_mount_tag(guest_path: &str) -> String {
+pub(crate) fn guest_mount_tag(guest_path: &str) -> String {
     use std::fmt::Write as _;
 
     const SLUG_MAX: usize = 11;
@@ -2809,6 +2852,7 @@ fn machine_cli_args(
                             &path.display(),
                             format,
                             *options,
+                            true,
                         );
                         launch.bootstrap.disk_mounts.push(BootstrapDiskMount {
                             id,
@@ -2858,7 +2902,20 @@ fn machine_cli_args(
                 options,
             } => {
                 let id = guest_mount_tag(guest);
-                push_disk_mount_arg(&mut launch.disks, &id, &host.display(), format, *options);
+                let snapshot_owned = is_owned_restored_disk(
+                    host,
+                    &local.sandboxes_dir().join(&config.spec.name),
+                    &id,
+                    *format,
+                );
+                push_disk_mount_arg(
+                    &mut launch.disks,
+                    &id,
+                    &host.display(),
+                    format,
+                    *options,
+                    snapshot_owned,
+                );
                 launch.bootstrap.disk_mounts.push(BootstrapDiskMount {
                     id,
                     guest_path: guest.clone(),
@@ -2955,7 +3012,9 @@ mod tests {
         AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
-    use super::{agentd_path_override, block_writeback_policy, machine_cli_args};
+    use super::{
+        agentd_path_override, block_writeback_policy, is_owned_restored_disk, machine_cli_args,
+    };
     use crate::{
         LogLevel,
         backend::LocalBackend,
@@ -2967,6 +3026,58 @@ mod tests {
         volume::VolumeKind,
     };
 
+    #[test]
+    fn restored_disk_ownership_requires_exact_sandbox_directory_and_device_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let sandbox = directory.path().join("child");
+        let owned = sandbox.join("additional-disks");
+        std::fs::create_dir_all(&owned).unwrap();
+        let disk = owned.join("data_12.raw");
+        std::fs::write(&disk, []).unwrap();
+        assert!(is_owned_restored_disk(
+            &disk,
+            &sandbox,
+            "data_12",
+            DiskImageFormat::Raw
+        ));
+        assert!(!is_owned_restored_disk(
+            &disk,
+            &sandbox,
+            "other",
+            DiskImageFormat::Raw
+        ));
+        assert!(!is_owned_restored_disk(
+            &disk,
+            &sandbox,
+            "data_12",
+            DiskImageFormat::Qcow2
+        ));
+        assert!(!is_owned_restored_disk(
+            &disk,
+            &directory.path().join("other"),
+            "data_12",
+            DiskImageFormat::Raw
+        ));
+        assert!(!is_owned_restored_disk(
+            &disk,
+            &sandbox,
+            "../data_12",
+            DiskImageFormat::Raw
+        ));
+
+        #[cfg(unix)]
+        {
+            let another = directory.path().join("symlinked-child");
+            std::fs::create_dir(&another).unwrap();
+            std::os::unix::fs::symlink(&owned, another.join("additional-disks")).unwrap();
+            assert!(!is_owned_restored_disk(
+                &disk,
+                &another,
+                "data_12",
+                DiskImageFormat::Raw
+            ));
+        }
+    }
     #[test]
     fn startup_cleanup_failure_preserves_each_startup_diagnosis() {
         let failures = [
@@ -4249,6 +4360,8 @@ mod tests {
             },
         ];
         config.checkpoint_restore = Some(CheckpointRestoreConfig {
+            external_mount_policy: Default::default(),
+            external_mounts: Vec::new(),
             local_branch: false,
             forked: false,
             closure: PathBuf::from("/tmp/checkpoint"),
@@ -4847,10 +4960,8 @@ mod tests {
         let rendered = render_args_with_named_volumes(&config, &named_volumes);
         let tag = super::guest_mount_tag("/var/lib/docker");
 
-        assert!(
-            rendered.windows(2).any(|pair| pair[0] == "--disk"
-                && pair[1] == format!("{tag}:{}:raw", raw_path.display()))
-        );
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--disk"
+            && pair[1] == format!("{tag}:{}:raw:snapshot-owned", raw_path.display())));
         assert!(rendered.contains(&format!(
             "MSB_DISK_MOUNTS={tag}:/var/lib/docker:fstype=ext4"
         )));
@@ -5093,10 +5204,8 @@ mod tests {
 
         let rendered = render_args_with_named_volumes(&config, &resolved);
         let tag = super::guest_mount_tag("/data");
-        assert!(
-            rendered.windows(2).any(|pair| pair[0] == "--disk"
-                && pair[1] == format!("{tag}:{}:raw", volume.path.display()))
-        );
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--disk"
+            && pair[1] == format!("{tag}:{}:raw:snapshot-owned", volume.path.display())));
         assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/data:fstype=ext4")));
 
         let owned_config = SandboxBuilder::new("owned-test")

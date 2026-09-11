@@ -234,6 +234,8 @@ async fn run_new(
         .await
         .map_err(|e| anyhow::anyhow!("create task panicked: {e}"))??;
 
+    super::common::display_restore_warnings(&sandbox).await;
+
     if sandbox.config().resumed_from_full_snapshot() {
         if !args.command.is_empty() {
             ui::warn(&format!(
@@ -753,6 +755,40 @@ mod tests {
 
         assert!(args.disk_only);
         assert_eq!(args.from_snapshot.as_deref(), Some("checkpoint"));
+    }
+
+    #[test]
+    fn external_mount_policy_is_explicit_and_requires_full_restore() {
+        let args = parse_run_args(&[
+            "--from-snapshot",
+            "saved",
+            "--external-mount-policy",
+            "relaxed",
+        ]);
+        assert_eq!(
+            args.sandbox.external_mount_policy.as_deref(),
+            Some("relaxed")
+        );
+        for args in [
+            vec!["msb", "alpine", "--external-mount-policy", "relaxed"],
+            vec![
+                "msb",
+                "--from-snapshot",
+                "saved",
+                "--external-mount-policy",
+                "unknown",
+            ],
+            vec![
+                "msb",
+                "--from-snapshot",
+                "saved",
+                "--external-mount-policy",
+                "relaxed",
+                "--disk-only",
+            ],
+        ] {
+            assert!(TestCli::try_parse_from(&args).is_err(), "accepted {args:?}");
+        }
     }
 
     #[test]

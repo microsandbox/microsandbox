@@ -262,6 +262,10 @@ pub struct DiskMountSpec {
 
     /// Whether the mount is read-only.
     pub readonly: bool,
+
+    /// The trusted launcher established managed ownership and retained the disk mutation lock.
+    /// Only named disk volumes and this sandbox's restored private copies may set this flag.
+    pub snapshot_owned: bool,
 }
 
 /// VM hardware and rootfs configuration.
@@ -556,7 +560,8 @@ pub fn enter(config: Config) -> ! {
     // a failure to write boot-error.json, regardless of how far run() got.
     let log_dir = config.log_dir.clone();
     let metrics_slot = config.metrics_slot.clone();
-    let result = run(config);
+    let failure_channel = super::progress::StartupFailureChannel::default();
+    let result = run(config, &failure_channel);
     match result {
         Ok(infallible) => match infallible {},
         Err(e) => {
@@ -570,12 +575,18 @@ pub fn enter(config: Config) -> ! {
                 eprintln!("failed to write boot-error.json: {write_err}");
             }
             eprintln!("sandbox error: {e}");
+            // `run` has already dropped its telemetry task/runtime. Keep preparation
+            // readers blocked until the structured cause (or stderr fallback) is written.
+            failure_channel.release();
             std::process::exit(1);
         }
     }
 }
 
-fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
+fn run(
+    mut config: Config,
+    failure_channel: &super::progress::StartupFailureChannel,
+) -> RuntimeResult<std::convert::Infallible> {
     // Raise the fd limit before anything else: every guest-held open file on a virtiofs share pins one fd in this process, so the shell's default soft limit
     // (1024 on many distros) is nowhere near enough for real workloads. Reference virtiofsd raises its own limit for the same reason. Best-effort: failure is
     // not fatal, just a smaller fd budget.
@@ -602,6 +613,9 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     drop(config.startup_fd.take()); // The retained writer is the only owner of the reply pipe.
     #[cfg(windows)]
     let startup_writer = write_startup_info(config.startup_pipe.as_deref(), &startup_json)?;
+    let startup_writer = startup_writer
+        .map(|writer| failure_channel.retain(writer))
+        .transpose()?;
     setup_log_capture(&config.log_dir, config.forward_output)?;
 
     tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
@@ -639,6 +653,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
                 // captured RAM backing to prepare before activation.
                 crate::startup_progress::StartupPhase::Activating
             },
+            failure_channel.clone(),
         ),
         None => Arc::new(|_| {}),
     };
@@ -1233,6 +1248,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     let relay_exit_reason = Arc::clone(&exit_reason);
     let restore_control = restored_agent.as_ref().map(|_| vm.control_handle());
     let restore_runtime_dir = config.runtime_dir.clone();
+    let relay_boot_log_dir = config.log_dir.clone();
     tokio_rt.spawn(async move {
         let ready_result = tokio::task::spawn_blocking(move || {
             if let (Some(restored), Some(control)) =
@@ -1252,6 +1268,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
                     && let Err(error) = publication.publish(&mut relay)
                 {
                     tracing::error!(%error, "publish restored runtime endpoints");
+                    super::progress::publish_failure(&relay_boot_log_dir, &error);
                     relay_exit_reason.store(
                         EXIT_REASON_AGENT_UNRESPONSIVE,
                         std::sync::atomic::Ordering::SeqCst,
@@ -1302,6 +1319,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
             }
             Ok(Err(e)) => {
                 tracing::error!("agent relay wait_ready failed: {e}");
+                super::progress::publish_failure(&relay_boot_log_dir, &e);
                 // agentd never signalled readiness within the relay's boot window
                 // — the guest failed to come up. Reclaim the VM. This is the boot-
                 // failure backstop that used to live in the heartbeat monitor's
@@ -1315,6 +1333,10 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
             }
             Err(e) => {
                 tracing::error!("agent relay wait_ready task panicked: {e}");
+                super::progress::publish_failure(
+                    &relay_boot_log_dir,
+                    &RuntimeError::Custom(format!("agent readiness task failed: {e}")),
+                );
                 relay_exit_reason.store(
                     EXIT_REASON_AGENT_UNRESPONSIVE,
                     std::sync::atomic::Ordering::SeqCst,
@@ -1891,7 +1913,73 @@ fn build_vm(
 
     // Isolated file mounts. Each backend exposes a synthetic root containing
     // only the selected file, so remounting the tag cannot reveal host siblings.
-    for file_mount in &vm.file_mounts {
+    let mut external_mount_reports = Vec::new();
+    let relaxed = vm.checkpoint_restore.as_ref().is_some_and(|restore| {
+        restore.external_mount_policy == microsandbox_types::ExternalMountRestorePolicy::Relaxed
+    });
+    let file_inputs = if let Some(restore) = &vm.checkpoint_restore {
+        let mut inputs = Vec::new();
+        for (index, binding) in restore
+            .external_mounts
+            .iter()
+            .filter(|binding| binding.filename.is_some())
+            .enumerate()
+        {
+            if binding.device_id != format!("virtio_fs{}", 2 + index) {
+                return Err(RuntimeError::Custom(
+                    "external file transport topology differs".into(),
+                ));
+            }
+            let spec = vm.file_mounts.iter().find(|spec| {
+                spec.mount
+                    .split_once(':')
+                    .is_some_and(|(tag, _)| tag == binding.mount.tag)
+            });
+            if spec.is_none() && !binding.unavailable {
+                return Err(RuntimeError::Custom(format!(
+                    "file mount {} has no trusted launch binding",
+                    binding.mount.guest_path
+                )));
+            }
+            inputs.push((spec, Some(binding)));
+        }
+        if vm.file_mounts.len() != inputs.iter().filter(|(spec, _)| spec.is_some()).count() {
+            return Err(RuntimeError::Custom(
+                "restore cannot add uncaptured file transports".into(),
+            ));
+        }
+        inputs
+    } else {
+        vm.file_mounts
+            .iter()
+            .map(|spec| (Some(spec), None))
+            .collect()
+    };
+    let captured_file_count = file_inputs.len();
+    for (file_mount, restore_binding) in file_inputs {
+        let Some(file_mount) = file_mount else {
+            let binding = restore_binding.expect("only restore omits backing");
+            if !relaxed {
+                return Err(RuntimeError::Custom(format!(
+                    "file mount {} is unavailable",
+                    binding.mount.guest_path
+                )));
+            }
+            let tag = binding.mount.tag.clone();
+            builder = builder.fs(move |fs| {
+                fs.tag(&tag)
+                    .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+            });
+            external_mount_reports.push(crate::checkpoint::ExternalMountReport {
+                guest_path: binding.mount.guest_path.clone(),
+                unavailable: Some(
+                    "no trusted destination mapping is available; filesystem operations return EIO"
+                        .into(),
+                ),
+                stale_inodes: Default::default(),
+            });
+            continue;
+        };
         let parsed = parse_mount_spec(&file_mount.mount)
             .map_err(|e| RuntimeError::Custom(format!("file mount {:?}: {e}", file_mount.mount)))?;
         let tag = parsed.tag;
@@ -1906,7 +1994,20 @@ fn build_vm(
             parsed.stat_virtualization,
             override_owner,
         );
+        let external_options = microsandbox_filesystem::ExternalCheckpointOptions {
+            relaxed,
+            remapped: restore_binding.is_some_and(|binding| binding.remapped),
+            ..Default::default()
+        };
+        if let Some(binding) = restore_binding {
+            external_mount_reports.push(crate::checkpoint::ExternalMountReport {
+                guest_path: binding.mount.guest_path.clone(),
+                unavailable: None,
+                stale_inodes: external_options.invalid_inodes.clone(),
+            });
+        }
         let cfg = PassthroughConfig {
+            external_checkpoint: Some(external_options),
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
             readonly: parsed.readonly,
@@ -1917,7 +2018,33 @@ fn build_vm(
             default_owner: override_owner,
             ..Default::default()
         };
-        let backend = SingleFileFs::new(host_path.clone(), file_mount.filename.clone(), cfg)
+        let backend =
+            match SingleFileFs::new(host_path.clone(), file_mount.filename.clone(), cfg) {
+                Err(error)
+                    if relaxed
+                        && restore_binding.is_some()
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound
+                                | std::io::ErrorKind::PermissionDenied
+                                | std::io::ErrorKind::NotADirectory
+                                | std::io::ErrorKind::IsADirectory
+                        ) =>
+                {
+                    external_mount_reports
+                        .last_mut()
+                        .expect("restore report")
+                        .unavailable = Some(format!(
+                        "external file cannot be opened: {error}; filesystem operations return EIO"
+                    ));
+                    builder = builder.fs(move |fs| {
+                        fs.tag(&tag)
+                            .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+                    });
+                    continue;
+                }
+                result => result,
+            }
             .map_err(|e| {
                 RuntimeError::Custom(format!(
                     "file mount {tag}: failed to open host file {}: {e}",
@@ -1927,8 +2054,70 @@ fn build_vm(
         builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
     }
 
-    // Additional directory mounts.
-    for mount_spec in &vm.mounts {
+    // Rebuild captured transports in their original order, including unavailable exports.
+    let mount_inputs = if let Some(restore) = &vm.checkpoint_restore {
+        let mut inputs = Vec::new();
+        for (index, binding) in restore
+            .external_mounts
+            .iter()
+            .filter(|binding| binding.filename.is_none())
+            .enumerate()
+        {
+            if binding.device_id != format!("virtio_fs{}", 2 + captured_file_count + index) {
+                return Err(RuntimeError::Custom(
+                    "external mount transport topology differs".into(),
+                ));
+            }
+            let spec = vm.mounts.iter().find(|spec| {
+                spec.split_once(':')
+                    .is_some_and(|(tag, _)| tag == binding.mount.tag)
+            });
+            if spec.is_none() && !binding.unavailable {
+                return Err(RuntimeError::Custom(format!(
+                    "mount {} has no trusted launch binding",
+                    binding.mount.guest_path
+                )));
+            }
+            inputs.push((spec.map(String::as_str), Some(binding)));
+        }
+        if vm.mounts.len() != inputs.iter().filter(|(spec, _)| spec.is_some()).count() {
+            return Err(RuntimeError::Custom(
+                "restore cannot add uncaptured filesystem transports".into(),
+            ));
+        }
+        inputs
+    } else {
+        vm.mounts
+            .iter()
+            .map(|spec| (Some(spec.as_str()), None))
+            .collect()
+    };
+    for (mount_spec, restore_binding) in mount_inputs {
+        let relaxed = vm.checkpoint_restore.as_ref().is_some_and(|restore| {
+            restore.external_mount_policy == microsandbox_types::ExternalMountRestorePolicy::Relaxed
+        });
+        let Some(mount_spec) = mount_spec else {
+            let binding = restore_binding.expect("only restores have unavailable bindings");
+            if !relaxed {
+                return Err(RuntimeError::Custom(format!(
+                    "mount {} is unavailable",
+                    binding.mount.guest_path
+                )));
+            }
+            {
+                let tag = binding.mount.tag.clone();
+                builder = builder.fs(move |fs| {
+                    fs.tag(&tag)
+                        .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+                });
+                external_mount_reports.push(crate::checkpoint::ExternalMountReport {
+                    guest_path: binding.mount.guest_path.clone(),
+                    unavailable: Some("no trusted destination mapping is available; filesystem operations return EIO".into()),
+                    stale_inodes: Default::default(),
+                });
+                continue;
+            }
+        };
         let parsed = parse_mount_spec(mount_spec)
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
@@ -1948,8 +2137,21 @@ fn build_vm(
             parsed.stat_virtualization,
             override_owner,
         );
+        let external_options = microsandbox_filesystem::ExternalCheckpointOptions {
+            relaxed,
+            remapped: restore_binding.is_some_and(|binding| binding.remapped),
+            ..Default::default()
+        };
+        if let Some(binding) = restore_binding {
+            external_mount_reports.push(crate::checkpoint::ExternalMountReport {
+                guest_path: binding.mount.guest_path.clone(),
+                unavailable: None,
+                stale_inodes: external_options.invalid_inodes.clone(),
+            });
+        }
         let cfg = PassthroughConfig {
             root_dir: host_path.clone(),
+            external_checkpoint: Some(external_options),
             inject_init: false,
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
@@ -1964,7 +2166,15 @@ fn build_vm(
             quota_bytes: parsed.quota_bytes,
             ..Default::default()
         };
-        let backend = PassthroughFs::new(cfg).map_err(|e| {
+        let backend = match PassthroughFs::new(cfg) {
+            Err(error) if relaxed && restore_binding.is_some()
+                && matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotADirectory) => {
+                external_mount_reports.last_mut().expect("restore report").unavailable = Some(format!("external export cannot be opened: {error}; filesystem operations return EIO"));
+                builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(microsandbox_filesystem::UnavailableFs::default())));
+                continue;
+            }
+            result => result,
+        }.map_err(|e| {
             // Name the folder on a permission error. The underlying error
             // distinguishes path access from a strict metadata probe failure.
             if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -2288,11 +2498,11 @@ fn build_vm(
                 })
             })
             .transpose()?;
-        Some(
-            prepared
-                .install(&mut vm, cache_root, startup_progress)
-                .map_err(RuntimeError::Custom)?,
-        )
+        let mut restored = prepared
+            .install(&mut vm, cache_root, startup_progress)
+            .map_err(RuntimeError::Custom)?;
+        restored.external_mount_reports = external_mount_reports;
+        Some(restored)
     } else {
         None
     };

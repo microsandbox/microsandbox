@@ -101,6 +101,23 @@ fn fs_for(path: &Path) -> PassthroughFs {
     fs
 }
 
+fn external_fs_for(path: &Path, relaxed: bool, remapped: bool) -> PassthroughFs {
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: path.to_path_buf(),
+        inject_init: false,
+        stat_virtualization: StatVirtualization::Off,
+        external_checkpoint: Some(super::super::ExternalCheckpointOptions {
+            relaxed,
+            remapped,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+    fs
+}
+
 fn assert_ads_store(fs: &PassthroughFs) {
     let store = fs.stat_store.as_ref().expect("stat store enabled");
     assert!(matches!(
@@ -132,6 +149,106 @@ fn expect_errno<T>(result: io::Result<T>, errno: i32) {
         Ok(_) => panic!("expected errno {errno}"),
         Err(error) => assert_eq!(error.raw_os_error(), Some(errno)),
     }
+}
+
+#[test]
+fn external_checkpoint_changed_file_requires_relaxed_and_retains_stale_ids() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("data"), b"before").unwrap();
+    let source = external_fs_for(&temp.path, false, false);
+    let entry = source.lookup(context(), ROOT_INODE, c"data").unwrap();
+    source.open(context(), entry.inode, false, 0).unwrap();
+    let bytes = source.capture_state().unwrap();
+    std::fs::write(temp.path.join("data"), b"after!").unwrap();
+
+    let strict = external_fs_for(&temp.path, false, false);
+    let untouched = strict.capture_state().unwrap();
+    assert!(strict.restore_state(&bytes).is_err());
+    assert_eq!(strict.capture_state().unwrap(), untouched);
+
+    let relaxed = external_fs_for(&temp.path, true, false);
+    relaxed.restore_state(&bytes).unwrap();
+    assert_eq!(relaxed.request_error(entry.inode), Some(116));
+    assert_eq!(relaxed.request_error(ROOT_INODE), None);
+    assert!(relaxed.handles.read().unwrap().is_empty());
+    let current = relaxed.lookup(context(), ROOT_INODE, c"data").unwrap();
+    assert_ne!(current.inode, entry.inode);
+    assert_eq!(relaxed.request_error(current.inode), None);
+    assert_eq!(
+        *relaxed
+            .cfg
+            .external_checkpoint
+            .as_ref()
+            .unwrap()
+            .invalid_inodes
+            .lock()
+            .unwrap(),
+        vec![entry.inode]
+    );
+
+    // A later checkpoint must not recycle an inode previously reported as stale.
+    let second = relaxed.capture_state().unwrap();
+    let next = external_fs_for(&temp.path, true, false);
+    next.restore_state(&second).unwrap();
+    assert_eq!(next.request_error(entry.inode), Some(116));
+    assert_eq!(
+        next.lookup(context(), ROOT_INODE, c"data").unwrap().inode,
+        current.inode
+    );
+}
+
+#[test]
+fn external_checkpoint_remap_validates_content_and_requires_explicit_policy() {
+    let source_dir = TempDir::new();
+    let destination_dir = TempDir::new();
+    std::fs::write(source_dir.path.join("data"), b"identical").unwrap();
+    std::fs::write(destination_dir.path.join("data"), b"identical").unwrap();
+    let source = external_fs_for(&source_dir.path, false, false);
+    let entry = source.lookup(context(), ROOT_INODE, c"data").unwrap();
+    let bytes = source.capture_state().unwrap();
+    assert!(
+        external_fs_for(&destination_dir.path, false, false)
+            .restore_state(&bytes)
+            .is_err()
+    );
+    let remapped = external_fs_for(&destination_dir.path, false, true);
+    remapped.restore_state(&bytes).unwrap();
+    assert_eq!(
+        remapped
+            .lookup(context(), ROOT_INODE, c"data")
+            .unwrap()
+            .inode,
+        entry.inode
+    );
+    std::fs::write(destination_dir.path.join("data"), b"different").unwrap();
+    assert!(remapped.restore_state(&bytes).is_err());
+}
+
+#[test]
+fn external_checkpoint_refuses_replaced_live_file_handle() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("data"), b"same").unwrap();
+    let source = external_fs_for(&temp.path, false, false);
+    let entry = source.lookup(context(), ROOT_INODE, c"data").unwrap();
+    source.open(context(), entry.inode, false, 0).unwrap();
+    std::fs::rename(temp.path.join("data"), temp.path.join("old-data")).unwrap();
+    std::fs::write(temp.path.join("data"), b"same").unwrap();
+    assert!(source.capture_state().is_err());
+}
+
+#[test]
+fn unavailable_external_checkpoint_validates_bytes_and_always_returns_eio() {
+    let temp = TempDir::new();
+    let source = external_fs_for(&temp.path, false, false);
+    let bytes = source.capture_state().unwrap();
+    let unavailable = crate::UnavailableFs::default();
+    unavailable.restore_state(&bytes).unwrap();
+    assert_eq!(unavailable.request_error(ROOT_INODE), Some(5));
+    assert_eq!(unavailable.request_error(123), Some(5));
+    let relaxed = external_fs_for(&temp.path, true, false);
+    assert!(relaxed.restore_state(&bytes[..bytes.len() - 1]).is_err());
+    assert!(unavailable.restore_state(b"invalid").is_err());
+    assert!(unavailable.capture_state().is_err());
 }
 
 #[test]

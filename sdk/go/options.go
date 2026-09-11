@@ -24,26 +24,27 @@ type SandboxConfig struct {
 	// RootDisk is nil.
 	//
 	// Deprecated: set RootDisk (via WithRootDisk / RootDisk.Managed) instead.
-	OCIUpperSizeMiB   uint32
-	ociUpperSizeSet   bool
-	Snapshot          string
-	SnapshotDiskOnly  bool
-	SnapshotBase      string
-	MemoryMiB         uint32
-	CPUs              uint8
-	MaxMemoryMiB      uint32
-	MaxCPUs           uint8
-	CPUPlacement      CPUPlacement
-	PlacementProfile  string
-	THP               THPPolicy
-	Forked            bool
-	Workdir           string
-	Shell             string
-	SecurityProfile   SecurityProfile
-	DeploymentProfile DeploymentProfile
-	Hostname          string
-	User              string
-	Replace           bool
+	OCIUpperSizeMiB     uint32
+	ociUpperSizeSet     bool
+	Snapshot            string
+	SnapshotDiskOnly    bool
+	SnapshotBase        string
+	MemoryMiB           uint32
+	CPUs                uint8
+	MaxMemoryMiB        uint32
+	MaxCPUs             uint8
+	CPUPlacement        CPUPlacement
+	PlacementProfile    string
+	THP                 THPPolicy
+	Forked              bool
+	ExternalMountPolicy ExternalMountRestorePolicy
+	Workdir             string
+	Shell               string
+	SecurityProfile     SecurityProfile
+	DeploymentProfile   DeploymentProfile
+	Hostname            string
+	User                string
+	Replace             bool
 	// ReplaceWithTimeout, if non-nil, sets a specific timeout between
 	// SIGTERM and SIGKILL when replacing an existing sandbox. nil means
 	// "use the runtime default" (10s when Replace is set). Setting this
@@ -88,6 +89,14 @@ type SandboxOption func(*SandboxConfig)
 
 // CPUPlacement controls how sandbox vCPU threads are placed on host processors.
 type CPUPlacement string
+
+// ExternalMountRestorePolicy selects admission of external filesystem identity changes.
+type ExternalMountRestorePolicy string
+
+const (
+	ExternalMountStrict  ExternalMountRestorePolicy = "strict"
+	ExternalMountRelaxed ExternalMountRestorePolicy = "relaxed"
+)
 
 const (
 	CPUPlacementInherit CPUPlacement = "inherit"
@@ -484,6 +493,11 @@ type THPPolicy string
 // It cannot be combined with a fresh boot or disk-only restore.
 func WithForked() SandboxOption {
 	return func(o *SandboxConfig) { o.Forked = true }
+}
+
+// WithExternalMountPolicy selects strict (default) or explicit relaxed full restore.
+func WithExternalMountPolicy(policy ExternalMountRestorePolicy) SandboxOption {
+	return func(o *SandboxConfig) { o.ExternalMountPolicy = policy }
 }
 
 const (
@@ -1460,8 +1474,8 @@ var Secret secretFactory
 // SecretEnvOptions{} if no additional tuning is needed.
 func (secretFactory) Env(envVar, value string, opts SecretEnvOptions) SecretEntry {
 	return SecretEntry{
-		EnvVar:            envVar,
-		Value:             value,
+		EnvVar:             envVar,
+		Value:              value,
 		Allow:              opts.Allow,
 		Passthrough:        opts.Passthrough,
 		Placeholder:        opts.Placeholder,

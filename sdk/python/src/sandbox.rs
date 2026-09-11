@@ -54,6 +54,14 @@ pub struct PySandboxTouchResult {
     activity_seq: u64,
 }
 
+/// One explicitly accepted external filesystem mismatch during relaxed full restore.
+#[pyclass(name = "ExternalMountWarning", get_all, frozen)]
+pub struct PyExternalMountWarning {
+    guest_path: String,
+    reason: String,
+    stale_inodes: Vec<u64>,
+}
+
 /// One page returned by Sandbox.list() / Sandbox.list_with().
 #[pyclass(name = "SandboxPage")]
 pub struct PySandboxPage {
@@ -971,6 +979,23 @@ impl PySandbox {
     //----------------------------------------------------------------------------------------------
     // Lifecycle
     //----------------------------------------------------------------------------------------------
+
+    /// Structured external-mount diagnostics retained by a relaxed full restore.
+    fn restore_warnings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let warnings = sandbox.restore_warnings().await.map_err(to_py_err)?;
+            Ok(warnings
+                .into_iter()
+                .map(|warning| PyExternalMountWarning {
+                    guest_path: warning.guest_path,
+                    reason: warning.reason,
+                    stale_inodes: warning.stale_inodes,
+                })
+                .collect::<Vec<_>>())
+        })
+    }
 
     /// Stop the sandbox gracefully and wait until stopped.
     #[pyo3(signature = (timeout = None))]

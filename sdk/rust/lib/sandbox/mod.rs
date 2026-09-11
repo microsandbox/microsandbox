@@ -174,6 +174,13 @@ pub use microsandbox_types::{
     SandboxSpec, TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
     VsockSpecPatch,
 };
+pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
+
+#[cfg(feature = "local")]
+mod external_mounts;
+mod restore_warnings;
+#[cfg(feature = "local")]
+pub(crate) use external_mounts::resolve_external_mounts;
 #[cfg(feature = "local")]
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
@@ -912,9 +919,9 @@ impl Sandbox {
     ///
     /// Routes through the backend trait. On local this connects to the agent
     /// endpoint and sends `core.shutdown` (agentd runs `sync()` +
-    /// `reboot(RB_POWER_OFF)` for a clean ext4 unmount), falling back to
-    /// platform process termination via PID if the endpoint is unreachable. On
-    /// cloud this issues `POST /v1/sandboxes/by-name/:name/stop`.
+    /// `reboot(RB_POWER_OFF)` for a clean ext4 unmount). If delivery fails, the
+    /// error is returned without substituting process termination. On cloud
+    /// this issues `POST /v1/sandboxes/by-name/:name/stop`.
     pub async fn request_stop(&self) -> MicrosandboxResult<()> {
         tracing::debug!(sandbox = %self.name, "stop: dispatching");
         self.backend

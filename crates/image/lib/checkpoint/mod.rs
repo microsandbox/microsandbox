@@ -26,7 +26,9 @@ pub use manifest::{
     DiskGenerationManifest, DiskLayerRef, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
     MemoryManifest, ResourceDescriptor, ResourceTreatment,
 };
-pub use qcow::{create_qcow2_overlay, relocate_qcow2_backing, relocated_qcow2_header};
+pub use qcow::{
+    create_qcow2_overlay, relocate_qcow2_backing, relocated_qcow2_header, validate_standalone_qcow2,
+};
 pub use resolver::{CheckpointClosure, CheckpointObjectReadTiming};
 pub use store::{
     AdmittedObject, CaptureObjectBatch, CaptureObjectBatchStats, LocalObjectStore, ObjectId,

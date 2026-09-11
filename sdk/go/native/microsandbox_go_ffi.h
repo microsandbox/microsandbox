@@ -164,6 +164,14 @@ char *msb_sandbox_close(uint64_t cancel_id, Handle handle, unsigned char *buf, u
 
 char *msb_sandbox_detach(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
+/**
+ * Read structured filesystem warnings retained by relaxed full restore.
+ */
+char *msb_sandbox_restore_warnings(uint64_t cancel_id,
+                                   Handle handle,
+                                   unsigned char *buf,
+                                   uintptr_t buf_len);
+
 char *msb_sandbox_stop(uint64_t cancel_id,
                        Handle handle,
                        uint64_t timeout_ms,

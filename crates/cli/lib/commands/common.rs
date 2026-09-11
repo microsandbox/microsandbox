@@ -42,6 +42,26 @@ pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Backend>> {
     Ok(backend)
 }
 
+/// Display relaxed-restore diagnostics even when ordinary progress is quiet.
+pub(crate) async fn display_restore_warnings(sandbox: &Sandbox) {
+    if !sandbox.config().resumed_from_full_snapshot() {
+        return;
+    }
+    match sandbox.restore_warnings().await {
+        Ok(warnings) => {
+            for warning in warnings {
+                ui::warn(&format!(
+                    "external mount {}: {} (stale inodes: {:?})",
+                    warning.guest_path, warning.reason, warning.stale_inodes,
+                ));
+            }
+        }
+        // Creation already succeeded. Reporting a diagnostic-read failure must not imply
+        // rollback or discard the live handle and accidentally trigger its drop policy.
+        Err(error) => ui::warn(&format!("could not read restore warnings: {error}")),
+    }
+}
+
 /// Borrow the `LocalBackend` inside the resolved default backend, or error.
 pub fn local_backend_ref(backend: &Arc<dyn Backend>) -> anyhow::Result<&LocalBackend> {
     backend
@@ -130,6 +150,10 @@ pub struct SandboxOpts {
     /// Restore a full snapshot with private copy-on-write memory.
     #[arg(long, requires = "from_snapshot", conflicts_with = "disk_only")]
     pub forked: bool,
+
+    /// External filesystem admission for full restore (strict by default).
+    #[arg(long, value_parser = ["strict", "relaxed"], requires = "from_snapshot", conflicts_with_all = ["disk_only", "image"])]
+    pub external_mount_policy: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     /// OPTIONS may include paired `uid=<N>,gid=<N>` for directory-backed mounts.
@@ -989,6 +1013,7 @@ impl SandboxOpts {
             || self.max_memory.is_some()
             || self.thp.is_some()
             || self.forked
+            || self.external_mount_policy.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -1266,6 +1291,14 @@ fn apply_sandbox_opts_inner(
     }
     if opts.forked {
         builder = builder.forked();
+    }
+    if let Some(policy) = opts.external_mount_policy.as_deref() {
+        let policy = match policy {
+            "strict" => microsandbox::sandbox::ExternalMountRestorePolicy::Strict,
+            "relaxed" => microsandbox::sandbox::ExternalMountRestorePolicy::Relaxed,
+            _ => anyhow::bail!("external mount policy must be strict or relaxed"),
+        };
+        builder = builder.external_mount_policy(policy);
     }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);

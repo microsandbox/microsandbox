@@ -6,6 +6,7 @@
 //! methods; [`LocalBackend::create_sandbox`] is its entry point.
 
 mod create;
+mod stop;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -257,17 +258,24 @@ impl LocalBackend {
     /// Tries the configured agent relay socket candidates, connects, sends
     /// `MessageType::Shutdown`, and lets agentd run an in-guest `sync()` +
     /// `reboot(RB_POWER_OFF)` so ext4 unmounts cleanly (no journal replay on
-    /// next boot). Falls back to platform process termination via PID if the
-    /// agent endpoint is unreachable (agentd wedged, sandbox just
-    /// transitioning, etc.).
+    /// next boot). A failed delivery is an error, never permission to kill.
     ///
     /// No-op when the sandbox isn't Starting, Running, or Draining.
     async fn stop_sandbox(&self, name: &str, expected_id: Option<i32>) -> MicrosandboxResult<()> {
         let _transition =
             Self::acquire_sandbox_transition_guard(&self.config().run_dir(), name).await?;
-        let (model, pid) = self
+        let (model, _) = self
             .sandbox_handle_state_owned(name, expected_id, true)
             .await?;
+        self.request_stop_owned(name, &model).await
+    }
+
+    /// Dispatch while the caller owns the name transition, preserving the selected run.
+    async fn request_stop_owned(
+        &self,
+        name: &str,
+        model: &sandbox_entity::Model,
+    ) -> MicrosandboxResult<()> {
         if !matches!(
             model.status,
             SandboxStatus::Starting | SandboxStatus::Running | SandboxStatus::Draining
@@ -275,30 +283,18 @@ impl LocalBackend {
             return Ok(());
         }
 
+        if crate::sandbox::pause::projected_status(self, name, model.status).await
+            == SandboxStatus::Paused
+        {
+            return Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+                "cannot gracefully stop paused sandbox {name:?}; resume it first or explicitly kill it"
+            )));
+        }
+        self.request_agent_shutdown(name, model.id).await?;
         if model.status == SandboxStatus::Running {
             Self::mark_sandbox_draining_if_running(self.db().await?.write(), model.id).await?;
         }
-
-        match self.request_agent_shutdown(name, model.id).await {
-            Ok(()) => Ok(()),
-            Err(error @ crate::MicrosandboxError::SandboxReplaced { .. }) => Err(error),
-            Err(e) => {
-                // Graceful degradation: agent endpoint unreachable (socket/pipe
-                // missing, ECONNREFUSED, handshake timeout) or shutdown delivery
-                // failed. Fall back to direct process termination so we still
-                // attempt a stop, at the cost of skipping the in-guest sync().
-                // The reaper updates DB status on PID exit.
-                tracing::warn!(
-                    sandbox = %name,
-                    error = %e,
-                    "stop_local: agent endpoint unreachable; falling back to process termination",
-                );
-                if let Some(pid) = pid.filter(|p| Self::pid_is_alive(*p)) {
-                    Self::terminate_pid_gracefully(pid)?;
-                }
-                Ok(())
-            }
-        }
+        Ok(())
     }
 
     /// Local lifecycle: kill a sandbox by name (SIGKILL).
@@ -1791,6 +1787,8 @@ mod tests {
         let pools = backend.db().await.unwrap();
         let mut config = test_config("abandoned");
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            external_mount_policy: Default::default(),
+            external_mounts: Vec::new(),
             local_branch: false,
             forked: false,
             closure: home.path().join("checkpoint"),

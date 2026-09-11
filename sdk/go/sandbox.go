@@ -88,42 +88,43 @@ func resolveRegistryCACertPaths(o *SandboxConfig) error {
 // Extracted so tests can assert the JSON envelope without booting the runtime.
 func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
-		Image:             o.Image,
-		ImageFstype:       o.ImageFstype,
-		ImageBind:         o.ImageBind,
-		Snapshot:          o.Snapshot,
-		SnapshotDiskOnly:  o.SnapshotDiskOnly,
-		SnapshotBase:      o.SnapshotBase,
-		MemoryMiB:         o.MemoryMiB,
-		CPUs:              o.CPUs,
-		MaxMemoryMiB:      o.MaxMemoryMiB,
-		MaxCPUs:           o.MaxCPUs,
-		CPUPlacement:      string(o.CPUPlacement),
-		PlacementProfile:  o.PlacementProfile,
-		THP:               string(o.THP),
-		Forked:            o.Forked,
-		Workdir:           o.Workdir,
-		Shell:             o.Shell,
-		SecurityProfile:   string(o.SecurityProfile),
-		DeploymentProfile: string(o.DeploymentProfile),
-		Hostname:          o.Hostname,
-		User:              o.User,
-		Replace:           o.Replace,
-		Env:               o.Env,
-		Labels:            o.Labels,
-		Detached:          o.Detached,
-		Ephemeral:         o.Ephemeral,
-		LogLevel:          string(o.LogLevel),
-		QuietLogs:         o.QuietLogs,
-		Scripts:           o.Scripts,
-		PullPolicy:        string(o.PullPolicy),
-		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs:   durationSecsCeil(o.IdleTimeout),
-		Ports:             o.Ports,
-		PortsUDP:          o.PortsUDP,
-		PortBindings:      buildFFIPortBindings(o.PortBindings),
-		Vsock:             buildFFIVsockRoutes(o.Vsock),
-		RegistryInsecure:  o.RegistryInsecure,
+		Image:               o.Image,
+		ImageFstype:         o.ImageFstype,
+		ImageBind:           o.ImageBind,
+		Snapshot:            o.Snapshot,
+		SnapshotDiskOnly:    o.SnapshotDiskOnly,
+		SnapshotBase:        o.SnapshotBase,
+		MemoryMiB:           o.MemoryMiB,
+		CPUs:                o.CPUs,
+		MaxMemoryMiB:        o.MaxMemoryMiB,
+		MaxCPUs:             o.MaxCPUs,
+		CPUPlacement:        string(o.CPUPlacement),
+		PlacementProfile:    o.PlacementProfile,
+		THP:                 string(o.THP),
+		Forked:              o.Forked,
+		ExternalMountPolicy: string(o.ExternalMountPolicy),
+		Workdir:             o.Workdir,
+		Shell:               o.Shell,
+		SecurityProfile:     string(o.SecurityProfile),
+		DeploymentProfile:   string(o.DeploymentProfile),
+		Hostname:            o.Hostname,
+		User:                o.User,
+		Replace:             o.Replace,
+		Env:                 o.Env,
+		Labels:              o.Labels,
+		Detached:            o.Detached,
+		Ephemeral:           o.Ephemeral,
+		LogLevel:            string(o.LogLevel),
+		QuietLogs:           o.QuietLogs,
+		Scripts:             o.Scripts,
+		PullPolicy:          string(o.PullPolicy),
+		MaxDurationSecs:     durationSecsCeil(o.MaxDuration),
+		IdleTimeoutSecs:     durationSecsCeil(o.IdleTimeout),
+		Ports:               o.Ports,
+		PortsUDP:            o.PortsUDP,
+		PortBindings:        buildFFIPortBindings(o.PortBindings),
+		Vsock:               buildFFIVsockRoutes(o.Vsock),
+		RegistryInsecure:    o.RegistryInsecure,
 	}
 	if o.Entrypoint != nil {
 		entrypoint := append([]string{}, o.Entrypoint...)
@@ -333,17 +334,17 @@ func sandboxTouchResultFromFFI(result *ffi.SandboxTouchResult) *SandboxTouchResu
 // buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
 func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	out := &ffi.NetworkOptions{
-		DNSRebindProtection: n.DNSRebindProtection,
-		DenyDomains:         n.DenyDomains,
-		DenyDomainSuffixes:  n.DenyDomainSuffixes,
-		Ports:               n.Ports,
-		PortBindings:        buildFFIPortBindings(n.PortBindings),
-		IPv4Pool:            n.IPv4Pool,
-		IPv6Pool:            n.IPv6Pool,
-		MaxConnections:      n.MaxConnections,
-		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
+		DNSRebindProtection:   n.DNSRebindProtection,
+		DenyDomains:           n.DenyDomains,
+		DenyDomainSuffixes:    n.DenyDomainSuffixes,
+		Ports:                 n.Ports,
+		PortBindings:          buildFFIPortBindings(n.PortBindings),
+		IPv4Pool:              n.IPv4Pool,
+		IPv6Pool:              n.IPv6Pool,
+		MaxConnections:        n.MaxConnections,
+		RateLimiter:           buildFFINetworkRateLimiter(n.RateLimiter),
 		SecretViolationAction: string(n.SecretViolationAction),
-		TrustHostCAs:        n.TrustHostCAs,
+		TrustHostCAs:          n.TrustHostCAs,
 	}
 
 	if n.Strict {
@@ -1033,6 +1034,26 @@ func (s *Sandbox) Name() string { return s.inner.Name() }
 
 // ID returns the stable identity of this persisted sandbox.
 func (s *Sandbox) ID() string { return s.inner.ID() }
+
+// ExternalMountWarning describes an external filesystem mismatch accepted during relaxed restore.
+type ExternalMountWarning struct {
+	GuestPath   string   `json:"guest_path"`
+	Reason      string   `json:"reason"`
+	StaleInodes []uint64 `json:"stale_inodes"`
+}
+
+// RestoreWarnings returns the structured warnings retained by relaxed full restore.
+func (s *Sandbox) RestoreWarnings(ctx context.Context) ([]ExternalMountWarning, error) {
+	data, err := s.inner.RestoreWarnings(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	var warnings []ExternalMountWarning
+	if err := json.Unmarshal([]byte(data), &warnings); err != nil {
+		return nil, err
+	}
+	return warnings, nil
+}
 
 func (s *Sandbox) identityHandle() *SandboxHandle {
 	return &SandboxHandle{name: s.Name(), id: s.ID(), backendKind: s.BackendKind()}

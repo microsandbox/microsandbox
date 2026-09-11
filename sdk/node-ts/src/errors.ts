@@ -18,6 +18,7 @@ export type MicrosandboxErrorCode =
   | "protocol"
   | "nix"
   | "execTimeout"
+  | "stopTimeout"
   | "terminal"
   | "sandboxFsOps"
   | "imageNotFound"
@@ -157,6 +158,13 @@ export class ExecTimeoutError extends MicrosandboxError {
   constructor(message: string, timeoutMs: number | null = null, options?: ErrorOptions) {
     super("execTimeout", message, options);
     this.timeoutMs = timeoutMs;
+  }
+}
+
+/** Graceful shutdown exceeded its budget; the sandbox was not implicitly killed. */
+export class StopTimeoutError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("stopTimeout", message, options);
   }
 }
 

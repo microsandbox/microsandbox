@@ -2592,6 +2592,36 @@ async fn handle_message_with_charge(
                             .park_bulk_output()
                             .await
                             .map_err(|error| AgentdError::ExecSession(error.into()))?;
+                        // Agent upload workers are outside the workload cgroup. A capture
+                        // cannot certify clean external pages while one may still write.
+                        // Resident pause remains available; only mount capture needs this proof.
+                        let external_mount_tags = request.external_mount_tags.clone();
+                        let external_mounts_synced = if external_mount_tags.is_empty() {
+                            true
+                        } else if state.bulk_write_workers.is_empty() {
+                            let permit = crate::mount_checkpoint::try_start_sync();
+                            if let Some(permit) = permit {
+                                matches!(
+                                    time::timeout(
+                                        std::time::Duration::from_secs(20),
+                                        tokio::task::spawn_blocking(move || {
+                                            // A timed-out join does not cancel syncfs. Keep the
+                                            // reservation in the worker until the actual flush ends.
+                                            let _permit = permit;
+                                            crate::mount_checkpoint::sync_external_mounts(
+                                                external_mount_tags,
+                                            )
+                                        }),
+                                    )
+                                    .await,
+                                    Ok(Ok(Ok(())))
+                                )
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
                         let reply = Message::with_payload(
                             MessageType::WorkloadFrozen,
                             msg.id,
@@ -2599,6 +2629,7 @@ async fn handle_message_with_charge(
                                 attempt_id: request.attempt_id,
                                 guest_bulk_bytes_target: state.frozen_guest_bulk_bytes,
                                 input_credit: state.input_window.credit()?,
+                                external_mounts_synced,
                             },
                         )
                         .map_err(|error| {
@@ -4143,6 +4174,7 @@ mod tests {
             MessageType::WorkloadFreeze,
             u32::MAX,
             &WorkloadFreeze {
+                external_mount_tags: Vec::new(),
                 attempt_id: "cut".into(),
                 host_input: Default::default(),
             },
@@ -4211,6 +4243,7 @@ mod tests {
                 MessageType::WorkloadFreeze,
                 u32::MAX,
                 &WorkloadFreeze {
+                    external_mount_tags: Vec::new(),
                     attempt_id: "prefix".into(),
                     host_input: target,
                 },
@@ -4366,6 +4399,7 @@ mod tests {
             MessageType::WorkloadFreeze,
             u32::MAX,
             &WorkloadFreeze {
+                external_mount_tags: Vec::new(),
                 attempt_id: "mixed-prefix".into(),
                 host_input: target,
             },
@@ -5528,6 +5562,7 @@ mod tests {
                 MessageType::WorkloadFreeze,
                 0,
                 &WorkloadFreeze {
+                    external_mount_tags: Vec::new(),
                     attempt_id: "capture".into(),
                     host_input: WorkloadTransportPosition::default(),
                 },

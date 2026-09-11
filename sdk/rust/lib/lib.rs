@@ -92,10 +92,11 @@ pub use sandbox::{
     TlsConfigPatch,
 };
 pub use sandbox::{
-    ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpecPatch, Sandbox,
-    SandboxConfig, SandboxConfigPatch, SandboxListBuilder, SandboxMetrics, SandboxPage,
-    SandboxPingResult, SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch,
-    SandboxTouchResult, VsockSpecPatch, validate_sandbox_name,
+    ExecOutput, ExternalMountRestorePolicy, ExternalMountWarning, MAX_HOSTNAME_BYTES,
+    MAX_SANDBOX_NAME_BYTES, NetworkSpecPatch, Sandbox, SandboxConfig, SandboxConfigPatch,
+    SandboxListBuilder, SandboxMetrics, SandboxPage, SandboxPingResult, SandboxPolicyPatch,
+    SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxTouchResult, VsockSpecPatch,
+    validate_sandbox_name,
 };
 #[cfg(feature = "local")]
 pub use snapshot::{

@@ -96,6 +96,13 @@ impl RegistryConfigBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxBuilder {
+    /// Select how full restore treats missing external bindings and stale captured handles.
+    /// Strict is the default. Explicit mappings use the existing volume builders at the
+    /// captured guest path; relaxed restore preserves the mount and reports degraded resources.
+    pub fn external_mount_policy(mut self, policy: super::ExternalMountRestorePolicy) -> Self {
+        self.config.external_mount_policy = policy;
+        self
+    }
     /// Start building a sandbox configuration.
     ///
     /// The name must be unique among existing sandboxes (unless
@@ -1362,6 +1369,8 @@ impl SandboxBuilder {
                 }
                 self.config.checkpoint_restore =
                     Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                        external_mount_policy: self.config.external_mount_policy,
+                        external_mounts: Vec::new(),
                         local_branch: false,
                         forked: false,
                         closure,
@@ -3618,6 +3627,8 @@ mod tests {
         let mut builder = SandboxBuilder::new("forked-child").image("alpine").forked();
         builder.config.checkpoint_restore =
             Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                external_mount_policy: Default::default(),
+                external_mounts: Vec::new(),
                 local_branch: false,
                 forked: false,
                 closure: "/owned/checkpoint".into(),
