@@ -178,6 +178,37 @@ impl ProcessHandle {
         Ok(self.child.try_wait()?)
     }
 
+    /// Reap a creator-owned process after startup has failed.
+    ///
+    /// This is rollback of an unpublished child, not the public graceful-stop API. The child
+    /// handle pins process identity; never rediscover a process by sandbox name during cleanup.
+    pub(crate) async fn terminate_failed_startup(&mut self) -> MicrosandboxResult<ExitStatus> {
+        if let Some(status) = self.try_wait()? {
+            self.cleanup_metrics_reservation();
+            return Ok(status);
+        }
+        #[cfg(unix)]
+        {
+            // Give installed exit observers a chance to reconcile state, but don't let a
+            // signal queued before the VMM event loop leave construction alive indefinitely.
+            let _ = signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM);
+            if let Ok(result) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), self.wait()).await
+            {
+                return result;
+            }
+        }
+        self.child.start_kill()?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.wait())
+            .await
+            .map_err(|_| {
+                crate::MicrosandboxError::Runtime(format!(
+                    "startup cleanup pending: runtime process {} for {:?} has not exited",
+                    self.pid, self.sandbox_name,
+                ))
+            })?
+    }
+
     /// Disarm the SIGTERM safety net so the sandbox keeps running after
     /// this handle is dropped. Used by detached sandbox flows.
     pub fn disarm(&mut self) {
@@ -422,6 +453,69 @@ fn terminate_process(pid: u32) -> std::io::Result<()> {
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, unix))]
+mod startup_tests {
+    use std::process::Stdio;
+
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    use super::*;
+
+    async fn blocked_startup(ignore_term: bool) -> (ProcessHandle, tokio::process::ChildStdin) {
+        let script = if ignore_term {
+            "trap '' TERM; printf 'ready\\n'; read value"
+        } else {
+            "printf 'ready\\n'; read value"
+        };
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Wait until the signal disposition is installed, without spawning grandchildren.
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .await
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        // Tokio's Child::wait closes a child-owned stdin to avoid deadlock. Retain the writer
+        // externally so EOF cannot accidentally make our signal-resistant fixture exit.
+        let stdin = child.stdin.take().unwrap();
+        let handle = ProcessHandle::new(
+            child.id().unwrap(),
+            "startup-cleanup-test".into(),
+            child,
+            Vec::new(),
+            None,
+            None,
+        );
+        (handle, stdin)
+    }
+
+    #[tokio::test]
+    async fn failed_startup_is_terminated_and_reaped() {
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        let status = handle.terminate_failed_startup().await.unwrap();
+        assert!(!status.success());
+        assert!(handle.try_wait().unwrap().is_some());
+        assert!(handle.child.id().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_startup_escalates_when_sigterm_is_ignored() {
+        let (mut handle, _stdin) = blocked_startup(true).await;
+        let status = handle.terminate_failed_startup().await.unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        assert!(handle.try_wait().unwrap().is_some());
+        // Repeated cleanup observes the same exited child instead of signaling a stale PID.
+        assert_eq!(handle.terminate_failed_startup().await.unwrap(), status);
+    }
+}
 
 #[cfg(all(test, unix))]
 mod tests {

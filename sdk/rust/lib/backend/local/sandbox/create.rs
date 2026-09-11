@@ -652,6 +652,35 @@ impl LocalBackend {
         let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
             Err(e) => {
+                // A timeout is not evidence of process exit. The creator still owns the
+                // name transition; only reconcile/delete storage after the runtime lets go.
+                let Some(_runtime_guard) = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+                    &self.config().run_dir(),
+                    &persisted_config.spec.name,
+                )?
+                else {
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "{e}; startup cleanup pending: runtime still owns sandbox {:?}",
+                        persisted_config.spec.name,
+                    )));
+                };
+                run_entity::Entity::update_many()
+                    .col_expr(
+                        run_entity::Column::Status,
+                        Expr::value(run_entity::RunStatus::Terminated),
+                    )
+                    .col_expr(
+                        run_entity::Column::TerminationReason,
+                        Expr::value(run_entity::TerminationReason::Failed),
+                    )
+                    .col_expr(
+                        run_entity::Column::TerminatedAt,
+                        Expr::value(chrono::Utc::now().naive_utc()),
+                    )
+                    .filter(run_entity::Column::SandboxId.eq(sandbox_id))
+                    .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
+                    .exec(write_db)
+                    .await?;
                 if created_named_volumes.is_empty() {
                     let _ = Self::compare_and_set_sandbox_status(
                         write_db,
@@ -815,8 +844,19 @@ impl LocalBackend {
 
         // Wait for the relay socket to become available.
         let client =
-            Self::wait_for_relay(&agent_sock_path, &log_dir, &mut handle, &config.spec.name)
-                .await?;
+            match Self::wait_for_relay(&agent_sock_path, &log_dir, &mut handle, &config.spec.name)
+                .await
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    if let Err(cleanup) = handle.terminate_failed_startup().await {
+                        return Err(crate::MicrosandboxError::Runtime(format!(
+                            "{error}; {cleanup}"
+                        )));
+                    }
+                    return Err(error);
+                }
+            };
 
         if let Ok(ready) = client.ready() {
             tracing::info!(
@@ -928,7 +968,7 @@ impl LocalBackend {
                     if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
                         return Err(error);
                     }
-                    return Err(e.into());
+                    return Err(relay_readiness_timeout(sandbox_name, &e));
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -945,9 +985,7 @@ impl LocalBackend {
                     if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
                         return Err(error);
                     }
-                    return Err(crate::MicrosandboxError::Runtime(format!(
-                        "timed out waiting for agent relay: {e}"
-                    )));
+                    return Err(relay_readiness_timeout(sandbox_name, &e));
                 }
             }
         }
@@ -1730,6 +1768,18 @@ fn snapshot_root_layout_from_config(
     })
 }
 
+/// Keep an expired readiness budget distinct from the last transient socket failure.
+fn relay_readiness_timeout(
+    sandbox_name: &str,
+    last_error: &impl std::fmt::Display,
+) -> crate::MicrosandboxError {
+    crate::MicrosandboxError::Runtime(format!(
+        "sandbox {sandbox_name:?} startup timed out after {} seconds before agent readiness; \
+         restore preparation may still be pending; last connection error: {last_error}",
+        AGENT_RELAY_READY_TIMEOUT.as_secs(),
+    ))
+}
+
 /// Derive a stable, filesystem-safe transition-lock path for one sandbox name.
 fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
     microsandbox_runtime::ipc::sandbox_transition_lock_path(run_dir, name)
@@ -1838,6 +1888,19 @@ mod tests {
         drop(ChildStageGuard::new(stage.clone()));
 
         assert!(!stage.exists());
+    }
+
+    #[test]
+    fn readiness_deadline_reports_timeout_not_only_missing_socket() {
+        let error = super::relay_readiness_timeout(
+            "slow-restore",
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        )
+        .to_string();
+        assert!(error.contains("startup timed out after 180 seconds"));
+        assert!(error.contains("slow-restore"));
+        assert!(error.contains("restore preparation"));
+        assert!(error.contains("last connection error"));
     }
 
     #[test]
