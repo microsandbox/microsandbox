@@ -1154,6 +1154,28 @@ pub enum LogSource {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl SandboxResourcesPatch {
+    /// Whether this patch explicitly sets the initial vCPU count, even to its default value.
+    pub fn has_cpus(&self) -> bool {
+        self.cpus.is_some()
+    }
+
+    /// Whether this patch explicitly sets initial memory, even to its default value.
+    pub fn has_memory_mib(&self) -> bool {
+        self.memory_mib.is_some()
+    }
+
+    /// Whether this patch explicitly sets the maximum vCPU count.
+    pub fn has_max_cpus(&self) -> bool {
+        self.max_cpus.is_some()
+    }
+
+    /// Whether this patch explicitly sets maximum memory.
+    pub fn has_max_memory_mib(&self) -> bool {
+        self.max_memory_mib.is_some()
+    }
+}
+
 impl DiskImageFormat {
     /// Returns the format as a CLI-safe lowercase string.
     pub fn as_str(&self) -> &'static str {

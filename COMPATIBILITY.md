@@ -168,6 +168,8 @@ Evolution rules:
 
 Sources: [`crates/db/lib/pool.rs`](crates/db/lib/pool.rs), [`crates/migration/lib/lib.rs`](crates/migration/lib/lib.rs), [`crates/migration/lib/schema_metadata.rs`](crates/migration/lib/schema_metadata.rs), and [`sdk/rust/lib/backend/local/mod.rs`](sdk/rust/lib/backend/local/mod.rs).
 
+Local startup serializes database opening, migration, and snapshot reconciliation using the existing `msb.db.migration.lock` file and shared process-lock helper (`flock` on Unix, `LockFileEx` on Windows). This replaces the former Windows no-op without changing database schemas, lease semantics, or the lock path. Genuine exclusive install/downgrade operations still refuse normal startup. Older Windows binaries that bypass this lock do not participate in the serialization; do not initialize the same home concurrently with them. The shared helper creates owner-only lock files on Unix and refuses symlink lock paths.
+
 Tests should open copies of real older databases, migrate them, exercise the affected behavior, and test every supported reverse migration or refusal path.
 
 ## 7. Home and Runtime Path Layout

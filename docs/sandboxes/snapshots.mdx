@@ -23,6 +23,8 @@ Disk snapshots work with running, paused, stopped, or crashed sandboxes. A runni
 
 Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `state.kind` is either `file` or `checkpoint`, and `root_disk.layout` records `managed`, `flat`, or `tmpfs`. Checkpoint payloads live in a content-addressed closure rather than a standalone disk file. A tmpfs root has no stopped disk snapshot because its writable state exists only in memory, but it is included in a running full snapshot; such a snapshot must be resumed and cannot use `--disk-only`.
 
+Full restore inherits the captured CPU and memory sizes, including their maximums. Explicit settings from CLI flags, `--conf`, or SDK configuration patches must match; conflicting settings are rejected rather than ignored. Disk-only restore boots afresh and can use different resources.
+
 ## Share restored memory with CoW
 
 On supported Linux, macOS, and Windows hosts, add `--forked` when restoring a full snapshot to share clean memory pages between children. Writes stay private to each child. Without the flag, restore eagerly copies memory. The source needs no special creation option.
