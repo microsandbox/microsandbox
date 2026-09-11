@@ -266,6 +266,8 @@ Sources: [`Cargo.toml`](Cargo.toml), [`crates/filesystem/build.rs`](crates/files
 
 Do not independently substitute or upgrade one component because its upstream ABI appears compatible. Verify the release bundle as a unit on every supported OS and architecture, including the embedded matching agentd, firmware/kernel, library soname, device behavior, and package-version checks.
 
+Normal x86 boot now declares `krun.poweroff=i8042` in libkrun's default kernel command line. Matching libkrunfw registers a low-priority final poweroff handler that sends the existing i8042 exit byte after orderly Linux shutdown. Generic KVM identity is not enough to enable it. Without both the host declaration and the new kernel, Linux may halt without releasing VMM ownership; StopWithTimeout reports expiry without killing. Existing running guests and full snapshots retain their captured kernel and require a fresh boot/recapture to acquire the handler. ARM platform poweroff, explicit custom command-line replacement and SEV/TDX built-in overrides are unchanged; they are not implicitly qualified by the normal Linux x86 test.
+
 ## 13. Networking, DNS, Published Ports, and Secret Substitution
 
 Observable network behavior is an effective compatibility contract. It includes default MTU, sandbox-slot address derivation, IPv4 subnet sizing, guest and gateway offsets, IPv6 prefixes, deterministic MAC addresses, interface name `eth0`, `host.microsandbox.internal`, DNS UDP and TCP behavior, DNS-over-TLS, TLS interception and trust paths, published-port binding, TCP half-close, UDP peer lifetime, destination policy, and host-side secret placeholder substitution.
