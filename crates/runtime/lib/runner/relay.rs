@@ -1463,11 +1463,14 @@ impl AgentRelay {
         vm: &msb_krun::VmControl,
         restored: &RestoredAgentState,
         runtime_dir: &Path,
+        startup_progress: &crate::startup_progress::StartupProgressCallback,
     ) -> RuntimeResult<()> {
-        let total_started = Instant::now();
         let wait_paused_started = Instant::now();
         let paused = vm
-            .wait_until_paused(RESTORE_ACTIVATION_TIMEOUT)
+            // Vm::enter still has to read RAM and restore CPU/device state. Storage
+            // preparation is cancellable by the owning launcher, not an activation
+            // timeout. Failures remain errors and never announce readiness.
+            .wait_until_paused_without_timeout()
             .map_err(|error| {
                 RuntimeError::Custom(format!("wait for restored VM pause: {error}"))
             })?;
@@ -1477,6 +1480,12 @@ impl AgentRelay {
             ));
         };
         let wait_paused_us = wait_paused_started.elapsed().as_micros();
+        // Keep activation timing separate from construction I/O; wait_paused_us remains
+        // available independently for diagnosing slow preparation.
+        let total_started = Instant::now();
+        startup_progress(crate::startup_progress::StartupProgress::phase(
+            crate::startup_progress::StartupPhase::Activating,
+        ));
         restored
             .publish_mount_warnings(runtime_dir)
             .map_err(RuntimeError::Custom)?;

@@ -1,4 +1,5 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
+import { validateStopTimeout } from "./internal/stop.js";
 import {
   compactionResultFromJson,
   type DiskCompactionOptions,
@@ -543,6 +544,7 @@ export class Sandbox implements AsyncDisposable {
     return withMappedErrors(() => this.inner.restoreWarnings());
   }
 
+  /** Wait indefinitely for graceful completion and runtime ownership release; never implicitly kills. */
   async stop(): Promise<void> {
     await withMappedErrors(() => this.inner.stop());
   }
@@ -567,7 +569,9 @@ export class Sandbox implements AsyncDisposable {
     await withMappedErrors(() => this.inner.requestStop());
   }
 
+  /** One total budget; StopTimeoutError on expiry without killing. Zero never dispatches shutdown. */
   async stopWithTimeout(timeoutMs: number): Promise<void> {
+    validateStopTimeout(timeoutMs);
     await withMappedErrors(() => this.inner.stopWithTimeout(timeoutMs));
   }
 

@@ -855,21 +855,33 @@ func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error
 <Accordion title="Example">
 
 ```go
-err := sb.Stop(ctx, m.WithStopTimeout(30*time.Second))
+err := sb.Stop(ctx)
 ```
 
 </Accordion>
 
-Gracefully shut down the sandbox and wait until stopped state is observed. Lets the workload finish writing any pending data to disk before it exits. Defaults to a ten-second graceful window before force-kill; pass [`WithStopTimeout`](#withstoptimeout) to change it.
+Request graceful shutdown and wait for the same sandbox run to finish, including local runtime ownership release. There is no built-in deadline and no automatic force-kill. Cancelling `ctx` ends the wait without force-killing. Use [`StopWithTimeout`](#sb-stopwithtimeout) or [`WithStopTimeout`](#withstoptimeout) for a bounded wait. These semantics require the matching updated native SDK and runtime; an older native library returns an unsupported-operation error.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#withstoptimeout">...StopOption</a></div>
-    <div className="msb-param-desc">Graceful shutdown window, e.g. <code>WithStopTimeout(30 * time.Second)</code>.</div>
+    <div className="msb-param-desc">Optional wait deadline, e.g. <code>WithStopTimeout(30 * time.Second)</code>; expiry never force-kills.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">StopWithTimeout()</span>
+
+```go
+func (s *Sandbox) StopWithTimeout(ctx context.Context, timeout time.Duration) error
+```
+
+Bound graceful shutdown with an explicit deadline. The deadline includes local transition ownership, request dispatch, and termination observation. Expiry returns `ErrStopTimeout` without force-killing; zero or a negative duration expires before sending a request. Use [`Kill`](#sb-kill) separately when forced termination is intended.
+
+```go
+err := sb.StopWithTimeout(ctx, 30*time.Second)
+```
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">RequestStop()</span>
 
@@ -877,7 +889,7 @@ Gracefully shut down the sandbox and wait until stopped state is observed. Lets 
 func (s *Sandbox) RequestStop(ctx context.Context) error
 ```
 
-Request graceful shutdown and return once the request is sent, without waiting for the sandbox to reach stopped state. Pair with [`WaitUntilStopped`](#sb-waituntilstopped) to await termination.
+Request graceful shutdown and return once the request is sent, without waiting for the sandbox to reach stopped state or scheduling a force-kill. Pair with [`WaitUntilStopped`](#sb-waituntilstopped) to await termination. A paused sandbox is not force-killed merely because its agent cannot process shutdown.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Kill()</span>
 
@@ -1907,7 +1919,7 @@ Add volume mount configurations keyed by guest path. Build values via the [`Moun
 func WithStopTimeout(timeout time.Duration) StopOption
 ```
 
-Set how long [`Stop`](#sb-stop) waits for graceful shutdown before force-killing. The default is ten seconds. This is a `StopOption`, not a `SandboxOption`. Pass it to [`Stop`](#sb-stop).
+Set a deadline for [`Stop`](#sb-stop), which otherwise waits without a built-in timeout. Expiry returns `ErrStopTimeout` without force-killing. Zero or a negative duration expires before sending a shutdown request. This is a `StopOption`, not a `SandboxOption`; pass it to [`Stop`](#sb-stop), or use [`StopWithTimeout`](#sb-stopwithtimeout).
 
 <p className="msb-label">Parameters</p>
 
@@ -2552,11 +2564,19 @@ Stop and remove this exact sandbox. A stale handle returns `ErrSandboxReplaced` 
 Stop(ctx, opts...)
 ```
 
-Graceful shutdown; accepts [`StopOption`](#withstoptimeout)
+Request graceful shutdown and wait for this exact sandbox run and local runtime ownership release, without a built-in deadline or force-kill. Accepts [`StopOption`](#withstoptimeout); context cancellation ends only the wait.
 
 <p className="msb-label">Returns</p>
 
 `error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">StopWithTimeout()</span>
+
+```go
+StopWithTimeout(ctx, timeout)
+```
+
+Bound graceful shutdown for this exact sandbox run. Expiry returns `ErrStopTimeout` without force-killing; zero or a negative duration expires before sending a request.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">RequestStop()</span>
 
@@ -2564,7 +2584,7 @@ Graceful shutdown; accepts [`StopOption`](#withstoptimeout)
 RequestStop(ctx)
 ```
 
-Async stop request
+Send a graceful shutdown request without waiting for completion or scheduling forced termination.
 
 <p className="msb-label">Returns</p>
 

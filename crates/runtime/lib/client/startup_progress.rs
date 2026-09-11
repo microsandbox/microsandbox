@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartupPhase {
-    /// Resolving a snapshot or preparing its disk and execution artifacts.
+    /// Resolving a snapshot, preparing artifacts, or loading eager guest RAM.
     PreparingSnapshot,
     /// Another process owns construction of this RAM cache entry.
     WaitingForMemoryBacking,

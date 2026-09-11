@@ -1022,7 +1022,7 @@ export declare class Sandbox {
   stopAndWait(): Promise<ExitStatus>
   /** Request graceful shutdown without waiting for observed exit. */
   requestStop(): Promise<void>
-  /** Stop gracefully with an explicit timeout before escalating to SIGKILL. */
+  /** One graceful-completion budget; expiry rejects without killing, including zero. */
   stopWithTimeout(timeoutMs: number): Promise<void>
   /** Kill the sandbox immediately and wait for observed exit. */
   kill(): Promise<void>
@@ -1421,10 +1421,8 @@ export declare class SandboxHandle {
   /**
    * Stop the sandbox gracefully.
    *
-   * Lets the sandbox finish writing any pending data to disk before
-   * it exits, so files written inside the sandbox aren't lost across
-   * a later restart. Waits 10_000 ms by default before force-kill;
-   * override with `stopWithTimeout(timeoutMs)`.
+   * Wait indefinitely for the targeted runtime to finish gracefully and release
+   * ownership. No implicit kill; use `stopWithTimeout` for a bounded wait.
    */
   stop(): Promise<void>
   /** Create an independent local CoW child without a durable full snapshot. */
@@ -1436,8 +1434,8 @@ export declare class SandboxHandle {
   /** Request graceful shutdown without waiting. */
   requestStop(): Promise<void>
   /**
-   * Stop the sandbox gracefully with an explicit timeout in
-   * milliseconds before escalation.
+   * One graceful-completion budget in milliseconds. Timeout rejects without killing;
+   * zero expires before dispatch.
    */
   stopWithTimeout(timeoutMs: number): Promise<void>
   /** Force-kill the sandbox and wait until stopped state is observed. */

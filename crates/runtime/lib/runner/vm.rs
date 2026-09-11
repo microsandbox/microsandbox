@@ -1055,11 +1055,14 @@ fn run(
         }
     };
 
-    // Preparation (including cold backing construction) has finished. Only now may the
-    // launcher start its activation deadline. This is the terminal startup-pipe event.
-    startup_progress(crate::startup_progress::StartupProgress::phase(
-        crate::startup_progress::StartupPhase::Activating,
-    ));
+    // A restored Vm is only a construction recipe here: eager RAM and CPU/device state
+    // are installed later by enter(). Its relay announces activation at the actual
+    // construction pause. Cold boots retain their ordinary bounded startup deadline.
+    if restored_agent.is_none() {
+        startup_progress(crate::startup_progress::StartupProgress::phase(
+            crate::startup_progress::StartupPhase::Activating,
+        ));
+    }
 
     // This must be the first host-to-guest frame. It is queued before the
     // watchdog and relay tasks can produce shutdown or init-ack messages, and
@@ -1249,12 +1252,18 @@ fn run(
     let restore_control = restored_agent.as_ref().map(|_| vm.control_handle());
     let restore_runtime_dir = config.runtime_dir.clone();
     let relay_boot_log_dir = config.log_dir.clone();
+    let restore_startup_progress = startup_progress.clone();
     tokio_rt.spawn(async move {
         let ready_result = tokio::task::spawn_blocking(move || {
             if let (Some(restored), Some(control)) =
                 (restored_agent.as_ref(), restore_control.as_ref())
             {
-                relay.activate_restored(control, restored, &restore_runtime_dir)?;
+                relay.activate_restored(
+                    control,
+                    restored,
+                    &restore_runtime_dir,
+                    &restore_startup_progress,
+                )?;
             } else {
                 relay.wait_ready()?;
             }
@@ -1346,28 +1355,19 @@ fn run(
         }
     });
 
-    // Shutdown listener: when the relay forwards a `core.shutdown` frame to
-    // agentd, we give the guest a mode-specific window to flush block-backed
-    // roots and power off cleanly. Normal agentd-as-PID1 sandboxes use a short
-    // fallback; handoff-init sandboxes keep the longer PID-1 grace.
+    // Record graceful shutdown intent, but let guest poweroff finish the runtime.
+    // A public Stop timeout bounds its caller's wait; it never authorizes killing
+    // a guest that is still draining work or flushing storage. Explicit lifetime
+    // policies below retain their own termination behavior.
     {
-        let shutdown_exit_handle = exit_handle.clone();
         let shutdown_reason = Arc::clone(&exit_reason);
-        let shutdown_paused = Arc::clone(&shared.resident_paused);
         tokio_rt.spawn(async move {
             if relay_drain_rx.recv().await.is_some() {
                 shutdown_reason.store(
                     EXIT_REASON_SHUTDOWN_REQUESTED,
                     std::sync::atomic::Ordering::SeqCst,
                 );
-                tracing::info!(
-                    "core.shutdown forwarded to agentd, allowing flush window before host fallback"
-                );
-                if !shutdown_paused.load(std::sync::atomic::Ordering::Acquire) {
-                    tokio::time::sleep(shutdown_flush_timeout).await;
-                }
-                tracing::info!("flush window elapsed, triggering host exit");
-                shutdown_exit_handle.trigger();
+                tracing::info!("graceful shutdown requested; waiting for guest poweroff");
             }
         });
     }

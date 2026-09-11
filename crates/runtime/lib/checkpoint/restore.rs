@@ -74,6 +74,7 @@ enum PreparedDeviceRestore {
 
 struct CheckpointMemoryRestore {
     closure: CheckpointClosure,
+    progress: Option<crate::startup_progress::StartupProgressCallback>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -190,7 +191,10 @@ impl PreparedCheckpointRestore {
             geometry: closure.checkpoint().geometry,
             execution,
             devices,
-            memory: Some(CheckpointMemoryRestore { closure }),
+            memory: Some(CheckpointMemoryRestore {
+                closure,
+                progress: None,
+            }),
             local_memory: None,
             agent,
         })
@@ -258,7 +262,9 @@ impl PreparedCheckpointRestore {
                 .map_err(|e| e.to_string())?;
             vm.set_private_memory_backing(backing);
         } else {
-            vm.set_memory_restore(self.memory.expect("durable restore memory"));
+            let mut memory = self.memory.expect("durable restore memory");
+            memory.progress = Some(progress);
+            vm.set_memory_restore(memory);
         }
         for device in self.devices {
             match device {
@@ -310,6 +316,23 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
         // Read and identity-check each packed object exactly once with bounded read-ahead.
         // Guest ranges are disjoint and only this construction thread writes them; workers
         // never obtain guest-memory access or permit activation before verification completes.
+        // Count required object-backed slices, not untouched capacity or bytes verified
+        // speculatively by reader threads. The existing observer coalesces these updates.
+        let total_bytes = objects
+            .values()
+            .flatten()
+            .map(|(range, _)| range.length())
+            .sum();
+        let report_progress = |completed_bytes| {
+            if let Some(progress) = &self.progress {
+                progress(crate::startup_progress::StartupProgress {
+                    phase: crate::startup_progress::StartupPhase::PreparingSnapshot,
+                    completed_bytes,
+                    total_bytes: Some(total_bytes),
+                });
+            }
+        };
+        report_progress(0);
         let object_count = objects.len();
         let pipeline = super::object_pipeline::consume_verified_objects(
             objects,
@@ -343,6 +366,7 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
                     guest_write_us += write_started.elapsed().as_micros();
                     guest_object_bytes = guest_object_bytes.saturating_add(range.length());
                 }
+                report_progress(guest_object_bytes);
                 Ok(())
             },
         )?;

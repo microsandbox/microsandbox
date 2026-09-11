@@ -17,14 +17,37 @@ use super::LocalBackend;
 
 impl LocalBackend {
     /// Send shutdown and prove terminal state plus ownership release for the same run.
-    pub(crate) async fn stop_complete(&self, name: &str, id: i32) -> MicrosandboxResult<()> {
+    pub(crate) async fn stop_complete(
+        &self,
+        name: &str,
+        id: i32,
+        ephemeral: bool,
+    ) -> MicrosandboxResult<()> {
         let run_dir = self.config().run_dir();
         let transition = Self::acquire_sandbox_transition_guard(&run_dir, name).await?;
-        let (model, _) = self
-            .sandbox_handle_state_owned(name, Some(id), true)
-            .await?;
+        let (model, _) = match self.sandbox_handle_state_owned(name, Some(id), true).await {
+            Ok(state) => state,
+            Err(MicrosandboxError::SandboxNotFound(_)) if ephemeral => {
+                // Ephemeral teardown can remove the row before dropping runtime ownership.
+                // A same-name replacement is still rejected by the identity-aware lookup.
+                drop(transition);
+                return self.wait_stop_complete(name, id, None, true).await;
+            }
+            Err(error) => return Err(error),
+        };
         let run_id = self.latest_stop_run(id).await?.map(|run| run.id);
-        self.request_stop_owned(name, &model).await?;
+        // Ownership, not a potentially recycled PID, decides whether there is a
+        // runtime to signal. A stale Running row must still converge successfully.
+        if try_acquire_lifecycle_guard(&run_dir, name)?.is_none()
+            && let Err(error) = self.request_stop_owned(name, &model).await
+        {
+            // The runtime can finish between the ownership probe and dispatch.
+            // Preserve a real unreachable-owner failure; reconcile only after
+            // proving that this run has released its runtime resources.
+            if try_acquire_lifecycle_guard(&run_dir, name)?.is_none() {
+                return Err(error);
+            }
+        }
         // Exit cleanup also needs transition ownership. Never retain this guard while waiting.
         drop(transition);
         self.wait_stop_complete(name, id, run_id, model.ephemeral)
@@ -152,7 +175,7 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(80),
-                backend.stop_complete("delayed-teardown", id)
+                backend.stop_complete("delayed-teardown", id, false)
             )
             .await
             .is_err()
@@ -163,7 +186,10 @@ mod tests {
                 .is_none()
         );
         drop(ownership);
-        backend.stop_complete("delayed-teardown", id).await.unwrap();
+        backend
+            .stop_complete("delayed-teardown", id, false)
+            .await
+            .unwrap();
         crate::sandbox::remove_local_persisted_sandbox(&backend, "delayed-teardown", id)
             .await
             .unwrap();
@@ -206,13 +232,113 @@ mod tests {
             .exec(backend.db().await.unwrap().write())
             .await
             .unwrap();
-        backend
-            .wait_stop_complete("stale-run", id, Some(run_id), false)
+        LocalBackend::update_sandbox_status(
+            backend.db().await.unwrap().write(),
+            id,
+            SandboxStatus::Running,
+        )
+        .await
+        .unwrap();
+        use crate::backend::Backend;
+        let backend: std::sync::Arc<dyn Backend> = std::sync::Arc::new(backend);
+        // Exercise public Stop, including dispatch selection, not just the polling helper.
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "stale-run")
             .await
             .unwrap();
+        handle.stop().await.unwrap();
+        let backend = backend.as_local().unwrap();
         assert_eq!(
             backend.latest_stop_run(id).await.unwrap().unwrap().status,
             run::RunStatus::Terminated
         );
+    }
+
+    #[tokio::test]
+    async fn public_stop_zero_and_wait_timeout_preserve_runtime_ownership() {
+        use crate::backend::Backend;
+        let (_home, backend, _, _) = fixture("public-stop").await;
+        let backend: std::sync::Arc<dyn Backend> = std::sync::Arc::new(backend);
+        let local = backend.as_local().unwrap();
+        let owner = try_acquire_lifecycle_guard(&local.config().run_dir(), "public-stop")
+            .unwrap()
+            .unwrap();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "public-stop")
+            .await
+            .unwrap();
+        for budget in [Duration::ZERO, Duration::from_millis(80)] {
+            assert!(matches!(handle.stop_with_timeout(budget).await,
+                Err(MicrosandboxError::StopTimeout { timeout, .. }) if timeout == budget));
+            assert!(
+                try_acquire_lifecycle_guard(&local.config().run_dir(), "public-stop")
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // Dropping an indefinitely pending Stop future cancels only this observer.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), handle.stop())
+                .await
+                .is_err()
+        );
+        assert!(
+            try_acquire_lifecycle_guard(&local.config().run_dir(), "public-stop")
+                .unwrap()
+                .is_none()
+        );
+        drop(owner);
+        handle.stop().await.unwrap();
+        handle.remove().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_stop_budget_includes_waiting_for_transition_ownership() {
+        use crate::backend::Backend;
+        let (_home, backend, _, _) = fixture("transition-budget").await;
+        let backend: std::sync::Arc<dyn Backend> = std::sync::Arc::new(backend);
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "transition-budget")
+            .await
+            .unwrap();
+        let local = backend.as_local().unwrap();
+        let _transition = LocalBackend::acquire_sandbox_transition_guard(
+            &local.config().run_dir(),
+            "transition-budget",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            handle.stop_with_timeout(Duration::from_millis(30)).await,
+            Err(MicrosandboxError::StopTimeout { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn ephemeral_row_disappearance_still_waits_for_ownership_release() {
+        let (_home, backend, id, _) = fixture("ephemeral-stop").await;
+        let owner = try_acquire_lifecycle_guard(&backend.config().run_dir(), "ephemeral-stop")
+            .unwrap()
+            .unwrap();
+        sandbox::Entity::delete_by_id(id)
+            .exec(backend.db().await.unwrap().write())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(80),
+                backend.stop_complete("ephemeral-stop", id, true)
+            )
+            .await
+            .is_err()
+        );
+        drop(owner);
+        backend
+            .stop_complete("ephemeral-stop", id, true)
+            .await
+            .unwrap();
     }
 }

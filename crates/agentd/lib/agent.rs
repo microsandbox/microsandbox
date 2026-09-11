@@ -16,7 +16,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::time::{self, Duration};
 
 use microsandbox_protocol::AGENT_TRANSPORT_DUAL_PORT_CMDLINE;
-use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::bulk::{
     BULK_HEADER_SIZE, BULK_PROTOCOL_VERSION, BulkCancel, BulkCancelReason, BulkCredit, BulkFinish,
@@ -3137,8 +3136,12 @@ async fn handle_message_with_charge(
             }
             state.fs.clear();
 
-            request_guest_poweroff()?;
-            return Err(AgentdError::Shutdown);
+            // A request is not completion. In handoff mode the foreign init owns the
+            // shutdown schedule; keep serving until the kernel actually powers off.
+            // Exiting agentd here can itself tear down the VM and bypass that schedule.
+            if let Err(error) = request_guest_poweroff() {
+                eprintln!("agentd: graceful poweroff request failed: {error}");
+            }
         }
 
         _ => {
@@ -4095,24 +4098,9 @@ fn request_guest_poweroff() -> AgentdResult<()> {
         libc::sync();
     }
 
-    // Handoff mode: ask the new init (PID 1) to shut down.
-    // SIGRTMIN+4 is systemd's poweroff signal; sysvinit-derived inits
-    // typically default-handle it as a clean exit. Either way, PID 1
-    // exiting causes the kernel to panic the guest, which the VMM
-    // observes as a clean shutdown.
-    if crate::handoff::signal_init_shutdown().is_ok() {
-        std::thread::sleep(HANDOFF_POWEROFF_TIMEOUT);
-    }
-
-    // Reaching this point means the init ignored the poweroff request, so
-    // the guest is going down hard (SIGTERM fallback, then the host's
-    // VMM-process kill as backstop). Force filesystems toward a clean
-    // terminal state first — without the process sweep, since the foreign
-    // init's services are not ours to kill.
-    crate::teardown::teardown_filesystems(false);
-
-    let _ = crate::handoff::signal_init_term();
-    Ok(())
+    // Foreign init owns both shutdown duration and filesystem teardown. No timer or
+    // fallback signal may convert this graceful request into forced termination.
+    crate::handoff::signal_init_shutdown()
 }
 
 //--------------------------------------------------------------------------------------------------

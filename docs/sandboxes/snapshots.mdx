@@ -248,6 +248,8 @@ If capture saves the snapshot but cannot recover the source, the command fails a
 
 Creating a sandbox from the resulting snapshot restores into a child-owned disk generation and installs a fresh VM Generation ID. Before your processes continue, the guest kernel corrects its wall clock and acknowledges activation; the runtime then thaws the workload and publishes network access last. Full restore requires the matching clock-aware kernel. Older development full snapshots must be recaptured, or restored with `--disk-only` where supported. Restore is eager: the archive or installed artifact is no longer needed after construction succeeds.
 
+RAM preparation has no fixed timeout, including the first forked restore on slow storage. SDK creation progress reports this work; `activating` means the VM is constructed and ready to resume, not that it is already usable. Clock synchronization and workload thaw still have bounded waits. You can cancel creation or apply your own overall deadline.
+
 Full restore preserves captured processes, but not the host connections that controlled them. Open a new client connection after restore. Inherited process output is drained without being sent to new clients; host filesystem and TCP transfers must be restarted.
 
 ## Export changes and compact a disk chain

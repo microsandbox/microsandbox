@@ -178,6 +178,17 @@ char *msb_sandbox_stop(uint64_t cancel_id,
                        unsigned char *buf,
                        uintptr_t buf_len);
 
+/**
+ * Wait for graceful shutdown without forced termination. An absent timeout is unbounded.
+ * This distinct symbol also gates the revised stop semantics for older native libraries.
+ */
+char *msb_sandbox_stop_gracefully(uint64_t cancel_id,
+                                  Handle handle,
+                                  uint8_t has_timeout,
+                                  uint64_t timeout_ms,
+                                  unsigned char *buf,
+                                  uintptr_t buf_len);
+
 char *msb_sandbox_pause(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 /**

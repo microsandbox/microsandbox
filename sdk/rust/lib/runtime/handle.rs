@@ -697,6 +697,36 @@ mod startup_tests {
     }
 
     #[tokio::test]
+    async fn completed_ram_progress_does_not_start_activation() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        let (reader, mut writer) = tokio::io::duplex(4096);
+        handle.startup_reader = Some(Box::new(BufReader::new(reader)));
+        writer.write_all(b"{\"phase\":\"preparing_snapshot\",\"completed_bytes\":4096,\"total_bytes\":4096}\n").await.unwrap();
+
+        // RAM can be complete while CPU/device reconstruction is still in progress.
+        // Only the explicit construction-boundary event starts activation deadlines.
+        {
+            let waiting = handle.wait_for_preparation(&None);
+            tokio::pin!(waiting);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), &mut waiting)
+                    .await
+                    .is_err()
+            );
+            writer
+                .write_all(
+                    b"{\"phase\":\"activating\",\"completed_bytes\":0,\"total_bytes\":null}\n",
+                )
+                .await
+                .unwrap();
+            waiting.await.unwrap();
+        }
+        handle.terminate_failed_startup().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn legacy_pid_only_runtime_does_not_wait_for_events() {
         let (mut handle, _stdin) = blocked_startup(false).await;
         handle.wait_for_preparation(&None).await.unwrap();

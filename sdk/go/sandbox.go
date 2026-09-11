@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	// Restart and Destroy retain their explicit convergence deadline; Stop has none.
 	defaultStopTimeout = 10 * time.Second
 	defaultKillTimeout = 5 * time.Second
 )
@@ -278,15 +279,24 @@ func durationMillisCeil(d time.Duration) uint64 {
 	if d <= 0 {
 		return 0
 	}
-	return uint64((d + time.Millisecond - 1) / time.Millisecond)
+	// Divide before rounding so a large valid Duration cannot overflow.
+	millis := uint64(d / time.Millisecond)
+	if d%time.Millisecond != 0 {
+		millis++
+	}
+	return millis
 }
 
-func stopTimeoutMillis(opts []StopOption) uint64 {
-	o := lifecycleOptions{timeout: defaultStopTimeout}
+func stopTimeoutMillis(opts []StopOption) *uint64 {
+	o := lifecycleOptions{}
 	for _, opt := range opts {
 		opt(&o)
 	}
-	return durationMillisCeil(o.timeout)
+	if !o.timeoutSet {
+		return nil
+	}
+	timeout := durationMillisCeil(o.timeout)
+	return &timeout
 }
 
 func killTimeoutMillis(opts []KillOption) uint64 {
@@ -573,7 +583,8 @@ type sandboxListOptions struct {
 type SandboxListOption func(*sandboxListOptions)
 
 type lifecycleOptions struct {
-	timeout time.Duration
+	timeout    time.Duration
+	timeoutSet bool
 }
 
 type connectOrStartOptions struct {
@@ -628,9 +639,13 @@ type SandboxTouchResult struct {
 	ActivitySeq uint64
 }
 
-// WithStopTimeout sets how long Stop waits for graceful shutdown before force-killing.
+// WithStopTimeout bounds Stop's wait for graceful shutdown. Expiry returns an
+// error without force-killing; zero expires before sending a shutdown request.
 func WithStopTimeout(timeout time.Duration) StopOption {
-	return func(o *lifecycleOptions) { o.timeout = timeout }
+	return func(o *lifecycleOptions) {
+		o.timeout = timeout
+		o.timeoutSet = true
+	}
 }
 
 // WithKillTimeout sets how long Kill waits for stopped-state observation.
@@ -914,9 +929,16 @@ func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrSta
 	return &Sandbox{inner: inner}, nil
 }
 
-// Stop gracefully stops the sandbox and waits until stopped state is observed.
+// Stop requests graceful shutdown and waits for this exact sandbox run to finish.
+// There is no built-in timeout. Context cancellation or WithStopTimeout ends only
+// the wait and never force-kills the sandbox.
 func (h *SandboxHandle) Stop(ctx context.Context, opts ...StopOption) error {
-	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "stop", ffi.SandboxHandleLifecycleOptions{TimeoutMs: stopTimeoutMillis(opts)}))
+	return wrapFFI(ffi.StopSandboxHandle(ctx, h.name, h.id, stopTimeoutMillis(opts)))
+}
+
+// StopWithTimeout bounds graceful shutdown observation without force-killing.
+func (h *SandboxHandle) StopWithTimeout(ctx context.Context, timeout time.Duration) error {
+	return h.Stop(ctx, WithStopTimeout(timeout))
 }
 
 // RequestStop requests graceful shutdown and returns once the request is sent.
@@ -1059,9 +1081,16 @@ func (s *Sandbox) identityHandle() *SandboxHandle {
 	return &SandboxHandle{name: s.Name(), id: s.ID(), backendKind: s.BackendKind()}
 }
 
-// Stop gracefully stops the sandbox and waits until stopped state is observed.
+// Stop requests graceful shutdown and waits for this exact sandbox run to finish.
+// There is no built-in timeout. Context cancellation or WithStopTimeout ends only
+// the wait and never force-kills the sandbox.
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
 	return wrapFFI(s.inner.Stop(ctx, stopTimeoutMillis(opts)))
+}
+
+// StopWithTimeout bounds graceful shutdown observation without force-killing.
+func (s *Sandbox) StopWithTimeout(ctx context.Context, timeout time.Duration) error {
+	return s.Stop(ctx, WithStopTimeout(timeout))
 }
 
 // RequestStop requests graceful shutdown and returns once the request is sent.

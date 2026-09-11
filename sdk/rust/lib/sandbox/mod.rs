@@ -179,6 +179,7 @@ pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
 #[cfg(feature = "local")]
 mod external_mounts;
 mod restore_warnings;
+mod stop;
 #[cfg(feature = "local")]
 pub(crate) use external_mounts::resolve_external_mounts;
 #[cfg(feature = "local")]
@@ -908,11 +909,19 @@ impl Sandbox {
         fs::SandboxFsOps::new(self.backend.clone(), &self.name, client)
     }
 
-    /// Stop the sandbox gracefully and wait until stopped state is observed.
+    /// Request graceful shutdown and wait without a built-in deadline for completion.
     ///
-    /// Uses [`DEFAULT_STOP_TIMEOUT`] before escalating to force termination.
+    /// Local completion includes release of runtime ownership for the targeted run.
+    /// Cancelling this wait never requests force termination; use [`Self::kill`] explicitly.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
-        self.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
+        stop::stop(
+            self.backend.clone(),
+            &self.name,
+            self.identity(),
+            self.is_local_ephemeral(),
+            None,
+        )
+        .await
     }
 
     /// Request graceful shutdown and return once the request is sent.
@@ -930,53 +939,37 @@ impl Sandbox {
             .await
     }
 
-    /// Stop the sandbox gracefully with an explicit timeout before escalation.
+    /// Wait for graceful completion under one budget, including dispatch and runtime release.
+    ///
+    /// Expiry returns [`MicrosandboxError::StopTimeout`] without killing. Zero has no
+    /// dispatch budget. A delivered shutdown request may still complete after timeout.
     pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
-        if timeout.is_zero() {
-            self.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await?;
-            return Ok(());
-        }
-
-        self.request_stop().await?;
-        if let Ok(result) = tokio::time::timeout(timeout, self.wait_until_stopped()).await {
-            result?;
-            return Ok(());
-        }
-
-        tracing::warn!(
-            sandbox = %self.name,
-            timeout_secs = timeout.as_secs(),
-            "graceful stop exceeded timeout, escalating to kill"
-        );
-        self.request_kill().await?;
-        match tokio::time::timeout(DEFAULT_KILL_TIMEOUT, self.wait_until_stopped()).await {
-            Ok(result) => {
-                result?;
-                Ok(())
-            }
-            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
-                "timed out observing stopped state for sandbox '{}'",
-                self.name
-            ))),
-        }
+        stop::stop(
+            self.backend.clone(),
+            &self.name,
+            self.identity(),
+            self.is_local_ephemeral(),
+            Some(timeout),
+        )
+        .await
     }
 
     /// Stop the sandbox gracefully and wait for the process to exit.
     ///
     /// **Local backend only.** Cloud sandboxes have no host process to wait
     /// on; use [`stop`](Self::stop) and poll [`status`](Self::status) instead.
+    ///
+    /// With no owned child-process handle, preserves the existing synthetic success status
+    /// after runtime completion; this is not the guest's actual exit code.
     #[cfg(feature = "local")]
     pub async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus> {
         let local = self.require_local(Operation::SandboxStopAndWait)?;
-        let stop_result = self.request_stop().await;
+        self.stop().await?;
         if local.handle.is_none() {
-            stop_result?;
-            // No handle to wait on — return a synthetic success status.
-            return Ok(std::process::ExitStatus::default());
+            Ok(std::process::ExitStatus::default())
+        } else {
+            self.wait().await
         }
-        let wait_result = self.wait().await;
-        stop_result?;
-        wait_result
     }
 
     /// Kill the sandbox immediately and wait until stopped state is observed.

@@ -121,6 +121,7 @@ typedef char *(*msb_sandbox_handle_modify_fn)(uint64_t cancel_id, const char *na
 typedef char *(*msb_sandbox_close_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_stop_gracefully_fn)(uint64_t cancel_id, uint64_t handle, uint8_t has_timeout, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_restore_warnings_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
@@ -289,6 +290,7 @@ static msb_sandbox_handle_modify_fn ptr_msb_sandbox_handle_modify = NULL;
 static msb_sandbox_close_fn      ptr_msb_sandbox_close      = NULL;
 static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
 static msb_sandbox_stop_fn       ptr_msb_sandbox_stop       = NULL;
+static msb_sandbox_stop_gracefully_fn ptr_msb_sandbox_stop_gracefully = NULL;
 static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
 static msb_sandbox_restore_warnings_fn ptr_msb_sandbox_restore_warnings = NULL;
 static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
@@ -480,6 +482,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_close);
 	RESOLVE(msb_sandbox_detach);
 	RESOLVE(msb_sandbox_stop);
+	RESOLVE_OPTIONAL(msb_sandbox_stop_gracefully);
 	RESOLVE(msb_sandbox_request_stop);
 	RESOLVE_OPTIONAL(msb_sandbox_restore_warnings);
 	RESOLVE(msb_sandbox_pause);
@@ -691,6 +694,10 @@ char *call_msb_sandbox_detach(uint64_t cancel_id, uint64_t handle, uint8_t *buf,
 }
 char *call_msb_sandbox_stop(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_stop ? ptr_msb_sandbox_stop(cancel_id, handle, timeout_ms, buf, buf_len) : NULL;
+}
+bool has_graceful_stop_wait(void) { return ptr_msb_sandbox_stop_gracefully != NULL; }
+char *call_msb_sandbox_stop_gracefully(uint64_t cancel_id, uint64_t handle, uint8_t has_timeout, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_stop_gracefully ? ptr_msb_sandbox_stop_gracefully(cancel_id, handle, has_timeout, timeout_ms, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_request_stop(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_request_stop ? ptr_msb_sandbox_request_stop(cancel_id, handle, buf, buf_len) : NULL;
@@ -2062,8 +2069,8 @@ type SandboxHandleInfo struct {
 type SandboxHandleLifecycleOptions struct {
 	Detached bool `json:"detached,omitempty"`
 	Force    bool `json:"force,omitempty"`
-	// Keep zero on the wire: it means immediate escalation for lifecycle
-	// convergence and must not be mistaken for an omitted/default timeout.
+	// Keep zero on the wire: an explicit zero deadline must not be mistaken
+	// for an omitted/default timeout. Graceful stop never escalates to kill.
 	TimeoutMs uint64 `json:"timeout_ms"`
 	Status    string `json:"status,omitempty"`
 }
@@ -2077,6 +2084,11 @@ func sandboxHandleLifecycle(
 ) (string, error) {
 	if err := ensureLoaded(); err != nil {
 		return "", err
+	}
+	if operation == "stop_gracefully" || operation == "stop_with_timeout" || operation == "request_stop" {
+		if err := requireGracefulStopWait(); err != nil {
+			return "", err
+		}
 	}
 	optsJSON, err := json.Marshal(opts)
 	if err != nil {
@@ -2183,6 +2195,19 @@ func SandboxHandleVoidLifecycle(
 ) error {
 	_, err := sandboxHandleLifecycle(ctx, name, id, operation, opts)
 	return err
+}
+
+// StopSandboxHandle preserves persisted identity and distinguishes no deadline from zero.
+func StopSandboxHandle(ctx context.Context, name, id string, timeoutMs *uint64) error {
+	operation, opts := stopLifecycleRequest(timeoutMs)
+	return SandboxHandleVoidLifecycle(ctx, name, id, operation, opts)
+}
+
+func stopLifecycleRequest(timeoutMs *uint64) (string, SandboxHandleLifecycleOptions) {
+	if timeoutMs == nil {
+		return "stop_gracefully", SandboxHandleLifecycleOptions{}
+	}
+	return "stop_with_timeout", SandboxHandleLifecycleOptions{TimeoutMs: *timeoutMs}
 }
 
 // BackendInfo is the secret-safe backend diagnostic shape returned by Rust.
@@ -2589,20 +2614,39 @@ func (s *Sandbox) Detach(ctx context.Context) error {
 	return err
 }
 
-// Stop gracefully stops the sandbox and waits for stopped observation.
-func (s *Sandbox) Stop(ctx context.Context, timeoutMs uint64) error {
+// Stop waits for graceful shutdown; nil has no deadline and a present zero expires immediately.
+func (s *Sandbox) Stop(ctx context.Context, timeoutMs *uint64) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
+	if err := requireGracefulStopWait(); err != nil {
+		return err
+	}
+	var hasTimeout C.uint8_t
+	var millis C.uint64_t
+	if timeoutMs != nil {
+		hasTimeout = 1
+		millis = C.uint64_t(*timeoutMs)
+	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_stop(cancelID, s.h(), C.uint64_t(timeoutMs), buf, bufLen)
+		return C.call_msb_sandbox_stop_gracefully(cancelID, s.h(), hasTimeout, millis, buf, bufLen)
 	})
 	return err
+}
+
+func requireGracefulStopWait() error {
+	if !bool(C.has_graceful_stop_wait()) {
+		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support graceful stop without forced termination; update the native SDK"}
+	}
+	return nil
 }
 
 // RequestStop requests graceful shutdown without waiting for stopped observation.
 func (s *Sandbox) RequestStop(ctx context.Context) error {
 	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if err := requireGracefulStopWait(); err != nil {
 		return err
 	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {

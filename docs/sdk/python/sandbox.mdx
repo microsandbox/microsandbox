@@ -927,16 +927,24 @@ await sb.stop()
 
 </Accordion>
 
-Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds by default; pass `timeout` to override the graceful shutdown window before force-kill escalation.
+Wait indefinitely for graceful shutdown and release of the targeted runtime's ownership. Success allows immediate removal. Cancelling the await does not kill the sandbox or undo a delivered shutdown request. Paused or unreachable sandboxes return errors; resume or kill explicitly. The optional `timeout` retains its call syntax and uses the same total budget as `stop_with_timeout()`.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
-    <div className="msb-param-desc">Seconds to wait for graceful exit before force-kill. <code>None</code> uses the ten-second default.</div>
+    <div className="msb-param-desc">Total graceful-completion budget in seconds. <code>None</code> waits indefinitely; expiry raises <code>StopTimeoutError</code> without killing.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
+
+```python
+async def stop_with_timeout(self, timeout: float) -> None
+```
+
+Use `await sb.stop_with_timeout(seconds)` for an explicit total graceful-completion budget. Expiry raises `StopTimeoutError`; zero expires before dispatch. A delivered request may finish later, but the timeout never requests force termination.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
 
@@ -1497,7 +1505,7 @@ Start in attached or detached mode
 stop(timeout=None)
 ```
 
-Gracefully shut down and wait until stopped state is observed
+Wait indefinitely for graceful completion and runtime ownership release. `await handle.stop_with_timeout(seconds)` supplies one total budget; expiry raises `StopTimeoutError` without killing, and zero expires before dispatch. The optional `stop(timeout=...)` argument uses the same behavior.
 
 <p className="msb-label">Returns</p>
 

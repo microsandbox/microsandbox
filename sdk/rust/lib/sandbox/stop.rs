@@ -14,6 +14,7 @@ pub(super) async fn stop(
     backend: Arc<dyn Backend>,
     name: &str,
     identity: SandboxIdentity,
+    _ephemeral: bool,
     timeout: Option<Duration>,
 ) -> MicrosandboxResult<()> {
     let timed_out = || MicrosandboxError::StopTimeout {
@@ -28,7 +29,7 @@ pub(super) async fn stop(
     let operation = async {
         #[cfg(feature = "local")]
         if let (Some(local), SandboxIdentity::Local(id)) = (backend.as_local(), &identity) {
-            return local.stop_complete(name, *id).await;
+            return local.stop_complete(name, *id, _ephemeral).await;
         }
         // The cloud control-plane's terminal status is its completion authority. Local process
         // locks have no meaning there; keep the backend identity checks on every observation.

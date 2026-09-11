@@ -233,31 +233,24 @@ msb start --label app=engine          # Start every sandbox labeled app=engine
 
 ## msb sandbox stop
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; force mode and timeout escalation to force kill are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Graceful stop works on microsandbox cloud; explicit force mode is unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```bash
-msb stop devbox                # Graceful shutdown (10s grace)
+msb stop devbox                # Wait indefinitely for graceful completion
 msb stop --force devbox        # Force kill immediately
-msb stop -t 30 devbox          # 30s grace before force kill
+msb stop -t 30 devbox          # Fail after 30s without killing
 msb stop --label app=engine    # Stop every sandbox labeled app=engine
 ```
 
-Graceful shutdown gives the sandbox a chance to finish writing any
-pending data to disk before it exits, so files written inside the
-sandbox aren't lost across a later `msb start`. If the sandbox is
-still running after the timeout, it is force-killed.
+Graceful Stop waits until the targeted run is terminal and releases runtime ownership, so a successful Stop can be followed immediately by Remove. There is no default deadline. `--timeout` is one total graceful-completion budget; expiry returns a nonzero exit status without killing. Zero expires before dispatch. A request already sent can finish later. Paused or unreachable sandboxes return an error; resume or force termination explicitly.
 
-`--force` and a timeout that elapses both end in a force-kill. Pending
-writes that the workload hasn't `fsync`'d at that point may be lost, with the
-same durability semantics as a sudden power loss on a physical
-machine. For durable writes, workloads should `fsync` important data
-themselves.
+Only `--force` requests force termination. Pending writes that the workload has not synced may be lost, as with sudden power loss. For durable writes, workloads should sync important data themselves.
 
 | Flag | Description |
 |------|-------------|
 | `--label` | Stop every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-f`, `--force` | Force terminate immediately. Pending writes may be lost |
-| `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
+| `-t`, `--timeout` | Total graceful-completion budget in seconds; expiry fails without killing. Omit to wait indefinitely |
 | `-q`, `--quiet` | Suppress progress output |
 
 ## msb sandbox pause / resume
@@ -281,7 +274,7 @@ msb branch devbox --name experiment
 
 ## msb sandbox restart
 
-<Tooltip tip="Graceful restart works on microsandbox cloud; force mode and timeout escalation to force kill are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Graceful restart works on microsandbox cloud; explicit force mode is unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Stop and start one or more sandboxes. Running, draining, and paused sandboxes are stopped first, then started from their persisted configuration. Stopped, crashed, and created sandboxes skip the stop phase and are started directly.
 
@@ -293,13 +286,13 @@ msb restart --force devbox
 msb restart -t 30 devbox
 ```
 
-`msb restart` uses the same stop controls as `msb stop`: `--force` kills immediately, and `--timeout` controls how long graceful shutdown gets before force-kill escalation.
+`msb restart --force` kills immediately. Otherwise `--timeout` bounds graceful completion; expiry fails without killing or starting a replacement. Unlike standalone Stop, Restart retains its explicit default budget of ten seconds.
 
 | Flag | Description |
 |------|-------------|
 | `--label` | Restart every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-f`, `--force` | Force terminate immediately before starting again. Pending writes may be lost |
-| `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
+| `-t`, `--timeout` | Total graceful-completion budget in seconds; expiry fails without killing. Defaults to 10 |
 | `-q`, `--quiet` | Suppress progress output |
 
 <a id="msb-ping"></a>

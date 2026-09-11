@@ -32,6 +32,7 @@ pub struct Sandbox {
     inner: Arc<SharedHandle<microsandbox::sandbox::Sandbox>>,
     backend_kind: &'static str,
     id: String,
+    stop_name: String,
     owns_lifecycle: bool,
 }
 
@@ -86,11 +87,13 @@ impl Sandbox {
     pub fn from_rust(inner: microsandbox::sandbox::Sandbox) -> Self {
         let backend_kind = inner.backend_kind().as_str();
         let id = inner.id().to_string();
+        let stop_name = inner.name().to_string();
         let owns_lifecycle = inner.owns_lifecycle();
         Sandbox {
             inner: Arc::new(SharedHandle::new(inner)),
             backend_kind,
             id,
+            stop_name,
             owns_lifecycle,
         }
     }
@@ -578,12 +581,27 @@ impl Sandbox {
         sb.request_stop().await.map_err(to_napi_error)
     }
 
-    /// Stop gracefully with an explicit timeout before escalating to SIGKILL.
+    /// One graceful-completion budget; expiry rejects without killing, including zero.
     #[napi]
     pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
-        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let timeout = Duration::from_millis(timeout_ms.into());
-        sb.stop_with_timeout(timeout).await.map_err(to_napi_error)
+        let expired = || {
+            to_napi_error(microsandbox::MicrosandboxError::StopTimeout {
+                name: self.stop_name.clone(),
+                identity: self.id.clone(),
+                timeout,
+            })
+        };
+        // Include admission in the same budget and reject zero before polling any work.
+        if timeout.is_zero() {
+            return Err(expired());
+        }
+        tokio::time::timeout(timeout, async {
+            let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+            sb.stop().await.map_err(to_napi_error)
+        })
+        .await
+        .map_err(|_| expired())?
     }
 
     /// Kill the sandbox immediately and wait for observed exit.

@@ -27,6 +27,9 @@ use crate::ssh::PySandboxSsh;
 #[pyclass(name = "Sandbox")]
 pub struct PySandbox {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+    // Immutable identity is available even while a consuming operation holds the wrapper lock.
+    stop_name: String,
+    stop_identity: String,
 }
 
 /// Result of observing a sandbox in a terminal non-running state.
@@ -76,6 +79,8 @@ pub struct PySandboxPage {
 impl PySandbox {
     pub fn from_rust(inner: microsandbox::sandbox::Sandbox) -> Self {
         Self {
+            stop_name: inner.name().to_string(),
+            stop_identity: inner.id().to_string(),
             inner: Arc::new(Mutex::new(Some(inner))),
         }
     }
@@ -997,22 +1002,42 @@ impl PySandbox {
         })
     }
 
-    /// Stop the sandbox gracefully and wait until stopped.
+    /// Wait indefinitely for graceful completion and runtime ownership release.
     #[pyo3(signature = (timeout = None))]
     fn stop<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
         let timeout = optional_duration(timeout)?;
+        let inner = self.inner.clone();
+        let name = self.stop_name.clone();
+        let identity = self.stop_identity.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sandbox = Self::clone_sandbox(&inner).await?;
-            match timeout {
-                Some(timeout) => sandbox
-                    .stop_with_timeout(timeout)
-                    .await
-                    .map_err(to_py_err)?,
-                None => sandbox.stop().await.map_err(to_py_err)?,
+            let operation = async {
+                let sandbox = Self::clone_sandbox(&inner).await?;
+                sandbox.stop().await.map_err(to_py_err)
+            };
+            let Some(timeout) = timeout else {
+                return operation.await;
+            };
+            let expired = || {
+                to_py_err(microsandbox::MicrosandboxError::StopTimeout {
+                    name: name.clone(),
+                    identity: identity.clone(),
+                    timeout,
+                })
+            };
+            // One wrapper-level budget includes lock acquisition as well as Rust Stop.
+            // Tokio may poll a zero-timeout future once, so reject zero before polling it.
+            if timeout.is_zero() {
+                return Err(expired());
             }
-            Ok(())
+            tokio::time::timeout(timeout, operation)
+                .await
+                .map_err(|_| expired())?
         })
+    }
+
+    /// Wait for graceful completion within one seconds budget; expiry never kills.
+    fn stop_with_timeout<'py>(&self, py: Python<'py>, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+        self.stop(py, Some(timeout))
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
@@ -2325,7 +2350,9 @@ pub fn optional_duration(value: Option<f64>) -> PyResult<Option<std::time::Durat
             "timeout must be a non-negative finite number of seconds",
         ));
     }
-    Ok(Some(std::time::Duration::from_secs_f64(value)))
+    std::time::Duration::try_from_secs_f64(value)
+        .map(Some)
+        .map_err(|_| PyValueError::new_err("timeout exceeds the supported duration range"))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2337,6 +2364,19 @@ mod tests {
     use microsandbox::sandbox::{SecretModificationPatch, SecretSource};
 
     use super::*;
+
+    #[test]
+    fn explicit_stop_duration_preserves_zero_and_fractional_seconds() {
+        assert_eq!(optional_duration(None).unwrap(), None);
+        assert_eq!(
+            optional_duration(Some(0.0)).unwrap(),
+            Some(std::time::Duration::ZERO)
+        );
+        assert_eq!(
+            optional_duration(Some(0.125)).unwrap(),
+            Some(std::time::Duration::from_millis(125))
+        );
+    }
 
     fn secret_patch(
         name: &str,
