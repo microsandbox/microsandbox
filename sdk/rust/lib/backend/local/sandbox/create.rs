@@ -850,6 +850,7 @@ impl LocalBackend {
             &log_dir,
             startup_process.handle_mut(),
             &config.spec.name,
+            AGENT_RELAY_READY_TIMEOUT,
         )
         .await
         {
@@ -900,13 +901,14 @@ impl LocalBackend {
         log_dir: &std::path::Path,
         handle: &mut ProcessHandle,
         sandbox_name: &str,
+        timeout: std::time::Duration,
     ) -> MicrosandboxResult<AgentClient> {
         tracing::debug!(
             sock = %sock_path.display(),
             pid = handle.pid(),
             "wait_for_relay: waiting for agent socket"
         );
-        let deadline = tokio::time::Instant::now() + AGENT_RELAY_READY_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + timeout;
         let max_backoff = std::time::Duration::from_millis(10);
         let mut backoff = std::time::Duration::from_millis(1);
         let mut attempts = 0u32;
@@ -966,7 +968,11 @@ impl LocalBackend {
 
                     // Keep early retries tight so relay readiness doesn't inherit a
                     // coarse fixed delay on warm starts.
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(
+                        backoff
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
                     backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
                 }
                 Ok(Err(e)) => {
@@ -978,7 +984,7 @@ impl LocalBackend {
                     if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
                         return Err(error);
                     }
-                    return Err(relay_readiness_timeout(sandbox_name, &e));
+                    return Err(relay_readiness_timeout(sandbox_name, timeout, &e));
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -995,7 +1001,7 @@ impl LocalBackend {
                     if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
                         return Err(error);
                     }
-                    return Err(relay_readiness_timeout(sandbox_name, &e));
+                    return Err(relay_readiness_timeout(sandbox_name, timeout, &e));
                 }
             }
         }
@@ -1781,12 +1787,13 @@ fn snapshot_root_layout_from_config(
 /// Keep an expired readiness budget distinct from the last transient socket failure.
 fn relay_readiness_timeout(
     sandbox_name: &str,
+    timeout: std::time::Duration,
     last_error: &impl std::fmt::Display,
 ) -> crate::MicrosandboxError {
     crate::MicrosandboxError::Runtime(format!(
         "sandbox {sandbox_name:?} startup timed out after {} seconds before agent readiness; \
          restore preparation may still be pending; last connection error: {last_error}",
-        AGENT_RELAY_READY_TIMEOUT.as_secs(),
+        timeout.as_secs_f64(),
     ))
 }
 
@@ -1904,6 +1911,7 @@ mod tests {
     fn readiness_deadline_reports_timeout_not_only_missing_socket() {
         let error = super::relay_readiness_timeout(
             "slow-restore",
+            super::AGENT_RELAY_READY_TIMEOUT,
             &std::io::Error::from(std::io::ErrorKind::NotFound),
         )
         .to_string();
@@ -1911,6 +1919,83 @@ mod tests {
         assert!(error.contains("slow-restore"));
         assert!(error.contains("restore preparation"));
         assert!(error.contains("last connection error"));
+    }
+
+    #[cfg(unix)]
+    async fn exercise_readiness_deadline(silent_peer: bool) -> String {
+        use crate::runtime::handle::{ProcessHandle, StartupProcess};
+
+        let directory = tempfile::Builder::new()
+            .prefix("msb-readiness")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket = directory.path().join("agent.sock");
+        let server = if silent_peer {
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            Some(tokio::spawn(async move {
+                let (_connection, _) = listener.accept().await.unwrap();
+                // Accept the transport but never finish the agent handshake, exercising the
+                // connection-attempt deadline rather than an immediately missing endpoint.
+                std::future::pending::<()>().await;
+            }))
+        } else {
+            None
+        };
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut owner = StartupProcess::new(ProcessHandle::new(
+            child.id().unwrap(),
+            "slow-restore".into(),
+            child,
+            Vec::new(),
+            None,
+            None,
+        ));
+        let result = LocalBackend::wait_for_relay(
+            &socket,
+            directory.path(),
+            owner.handle_mut(),
+            "slow-restore",
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        let still_alive = owner.handle_mut().try_wait().unwrap().is_none();
+        owner.handle_mut().terminate_failed_startup().await.unwrap();
+        if let Some(server) = server {
+            server.abort();
+            let _ = server.await;
+        }
+        assert!(still_alive, "fixture exited before readiness expired");
+        let error = result
+            .err()
+            .expect("relay unexpectedly became ready")
+            .to_string();
+        assert!(
+            error.contains("startup timed out after 0.05 seconds"),
+            "{error}"
+        );
+        assert!(error.contains("slow-restore"), "{error}");
+        assert!(error.contains("last connection error"), "{error}");
+        error
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_loop_reports_missing_socket_deadline() {
+        let error = exercise_readiness_deadline(false).await;
+        assert!(
+            error.contains("No such file") || error.contains("not found"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_loop_reports_stalled_handshake_deadline() {
+        let error = exercise_readiness_deadline(true).await;
+        assert!(error.contains("deadline has elapsed"), "{error}");
     }
 
     #[test]
