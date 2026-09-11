@@ -1,4 +1,4 @@
-//! Handler for the `msb sandbox` subcommand.
+//! Handler for the `msb machine` subcommand.
 //!
 //! Parses CLI arguments, builds a [`microsandbox_runtime::vm::Config`], and delegates to
 //! [`microsandbox_runtime::vm::enter()`]. This command **never returns**
@@ -28,14 +28,14 @@ use microsandbox_runtime::{
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Arguments for the `msb sandbox` subcommand.
+/// Arguments for the `msb machine` subcommand.
 ///
 /// Only the operator-readable labels and the real inherited fds live on argv.
 /// The bulk of the configuration — paths, env (incl. secrets), mounts, network
 /// config — arrives as a JSON [`LaunchConfig`] over `--config-fd` (or
 /// `--config-file` for manual invocation). See issue #997.
 #[derive(Debug, Args)]
-pub struct SandboxArgs {
+pub struct MachineArgs {
     /// Require captured execution; runtimes without this protocol reject the invocation.
     #[arg(long, hide = true)]
     pub restore: bool,
@@ -141,7 +141,7 @@ fn parse_agent_transport_profile(s: &str) -> Result<AgentTransportProfile, Strin
 }
 
 /// Run the sandbox process. This function **never returns**.
-pub fn run(args: SandboxArgs) -> ! {
+pub fn run(args: MachineArgs) -> ! {
     let launch = match load_launch_config(&args) {
         Ok(launch) => launch,
         Err(err) => {
@@ -414,21 +414,21 @@ fn launch_run_dir(launch: &LaunchConfig) -> PathBuf {
 /// serializes the rest — network config, env (including secrets), mounts, and
 /// paths — to an inherited fd, so they no longer appear in `ps` or
 /// `/proc/<pid>/cmdline`. See issue #997.
-fn load_launch_config(args: &SandboxArgs) -> Result<LaunchConfig, String> {
+fn load_launch_config(args: &MachineArgs) -> Result<LaunchConfig, String> {
     #[cfg(unix)]
     let bytes = match (args.config_fd, &args.config_file) {
         (Some(fd), _) => read_config_fd(fd)?,
         (None, Some(path)) => std::fs::read(path)
             .map_err(|e| format!("failed to read --config-file {}: {e}", path.display()))?,
         (None, None) => {
-            return Err("missing --config-fd or --config-file for `msb sandbox`".to_string());
+            return Err("missing --config-fd or --config-file for `msb machine`".to_string());
         }
     };
     #[cfg(windows)]
     let bytes = match &args.config_file {
         Some(path) => std::fs::read(path)
             .map_err(|e| format!("failed to read --config-file {}: {e}", path.display()))?,
-        None => return Err("missing --config-file for `msb sandbox`".to_string()),
+        None => return Err("missing --config-file for `msb machine`".to_string()),
     };
     let config = LaunchConfig::decode(&bytes)?;
     if args.restore != (config.execution == microsandbox_runtime::launch::ExecutionIntent::Restore)
@@ -726,13 +726,13 @@ mod tests {
         validate_pipe_fd(read_fd.as_raw_fd(), read_fd.as_raw_fd(), "parent-watch-fd").unwrap();
     }
 
-    /// Build a `SandboxArgs` carrying only a config source; the rest is unused
+    /// Build a `MachineArgs` carrying only a config source; the rest is unused
     /// by `load_launch_config`.
-    fn args_with(config_fd: Option<i32>, config_file: Option<PathBuf>) -> SandboxArgs {
+    fn args_with(config_fd: Option<i32>, config_file: Option<PathBuf>) -> MachineArgs {
         #[cfg(not(unix))]
         let _ = config_fd;
 
-        SandboxArgs {
+        MachineArgs {
             restore: false,
             agent_transport: AgentTransportProfile::Auto,
             sandbox_name: "test".to_string(),
@@ -781,7 +781,7 @@ mod tests {
         #[derive(Debug, Parser)]
         struct TestCli {
             #[command(flatten)]
-            sandbox: SandboxArgs,
+            sandbox: MachineArgs,
         }
 
         let parsed =

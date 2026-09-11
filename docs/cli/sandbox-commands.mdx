@@ -5,7 +5,13 @@ description: Create, run, and interact with sandboxes from the CLI
 icon: "cube"
 ---
 
-## msb run
+Sandbox operations belong to the canonical `msb sandbox` group, also available as `msb sbx`. Top-level verbs remain the recommended everyday form, so examples below use the shorter spelling. For example, `msb create`, `msb sandbox create`, and `msb sbx create` accept the same arguments and perform the same operation.
+
+The verb aliases `ls`, `ps`, `rm`, `cp`, and `mod` work at all three levels. SSH remains a separate top-level group, documented under [SSH commands](/cli/ssh-commands). Installation and self-management commands have their own sections at the end of this page.
+
+<a id="msb-run"></a>
+
+## msb sandbox run
 
 <Tooltip tip="The core run workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -190,7 +196,9 @@ msb run alpine --no-net --net-rule "allow@api.internal.corp"
 msb run alpine --net public --net-rule "deny@dns"
 ```
 
-## msb create
+<a id="msb-create"></a>
+
+## msb sandbox create
 
 <Tooltip tip="The core create workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -203,7 +211,9 @@ msb create --replace-with-timeout 30s python --name worker  # Give the old one 3
 msb create --replace-with-timeout 0 python --name worker    # SIGKILL immediately
 ```
 
-## msb start
+<a id="msb-start"></a>
+
+## msb sandbox start
 
 Resume a stopped sandbox. Name one or more sandboxes, or select them by label.
 
@@ -217,7 +227,9 @@ msb start --label app=engine          # Start every sandbox labeled app=engine
 | `--label` | Start every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb stop
+<a id="msb-stop"></a>
+
+## msb sandbox stop
 
 <Tooltip tip="Graceful stop works on microsandbox cloud; force mode and timeout escalation to force kill are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -246,7 +258,26 @@ themselves.
 | `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb restart
+## msb sandbox pause / resume
+
+Suspend a resident sandbox without creating a snapshot, then resume it. These operations also accept the top-level `msb pause` and `msb resume` forms.
+
+```bash
+msb pause devbox
+msb resume devbox
+```
+
+## msb sandbox branch
+
+Branch running execution into a new local CoW child without creating a durable full snapshot. The top-level form is `msb branch`.
+
+```bash
+msb branch devbox --name experiment
+```
+
+<a id="msb-restart"></a>
+
+## msb sandbox restart
 
 <Tooltip tip="Graceful restart works on microsandbox cloud; force mode and timeout escalation to force kill are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -269,7 +300,9 @@ msb restart -t 30 devbox
 | `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb ping
+<a id="msb-ping"></a>
+
+## msb sandbox ping
 
 <Tooltip tip="Not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -290,7 +323,9 @@ Use `--touch` when a successful health check should also refresh the idle timer.
 | `--touch` | Refresh the sandbox idle timer after a successful ping |
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb touch
+<a id="msb-touch"></a>
+
+## msb sandbox touch
 
 <Tooltip tip="Not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -307,7 +342,9 @@ msb touch --label app=engine
 | `--label` | Touch every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb modify
+<a id="msb-modify"></a>
+
+## msb sandbox modify
 
 <Tooltip tip="Not yet available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -348,7 +385,9 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 
 A live resize may not apply instantly; `--format json` reports a per-resource `resize_status`. See [Live Modify](/sandboxes/tuning) for the change model, or use `msb modify --help` for the full flag list.
 
-## msb exec
+<a id="msb-exec"></a>
+
+## msb sandbox exec
 
 Execute a command inside a sandbox.
 
@@ -374,7 +413,9 @@ msb exec devbox -- ls -la /app
   The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. Use `--no-tty` to force captured, non-interactive execution even from a terminal.
 </Tip>
 
-## msb copy
+<a id="msb-copy"></a>
+
+## msb sandbox copy
 
 Copy files between the host and a sandbox.
 
@@ -393,7 +434,9 @@ Host-to-sandbox and sandbox-to-host forms follow `docker cp` syntax. Same-sandbo
 |------|-------------|
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb logs
+<a id="msb-logs"></a>
+
+## msb sandbox logs
 
 <Tooltip tip="On microsandbox cloud, use msb logs -f for a live stream. Bounded and historical reads remain local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -451,7 +494,9 @@ msb logs devbox --source all                # everything, chronologically merged
   If a sandbox failed to start, `msb logs` prepends a styled error block reconstructed from `boot-error.json`. The block tells you the failure stage, errno, and a hint, even though no user-program output was ever captured.
 </Tip>
 
-## msb ls
+<a id="msb-ls"></a>
+
+## msb sandbox list
 
 List all stored sandboxes.
 
@@ -472,7 +517,9 @@ msb ls -q                 # Names only
 | `--format` | Output format (`json`) |
 | `-q`, `--quiet` | Show only sandbox names |
 
-## msb status / ps
+<a id="msb-status--ps"></a>
+
+## msb sandbox status
 
 Show sandbox status with process details.
 
@@ -492,7 +539,9 @@ msb ps --format json      # JSON output
 
 The `CPUS` and `MEM` columns show the sandbox's allocation as `effective / max`, where max is the boot-time hotplug ceiling, the headroom available to a [live resize](/cli/sandbox-commands#msb-modify). Values come from the active config for running sandboxes (so an accepted `msb modify` shows immediately) and from the stored config for stopped ones. For *usage* rather than allocation, see [`msb metrics`](/cli/sandbox-commands#msb-metrics).
 
-## msb metrics
+<a id="msb-metrics"></a>
+
+## msb sandbox metrics
 
 <Tooltip tip="Not yet available on microsandbox cloud; instrument the workload with an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -536,7 +585,9 @@ The `CPU` and `MEM` denominators come from the catalog's **active config**, so t
 
 `--format json` and `--follow` keep the raw cumulative counters (no rate conversion) and add `state` and `cpus` fields.
 
-## msb inspect
+<a id="msb-inspect"></a>
+
+## msb sandbox inspect
 
 <Tooltip tip="On microsandbox cloud, text output omits parsed configuration details; use --format json to view the raw cloud specification."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -551,7 +602,9 @@ msb inspect devbox --format json
 |------|-------------|
 | `--format` | Output format (`json`) |
 
-## msb rm
+<a id="msb-rm"></a>
+
+## msb sandbox remove
 
 Remove one or more sandboxes and their associated state.
 

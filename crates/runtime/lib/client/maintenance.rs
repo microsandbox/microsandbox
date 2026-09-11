@@ -1,6 +1,6 @@
 //! Host-runtime-owned sandbox lifecycle maintenance.
 //!
-//! Each `msb sandbox` process self-cleans its own ephemeral sandbox when the
+//! Each `msb machine` process self-cleans its own ephemeral sandbox when the
 //! VM reaches a terminal status (see [`cleanup_terminal_ephemeral_sandbox`]),
 //! and on startup performs a cheap, bounded, opportunistic sweep of leftovers
 //! from runtimes that died before they could self-clean

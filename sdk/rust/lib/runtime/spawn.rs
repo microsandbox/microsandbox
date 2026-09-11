@@ -1,7 +1,7 @@
 //! Spawning the sandbox process.
 //!
 //! [`spawn_sandbox`] assembles CLI arguments from [`SandboxConfig`],
-//! fork+execs `msb sandbox`, and reads the startup JSON to obtain the
+//! fork+execs `msb machine`, and reads the startup JSON to obtain the
 //! sandbox process PID. The sandbox process runs the VMM and agent relay
 //! internally.
 
@@ -285,7 +285,7 @@ impl Drop for StdioInheritGuard {
 /// 1. Resolves the `msb` binary path
 /// 2. Creates sandbox directories (logs, runtime, scripts)
 /// 3. Builds CLI arguments from the config
-/// 4. Spawns the hidden `msb sandbox` process with `--agent-sock` for the relay
+/// 4. Spawns the hidden `msb machine` process with `--agent-sock` for the relay
 /// 5. Reads startup JSON from stdout to get child PIDs
 pub async fn spawn_sandbox(
     local: &LocalBackend,
@@ -493,7 +493,7 @@ pub async fn spawn_sandbox(
     // Split the config: `visible` stays on argv, the typed `LaunchConfig` is
     // delivered over the config fd (keeps the network-config blob and
     // secret-bearing env off `ps` / `/proc/<pid>/cmdline` — see issue #997).
-    let (mut visible, mut launch) = sandbox_cli_args(
+    let (mut visible, mut launch) = machine_cli_args(
         local,
         config,
         sandbox_id,
@@ -2461,7 +2461,7 @@ fn guest_mount_tag(guest_path: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sandbox_cli_args(
+fn machine_cli_args(
     local: &LocalBackend,
     config: &SandboxConfig,
     sandbox_id: i32,
@@ -2484,7 +2484,7 @@ fn sandbox_cli_args(
     // labels (name, id, sizing, fds) so the sandbox is identifiable in `ps`
     // and logs. Everything bulky, structured, or secret-bearing goes into the
     // typed `LaunchConfig`, delivered over the config fd. See issue #997.
-    let mut visible = vec![OsString::from("sandbox")];
+    let mut visible = vec![OsString::from("machine")];
 
     // An old binary might ignore unknown JSON fields, including the whole restore source.
     // An explicit argv requirement instead fails in its command parser, before any VM exists.
@@ -2954,7 +2954,7 @@ mod tests {
         AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
-    use super::{agentd_path_override, block_writeback_policy, sandbox_cli_args};
+    use super::{agentd_path_override, block_writeback_policy, machine_cli_args};
     use crate::{
         LogLevel,
         backend::LocalBackend,
@@ -3185,7 +3185,7 @@ mod tests {
     //----------------------------------------------------------------------------------------------
 
     /// Build a `LocalBackend` for tests. Uses `lazy()` since these tests only
-    /// exercise the pure-rendering `sandbox_cli_args` path — no DB / FS
+    /// exercise the pure-rendering `machine_cli_args` path — no DB / FS
     /// touches.
     fn test_local_backend() -> LocalBackend {
         LocalBackend::lazy()
@@ -3210,7 +3210,7 @@ mod tests {
     /// Return the typed launch payload generated for a sandbox configuration.
     fn render_launch(config: &SandboxConfig) -> LaunchConfig {
         let local = test_local_backend();
-        let (_, launch) = sandbox_cli_args(
+        let (_, launch) = machine_cli_args(
             &local,
             config,
             42,
@@ -3469,7 +3469,7 @@ mod tests {
     }
 
     /// Render the full arg set (visible argv + the flattened config payload)
-    /// as strings. Tests assert on the union since both feed `msb sandbox`.
+    /// as strings. Tests assert on the union since both feed `msb machine`.
     fn render_args(config: &SandboxConfig) -> Vec<String> {
         render_args_with_named_volumes(config, &HashMap::new())
     }
@@ -3479,7 +3479,7 @@ mod tests {
         named_volumes: &HashMap<String, super::ResolvedNamedVolume>,
     ) -> Vec<String> {
         let local = test_local_backend();
-        let (visible, launch) = sandbox_cli_args(
+        let (visible, launch) = machine_cli_args(
             &local,
             config,
             42,
@@ -3571,7 +3571,7 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[tokio::test]
-    async fn sandbox_cli_args_uses_the_supplied_network_slot() {
+    async fn machine_cli_args_uses_the_supplied_network_slot() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
@@ -3584,7 +3584,7 @@ mod tests {
     /// Render only the `visible` argv (what shows up in `ps`).
     fn render_visible_args(config: &SandboxConfig) -> Vec<String> {
         let local = test_local_backend();
-        let (visible, _piped) = sandbox_cli_args(
+        let (visible, _piped) = machine_cli_args(
             &local,
             config,
             42,
@@ -3616,7 +3616,7 @@ mod tests {
         file_mounts: &HashMap<String, (String, String)>,
     ) -> Vec<String> {
         let local = test_local_backend();
-        let (visible, launch) = sandbox_cli_args(
+        let (visible, launch) = machine_cli_args(
             &local,
             config,
             42,
@@ -3645,7 +3645,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_selected_log_level() {
+    async fn test_machine_cli_args_include_selected_log_level() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .log_level(LogLevel::Debug)
@@ -3659,7 +3659,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_are_silent_by_default() {
+    async fn test_machine_cli_args_are_silent_by_default() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
@@ -3677,7 +3677,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_agent_sock_path() {
+    async fn test_machine_cli_args_include_agent_sock_path() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
@@ -3694,7 +3694,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_startup_fd_when_supplied() {
+    async fn test_machine_cli_args_include_startup_fd_when_supplied() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
@@ -3702,7 +3702,7 @@ mod tests {
             .unwrap();
 
         let local = test_local_backend();
-        let (visible, _piped) = sandbox_cli_args(
+        let (visible, _piped) = machine_cli_args(
             &local,
             &config,
             42,
@@ -3733,7 +3733,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_detached_startup_command() {
+    async fn test_machine_cli_args_include_detached_startup_command() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .entrypoint(["/entrypoint"])
@@ -3757,7 +3757,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_detached_image_default_command() {
+    async fn test_machine_cli_args_include_detached_image_default_command() {
         let mut config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .entrypoint(["/entrypoint"])
@@ -3774,14 +3774,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_startup_pipe_when_supplied() {
+    async fn test_machine_cli_args_include_startup_pipe_when_supplied() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
             .await
             .unwrap();
         let local = test_local_backend();
-        let (visible, _launch) = sandbox_cli_args(
+        let (visible, _launch) = machine_cli_args(
             &local,
             &config,
             42,
@@ -3811,7 +3811,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_skip_startup_exec_when_init_owns_argv() {
+    async fn test_machine_cli_args_skip_startup_exec_when_init_owns_argv() {
         let mut config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .workdir("/opt/hermes")
@@ -3971,7 +3971,7 @@ mod tests {
         let all = render_args(&config);
 
         // Operator-readable labels stay on argv.
-        assert_eq!(visible.first().map(String::as_str), Some("sandbox"));
+        assert_eq!(visible.first().map(String::as_str), Some("machine"));
         assert!(visible.windows(2).any(|p| p == ["--name", "test"]));
         assert!(visible.iter().any(|a| a == "--vcpus"));
         assert!(visible.iter().any(|a| a == "--memory-mib"));
@@ -4040,7 +4040,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_emit_metrics_interval_flag() {
+    async fn test_machine_cli_args_emit_metrics_interval_flag() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .metrics_sample_interval(std::time::Duration::from_millis(1000))
@@ -4059,7 +4059,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_custom_metrics_sample_interval() {
+    async fn test_machine_cli_args_include_custom_metrics_sample_interval() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .metrics_sample_interval(std::time::Duration::from_millis(2500))
@@ -4078,7 +4078,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_disabled_metrics_emit_disable_flag() {
+    async fn test_machine_cli_args_disabled_metrics_emit_disable_flag() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .metrics_sample_interval(std::time::Duration::ZERO)
@@ -4101,7 +4101,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_disable_overrides_positive_interval() {
+    async fn test_machine_cli_args_disable_overrides_positive_interval() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .metrics_sample_interval(std::time::Duration::from_millis(2500))
@@ -4125,7 +4125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_db_connect_timeout() {
+    async fn test_machine_cli_args_include_db_connect_timeout() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
@@ -4142,7 +4142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_use_passthrough_for_bind_rootfs() {
+    async fn test_machine_cli_args_use_passthrough_for_bind_rootfs() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
@@ -4158,7 +4158,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_oci_without_manifest_digest_emits_no_block_root() {
+    async fn test_machine_cli_args_oci_without_manifest_digest_emits_no_block_root() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .build()
@@ -4174,7 +4174,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_cli_args_preserve_checkpoint_root_chain_and_restore_source() {
+    fn test_machine_cli_args_preserve_checkpoint_root_chain_and_restore_source() {
         let mut config = SandboxConfig::default();
         config.spec.name = "restored".into();
         config.spec.image = RootfsSource::oci("alpine");
@@ -4220,7 +4220,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_cli_args_preserve_flat_checkpoint_root_chain() {
+    fn test_machine_cli_args_preserve_flat_checkpoint_root_chain() {
         let mut config = SandboxConfig::default();
         config.spec.name = "restored-flat".into();
         config.spec.image = RootfsSource::Oci(OciRootfsSource {
@@ -4360,7 +4360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_flat_oci_attaches_one_raw_root_disk() {
+    async fn test_machine_cli_args_flat_oci_attaches_one_raw_root_disk() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .root_disk_with(|disk| disk.flat().size(8192u32))
@@ -4383,7 +4383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_inject_tmpfs_env_var() {
+    async fn test_machine_cli_args_inject_tmpfs_env_var() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/tmp", |m| m.tmpfs().size(256u32))
@@ -4398,7 +4398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_tmpfs_readonly_appends_ro() {
+    async fn test_machine_cli_args_tmpfs_readonly_appends_ro() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/seed", |m| m.tmpfs().size(64u32).readonly())
@@ -4412,7 +4412,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
+    async fn test_machine_cli_args_apply_default_oci_tmpfs() {
         let mut config = SandboxConfig {
             spec: microsandbox_types::SandboxSpec {
                 name: "test".into(),
@@ -4439,7 +4439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_omit_tmpfs_env_var_when_no_tmpfs() {
+    async fn test_machine_cli_args_omit_tmpfs_env_var_when_no_tmpfs() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
@@ -4452,7 +4452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_disk_image_with_fstype() {
+    async fn test_machine_cli_args_disk_image_with_fstype() {
         let config = SandboxBuilder::new("test")
             .image_with(|i| i.disk("/tmp/ubuntu.qcow2").fstype("ext4"))
             .build()
@@ -4481,7 +4481,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_disk_image_without_fstype() {
+    async fn test_machine_cli_args_disk_image_without_fstype() {
         let config = SandboxBuilder::new("test")
             .image_with(|i| i.disk("/tmp/alpine.raw"))
             .build()
@@ -4504,7 +4504,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_file_mount_generates_correct_args() {
+    async fn test_machine_cli_args_file_mount_generates_correct_args() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/guest/config.txt", |m| {
@@ -4537,7 +4537,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_mixed_file_and_dir_mounts() {
+    async fn test_machine_cli_args_mixed_file_and_dir_mounts() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/data", |m| m.bind("/host/data"))
@@ -4564,7 +4564,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_bind_mount_gets_default_quota() {
+    async fn test_machine_cli_args_bind_mount_gets_default_quota() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/data", |m| m.bind("/host/data"))
@@ -4587,7 +4587,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_file_mount_quota_override() {
+    async fn test_machine_cli_args_file_mount_quota_override() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/guest/file.txt", |m| m.bind("/host/file.txt").quota(32u32))
@@ -4609,7 +4609,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_bind_mount_protected_by_default() {
+    async fn test_machine_cli_args_bind_mount_protected_by_default() {
         // No opt-out: the rendered mount spec must NOT carry the token, so the
         // runtime applies the protective no-follow default.
         let config = SandboxBuilder::new("test")
@@ -4632,7 +4632,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_bind_mount_follow_root_symlinks_opt_out() {
+    async fn test_machine_cli_args_bind_mount_follow_root_symlinks_opt_out() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/data", |m| m.bind("/host/data").follow_root_symlinks(true))
@@ -4653,7 +4653,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_bind_mount_owner_host_only() {
+    async fn test_machine_cli_args_bind_mount_owner_host_only() {
         // An explicit owner is a host-side virtiofs presentation policy: it must
         // ride the `--mount` arg the VMM parses, and must NOT leak into the guest
         // `MSB_DIR_MOUNTS` spec (where agentd rejects `uid`/`gid` as unknown).
@@ -4688,7 +4688,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_bind_mount_quota_override() {
+    async fn test_machine_cli_args_bind_mount_quota_override() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/data", |m| m.bind("/host/data").quota(2048u32))
@@ -4709,7 +4709,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(windows)]
-    async fn test_sandbox_cli_args_windows_drive_bind_mount_preserves_drive_colon() {
+    async fn test_machine_cli_args_windows_drive_bind_mount_preserves_drive_colon() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/data", |m| {
@@ -4740,7 +4740,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(windows)]
-    async fn test_sandbox_cli_args_windows_drive_file_mount_preserves_drive_colon() {
+    async fn test_machine_cli_args_windows_drive_file_mount_preserves_drive_colon() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/guest/config.txt", |m| {
@@ -4772,7 +4772,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_named_disk_volume() {
+    async fn test_machine_cli_args_named_disk_volume() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/var/lib/docker", |m| {
@@ -4805,7 +4805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_named_directory_volume() {
+    async fn test_machine_cli_args_named_directory_volume() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/data", |m| {
@@ -5104,7 +5104,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_disk_image_volume() {
+    async fn test_machine_cli_args_disk_image_volume() {
         // SandboxBuilder::validate canonicalizes disk hosts, so the file
         // must exist. Stage one in a tempdir.
         let dir = tempfile::tempdir().unwrap();
@@ -5141,7 +5141,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_disk_image_readonly() {
+    async fn test_machine_cli_args_disk_image_readonly() {
         let dir = tempfile::tempdir().unwrap();
         let host = dir.path().join("seed.raw");
         std::fs::write(&host, []).unwrap();

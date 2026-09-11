@@ -1,7 +1,7 @@
-//! The typed launch contract between the SDK and the `msb sandbox` process.
+//! The typed launch contract between the SDK and the `msb machine` process.
 //!
 //! [`LaunchConfig`] is the bulk of a sandbox's configuration. The SDK builds
-//! it, serializes it as JSON, and hands it to `msb sandbox` over an inherited
+//! it, serializes it as JSON, and hands it to `msb machine` over an inherited
 //! file descriptor (see [`CONFIG_FD`]); the process deserializes it
 //! and builds its [`crate::vm::Config`] from it. Only a few operator-readable
 //! labels and the real inherited fds stay on the process argv. This keeps the
@@ -25,13 +25,13 @@ use microsandbox_types::DeploymentProfile;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Fixed fd carrying the bulk `msb sandbox` config as NUL-terminated argument records.
+/// Fixed fd carrying the bulk `msb machine` config as NUL-terminated argument records.
 pub const CONFIG_FD: i32 = 96;
 
-/// Fixed fd used to pass the attached-parent watchdog pipe into `msb sandbox`.
+/// Fixed fd used to pass the attached-parent watchdog pipe into `msb machine`.
 pub const PARENT_WATCH_FD: i32 = 97;
 
-/// Fixed fd used to pass startup JSON from `msb sandbox` to its launcher.
+/// Fixed fd used to pass startup JSON from `msb machine` to its launcher.
 pub const STARTUP_FD: i32 = 98;
 
 /// Fixed fd holding the inherited per-sandbox lifecycle ownership lock.
@@ -75,7 +75,7 @@ pub struct StartupCommand {
     pub user: Option<String>,
 }
 
-/// The bulk `msb sandbox` configuration delivered over the config fd.
+/// The bulk `msb machine` configuration delivered over the config fd.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchConfig {

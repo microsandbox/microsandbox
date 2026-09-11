@@ -10,7 +10,7 @@ use crate::ui;
 //--------------------------------------------------------------------------------------------------
 
 /// Arguments shared by resident pause and resume.
-#[derive(Args)]
+#[derive(Debug, Args)]
 pub struct PauseArgs {
     /// Sandbox name.
     pub name: String,
