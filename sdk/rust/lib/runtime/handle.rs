@@ -65,6 +65,14 @@ pub struct ProcessHandle {
     _disk_locks: Vec<File>,
 }
 
+/// Cancellation owner for a process whose startup has not completed.
+///
+/// Dropping a Tokio child alone does not terminate it. Keep the process and its locks together
+/// until either startup hands them off or cancellation has killed and reaped the child.
+pub(crate) struct StartupProcess {
+    handle: Option<ProcessHandle>,
+}
+
 /// Token used to release a metrics reservation that never reached Active.
 #[derive(Clone)]
 pub(crate) struct MetricsReservationCleanup {
@@ -86,6 +94,29 @@ unsafe impl Send for WindowsJob {}
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl StartupProcess {
+    pub(crate) fn new(handle: ProcessHandle) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    pub(crate) fn handle_mut(&mut self) -> &mut ProcessHandle {
+        self.handle
+            .as_mut()
+            .expect("startup owner already consumed")
+    }
+
+    pub(crate) fn child_mut(&mut self) -> &mut Child {
+        &mut self.handle_mut().child
+    }
+
+    /// Transfer ownership without detaching the established process.
+    pub(crate) fn into_handle(mut self) -> ProcessHandle {
+        self.handle.take().expect("startup owner already consumed")
+    }
+}
 
 impl ProcessHandle {
     /// Create a new handle.
@@ -344,6 +375,34 @@ impl WindowsJob {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl Drop for StartupProcess {
+    fn drop(&mut self) {
+        let Some(mut handle) = self.handle.take() else {
+            return;
+        };
+        if matches!(handle.try_wait(), Ok(Some(_))) {
+            handle.cleanup_metrics_reservation();
+            return;
+        }
+
+        // Cancellation has no caller left to await graceful rollback. Request termination
+        // synchronously, before scheduling the reaper: a runtime shutdown must not leave an
+        // unpublished VM running merely because the cleanup task never got polled.
+        if let Err(error) = handle.child.start_kill() {
+            tracing::error!(pid = handle.pid, %error, "failed to terminate cancelled startup");
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                // Retain disk locks and the Windows job until exit, not just until kill is sent.
+                // There is deliberately no cleanup deadline that would release these early.
+                if let Err(error) = handle.wait().await {
+                    tracing::error!(pid = handle.pid, %error, "failed to reap cancelled startup");
+                }
+            });
+        }
+    }
+}
+
 impl Drop for ProcessHandle {
     fn drop(&mut self) {
         if self.detached {
@@ -514,6 +573,47 @@ mod startup_tests {
         assert!(handle.try_wait().unwrap().is_some());
         // Repeated cleanup observes the same exited child instead of signaling a stale PID.
         assert_eq!(handle.terminate_failed_startup().await.unwrap(), status);
+    }
+
+    #[tokio::test]
+    async fn cancelled_startup_kills_and_reaps_a_signal_resistant_child() {
+        let (handle, _stdin) = blocked_startup(true).await;
+        let pid = handle.pid();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let launch = tokio::spawn(async move {
+            let _owner = StartupProcess::new(handle);
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        waiting.await.unwrap();
+        launch.abort();
+        assert!(launch.await.unwrap_err().is_cancelled());
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            // A zombie still answers kill(pid, 0). ESRCH therefore checks reaping, not merely
+            // delivery of SIGKILL. The fixture has no grandchildren or unrelated processes.
+            while signal::kill(Pid::from_raw(pid as i32), None) != Err(nix::errno::Errno::ESRCH) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled startup child was not reaped");
+        assert_eq!(
+            nix::sys::wait::waitpid(
+                Pid::from_raw(pid as i32),
+                Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+            ),
+            Err(nix::errno::Errno::ECHILD),
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_owner_handoff_preserves_the_live_child() {
+        let (handle, _stdin) = blocked_startup(false).await;
+        let mut handle = StartupProcess::new(handle).into_handle();
+        tokio::task::yield_now().await;
+        assert!(handle.try_wait().unwrap().is_none());
+        handle.terminate_failed_startup().await.unwrap();
     }
 }
 

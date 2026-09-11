@@ -75,9 +75,9 @@ use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 use super::network_slot::NetworkSlot;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
-use crate::runtime::handle::ProcessHandle;
 #[cfg(windows)]
 use crate::runtime::handle::WindowsJob;
+use crate::runtime::handle::{ProcessHandle, StartupProcess};
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     backend::LocalBackend,
@@ -672,7 +672,7 @@ pub async fn spawn_sandbox(
     ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
 
     // Spawn and Windows lock release form one handoff, before waiting for startup JSON.
-    let mut child = {
+    let child = {
         match spawn_runtime_command(
             &mut cmd,
             mode,
@@ -699,11 +699,38 @@ pub async fn spawn_sandbox(
     tracing::debug!(pid = _pid, sandbox = %config.spec.name, "spawn_sandbox: process started");
 
     #[cfg(windows)]
-    if let Some(job) = &child_job
-        && let Err(err) = job.assign_pid(_pid)
-    {
-        let status = terminate_startup_process(&mut child).await;
-        release_metrics_reservation(config, metrics_reservation.as_ref());
+    let job_assignment = child_job
+        .as_ref()
+        .map(|job| job.assign_pid(_pid))
+        .transpose();
+
+    // Install cancellation ownership before the first post-spawn await, including failures
+    // during Windows job assignment and the initial startup reply.
+    let mut startup_process = StartupProcess::new(ProcessHandle::new(
+        _pid,
+        config.spec.name.clone(),
+        child,
+        disk_locks,
+        #[cfg(unix)]
+        parent_watchdog.map(|pipe| pipe.write_fd),
+        #[cfg(windows)]
+        child_job,
+        metrics_reservation.as_ref().map(|reservation| {
+            MetricsReservationCleanup::new(
+                reservation.shm_name.clone(),
+                reservation.slot,
+                reservation.generation,
+                Some(reservation.registry.clone()),
+            )
+        }),
+    ));
+
+    #[cfg(windows)]
+    if let Err(err) = job_assignment {
+        let status = startup_process
+            .handle_mut()
+            .terminate_failed_startup()
+            .await;
         return Err(crate::MicrosandboxError::Runtime(format!(
             "failed to assign sandbox process to Windows job (status: {status:?}): {err}"
         )));
@@ -711,19 +738,23 @@ pub async fn spawn_sandbox(
 
     let line = match tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        read_startup_line(&mut child, startup_pipe),
+        read_startup_line(startup_process.child_mut(), startup_pipe),
     )
     .await
     {
         Ok(Ok(line)) => line,
         Ok(Err(err)) => {
-            terminate_startup_process(&mut child).await;
-            release_metrics_reservation(config, metrics_reservation.as_ref());
+            startup_process
+                .handle_mut()
+                .terminate_failed_startup()
+                .await?;
             return Err(err);
         }
         Err(_) => {
-            terminate_startup_process(&mut child).await;
-            release_metrics_reservation(config, metrics_reservation.as_ref());
+            startup_process
+                .handle_mut()
+                .terminate_failed_startup()
+                .await?;
             return Err(crate::MicrosandboxError::Runtime(
                 "sandbox startup timeout: no JSON received within 30 seconds".into(),
             ));
@@ -733,8 +764,10 @@ pub async fn spawn_sandbox(
     let startup: StartupInfo = match serde_json::from_str(line.trim()) {
         Ok(info) => info,
         Err(_) => {
-            let status = terminate_startup_process(&mut child).await;
-            release_metrics_reservation(config, metrics_reservation.as_ref());
+            let status = startup_process
+                .handle_mut()
+                .terminate_failed_startup()
+                .await?;
             tracing::debug!(
                 raw_line = ?line,
                 exit_status = ?status,
@@ -747,8 +780,10 @@ pub async fn spawn_sandbox(
         }
     };
     if startup.pid != _pid {
-        let status = terminate_startup_process(&mut child).await;
-        release_metrics_reservation(config, metrics_reservation.as_ref());
+        let status = startup_process
+            .handle_mut()
+            .terminate_failed_startup()
+            .await?;
         return Err(crate::MicrosandboxError::Runtime(format!(
             "sandbox startup PID mismatch: spawned pid {_pid}, startup pid {} \
              (status: {status:?})",
@@ -762,41 +797,7 @@ pub async fn spawn_sandbox(
         "spawn_sandbox: startup JSON received"
     );
 
-    #[cfg(unix)]
-    let handle = ProcessHandle::new(
-        startup.pid,
-        config.spec.name.clone(),
-        child,
-        disk_locks,
-        parent_watchdog.map(|pipe| pipe.write_fd),
-        metrics_reservation.as_ref().map(|reservation| {
-            MetricsReservationCleanup::new(
-                reservation.shm_name.clone(),
-                reservation.slot,
-                reservation.generation,
-                Some(reservation.registry.clone()),
-            )
-        }),
-    );
-
-    #[cfg(windows)]
-    let handle = ProcessHandle::new(
-        startup.pid,
-        config.spec.name.clone(),
-        child,
-        disk_locks,
-        child_job,
-        metrics_reservation.as_ref().map(|reservation| {
-            MetricsReservationCleanup::new(
-                reservation.shm_name.clone(),
-                reservation.slot,
-                reservation.generation,
-                Some(reservation.registry.clone()),
-            )
-        }),
-    );
-
-    Ok((handle, agent_sock_path))
+    Ok((startup_process.into_handle(), agent_sock_path))
 }
 
 /// Start the process after releasing ownership that cannot be inherited on Windows.
@@ -2225,13 +2226,6 @@ pub(crate) async fn acquire_sandbox_lifecycle_guard(
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-}
-
-async fn terminate_startup_process(
-    child: &mut tokio::process::Child,
-) -> Option<std::process::ExitStatus> {
-    let _ = child.start_kill();
-    child.wait().await.ok()
 }
 
 /// Resolve bind mounts whose host source is a regular file.

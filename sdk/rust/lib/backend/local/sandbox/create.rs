@@ -27,6 +27,7 @@ use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
     sandbox_rootfs as sandbox_rootfs_entity,
 };
+use crate::runtime::handle::StartupProcess;
 use crate::runtime::{
     ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes, spawn_sandbox,
 };
@@ -838,25 +839,34 @@ impl LocalBackend {
         mode: SpawnMode,
         lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
     ) -> MicrosandboxResult<(crate::backend::SandboxLocalState, SandboxConfig)> {
-        let (mut handle, agent_sock_path) =
+        let (handle, agent_sock_path) =
             spawn_sandbox(self, &config, sandbox_id, mode, lifecycle_guard).await?;
+        let mut startup_process = StartupProcess::new(handle);
         let log_dir = self.sandboxes_dir().join(&config.spec.name).join("logs");
 
         // Wait for the relay socket to become available.
-        let client =
-            match Self::wait_for_relay(&agent_sock_path, &log_dir, &mut handle, &config.spec.name)
-                .await
-            {
-                Ok(client) => client,
-                Err(error) => {
-                    if let Err(cleanup) = handle.terminate_failed_startup().await {
-                        return Err(crate::MicrosandboxError::Runtime(format!(
-                            "{error}; {cleanup}"
-                        )));
-                    }
-                    return Err(error);
+        let client = match Self::wait_for_relay(
+            &agent_sock_path,
+            &log_dir,
+            startup_process.handle_mut(),
+            &config.spec.name,
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(error) => {
+                if let Err(cleanup) = startup_process
+                    .handle_mut()
+                    .terminate_failed_startup()
+                    .await
+                {
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "{error}; {cleanup}"
+                    )));
                 }
-            };
+                return Err(error);
+            }
+        };
 
         if let Ok(ready) = client.ready() {
             tracing::info!(
@@ -868,7 +878,7 @@ impl LocalBackend {
         }
         // Even detached launches remain creator-owned until catalog publication and validation
         // finish. Cancellation or failure before that boundary must terminate this exact child.
-        let handle = Some(Arc::new(Mutex::new(handle)));
+        let handle = Some(Arc::new(Mutex::new(startup_process.into_handle())));
 
         Ok((
             crate::backend::SandboxLocalState {
