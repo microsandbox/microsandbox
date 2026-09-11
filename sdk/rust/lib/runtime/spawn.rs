@@ -727,69 +727,39 @@ pub async fn spawn_sandbox(
 
     #[cfg(windows)]
     if let Err(err) = job_assignment {
-        let status = startup_process
+        let error = crate::MicrosandboxError::Runtime(format!(
+            "failed to assign sandbox process to Windows job: {err}"
+        ));
+        let cleanup = startup_process
             .handle_mut()
             .terminate_failed_startup()
             .await;
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "failed to assign sandbox process to Windows job (status: {status:?}): {err}"
-        )));
+        return Err(startup_error_with_cleanup(error, cleanup));
     }
 
-    let line = match tokio::time::timeout(
+    let startup_result = match tokio::time::timeout(
         std::time::Duration::from_secs(30),
         read_startup_line(startup_process.child_mut(), startup_pipe),
     )
     .await
     {
-        Ok(Ok(line)) => line,
-        Ok(Err(err)) => {
-            startup_process
+        Ok(line) => line.and_then(|line| parse_startup_info(&line, _pid)),
+        Err(_) => Err(crate::MicrosandboxError::Runtime(
+            "sandbox startup timeout: no JSON received within 30 seconds".into(),
+        )),
+    };
+    let startup = match startup_result {
+        Ok(startup) => startup,
+        Err(error) => {
+            // Decide why launch failed before cleanup. Reaping can fail independently and
+            // must never replace the timeout, read error, bad JSON or mismatched identity.
+            let cleanup = startup_process
                 .handle_mut()
                 .terminate_failed_startup()
-                .await?;
-            return Err(err);
-        }
-        Err(_) => {
-            startup_process
-                .handle_mut()
-                .terminate_failed_startup()
-                .await?;
-            return Err(crate::MicrosandboxError::Runtime(
-                "sandbox startup timeout: no JSON received within 30 seconds".into(),
-            ));
+                .await;
+            return Err(startup_error_with_cleanup(error, cleanup));
         }
     };
-
-    let startup: StartupInfo = match serde_json::from_str(line.trim()) {
-        Ok(info) => info,
-        Err(_) => {
-            let status = startup_process
-                .handle_mut()
-                .terminate_failed_startup()
-                .await?;
-            tracing::debug!(
-                raw_line = ?line,
-                exit_status = ?status,
-                "spawn_sandbox: failed to parse startup JSON"
-            );
-            return Err(crate::MicrosandboxError::Runtime(format!(
-                "sandbox process exited ({status:?}) before sending startup info \
-                 (line: {line:?}, check stderr above for details)"
-            )));
-        }
-    };
-    if startup.pid != _pid {
-        let status = startup_process
-            .handle_mut()
-            .terminate_failed_startup()
-            .await?;
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "sandbox startup PID mismatch: spawned pid {_pid}, startup pid {} \
-             (status: {status:?})",
-            startup.pid
-        )));
-    }
 
     tracing::debug!(
         vm_pid = startup.pid,
@@ -798,6 +768,36 @@ pub async fn spawn_sandbox(
     );
 
     Ok((startup_process.into_handle(), agent_sock_path))
+}
+
+/// Validate the reply before cleanup so a teardown failure cannot hide its diagnosis.
+fn parse_startup_info(line: &str, expected_pid: u32) -> MicrosandboxResult<StartupInfo> {
+    let startup: StartupInfo = serde_json::from_str(line.trim()).map_err(|error| {
+        MicrosandboxError::Runtime(format!(
+            "invalid sandbox startup JSON: {error} (line: {line:?}, check stderr for details)"
+        ))
+    })?;
+    if startup.pid != expected_pid {
+        return Err(MicrosandboxError::Runtime(format!(
+            "sandbox startup PID mismatch: spawned pid {expected_pid}, startup pid {}",
+            startup.pid,
+        )));
+    }
+    Ok(startup)
+}
+
+/// Keep the original typed failure when cleanup succeeds; report both when it does not.
+fn startup_error_with_cleanup(
+    startup: MicrosandboxError,
+    cleanup: MicrosandboxResult<std::process::ExitStatus>,
+) -> MicrosandboxError {
+    match cleanup {
+        Ok(status) => {
+            tracing::debug!(?status, error = %startup, "failed startup process reaped");
+            startup
+        }
+        Err(cleanup) => MicrosandboxError::Runtime(format!("{startup}; {cleanup}")),
+    }
 }
 
 /// Start the process after releasing ownership that cannot be inherited on Windows.
@@ -2959,6 +2959,63 @@ mod tests {
         },
         volume::VolumeKind,
     };
+
+    #[test]
+    fn startup_cleanup_failure_preserves_each_startup_diagnosis() {
+        let failures = [
+            crate::MicrosandboxError::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "startup pipe read failed",
+            )),
+            crate::MicrosandboxError::Runtime(
+                "sandbox startup timeout: no JSON received within 30 seconds".into(),
+            ),
+            super::parse_startup_info("not JSON", 42).unwrap_err(),
+            super::parse_startup_info(r#"{"pid":43}"#, 42).unwrap_err(),
+        ];
+        for failure in failures {
+            let original = failure.to_string();
+            let error = super::startup_error_with_cleanup(
+                failure,
+                Err(crate::MicrosandboxError::Runtime(
+                    "startup cleanup pending: runtime process 42 has not exited".into(),
+                )),
+            )
+            .to_string();
+            assert!(error.contains(&original), "{error}");
+            assert!(error.contains("startup cleanup pending"), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_startup_cleanup_keeps_the_original_error_variant() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let error = super::startup_error_with_cleanup(
+            crate::MicrosandboxError::from(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "startup pipe closed",
+            )),
+            Ok(std::process::ExitStatus::from_raw(0)),
+        );
+        assert!(
+            matches!(error, crate::MicrosandboxError::Io(ref io) if io.kind() == std::io::ErrorKind::BrokenPipe)
+        );
+    }
+
+    #[test]
+    fn startup_reply_requires_the_exact_owned_process() {
+        assert_eq!(
+            super::parse_startup_info(" {\"pid\":42}\n", 42)
+                .unwrap()
+                .pid,
+            42
+        );
+        assert!(super::parse_startup_info("", 42).is_err());
+        assert!(super::parse_startup_info("{}", 42).is_err());
+        assert!(super::parse_startup_info(r#"{"pid":43}"#, 42).is_err());
+    }
 
     #[cfg(windows)]
     #[test]

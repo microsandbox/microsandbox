@@ -28,6 +28,7 @@ use crate::db::entity::{
     sandbox_rootfs as sandbox_rootfs_entity,
 };
 use crate::runtime::handle::StartupProcess;
+use crate::runtime::spawn::EnsuredNamedVolumes;
 use crate::runtime::{
     ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes, spawn_sandbox,
 };
@@ -653,47 +654,14 @@ impl LocalBackend {
         let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
             Err(e) => {
-                // A timeout is not evidence of process exit. The creator still owns the
-                // name transition; only reconcile/delete storage after the runtime lets go.
-                let Some(_runtime_guard) = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
-                    &self.config().run_dir(),
+                self.rollback_failed_startup(
+                    write_db,
+                    sandbox_id,
                     &persisted_config.spec.name,
-                )?
-                else {
-                    return Err(crate::MicrosandboxError::Runtime(format!(
-                        "{e}; startup cleanup pending: runtime still owns sandbox {:?}",
-                        persisted_config.spec.name,
-                    )));
-                };
-                run_entity::Entity::update_many()
-                    .col_expr(
-                        run_entity::Column::Status,
-                        Expr::value(run_entity::RunStatus::Terminated),
-                    )
-                    .col_expr(
-                        run_entity::Column::TerminationReason,
-                        Expr::value(run_entity::TerminationReason::Failed),
-                    )
-                    .col_expr(
-                        run_entity::Column::TerminatedAt,
-                        Expr::value(chrono::Utc::now().naive_utc()),
-                    )
-                    .filter(run_entity::Column::SandboxId.eq(sandbox_id))
-                    .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
-                    .exec(write_db)
-                    .await?;
-                if created_named_volumes.is_empty() {
-                    let _ = Self::compare_and_set_sandbox_status(
-                        write_db,
-                        sandbox_id,
-                        &[SandboxStatus::Starting],
-                        SandboxStatus::Stopped,
-                    )
-                    .await;
-                } else {
-                    rollback_created_named_volumes(self, &created_named_volumes).await;
-                    let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
-                }
+                    &created_named_volumes,
+                )
+                .await
+                .map_err(|cleanup| crate::MicrosandboxError::Runtime(format!("{e}; {cleanup}")))?;
                 return Err(e);
             }
         };
@@ -802,6 +770,57 @@ impl LocalBackend {
             sandbox.finish_detached_creation().await?;
         }
         Ok(sandbox)
+    }
+
+    /// Roll back a failed launch while the caller still owns the name transition.
+    async fn rollback_failed_startup(
+        &self,
+        write_db: &DbWriteConnection,
+        sandbox_id: i32,
+        sandbox_name: &str,
+        created_named_volumes: &EnsuredNamedVolumes,
+    ) -> MicrosandboxResult<()> {
+        // A timeout is not evidence of process exit. Keep the runtime ownership guard through
+        // database reconciliation and volume rollback; no live owner may lose its storage.
+        let Some(_runtime_guard) = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+            &self.config().run_dir(),
+            sandbox_name,
+        )?
+        else {
+            return Err(crate::MicrosandboxError::Runtime(format!(
+                "startup cleanup pending: runtime still owns sandbox {sandbox_name:?}",
+            )));
+        };
+        run_entity::Entity::update_many()
+            .col_expr(
+                run_entity::Column::Status,
+                Expr::value(run_entity::RunStatus::Terminated),
+            )
+            .col_expr(
+                run_entity::Column::TerminationReason,
+                Expr::value(run_entity::TerminationReason::Failed),
+            )
+            .col_expr(
+                run_entity::Column::TerminatedAt,
+                Expr::value(chrono::Utc::now().naive_utc()),
+            )
+            .filter(run_entity::Column::SandboxId.eq(sandbox_id))
+            .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
+            .exec(write_db)
+            .await?;
+        if created_named_volumes.is_empty() {
+            let _ = Self::compare_and_set_sandbox_status(
+                write_db,
+                sandbox_id,
+                &[SandboxStatus::Starting],
+                SandboxStatus::Stopped,
+            )
+            .await;
+        } else {
+            rollback_created_named_volumes(self, created_named_volumes).await;
+            let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
+        }
+        Ok(())
     }
 
     /// Clear only the pending construction intent, preserving any concurrent desired edits.
@@ -1996,6 +2015,178 @@ mod tests {
     async fn readiness_loop_reports_stalled_handshake_deadline() {
         let error = exercise_readiness_deadline(true).await;
         assert!(error.contains("deadline has elapsed"), "{error}");
+    }
+
+    async fn exercise_failed_startup_rollback(with_created_volume: bool) {
+        use crate::db::entity::volume as volume_entity;
+        use crate::runtime::ensure_named_volumes;
+        use crate::sandbox::SandboxBuilder;
+
+        let directory = tempdir().unwrap();
+        let rootfs = directory.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+        let local = LocalBackend::builder()
+            .home(directory.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let mut builder = SandboxBuilder::new("rollback-owner").image(rootfs.display().to_string());
+        if with_created_volume {
+            builder = builder.volume("/data", |mount| {
+                mount.named_with("created-during-startup", |volume| volume.ensure_exists())
+            });
+        }
+        let config = builder.build().await.unwrap();
+        let pools = local.db().await.unwrap();
+        let write_db = pools.write();
+        let _transition = microsandbox_runtime::ipc::try_acquire_transition_guard(
+            &local.config().run_dir(),
+            &config.spec.name,
+        )
+        .unwrap()
+        .unwrap();
+        let created = ensure_named_volumes(&local, &config).await.unwrap();
+        let sandbox_id = LocalBackend::insert_starting_sandbox_record(write_db, &config)
+            .await
+            .unwrap();
+        let active_run = run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(write_db)
+        .await
+        .unwrap()
+        .last_insert_id;
+
+        let sandbox_before = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(write_db)
+            .await
+            .unwrap()
+            .unwrap();
+        let run_before = run_entity::Entity::find_by_id(active_run)
+            .one(write_db)
+            .await
+            .unwrap()
+            .unwrap();
+        let volumes_before = volume_entity::Entity::find().all(write_db).await.unwrap();
+        assert_eq!(volumes_before.len(), usize::from(with_created_volume));
+        let volume_path = local.volume_path("created-during-startup");
+        if with_created_volume {
+            fs::write(volume_path.join("sentinel"), b"still owned").unwrap();
+            // Sandbox deletion cascades to run rows. Check the actual run state at each
+            // deletion, rather than inferring reconciliation from the rows being absent.
+            for (table, id) in [("sandbox", sandbox_id), ("volume", volumes_before[0].id)] {
+                write_db
+                    .execute_unprepared(&format!(
+                        "CREATE TRIGGER check_{table}_rollback BEFORE DELETE ON {table}
+                     WHEN OLD.id = {id} BEGIN
+                     SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM run WHERE id = {active_run}
+                     AND status = 'Terminated' AND termination_reason = 'Failed'
+                     AND terminated_at IS NOT NULL)
+                     THEN RAISE(ABORT, 'rollback before run reconciliation') END; END;"
+                    ))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let runtime_owner = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+            &local.config().run_dir(),
+            &config.spec.name,
+        )
+        .unwrap()
+        .unwrap();
+        let error = local
+            .rollback_failed_startup(write_db, sandbox_id, &config.spec.name, &created)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("startup cleanup pending"),
+            "{error}"
+        );
+        assert_eq!(
+            sandbox_entity::Entity::find_by_id(sandbox_id)
+                .one(write_db)
+                .await
+                .unwrap(),
+            Some(sandbox_before)
+        );
+        assert_eq!(
+            run_entity::Entity::find_by_id(active_run)
+                .one(write_db)
+                .await
+                .unwrap(),
+            Some(run_before)
+        );
+        assert_eq!(
+            volume_entity::Entity::find().all(write_db).await.unwrap(),
+            volumes_before
+        );
+        if with_created_volume {
+            assert_eq!(
+                fs::read(volume_path.join("sentinel")).unwrap(),
+                b"still owned"
+            );
+        }
+
+        drop(runtime_owner);
+        local
+            .rollback_failed_startup(write_db, sandbox_id, &config.spec.name, &created)
+            .await
+            .unwrap();
+        if with_created_volume {
+            assert!(!volume_path.exists());
+            assert!(
+                volume_entity::Entity::find()
+                    .all(write_db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                sandbox_entity::Entity::find_by_id(sandbox_id)
+                    .one(write_db)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                run_entity::Entity::find_by_id(active_run)
+                    .one(write_db)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            let sandbox = sandbox_entity::Entity::find_by_id(sandbox_id)
+                .one(write_db)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(sandbox.status, SandboxStatus::Stopped);
+            let run = run_entity::Entity::find_by_id(active_run)
+                .one(write_db)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.status, run_entity::RunStatus::Terminated);
+            assert_eq!(
+                run.termination_reason,
+                Some(run_entity::TerminationReason::Failed)
+            );
+            assert!(run.terminated_at.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_startup_rollback_waits_for_runtime_before_stopping_record() {
+        exercise_failed_startup_rollback(false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_startup_rollback_preserves_owned_volumes_then_reconciles_before_deletion() {
+        exercise_failed_startup_rollback(true).await;
     }
 
     #[test]
