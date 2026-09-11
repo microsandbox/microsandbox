@@ -194,6 +194,8 @@ Parsers and mutators must validate the complete supported feature set before the
 
 ## 9. Snapshots, Manifests, and Portable Archives
 
+Unreleased full checkpoints require an explicit `geometry` record in `checkpoint.json`: original CPU count/capacity and initial RAM/capacity. Live resize targets cannot substitute for the original guest-physical layout. Capture writes the public requirements summary from this runtime-owned record; restore rejects disagreement before RAM preparation. CPU and virtio-mem state retain the actual/requested counts and plugged-block bitmap separately, including unfinished resize operations. Earlier development full checkpoints missing these records are rejected, not guessed or migrated. This is an approved replacement of unreleased full state; released disk-only descriptors and archives are unchanged.
+
 Snapshot descriptors carry a stable random `snap_...` ID; their canonical bytes determine the descriptor digest, not that ID. Compatibility-sensitive elements include field order, required `null` values, map ordering, duplicate-key handling, tag spellings, schema and integrity identifiers, payload names, parent identities, state/scope/format variants, extension requirements, and translation-graph behavior.
 
 Archive compatibility includes compression detection, `archive.json`, canonical inventory order, transport digests, accepted path grammar, legacy paths, cache-closure entries, and rejection of duplicate, missing, or escaping paths.

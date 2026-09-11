@@ -859,6 +859,9 @@ async fn capture_full_snapshot(
 
         let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        // The database follows live resize targets; it cannot describe the original RAM map.
+        // Use the runtime-owned geometry bound to this exact checkpoint instead.
+        let geometry = closure.checkpoint().geometry;
         let requirements_summary = BTreeMap::from([
             (
                 "architecture".into(),
@@ -872,21 +875,18 @@ async fn capture_full_snapshot(
                 "memory_bytes".into(),
                 serde_json::Value::from(checkpoint.memory_logical_bytes),
             ),
-            (
-                "vcpus".into(),
-                serde_json::Value::from(sandbox_config.spec.resources.cpus),
-            ),
+            ("vcpus".into(), serde_json::Value::from(geometry.vcpus)),
             (
                 "max_vcpus".into(),
-                serde_json::Value::from(sandbox_config.spec.resources.max_cpus),
+                serde_json::Value::from(geometry.max_vcpus),
             ),
             (
                 "memory_mib".into(),
-                serde_json::Value::from(sandbox_config.spec.resources.memory_mib),
+                serde_json::Value::from(geometry.memory_mib),
             ),
             (
                 "max_memory_mib".into(),
-                serde_json::Value::from(sandbox_config.spec.resources.max_memory_mib),
+                serde_json::Value::from(geometry.max_memory_mib),
             ),
         ]);
         let manifest = Manifest {
@@ -1796,6 +1796,12 @@ mod tests {
             schema: "microsandbox.checkpoint/1".into(),
             checkpoint_id: "checkpoint_fixture".into(),
             capture_intent: CaptureIntent::FullSnapshot,
+            geometry: microsandbox_image::checkpoint::CheckpointGeometry {
+                vcpus: 1,
+                max_vcpus: 1,
+                memory_mib: 128,
+                max_memory_mib: 128,
+            },
             architecture: std::env::consts::ARCH.into(),
             pause_generation: 7,
             execution_state: store.put_bytes(b"execution").unwrap(),

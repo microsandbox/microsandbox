@@ -91,8 +91,8 @@ microsandbox-protocol = { version = "=0.6.18", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.18", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.18", path = "crates/utils" }
 microsandbox-vsock = { version = "=0.6.18", path = "crates/vsock" }
-msb_krun = "=0.1.35"
-msb_krun_utils = "=0.1.35"
+msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "97a8042c6861a5e87130c4fa9d93677bb40c29ea" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "97a8042c6861a5e87130c4fa9d93677bb40c29ea" }
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 

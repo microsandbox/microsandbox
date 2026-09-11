@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use microsandbox_agent_client::AgentClient;
 use microsandbox_image::checkpoint::{
-    AdmittedObject, CaptureIntent, CaptureObjectBatch, CheckpointManifest, ContentRef,
-    DeviceStateRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
-    MemoryManifest, ObjectId, ResourceDescriptor, ResourceTreatment,
+    AdmittedObject, CaptureIntent, CaptureObjectBatch, CheckpointGeometry, CheckpointManifest,
+    ContentRef, DeviceStateRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent,
+    MemoryExtentContent, MemoryManifest, ObjectId, ResourceDescriptor, ResourceTreatment,
 };
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::core::{
@@ -1268,6 +1268,12 @@ impl CheckpointCoordinator {
             checkpoint_id: checkpoint_id.into(),
             capture_intent: intent,
             architecture: std::env::consts::ARCH.into(),
+            geometry: CheckpointGeometry {
+                vcpus: self.boot_geometry.0,
+                max_vcpus: self.boot_geometry.1.max(self.boot_geometry.0),
+                memory_mib: self.boot_geometry.2,
+                max_memory_mib: self.boot_geometry.3.max(self.boot_geometry.2),
+            },
             pause_generation,
             execution_state: execution_id,
             memory: memory_id,

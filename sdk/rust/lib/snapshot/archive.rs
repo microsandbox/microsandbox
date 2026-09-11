@@ -4483,6 +4483,12 @@ mod tests {
             schema: "microsandbox.checkpoint/1".into(),
             checkpoint_id: "checkpoint_archive".into(),
             capture_intent: CaptureIntent::FullSnapshot,
+            geometry: microsandbox_image::checkpoint::CheckpointGeometry {
+                vcpus: 1,
+                max_vcpus: 1,
+                memory_mib: 128,
+                max_memory_mib: 128,
+            },
             architecture: std::env::consts::ARCH.into(),
             pause_generation: 11,
             execution_state: execution_id,

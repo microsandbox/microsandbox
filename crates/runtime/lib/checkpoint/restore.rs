@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use microsandbox_image::checkpoint::{
-    CheckpointClosure, MemoryExtentContent, ObjectId, ResourceDescriptor, ResourceTreatment,
+    CheckpointClosure, CheckpointGeometry, MemoryExtentContent, ObjectId, ResourceDescriptor,
+    ResourceTreatment,
 };
 use microsandbox_protocol::core::{
     Ready, WORKLOAD_TRANSPORT_BARRIER_VERSION, WorkloadTransportCredit, WorkloadTransportPosition,
@@ -30,6 +31,7 @@ const MAX_MEMORY_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Fully admitted checkpoint state ready to install during [`msb_krun::Vm::enter`].
 pub(crate) struct PreparedCheckpointRestore {
+    geometry: CheckpointGeometry,
     execution: msb_krun::ExecutionState,
     devices: Vec<PreparedDeviceRestore>,
     memory: Option<CheckpointMemoryRestore>,
@@ -113,6 +115,12 @@ impl PreparedCheckpointRestore {
         let backing =
             msb_krun::PrivateMemoryBacking::new(file, regions).map_err(|e| e.to_string())?;
         Ok(Self {
+            geometry: CheckpointGeometry {
+                vcpus: state.vcpus,
+                max_vcpus: state.max_cpus.max(state.vcpus),
+                memory_mib: state.memory_mib,
+                max_memory_mib: state.max_memory_mib.max(state.memory_mib),
+            },
             execution,
             devices,
             memory: None,
@@ -170,12 +178,27 @@ impl PreparedCheckpointRestore {
         );
 
         Ok(Self {
+            geometry: closure.checkpoint().geometry,
             execution,
             devices,
             memory: Some(CheckpointMemoryRestore { closure }),
             local_memory: None,
             agent,
         })
+    }
+
+    /// Validate the launcher configuration before preparing RAM backing or entering the VM.
+    pub(crate) fn validate_geometry(&self, config: &crate::vm::VmConfig) -> Result<(), String> {
+        let requested = CheckpointGeometry {
+            vcpus: config.vcpus,
+            max_vcpus: config.max_cpus.max(config.vcpus),
+            memory_mib: config.memory_mib,
+            max_memory_mib: config.max_memory_mib.max(config.memory_mib),
+        };
+        if requested != self.geometry {
+            return Err("restore VM construction geometry differs from captured geometry".into());
+        }
+        Ok(())
     }
 
     /// Install all restore sources and leave the VM at an explicit activation gate.

@@ -1962,6 +1962,21 @@ pub(crate) fn apply_checkpoint_restore_constraints(
     checkpoint: &microsandbox_image::checkpoint::CheckpointManifest,
     overrides: RestoreOverrideIntent,
 ) -> MicrosandboxResult<()> {
+    // The summary is for inspection, not an independent source of VM layout.
+    // Reject disagreement before applying configuration or preparing child disks.
+    let geometry = checkpoint.geometry;
+    for (key, expected) in [
+        ("vcpus", u64::from(geometry.vcpus)),
+        ("max_vcpus", u64::from(geometry.max_vcpus)),
+        ("memory_mib", u64::from(geometry.memory_mib)),
+        ("max_memory_mib", u64::from(geometry.max_memory_mib)),
+    ] {
+        if checkpoint_requirement_u64(state, key)? != expected {
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                "checkpoint restore summary disagrees with captured geometry for {key}"
+            )));
+        }
+    }
     apply_checkpoint_resources(config, state, overrides)?;
     apply_capture_network(config, &checkpoint.resources)
 }

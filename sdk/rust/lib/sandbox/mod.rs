@@ -109,6 +109,8 @@ pub(crate) use modify::control_checkpoint_create;
 #[cfg(feature = "local")]
 pub(crate) use modify::control_disk_checkpoint_create;
 #[cfg(feature = "local")]
+pub(crate) use modify::restore_requested_resources;
+#[cfg(feature = "local")]
 pub(crate) use patch::{apply_patches, build_flat_tree, build_upper_tree};
 #[cfg(all(feature = "local", windows))]
 pub(crate) use reap::reap_leaked_runtime_process;

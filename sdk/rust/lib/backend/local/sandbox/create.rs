@@ -758,7 +758,14 @@ impl LocalBackend {
         if let Some(closure) = restore_closure {
             // Do not lose the recovery discriminator if any preceding creation check failed.
             // RAM/device state has been consumed and the runtime owns its disk chain and pins.
-            if let Err(error) = Self::complete_sandbox_restore(write_db, sandbox_id).await {
+            if let Err(error) = Self::complete_sandbox_restore(
+                write_db,
+                sandbox_id,
+                &persisted_config,
+                sandbox.config(),
+            )
+            .await
+            {
                 sandbox.terminate_creation_owner().await;
                 return Err(error);
             }
@@ -823,15 +830,32 @@ impl LocalBackend {
         Ok(())
     }
 
-    /// Clear only the pending construction intent, preserving any concurrent desired edits.
+    /// Finish construction and project captured targets without overwriting desired edits.
     async fn complete_sandbox_restore(
         db: &DbWriteConnection,
         sandbox_id: i32,
+        construction: &SandboxConfig,
+        restored: &SandboxConfig,
     ) -> MicrosandboxResult<()> {
+        // Construction needs the original boot geometry, but future starts/modifications need
+        // the captured requested sizes. Replace only values that still match construction:
+        // a concurrent explicit desired edit must survive this readiness publication.
         sandbox_entity::Entity::update_many()
             .col_expr(
                 sandbox_entity::Column::Config,
-                Expr::cust("json_remove(config, '$.checkpoint_restore')"),
+                Expr::cust_with_values(
+                    "json_set(json_remove(config, '$.checkpoint_restore'), \
+                     '$.resources.cpus', CASE WHEN json_extract(config, '$.resources.cpus') = ? \
+                     THEN ? ELSE json_extract(config, '$.resources.cpus') END, \
+                     '$.resources.memory_mib', CASE WHEN json_extract(config, '$.resources.memory_mib') = ? \
+                     THEN ? ELSE json_extract(config, '$.resources.memory_mib') END)",
+                    [
+                        u32::from(construction.spec.resources.cpus),
+                        u32::from(restored.spec.resources.cpus),
+                        construction.spec.resources.memory_mib,
+                        restored.spec.resources.memory_mib,
+                    ],
+                ),
             )
             .filter(sandbox_entity::Column::Id.eq(sandbox_id))
             .exec(db)
@@ -853,7 +877,7 @@ impl LocalBackend {
     /// the local-variant state plus the (possibly mutated) config.
     pub(super) async fn create_sandbox_inner(
         &self,
-        config: SandboxConfig,
+        mut config: SandboxConfig,
         sandbox_id: i32,
         mode: SpawnMode,
         lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
@@ -862,6 +886,7 @@ impl LocalBackend {
             spawn_sandbox(self, &config, sandbox_id, mode, lifecycle_guard).await?;
         let mut startup_process = StartupProcess::new(handle);
         let log_dir = self.sandboxes_dir().join(&config.spec.name).join("logs");
+        let startup_deadline = tokio::time::Instant::now() + AGENT_RELAY_READY_TIMEOUT;
 
         // Wait for the relay socket to become available.
         let client = match Self::wait_for_relay(
@@ -869,7 +894,7 @@ impl LocalBackend {
             &log_dir,
             startup_process.handle_mut(),
             &config.spec.name,
-            AGENT_RELAY_READY_TIMEOUT,
+            startup_deadline.saturating_duration_since(tokio::time::Instant::now()),
         )
         .await
         {
@@ -895,6 +920,31 @@ impl LocalBackend {
                 ready_time_ms = ready.ready_time_ns / 1_000_000,
                 "sandbox ready",
             );
+        }
+        if config.checkpoint_restore.is_some() {
+            // Resource reporting is part of readiness, not an unbounded wait after it.
+            let restored = tokio::time::timeout_at(
+                startup_deadline,
+                crate::sandbox::restore_requested_resources(self, &mut config),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(crate::MicrosandboxError::Runtime(
+                    "startup deadline expired while reading restored resource targets".into(),
+                ))
+            });
+            if let Err(error) = restored {
+                if let Err(cleanup) = startup_process
+                    .handle_mut()
+                    .terminate_failed_startup()
+                    .await
+                {
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "{error}; {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
         }
         // Even detached launches remain creator-owned until catalog publication and validation
         // finish. Cancellation or failure before that boundary must terminate this exact child.
@@ -2423,7 +2473,10 @@ mod tests {
 
         // Ordinary post-success/snapshot projections must not perpetuate one-shot restore input.
         assert!(pending.clone_for_persistence().checkpoint_restore.is_none());
-        LocalBackend::complete_sandbox_restore(pools.write(), id)
+        let mut restored = config.clone();
+        restored.spec.resources.cpus = 2;
+        restored.spec.resources.memory_mib = 768;
+        LocalBackend::complete_sandbox_restore(pools.write(), id, &config, &restored)
             .await
             .unwrap();
         let model = sandbox_entity::Entity::find_by_id(id)
@@ -2434,7 +2487,41 @@ mod tests {
         let completed: SandboxConfig = serde_json::from_str(&model.config).unwrap();
         assert!(completed.checkpoint_restore.is_none());
         assert_eq!(completed.spec.name, "pending");
+        assert_eq!(completed.spec.resources.cpus, 2);
+        assert_eq!(completed.spec.resources.memory_mib, 768);
         LocalBackend::validate_completed_restore(&completed).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_completion_preserves_concurrent_desired_resource_edits() {
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("test.db")).await;
+        let mut construction =
+            test_config_with_rootfs("edited", bind_rootfs(temp.path().to_path_buf()));
+        construction.spec.resources.cpus = 1;
+        construction.spec.resources.max_cpus = 4;
+        construction.spec.resources.memory_mib = 256;
+        construction.spec.resources.max_memory_mib = 1024;
+        let mut edited = construction.clone();
+        edited.spec.resources.cpus = 3;
+        let id = LocalBackend::insert_sandbox_record(pools.write(), &edited)
+            .await
+            .unwrap();
+        let mut restored = construction.clone();
+        restored.spec.resources.cpus = 2;
+        restored.spec.resources.memory_mib = 768;
+        LocalBackend::complete_sandbox_restore(pools.write(), id, &construction, &restored)
+            .await
+            .unwrap();
+        let model = sandbox_entity::Entity::find_by_id(id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let completed: SandboxConfig = serde_json::from_str(&model.config).unwrap();
+        assert_eq!(completed.spec.resources.cpus, 3);
+        assert_eq!(completed.spec.resources.memory_mib, 768);
+        assert_eq!(completed.spec.resources.max_memory_mib, 1024);
     }
 
     #[tokio::test]
