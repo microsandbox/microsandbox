@@ -60,6 +60,7 @@ def create(name, *args):
 
 def stop_remove(name):
     run("stop", name)
+    assert_released(name)
     run("remove", name)
     owned.remove(name)
 
@@ -80,6 +81,14 @@ def assert_owned(name):
         except BlockingIOError:
             return
     raise AssertionError("runtime ownership was released before graceful poweroff")
+
+
+def assert_released(name):
+    # Remove has its own bounded wait; prove Stop released ownership before invoking it.
+    digest = hashlib.sha256(name.encode()).hexdigest()[:32]
+    with (home / "run/locks" / (digest + ".lock")).open("rb") as lease:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    save(dict(args=["ownership_released", name], stdout="PASS immediate nonblocking acquisition"))
 
 
 def sdk_case(test_name, mode=None, delay=0):
@@ -128,7 +137,11 @@ def delayed_stop_case(timed):
     start = time.monotonic()
     if timed:
         result = run("stop", name, "--timeout", "1", check=False, timeout=10)
+        timeout_elapsed = time.monotonic() - start
         assert result.returncode != 0, "one-second stop must time out, not claim completion"
+        diagnostic = (result.stdout + result.stderr).lower()
+        assert "timed out" in diagnostic and "no kill was requested" in diagnostic
+        assert timeout_elapsed < 3, "one-second Stop deadline substantially overran its budget"
         wait_path(markers / "shutdown-requested")
         # The old guest fallback fired at two seconds. Preserve an observation beyond it.
         while time.monotonic() - start < 3.25:
@@ -136,6 +149,7 @@ def delayed_stop_case(timed):
         assert_owned(name)
         assert not (markers / "poweroff").exists()
     run("stop", name, timeout=35)
+    assert_released(name)
     elapsed = time.monotonic() - start
     assert elapsed >= 11, "Stop returned before the real guest's delayed poweroff"
     assert (markers / "shutdown-requested").exists()

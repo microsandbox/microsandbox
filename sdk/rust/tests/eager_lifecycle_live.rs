@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use microsandbox::{CreationProgress, MicrosandboxError, Sandbox, StartupPhase};
+use microsandbox_db::entity::sandbox as sandbox_row;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 #[cfg(target_os = "linux")]
 use serde_json::Value;
 
@@ -297,12 +299,41 @@ async fn portable_eager_forked_progress_and_stop_completion() {
             .await
             .unwrap();
         assert!(checksum.status().success);
+        let backend = microsandbox::backend::default_backend();
+        let local = backend.as_local().unwrap();
+        // Open the existing catalog before timing Stop, without a reconciling handle lookup.
+        let pools = local.db().await.unwrap();
         let stop_started = Instant::now();
         tokio::time::timeout(Duration::from_secs(30), sandbox.stop())
             .await
             .unwrap()
             .unwrap();
         let stop_ms = stop_started.elapsed().as_millis();
+        // Remove can wait for ownership (and has legacy Windows cleanup), so test Stop's
+        // boundary first: one nonblocking acquisition, with no await, retry, or sleep.
+        let ownership = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+            &local.config().run_dir(),
+            &name,
+        )
+        .unwrap()
+        .expect("successful Stop must already have released runtime ownership");
+        // Read the raw row while holding our test lease. Sandbox::get/status would
+        // reconcile state and could conceal a failure to publish completion before Stop.
+        let terminal = sandbox_row::Entity::find()
+            .filter(sandbox_row::Column::Name.eq(&name))
+            .one(pools.read())
+            .await
+            .unwrap()
+            .expect("persistent Stop must retain the sandbox row");
+        assert!(matches!(
+            terminal.status,
+            sandbox_row::SandboxStatus::Stopped | sandbox_row::SandboxStatus::Crashed
+        ));
+        println!(
+            "ownership_released=true terminal_status={:?}",
+            terminal.status
+        );
+        drop(ownership);
         // No force, status polling, or sleep may be required between successful Stop and Remove.
         let remove_started = Instant::now();
         sandbox.remove_persisted().await.unwrap();
