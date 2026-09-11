@@ -69,9 +69,7 @@ pub async fn run(
         apply_sandbox_opts(builder, &args.sandbox)?
     };
 
-    let (mut progress, task) = builder
-        .detached(true)
-        .create_detached_with_pull_progress()?;
+    let (mut progress, task) = builder.detached(true).create_detached_with_progress()?;
     let mut display = if args.sandbox.quiet {
         ui::PullProgressDisplay::quiet(&image.display())
     } else {
@@ -79,7 +77,7 @@ pub async fn run(
     };
 
     while let Some(event) = progress.recv().await {
-        display.handle_event(event);
+        display.handle_creation_event(event);
     }
 
     match task.await {

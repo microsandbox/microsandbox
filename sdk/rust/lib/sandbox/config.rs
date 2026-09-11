@@ -131,6 +131,10 @@ pub(crate) struct RestoreOverrideIntent {
 /// registry credentials, replacement flags, and resolved snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
+    /// Operation-local observer; never persisted or retained as a stream owner.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) creation_progress: Option<tokio::sync::mpsc::WeakSender<crate::CreationProgress>>,
     /// Backend-neutral sandbox task description shared across SDKs and services.
     #[serde(flatten)]
     pub spec: SandboxSpec,
@@ -772,6 +776,8 @@ impl Default for SandboxConfig {
                 ..Default::default()
             },
             registry_auth: None,
+            #[cfg(feature = "local")]
+            creation_progress: None,
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,

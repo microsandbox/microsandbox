@@ -36,6 +36,23 @@ Return one [`SandboxMetrics`](#sandboxmetrics) snapshot for every running sandbo
 
 ## Sandbox
 
+### Creation progress
+
+`createWithProgress()` includes image preparation and local snapshot startup. Ignoring events does not delay creation; `awaitSandbox()` supplies the authoritative result.
+
+```typescript
+const creation = await Sandbox.builder("child")
+  .fromSnapshot("saved")
+  .forked()
+  .createWithProgress();
+for await (const event of creation) {
+  if (event.kind === "startup") console.log(event.phase, event.completedBytes, event.totalBytes);
+}
+const sandbox = await creation.awaitSandbox();
+```
+
+Startup phases report preparing, waiting for RAM backing, preparing RAM backing, reusing backing, syncing, and activating. Totals are absent for indeterminate work. Preparation does not consume the activation timeout. Call `creation.cancel()` to cancel creation, then await its result. `createWithPullProgress()` remains image-only.
+
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">builder()</span>
 
 ```typescript

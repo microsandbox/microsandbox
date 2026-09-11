@@ -989,4 +989,13 @@ char *msb_sandbox_attach_shell(uint64_t cancel_id,
                                unsigned char *buf,
                                uintptr_t buf_len);
 
+char *msb_creation_progress_open(unsigned char *buf, uintptr_t len);
+
+char *msb_creation_progress_recv(uint64_t cancel_id,
+                                 uint64_t id,
+                                 unsigned char *buf,
+                                 uintptr_t len);
+
+char *msb_creation_progress_close(uint64_t id, unsigned char *buf, uintptr_t len);
+
 #endif  /* MICROSANDBOX_GO_FFI_H */

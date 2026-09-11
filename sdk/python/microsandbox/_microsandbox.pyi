@@ -1050,6 +1050,7 @@ class SnapshotHandle:
     async def remove(self, *, force: bool = False) -> None: ...
 
 class PullSession:
+    def cancel(self) -> None: ...
     @property
     def progress(self) -> PullProgressIter: ...
     async def result(self) -> Sandbox: ...
@@ -1064,6 +1065,8 @@ class PullProgressIter:
 
 class PullEvent:
     event_type: PullEventType
+    phase: str | None
+    completed_bytes: int | None
     reference: str | None
     manifest_digest: str | None
     layer_count: int | None

@@ -213,9 +213,9 @@ async fn run_new(
     // Create sandbox with pull progress — select attached vs detached mode.
     let builder = builder.detached(args.detach);
     let (mut progress, task) = if args.detach {
-        builder.create_detached_with_pull_progress()?
+        builder.create_detached_with_progress()?
     } else {
-        builder.create_with_pull_progress()?
+        builder.create_with_progress()?
     };
 
     let display_label = image.display();
@@ -226,7 +226,7 @@ async fn run_new(
     };
 
     while let Some(event) = progress.recv().await {
-        display.handle_event(event);
+        display.handle_creation_event(event);
     }
 
     display.finish();

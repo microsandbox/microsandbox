@@ -206,6 +206,7 @@ impl PreparedCheckpointRestore {
         self,
         vm: &mut msb_krun::Vm,
         cache_root: Option<PathBuf>,
+        progress: crate::startup_progress::StartupProgressCallback,
     ) -> Result<RestoredAgentState, String> {
         vm.set_execution_restore(self.execution);
         if let Some(backing) = self.local_memory {
@@ -216,7 +217,9 @@ impl PreparedCheckpointRestore {
                 .as_ref()
                 .expect("durable restore memory")
                 .closure;
-            let cache = super::MemoryCache::open(root).map_err(|e| e.to_string())?;
+            let cache = super::MemoryCache::open(root)
+                .map_err(|e| e.to_string())?
+                .with_progress(progress);
             let cached = cache
                 .materialize_parallel(
                     closure.memory(),

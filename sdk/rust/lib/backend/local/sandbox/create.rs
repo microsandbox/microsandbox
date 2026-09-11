@@ -886,6 +886,26 @@ impl LocalBackend {
             spawn_sandbox(self, &config, sandbox_id, mode, lifecycle_guard).await?;
         let mut startup_process = StartupProcess::new(handle);
         let log_dir = self.sandboxes_dir().join(&config.spec.name).join("logs");
+        if let Err(error) = startup_process
+            .handle_mut()
+            .wait_for_preparation(&config.creation_progress)
+            .await
+        {
+            // Preserve the runtime's structured diagnosis when an invalid checkpoint
+            // closes the startup channel before activation can be announced.
+            let error = Self::read_boot_start_error(&log_dir, &config.spec.name).unwrap_or(error);
+            if let Err(cleanup) = startup_process
+                .handle_mut()
+                .terminate_failed_startup()
+                .await
+            {
+                return Err(crate::MicrosandboxError::Runtime(format!(
+                    "{error}; {cleanup}"
+                )));
+            }
+            return Err(error);
+        }
+        // Cold backing construction and lock waits do not consume activation's budget.
         let startup_deadline = tokio::time::Instant::now() + AGENT_RELAY_READY_TIMEOUT;
 
         // Wait for the relay socket to become available.

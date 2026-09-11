@@ -316,11 +316,9 @@ impl PySandbox {
         let _runtime_guard = runtime.enter();
 
         let (progress, task) = if detached {
-            builder
-                .create_detached_with_pull_progress()
-                .map_err(to_py_err)?
+            builder.create_detached_with_progress().map_err(to_py_err)?
         } else {
-            builder.create_with_pull_progress().map_err(to_py_err)?
+            builder.create_with_progress().map_err(to_py_err)?
         };
 
         Ok(PyPullSession::new(progress, task))
@@ -1981,10 +1979,11 @@ fn apply_attach_options(
 // Types: Pull Progress
 //--------------------------------------------------------------------------------------------------
 
-/// Context manager for sandbox creation with pull progress.
+/// Context manager for sandbox creation with image and startup progress.
 #[pyclass(name = "PullSession")]
 pub struct PyPullSession {
-    progress: Arc<Mutex<Option<microsandbox::sandbox::PullProgressHandle>>>,
+    abort: tokio::task::AbortHandle,
+    progress: Arc<Mutex<Option<microsandbox::CreationProgressHandle>>>,
     task: Arc<
         Mutex<
             Option<
@@ -1996,10 +1995,10 @@ pub struct PyPullSession {
     >,
 }
 
-/// Async iterator over pull-progress events.
+/// Async iterator over image and startup progress events.
 #[pyclass(name = "PullProgressIter")]
 struct PyPullProgressIter {
-    handle: Arc<Mutex<Option<microsandbox::sandbox::PullProgressHandle>>>,
+    handle: Arc<Mutex<Option<microsandbox::CreationProgressHandle>>>,
 }
 
 /// Pull-progress event exposed to Python.
@@ -2007,6 +2006,10 @@ struct PyPullProgressIter {
 #[derive(Default)]
 pub struct PyPullEvent {
     event_type: &'static str,
+    #[pyo3(get)]
+    phase: Option<&'static str>,
+    #[pyo3(get)]
+    completed_bytes: Option<u64>,
     #[pyo3(get)]
     reference: Option<String>,
     #[pyo3(get)]
@@ -2035,12 +2038,13 @@ pub struct PyPullEvent {
 
 impl PyPullSession {
     pub fn new(
-        progress: microsandbox::sandbox::PullProgressHandle,
+        progress: microsandbox::CreationProgressHandle,
         task: tokio::task::JoinHandle<
             microsandbox::MicrosandboxResult<microsandbox::sandbox::Sandbox>,
         >,
     ) -> Self {
         Self {
+            abort: task.abort_handle(),
             progress: Arc::new(Mutex::new(Some(progress))),
             task: Arc::new(Mutex::new(Some(task))),
         }
@@ -2049,7 +2053,12 @@ impl PyPullSession {
 
 #[pymethods]
 impl PyPullSession {
-    /// Async iterator over pull progress events.
+    /// Cancel creation. Await result() to observe cancellation.
+    fn cancel(&self) {
+        self.abort.abort();
+    }
+
+    /// Async iterator over image and startup progress events.
     #[getter]
     fn progress(&self) -> PyPullProgressIter {
         PyPullProgressIter {
@@ -2070,6 +2079,9 @@ impl PyPullSession {
         _exc_val: &Bound<'py, PyAny>,
         _exc_tb: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !_exc_type.is_none() {
+            self.abort.abort();
+        }
         let task = self.task.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             // Ensure task is awaited/aborted.
@@ -2120,7 +2132,16 @@ impl PyPullProgressIter {
                 .as_mut()
                 .ok_or_else(|| pyo3::exceptions::PyStopAsyncIteration::new_err(()))?;
             match progress.recv().await {
-                Some(event) => Ok(convert_pull_progress(event)),
+                Some(microsandbox::CreationProgress::Pull(event)) => {
+                    Ok(convert_pull_progress(event))
+                }
+                Some(microsandbox::CreationProgress::Startup(event)) => Ok(PyPullEvent {
+                    event_type: "startup",
+                    phase: Some(event.phase.as_str()),
+                    completed_bytes: Some(event.completed_bytes),
+                    total_bytes: event.total_bytes.map(|bytes| bytes as i64),
+                    ..Default::default()
+                }),
                 None => {
                     // Stream ended.
                     *guard = None;

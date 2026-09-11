@@ -200,6 +200,8 @@ msb run alpine --net public --net-rule "deny@dns"
 
 ## msb sandbox create
 
+Snapshot restores show RAM-backing preparation, cache waits/reuse, syncing, and activation in the terminal. Slow preparation does not consume the activation timeout. `--quiet` hides progress; stdout remains scriptable.
+
 <Tooltip tip="The core create workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Create and boot a sandbox without running a command. Takes the same flags as `msb run` (except `--detach`).

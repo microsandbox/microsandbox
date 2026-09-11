@@ -19,7 +19,7 @@ mod runner;
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(feature = "client")]
-pub use client::{boot_error, control, ipc, launch, logging, maintenance};
+pub use client::{boot_error, control, ipc, launch, logging, maintenance, startup_progress};
 #[cfg(feature = "runner")]
 pub use runner::{console, cpu, exec_log, heartbeat, metrics, policy, relay, vm};
 #[cfg(all(feature = "client", not(feature = "runner")))]

@@ -26,6 +26,23 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ## Sandbox
 
+### Creation progress
+
+`create_with_progress()` reports image preparation, snapshot RAM backing preparation, and activation. Await the task for the result; ignoring or dropping progress does not cancel creation.
+
+```rust
+let (mut progress, task) = Sandbox::builder("child")
+    .from_snapshot("saved")
+    .forked()
+    .create_with_progress()?;
+while let Some(event) = progress.recv().await {
+    eprintln!("{event:?}");
+}
+let sandbox = task.await??;
+```
+
+Local startup events distinguish waiting for backing, preparing it, reusing it, syncing, and activating. Byte totals cover required data slices, not reserved RAM. Lock waits and syncing have no percentage. Preparation has no fixed deadline; the activation timeout begins afterward. Abort the creation task to cancel, or wrap the operation in your own overall deadline. `create_detached_with_progress()` provides the same events for detached creation. Existing pull-only APIs remain available.
+
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">builder()</span>
 
 ```rust

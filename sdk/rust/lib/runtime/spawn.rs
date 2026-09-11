@@ -118,6 +118,8 @@ const MIN_BLOCK_WRITEBACK_LIMIT_BYTES: u64 = 128 * 1024 * 1024;
 #[derive(Debug, Deserialize)]
 struct StartupInfo {
     pid: u32,
+    #[serde(default)]
+    startup_events: bool,
 }
 
 #[derive(Clone)]
@@ -743,12 +745,13 @@ pub async fn spawn_sandbox(
     )
     .await
     {
-        Ok(line) => line.and_then(|line| parse_startup_info(&line, _pid)),
+        Ok(reply) => reply
+            .and_then(|(line, reader)| parse_startup_info(&line, _pid).map(|info| (info, reader))),
         Err(_) => Err(crate::MicrosandboxError::Runtime(
             "sandbox startup timeout: no JSON received within 30 seconds".into(),
         )),
     };
-    let startup = match startup_result {
+    let (startup, reader) = match startup_result {
         Ok(startup) => startup,
         Err(error) => {
             // Decide why launch failed before cleanup. Reaping can fail independently and
@@ -760,6 +763,10 @@ pub async fn spawn_sandbox(
             return Err(startup_error_with_cleanup(error, cleanup));
         }
     };
+
+    if startup.startup_events {
+        startup_process.handle_mut().startup_reader = Some(reader);
+    }
 
     tracing::debug!(
         vm_pid = startup.pid,
@@ -1201,7 +1208,7 @@ fn write_launch_config_file(
 async fn read_startup_line(
     child: &mut tokio::process::Child,
     startup_pipe: Option<Pipe>,
-) -> MicrosandboxResult<String> {
+) -> MicrosandboxResult<(String, Box<dyn AsyncBufRead + Send + Unpin>)> {
     let mut reader: Box<dyn AsyncBufRead + Send + Unpin> = match startup_pipe {
         Some(pipe) => {
             let Pipe { read_fd, write_fd } = pipe;
@@ -1220,14 +1227,14 @@ async fn read_startup_line(
 
     let mut line = String::new();
     reader.read_line(&mut line).await?;
-    Ok(line)
+    Ok((line, reader))
 }
 
 #[cfg(windows)]
 async fn read_startup_line(
     child: &mut tokio::process::Child,
     startup_pipe: Option<StartupPipe>,
-) -> MicrosandboxResult<String> {
+) -> MicrosandboxResult<(String, Box<dyn AsyncBufRead + Send + Unpin>)> {
     let mut reader: Box<dyn AsyncBufRead + Send + Unpin> = match startup_pipe {
         Some(pipe) => {
             let server = pipe.server;
@@ -1244,7 +1251,7 @@ async fn read_startup_line(
 
     let mut line = String::new();
     reader.read_line(&mut line).await?;
-    Ok(line)
+    Ok((line, reader))
 }
 
 #[cfg(unix)]

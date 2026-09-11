@@ -35,6 +35,8 @@
 // be repetitive without adding signal.
 #![allow(clippy::missing_safety_doc)]
 
+mod creation_progress;
+
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
@@ -1041,6 +1043,7 @@ struct RootDiskOpts {
 
 #[derive(serde::Deserialize)]
 struct SandboxCreateOpts {
+    creation_progress: Option<u64>,
     image: Option<String>,
     image_fstype: Option<String>,
     /// Host directory used directly as the root filesystem (bind rootfs).
@@ -2482,6 +2485,8 @@ pub unsafe extern "C" fn msb_sandbox_create(
 
             let sandbox = if connect_or_create {
                 builder.detached(opts.detached).connect_or_create().await?
+            } else if let Some(progress) = opts.creation_progress {
+                creation_progress::create(builder.detached(opts.detached), progress).await?
             } else if opts.detached {
                 builder.create_detached().await?
             } else {

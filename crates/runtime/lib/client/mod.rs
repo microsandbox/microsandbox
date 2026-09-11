@@ -10,3 +10,4 @@ pub mod ipc;
 pub mod launch;
 pub mod logging;
 pub mod maintenance;
+pub mod startup_progress;

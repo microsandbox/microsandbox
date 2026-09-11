@@ -252,6 +252,7 @@ export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<NapiSandbox>;
   connectOrCreate(): Promise<NapiSandbox>;
   createWithPullProgress(): Promise<NapiPullProgressCreate>;
+  createWithProgress(): Promise<NapiPullProgressCreate>;
 }
 
 export interface NapiSandboxRestartOptions {
@@ -1083,6 +1084,8 @@ export interface NapiInterfaceOverridesBuilder {
 
 export interface NapiPullProgressEvent {
   readonly kind: string;
+  readonly phase?: string;
+  readonly completedBytes?: number;
   readonly reference?: string;
   readonly manifestDigest?: string;
   readonly layerCount?: number;
@@ -1100,6 +1103,7 @@ export interface NapiPullProgressStream extends AsyncIterable<NapiPullProgressEv
 }
 
 export interface NapiPullProgressCreate {
+  cancel(): void;
   readonly progress: NapiPullProgressStream;
   awaitSandbox(): Promise<NapiSandbox>;
 }

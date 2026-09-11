@@ -78,6 +78,8 @@ export interface SandboxBuilder extends NapiSandboxBuilderSetters {
    */
   connectOrCreate(): Promise<Sandbox>;
   createWithPullProgress(): Promise<PullProgressCreate>;
+  /** Image preparation, snapshot backing and activation progress. Await the result for success. */
+  createWithProgress(): Promise<CreationProgressCreate>;
 }
 
 export interface SandboxPingResult {
@@ -140,6 +142,9 @@ function sandboxPageFromNapi(page: NapiSandboxPage): SandboxPage {
  * final `Sandbox`.
  */
 export class PullProgressCreate {
+  /** Cancel creation; awaitSandbox() rejects when cancellation is observed. */
+  cancel(): void { this.inner.cancel(); }
+
   /** @internal */
   private readonly inner: NapiPullProgressCreate;
   /** @internal */
@@ -177,6 +182,23 @@ export class PullProgressCreate {
   }
 }
 
+/** Creation-wide progress; ignoring events does not cancel or delay creation. */
+export class CreationProgressCreate {
+  private readonly creation: PullProgressCreate;
+  /** @internal */
+  constructor(inner: NapiPullProgressCreate, name: string, attached: boolean) {
+    this.creation = new PullProgressCreate(inner, name, attached);
+  }
+  get progress(): import("./creation-progress.js").CreationProgressStream {
+    return this.creation.progress as unknown as import("./creation-progress.js").CreationProgressStream;
+  }
+  [Symbol.asyncIterator](): AsyncIterator<import("./creation-progress.js").CreationProgress> {
+    return this.progress[Symbol.asyncIterator]();
+  }
+  cancel(): void { this.creation.cancel(); }
+  awaitSandbox(): Promise<Sandbox> { return this.creation.awaitSandbox(); }
+}
+
 export class Sandbox implements AsyncDisposable {
   /** @internal */
   readonly inner: NapiSandbox;
@@ -211,6 +233,7 @@ export class Sandbox implements AsyncDisposable {
     const origCreate = nb.create.bind(nb);
     const origConnectOrCreate = nb.connectOrCreate.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
+    const origCreateWithProgress = nb.createWithProgress?.bind(nb);
     const wrapped = nb as unknown as {
       detached: (enabled: boolean) => SandboxBuilder;
     };
@@ -239,6 +262,11 @@ export class Sandbox implements AsyncDisposable {
     ).createWithPullProgress = async () => {
       const raw = await withMappedErrors(() => origCreateWithPP());
       return new PullProgressCreate(raw, name, /*attached*/ !detached);
+    };
+    (nb as unknown as { createWithProgress: () => Promise<CreationProgressCreate> }).createWithProgress = async () => {
+      if (!origCreateWithProgress) throw new Error("Installed native SDK does not support creation progress");
+      const raw = await withMappedErrors(() => origCreateWithProgress());
+      return new CreationProgressCreate(raw, name, !detached);
     };
     return nb as unknown as SandboxBuilder;
   }

@@ -385,6 +385,7 @@ pub struct VmConfig {
 #[derive(Debug, Serialize)]
 struct StartupInfo {
     pid: u32,
+    startup_events: bool,
 }
 
 /// Shared bind identity map registration for user-volume passthrough mounts.
@@ -584,14 +585,23 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Write startup JSON and redirect output FIRST, before any tracing.
     // This ensures all tracing goes to runtime.log, not the terminal.
     let pid = std::process::id();
-    let startup = StartupInfo { pid };
+    #[cfg(unix)]
+    let startup_events = config.startup_fd.is_some();
+    #[cfg(windows)]
+    let startup_events = config.startup_pipe.is_some();
+    let startup = StartupInfo {
+        pid,
+        startup_events,
+    };
     let startup_json = serde_json::to_string(&startup)
         .map_err(|e| RuntimeError::Custom(format!("serialize startup: {e}")))?;
 
     #[cfg(unix)]
-    write_startup_info(config.startup_fd.as_ref(), &startup_json)?;
+    let startup_writer = write_startup_info(config.startup_fd.as_ref(), &startup_json)?;
+    #[cfg(unix)]
+    drop(config.startup_fd.take()); // The retained writer is the only owner of the reply pipe.
     #[cfg(windows)]
-    write_startup_info(config.startup_pipe.as_deref(), &startup_json)?;
+    let startup_writer = write_startup_info(config.startup_pipe.as_deref(), &startup_json)?;
     setup_log_capture(&config.log_dir, config.forward_output)?;
 
     tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
@@ -617,6 +627,21 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
         .enable_all()
         .build()
         .map_err(|e| RuntimeError::Custom(format!("tokio runtime: {e}")))?;
+
+    let startup_progress: crate::startup_progress::StartupProgressCallback = match startup_writer {
+        Some(writer) => super::progress::start(
+            writer,
+            &tokio_rt,
+            if config.vm.checkpoint_restore.is_some() {
+                crate::startup_progress::StartupPhase::PreparingSnapshot
+            } else {
+                // Ordinary boots retain their existing bounded startup behavior; there is no
+                // captured RAM backing to prepare before activation.
+                crate::startup_progress::StartupPhase::Activating
+            },
+        ),
+        None => Arc::new(|_| {}),
+    };
 
     // Set up runtime directory.
     std::fs::create_dir_all(&config.runtime_dir)?;
@@ -972,7 +997,10 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
                 "host placement acknowledged before guest execution"
             );
         },
-        tokio_rt.handle().clone(),
+        VmBuildRuntime {
+            tokio_handle: tokio_rt.handle().clone(),
+            startup_progress: startup_progress.clone(),
+        },
         host_placement,
         writeback_limit.as_ref(),
     );
@@ -1011,6 +1039,12 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
             return Err(e);
         }
     };
+
+    // Preparation (including cold backing construction) has finished. Only now may the
+    // launcher start its activation deadline. This is the terminal startup-pipe event.
+    startup_progress(crate::startup_progress::StartupProgress::phase(
+        crate::startup_progress::StartupPhase::Activating,
+    ));
 
     // This must be the first host-to-guest frame. It is queued before the
     // watchdog and relay tasks can produce shutdown or init-ack messages, and
@@ -1654,15 +1688,25 @@ struct HostPlacement<'a> {
     numa_topology: Option<msb_krun::NumaTopology>,
 }
 
+/// Runtime services needed while constructing host devices and restore backing.
+struct VmBuildRuntime {
+    tokio_handle: tokio::runtime::Handle,
+    startup_progress: crate::startup_progress::StartupProgressCallback,
+}
+
 fn build_vm(
     config: &Config,
     console_backends: AgentConsoleBackends,
     on_exit: impl Fn(i32) + Send + 'static,
     on_placement: impl FnOnce(&msb_krun::PlacementReport) + Send + 'static,
-    tokio_handle: tokio::runtime::Handle,
+    runtime: VmBuildRuntime,
     host_placement: HostPlacement<'_>,
     writeback_limit: Option<&msb_krun::WritebackLimit>,
 ) -> RuntimeResult<VmBuildOutput> {
+    let VmBuildRuntime {
+        tokio_handle,
+        startup_progress,
+    } = runtime;
     let AgentConsoleBackends {
         control: console_backend,
         bulk: bulk_console_backend,
@@ -2246,7 +2290,7 @@ fn build_vm(
             .transpose()?;
         Some(
             prepared
-                .install(&mut vm, cache_root)
+                .install(&mut vm, cache_root, startup_progress)
                 .map_err(RuntimeError::Custom)?,
         )
     } else {
@@ -2647,7 +2691,10 @@ fn setup_log_capture(_log_dir: &std::path::Path, _forward: bool) -> RuntimeResul
 /// Write startup info JSON to the dedicated startup fd when supplied,
 /// otherwise stdout.
 #[cfg(unix)]
-fn write_startup_info(startup_fd: Option<&OwnedFd>, json: &str) -> RuntimeResult<()> {
+fn write_startup_info(
+    startup_fd: Option<&OwnedFd>,
+    json: &str,
+) -> RuntimeResult<Option<std::fs::File>> {
     if let Some(fd) = startup_fd {
         let dup = unsafe { libc::dup(fd.as_raw_fd()) };
         if dup < 0 {
@@ -2656,19 +2703,22 @@ fn write_startup_info(startup_fd: Option<&OwnedFd>, json: &str) -> RuntimeResult
         let mut file = unsafe { std::fs::File::from_raw_fd(dup) };
         writeln!(file, "{json}")?;
         file.flush()?;
-        return Ok(());
+        return Ok(Some(file));
     }
 
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "{json}")?;
     stdout.flush()?;
-    Ok(())
+    Ok(None)
 }
 
 /// Write startup info JSON to the dedicated startup pipe when supplied,
 /// otherwise stdout.
 #[cfg(windows)]
-fn write_startup_info(startup_pipe: Option<&str>, json: &str) -> RuntimeResult<()> {
+fn write_startup_info(
+    startup_pipe: Option<&str>,
+    json: &str,
+) -> RuntimeResult<Option<std::fs::File>> {
     if let Some(pipe) = startup_pipe {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -2676,13 +2726,13 @@ fn write_startup_info(startup_pipe: Option<&str>, json: &str) -> RuntimeResult<(
             .map_err(|err| RuntimeError::Custom(format!("open startup pipe {pipe}: {err}")))?;
         writeln!(file, "{json}")?;
         file.flush()?;
-        return Ok(());
+        return Ok(Some(file));
     }
 
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "{json}")?;
     stdout.flush()?;
-    Ok(())
+    Ok(None)
 }
 
 /// Connect to the sandbox database.

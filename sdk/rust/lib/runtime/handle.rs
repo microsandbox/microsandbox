@@ -44,6 +44,9 @@ pub struct ProcessHandle {
     /// The sandbox child process handle.
     child: Child,
 
+    /// Retained only until preparation completes. No background reader survives creation.
+    pub(crate) startup_reader: Option<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>>,
+
     /// When true, the Drop impl will NOT send SIGTERM.
     detached: bool,
 
@@ -119,6 +122,44 @@ impl StartupProcess {
 }
 
 impl ProcessHandle {
+    /// Wait without a preparation deadline. The caller owns cancellation and process cleanup.
+    pub(crate) async fn wait_for_preparation(
+        &mut self,
+        observer: &Option<tokio::sync::mpsc::WeakSender<crate::CreationProgress>>,
+    ) -> MicrosandboxResult<()> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+        let Some(mut reader) = self.startup_reader.take() else {
+            // Older runtimes only report a PID. Preserve their bounded readiness path.
+            return Ok(());
+        };
+        loop {
+            let mut line = String::new();
+            let mut frame = (&mut reader).take(4096);
+            let length = tokio::select! {
+                result = frame.read_line(&mut line) => result?,
+                status = self.child.wait() => {
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "sandbox exited during preparation: {}", status?
+                    )));
+                }
+            };
+            if length == 0 || !line.ends_with('\n') {
+                return Err(crate::MicrosandboxError::Runtime(
+                    "sandbox startup channel ended before activation or sent an oversized frame"
+                        .into(),
+                ));
+            }
+            let event: crate::StartupProgress = serde_json::from_str(&line).map_err(|error| {
+                crate::MicrosandboxError::Runtime(format!("invalid startup progress: {error}"))
+            })?;
+            let activating = event.phase == crate::StartupPhase::Activating;
+            crate::progress::report(observer, crate::CreationProgress::Startup(event));
+            if activating {
+                return Ok(());
+            }
+        }
+    }
+
     /// Create a new handle.
     pub(crate) fn new(
         pid: u32,
@@ -133,6 +174,7 @@ impl ProcessHandle {
             pid,
             sandbox_name,
             child,
+            startup_reader: None,
             detached: false,
             _disk_locks: disk_locks,
             #[cfg(unix)]
@@ -613,6 +655,69 @@ mod startup_tests {
         let mut handle = StartupProcess::new(handle).into_handle();
         tokio::task::yield_now().await;
         assert!(handle.try_wait().unwrap().is_none());
+        handle.terminate_failed_startup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparation_is_unbounded_and_activation_is_explicit() {
+        use tokio::io::AsyncWriteExt;
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        let (reader, mut writer) = tokio::io::duplex(4096);
+        handle.startup_reader = Some(Box::new(BufReader::new(reader)));
+        let started = std::time::Instant::now();
+        let write = tokio::spawn(async move {
+            writer.write_all(b"{\"phase\":\"waiting_for_memory_backing\",\"completed_bytes\":0,\"total_bytes\":null}\n").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            writer
+                .write_all(
+                    b"{\"phase\":\"activating\",\"completed_bytes\":0,\"total_bytes\":null}\n",
+                )
+                .await
+                .unwrap();
+        });
+        let (events, sender) = crate::progress::channel();
+        drop(events); // No observer: the internal activation event must still be consumed.
+        handle
+            .wait_for_preparation(&Some(sender.downgrade()))
+            .await
+            .unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+        assert!(handle.startup_reader.is_none());
+        write.await.unwrap();
+        handle.terminate_failed_startup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparation_eof_is_not_readiness() {
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        handle.startup_reader = Some(Box::new(BufReader::new(&b""[..])));
+        let error = handle.wait_for_preparation(&None).await.unwrap_err();
+        assert!(error.to_string().contains("before activation"));
+        handle.terminate_failed_startup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_pid_only_runtime_does_not_wait_for_events() {
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        handle.wait_for_preparation(&None).await.unwrap();
+        handle.terminate_failed_startup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparation_rejects_oversized_frame() {
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        handle.startup_reader = Some(Box::new(BufReader::new(std::io::Cursor::new(vec![
+            b'x';
+            4097
+        ]))));
+        assert!(
+            handle
+                .wait_for_preparation(&None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("oversized")
+        );
         handle.terminate_failed_startup().await.unwrap();
     }
 }

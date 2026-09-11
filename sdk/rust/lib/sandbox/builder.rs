@@ -1481,6 +1481,84 @@ impl SandboxBuilder {
         super::Sandbox::create_detached(config).await
     }
 
+    /// Create with image-pull, snapshot-preparation, and activation progress.
+    ///
+    /// Events are best-effort and never block creation. Await the task for the authoritative
+    /// result; dropping the progress receiver does not cancel it. Abort the task to cancel.
+    #[cfg(feature = "local")]
+    pub fn create_with_progress(
+        mut self,
+    ) -> crate::MicrosandboxResult<(
+        crate::CreationProgressHandle,
+        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
+    )> {
+        let (handle, sender) = crate::progress::channel();
+        self.config.creation_progress = Some(sender.downgrade());
+        let task = tokio::spawn(async move {
+            if self.pending_snapshot.is_some() {
+                let _ = sender.try_send(crate::CreationProgress::Startup(
+                    crate::StartupProgress::phase(crate::StartupPhase::PreparingSnapshot),
+                ));
+            }
+            let (mut pull, pull_sender) = microsandbox_image::progress_channel();
+            let create = async {
+                let requested_detached = self.detached;
+                let config = self.build().await?;
+                let detached = requested_detached || config.resumed_from_full_snapshot();
+                let backend = crate::backend::default_backend();
+                match backend.kind() {
+                    crate::backend::BackendKind::Local => {
+                        let mode = if detached {
+                            crate::runtime::SpawnMode::Detached
+                        } else {
+                            crate::runtime::SpawnMode::Attached
+                        };
+                        let local = backend.as_local().ok_or_else(|| {
+                            MicrosandboxError::local_only(Operation::SandboxCreate)
+                        })?;
+                        local
+                            .create_sandbox(backend.clone(), config, mode, Some(pull_sender))
+                            .await
+                    }
+                    crate::backend::BackendKind::Cloud => {
+                        drop(pull_sender);
+                        if detached {
+                            backend
+                                .sandboxes()
+                                .create_detached(backend.clone(), config)
+                                .await
+                        } else {
+                            backend
+                                .sandboxes()
+                                .create(backend.clone(), config, true)
+                                .await
+                        }
+                    }
+                }
+            };
+            let forward = async {
+                while let Some(event) = pull.recv().await {
+                    let _ = sender.try_send(crate::CreationProgress::Pull(event));
+                }
+            };
+            // No detached forwarding task: cancellation drops both futures together.
+            let (result, ()) = tokio::join!(create, forward);
+            result
+        });
+        Ok((handle, task))
+    }
+
+    /// Create a detached sandbox with the same creation-progress stream.
+    #[cfg(feature = "local")]
+    pub fn create_detached_with_progress(
+        self,
+    ) -> crate::MicrosandboxResult<(
+        crate::CreationProgressHandle,
+        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
+    )> {
+        self.detached(true).create_with_progress()
+    }
+
     /// Create the sandbox with pull progress reporting.
     ///
     /// Returns a progress handle for per-layer pull events and a task handle

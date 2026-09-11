@@ -265,6 +265,12 @@ static msb_cancel_alloc_fn       ptr_msb_cancel_alloc       = NULL;
 static msb_cancel_trigger_fn     ptr_msb_cancel_trigger     = NULL;
 static msb_cancel_unregister_fn  ptr_msb_cancel_unregister  = NULL;
 static msb_sandbox_create_fn     ptr_msb_sandbox_create     = NULL;
+typedef char *(*msb_creation_progress_open_fn)(uint8_t *, size_t);
+typedef char *(*msb_creation_progress_recv_fn)(uint64_t, uint64_t, uint8_t *, size_t);
+typedef char *(*msb_creation_progress_close_fn)(uint64_t, uint8_t *, size_t);
+static char *(*ptr_msb_creation_progress_open)(uint8_t *, size_t) = NULL;
+static char *(*ptr_msb_creation_progress_recv)(uint64_t, uint64_t, uint8_t *, size_t) = NULL;
+static char *(*ptr_msb_creation_progress_close)(uint64_t, uint8_t *, size_t) = NULL;
 static msb_sandbox_handle_lifecycle_fn ptr_msb_sandbox_handle_lifecycle = NULL;
 static msb_sandbox_lookup_fn     ptr_msb_sandbox_lookup     = NULL;
 static msb_default_backend_info_fn ptr_msb_default_backend_info = NULL;
@@ -453,6 +459,9 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_cancel_unregister);
 	RESOLVE_OPTIONAL(msb_default_backend_info);
 	RESOLVE(msb_sandbox_create);
+	RESOLVE_OPTIONAL(msb_creation_progress_open);
+	RESOLVE_OPTIONAL(msb_creation_progress_recv);
+	RESOLVE_OPTIONAL(msb_creation_progress_close);
 	RESOLVE(msb_sandbox_handle_lifecycle);
 	RESOLVE(msb_sandbox_lookup);
 	RESOLVE(msb_sandbox_connect);
@@ -623,6 +632,11 @@ void call_msb_cancel_unregister(uint64_t id) {
 char *call_msb_sandbox_create(uint64_t cancel_id, const char *name, const char *opts_json, bool connect_or_create, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_create ? ptr_msb_sandbox_create(cancel_id, name, opts_json, connect_or_create, buf, buf_len) : NULL;
 }
+
+bool has_creation_progress(void) { return ptr_msb_creation_progress_open && ptr_msb_creation_progress_recv && ptr_msb_creation_progress_close; }
+char *call_creation_progress_open(uint8_t *buf, size_t len) { return ptr_msb_creation_progress_open(buf, len); }
+char *call_creation_progress_recv(uint64_t cancel, uint64_t id, uint8_t *buf, size_t len) { return ptr_msb_creation_progress_recv(cancel, id, buf, len); }
+char *call_creation_progress_close(uint64_t id, uint8_t *buf, size_t len) { return ptr_msb_creation_progress_close(id, buf, len); }
 char *call_msb_sandbox_handle_lifecycle(uint64_t cancel_id, const char *name, const char *expected_id, const char *operation, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_lifecycle ? ptr_msb_sandbox_handle_lifecycle(cancel_id, name, expected_id, operation, opts_json, buf, buf_len) : NULL;
 }
@@ -1638,6 +1652,7 @@ type SandboxPage struct {
 // Zero-valued scalar fields are omitted; pointer fields preserve explicit zero.
 // The Rust side applies defaults when optional fields are absent.
 type CreateOptions struct {
+	CreationProgress     uint64               `json:"creation_progress,omitempty"`
 	Image                string               `json:"image,omitempty"`
 	ImageFstype          string               `json:"image_fstype,omitempty"`
 	ImageBind            string               `json:"image_bind,omitempty"`
@@ -1889,6 +1904,41 @@ type PatchOptions struct {
 	Dst     string  `json:"dst,omitempty"`
 	Target  string  `json:"target,omitempty"`
 	Link    string  `json:"link,omitempty"`
+}
+
+// OpenCreationProgress reserves an operation-local, bounded event stream.
+func OpenCreationProgress(ctx context.Context) (uint64, error) {
+	if err := ensureLoaded(); err != nil {
+		return 0, err
+	}
+	if !bool(C.has_creation_progress()) {
+		return 0, fmt.Errorf("installed native SDK does not support creation progress")
+	}
+	out, err := call(ctx, func(_ C.uint64_t, buf *C.uint8_t, n C.size_t) *C.char { return C.call_creation_progress_open(buf, n) })
+	if err != nil {
+		return 0, err
+	}
+	var reply struct {
+		Handle uint64 `json:"handle"`
+	}
+	err = json.Unmarshal([]byte(out), &reply)
+	return reply.Handle, err
+}
+
+// ReceiveCreationProgress waits for the next event or context cancellation.
+func ReceiveCreationProgress(ctx context.Context, id uint64) (json.RawMessage, error) {
+	out, err := call(ctx, func(cancel C.uint64_t, buf *C.uint8_t, n C.size_t) *C.char {
+		return C.call_creation_progress_recv(cancel, C.uint64_t(id), buf, n)
+	})
+	return json.RawMessage(out), err
+}
+
+// CloseCreationProgress releases the operation's stream after its receiver has stopped.
+func CloseCreationProgress(id uint64) error {
+	_, err := call(context.Background(), func(_ C.uint64_t, buf *C.uint8_t, n C.size_t) *C.char {
+		return C.call_creation_progress_close(C.uint64_t(id), buf, n)
+	})
+	return err
 }
 
 // CreateSandbox creates and boots a sandbox, returning a handle the caller
