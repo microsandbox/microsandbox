@@ -52,6 +52,8 @@ Strict admission is the default. `msb create --from-snapshot saved --external-mo
 
 Full snapshots also retain clean guest filesystem cache pages. Reads or memory mappings may therefore return previously captured bytes before reaching the backend; relaxed restore does not promise immediate cache invalidation. Capture synchronizes dirty guest writes before admitting external mounts, so the saved cache is not permission to replay stale dirty writes onto a changed destination.
 
+Strict admission checks the mount at restore time; it does not lock the host directory afterward. Source and child writes still reach the same files, and host edits can affect both. Cached attributes and file contents can expire separately—even a read's length can be stale. Coordinate shared writes in your application; use managed disk volumes when children need private filesystem state.
+
 Named disk volumes are captured as immutable disk generations. Restored children receive private copies; the source volume is unchanged. Arbitrary external disk-image mounts are not implicitly converted into snapshot-owned volumes.
 
 ## Branch a running sandbox
@@ -251,6 +253,8 @@ Creating a sandbox from the resulting snapshot restores into a child-owned disk 
 RAM preparation has no fixed timeout, including the first forked restore on slow storage. SDK creation progress reports this work; `activating` means the VM is constructed and ready to resume, not that it is already usable. Clock synchronization and workload thaw still have bounded waits. You can cancel creation or apply your own overall deadline.
 
 Full restore preserves captured processes, but not the host connections that controlled them. Open a new client connection after restore. Inherited process output is drained without being sent to new clients; host filesystem and TCP transfers must be restarted.
+
+Application TCP connections also depend on host-side proxy state that is not captured. Applications need reconnect/retry handling; a restored socket can wait for its protocol timeout instead of failing immediately. This is separate from reconnecting the SDK or CLI client.
 
 ## Export changes and compact a disk chain
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live extra-disk checkpoint isolation and portable-archive regression (macOS/Linux).
+"""Live extra-disk checkpoint isolation and portable-archive regression.
 
 Usage: checkpoint-managed-volumes.py MSB_BIN MATCHING_AGENTD LIBKRUNFW
 Set CBH_ROOT_DISK=flat:512M to repeat with a flat root. Uses two disposable
@@ -15,7 +15,8 @@ import tempfile
 import time
 
 binary, agent, firmware = sys.argv[1:4]
-root = Path(tempfile.mkdtemp(prefix="cbh-volumes-", dir="/tmp"))
+binary, agent, firmware = (str(Path(path).resolve()) for path in (binary, agent, firmware))
+root = Path(tempfile.mkdtemp(prefix="cbh-volumes-", dir=os.environ.get("CBH_TEST_ROOT")))
 env = dict(os.environ, MSB_HOME=str(root / "home"), MSB_AGENTD_PATH=agent,
            MSB_LIBKRUNFW_PATH=firmware, MSB_PATH=binary)
 names = []
@@ -49,6 +50,13 @@ def verify(name, generation, environment=None):
         "sha256sum -c /data/checksum; sha256sum -c /other/checksum", environment=environment)
 
 
+def stop_remove(name, environment=None):
+    # Exercise graceful completion before removal; force is only failure-path cleanup.
+    run("stop", name, environment=environment)
+    run("remove", name, environment=environment)
+    names.remove((name, environment))
+
+
 try:
     for volume in ["data", "other"]:
         run("volume", "create", volume, "--kind", "disk", "--size", "128M")
@@ -64,9 +72,9 @@ try:
     for child, forked in [("eager", False), ("forked", True)]:
         create(child, "--from-snapshot", "volumes:one", *(["--forked"] if forked else []))
         verify(child, 1)
-        run("exec", child, "--", "sh", "-ec", "echo child > /data/generation")
+        run("exec", child, "--", "sh", "-ec", "echo child > /data/generation; echo child > /other/generation; sync")
         verify("source", 1)
-        run("stop", "--force", child)
+        stop_remove(child)
     # Full restore above preserves dirty guest cache. A disk-only cold boot intentionally
     # discards that RAM, so establish persisted checksums before testing its crash-consistent view.
     run("exec", "source", "--", "sh", "-ec", "echo 2 > /data/generation; echo 2 > /other/generation; sync")
@@ -82,6 +90,15 @@ try:
     verify("imported", 2, environment=offline)
     create("disk-only", "--from-snapshot", "volumes:two", "--disk-only")
     verify("disk-only", 2)
+    stop_remove("disk-only")
+    # Direct full export must include both extra disks without installing another member.
+    installed_before = sorted(str(p) for p in (root / "home" / "snapshots").rglob("snapshot.json"))
+    direct = root / "direct.msb"
+    run("snapshot", "create", "direct", "--from-sandbox", "source", "--full", "-o", str(direct))
+    assert sorted(str(p) for p in (root / "home" / "snapshots").rglob("snapshot.json")) == installed_before
+    create("direct", "--from-snapshot", str(direct), "--forked")
+    verify("direct", 2)
+    stop_remove("direct")
     names.append(("branch", None))
     run("branch", "source", "--name", "branch")
     verify("branch", 2)
@@ -96,11 +113,16 @@ try:
     assert json.loads(run("inspect", "source", "--format", "json").stdout)["status"] == "Paused"
     run("resume", "source")
     verify("source", 2)
-    print("PASS: managed volumes, eager/forked, deltas, disk-only, nested branch, paused capture", flush=True)
+    for name, environment in list(reversed(names)):
+        stop_remove(name, environment)
+    for environment in (env, offline):
+        assert json.loads(run("list", "--format", "json", environment=environment).stdout) == []
+    print("PASS: managed volumes, eager/forked, deltas, direct archive, disk-only, nested branch, paused capture, Stop/Remove", flush=True)
 finally:
     for name, environment in reversed(names):
         try:
             run("stop", "--force", name, check=False, timeout=30, environment=environment)
+            run("remove", name, check=False, timeout=30, environment=environment)
         except Exception as error:
             print(f"Cleanup needs attention for {name}: {error}", flush=True)
     print(f"Evidence retained: {root}", flush=True)
