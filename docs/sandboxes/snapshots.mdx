@@ -199,7 +199,7 @@ msb snapshot create after-pip-install --from-sandbox baseline --dest-dir /mnt/bi
 ```
 </CodeGroup>
 
-The default disk mode captures only the owned managed or flat root disk. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Direct `--archive ./saved.msb` capture works in either mode without installing a snapshot directory.
+The default disk mode captures only the owned managed or flat root disk. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Use `--output ./saved.msb` (or `-o ./saved.msb`) in either mode to write an archive without installing a snapshot directory.
 
 ## Capture a running sandbox
 
@@ -321,7 +321,7 @@ archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
 ```bash CLI
 msb snapshot create after-pip-install \
     --from-sandbox baseline \
-    --archive /tmp/after-pip-install.msb
+    -o /tmp/after-pip-install.msb
 ```
 </CodeGroup>
 

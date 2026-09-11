@@ -70,11 +70,11 @@ pub struct SnapshotCreateArgs {
     pub dest_dir: Option<std::path::PathBuf>,
 
     /// Write directly to an archive without installing a snapshot directory.
-    #[arg(long, value_name = "PATH", conflicts_with = "dest_dir")]
-    pub archive: Option<std::path::PathBuf>,
+    #[arg(short = 'o', long, value_name = "PATH", conflicts_with = "dest_dir")]
+    pub output: Option<std::path::PathBuf>,
 
     /// Write a plain tar archive instead of zstd-compressed tar.
-    #[arg(long, requires = "archive")]
+    #[arg(long, requires = "output")]
     pub plain_tar: bool,
 
     /// Add a `key=value` label. May be repeated.
@@ -265,7 +265,7 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
         ui::Spinner::start("Snapshotting", &args.from_sandbox)
     };
 
-    if let Some(archive_path) = args.archive.as_ref() {
+    if let Some(archive_path) = args.output.as_ref() {
         return match builder.create_archive(archive_path, args.plain_tar).await {
             Ok(archive) => {
                 spinner.finish_success("Snapshotted");
@@ -711,7 +711,7 @@ mod tests {
             "clean",
             "--from-sandbox",
             "box",
-            "--archive",
+            "--output",
             "/tmp/clean.tar",
             "--plain-tar",
         ]);
@@ -719,11 +719,83 @@ mod tests {
             panic!("expected create command");
         };
         assert_eq!(
-            args.archive.as_deref(),
+            args.output.as_deref(),
             Some(std::path::Path::new("/tmp/clean.tar"))
         );
         assert!(args.plain_tar);
         assert!(args.dest_dir.is_none());
+    }
+
+    #[test]
+    fn create_parses_short_output_for_full_archive() {
+        let parsed = parse_snapshot_args(&[
+            "create",
+            "--from-sandbox",
+            "box",
+            "--full",
+            "-o",
+            "/tmp/full.msb",
+        ]);
+        let SnapshotCommands::Create(args) = parsed.command else {
+            panic!("expected create command");
+        };
+        assert_eq!(
+            args.output.as_deref(),
+            Some(std::path::Path::new("/tmp/full.msb"))
+        );
+        assert!(args.full);
+        assert!(!args.plain_tar);
+        assert!(args.dest_dir.is_none());
+    }
+
+    #[test]
+    fn create_output_constraints_are_enforced() {
+        for flag in ["--output", "-o"] {
+            let conflict = TestCli::try_parse_from([
+                "msb",
+                "create",
+                "--from-sandbox",
+                "box",
+                flag,
+                "saved.msb",
+                "--dest-dir",
+                "/tmp/snapshots",
+            ])
+            .unwrap_err();
+            assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+            assert!(
+                TestCli::try_parse_from(["msb", "create", "--from-sandbox", "box", flag,]).is_err()
+            );
+        }
+        let missing_output =
+            TestCli::try_parse_from(["msb", "create", "--from-sandbox", "box", "--plain-tar"])
+                .unwrap_err();
+        assert_eq!(
+            missing_output.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(missing_output.to_string().contains("--output"));
+    }
+
+    #[test]
+    fn create_without_output_installs_snapshot_and_old_archive_flag_is_rejected() {
+        let parsed = parse_snapshot_args(&["create", "saved", "--from-sandbox", "box"]);
+        let SnapshotCommands::Create(args) = parsed.command else {
+            panic!("expected create command");
+        };
+        assert!(args.output.is_none());
+        // This unreleased spelling is deliberately replaced, not kept as an alias.
+        let old_flag = TestCli::try_parse_from([
+            "msb",
+            "create",
+            "saved",
+            "--from-sandbox",
+            "box",
+            "--archive",
+            "saved.msb",
+        ])
+        .unwrap_err();
+        assert_eq!(old_flag.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

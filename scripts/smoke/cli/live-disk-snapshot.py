@@ -73,7 +73,7 @@ try:
             archive = out / (snap + (".tar" if mode == "plain" else ".msb"))
             installed_before = set((home / "snapshots").glob("*"))
             if mode in ("archive", "plain"):
-                args += ["--archive", str(archive)]
+                args += ["--output", str(archive)]
                 if mode == "plain":
                     args += ["--plain-tar"]
             if mode == "integrity":

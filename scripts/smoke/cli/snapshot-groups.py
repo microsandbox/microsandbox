@@ -173,7 +173,7 @@ try:
     # Direct archive capture records ancestry but never creates an installed member.
     before_members = sorted(str(p) for p in (home / "snapshots").rglob("snapshot.json"))
     direct = root / "direct.msb"
-    run("direct-capture", "snapshot", "create", "direct", "--from-sandbox", "source", "--full", "--archive", direct)
+    run("direct-capture", "snapshot", "create", "direct", "--from-sandbox", "source", "--full", "--output", direct)
     assert sorted(str(p) for p in (home / "snapshots").rglob("snapshot.json")) == before_members
     create("direct-restored", str(direct), forked=True)
     assert guest("direct-restored-state", "direct-restored", "cat /dev/shm/marker") == "ram-three"
