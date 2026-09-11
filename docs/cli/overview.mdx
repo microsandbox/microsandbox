@@ -49,6 +49,8 @@ msb sbx run alpine -- echo hello
 
 Existing verb aliases also work inside either group, such as `msb sbx ls`, `msb sandbox rm devbox`, and `msb sbx mod devbox --cpus 2`. This includes the release's `pause`, `resume`, and `branch` commands. The same command forms apply when a cloud backend is selected, subject to each operation's backend support.
 
+SSH remains a separate top-level command group: use `msb ssh`, `msb ssh serve`, and `msb ssh authorize`.
+
 ## Quick reference
 
 ```bash

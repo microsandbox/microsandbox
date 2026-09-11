@@ -115,6 +115,10 @@ enum Commands {
     /// Manage registry credentials.
     Registry(registry::RegistryArgs),
 
+    /// Connect to a sandbox over SSH.
+    #[cfg(feature = "ssh")]
+    Ssh(microsandbox_cli::commands::ssh::SshArgs),
+
     /// List cached images (alias for `image ls`).
     #[command(hide = true)]
     Images(image::ImageListArgs),
@@ -645,6 +649,8 @@ fn run_async_command_anyhow(
             Commands::Load(args) => image::run_load(args).await,
             Commands::Save(args) => image::run_save(args).await,
             Commands::Registry(args) => registry::run(args).await,
+            #[cfg(feature = "ssh")]
+            Commands::Ssh(args) => microsandbox_cli::commands::ssh::run(args).await,
             Commands::Images(args) => image::run_list(args).await,
             Commands::Volumes(args) => {
                 volume::run(volume::VolumeArgs {
@@ -831,10 +837,6 @@ mod sandbox_command_tests {
             &["copy", "./source", "demo:/target"],
             &["logs", "demo"],
             &["inspect", "demo"],
-            #[cfg(feature = "ssh")]
-            &["ssh", "demo", "--", "uname", "-a"],
-            #[cfg(feature = "ssh")]
-            &["ssh", "serve", "demo", "--port", "2222"],
         ];
         for args in cases {
             let short = format!("{:?}", parse_sandbox(&[], args));
@@ -846,6 +848,36 @@ mod sandbox_command_tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "ssh")]
+    #[test]
+    fn ssh_remains_a_top_level_command_only() {
+        // SSH owns connection, serving, and authorization workflows outside the sandbox group.
+        for args in [
+            &["ssh", "demo", "--", "uname", "-a"][..],
+            &["ssh", "connect", "demo"][..],
+            &["ssh", "serve", "demo", "--port", "2222"][..],
+            &["ssh", "authorize", "--stdin"][..],
+        ] {
+            let cli = Cli::try_parse_from(["msb"].into_iter().chain(args.iter().copied())).unwrap();
+            assert!(matches!(cli.command.into_canonical(), Commands::Ssh(_)));
+            for group in ["sandbox", "sbx"] {
+                assert!(
+                    Cli::try_parse_from(["msb", group].into_iter().chain(args.iter().copied()))
+                        .is_err()
+                );
+            }
+        }
+        let command = Cli::command();
+        assert!(!command.find_subcommand("ssh").unwrap().is_hide_set());
+        assert!(
+            command
+                .find_subcommand("sandbox")
+                .unwrap()
+                .find_subcommand("ssh")
+                .is_none()
+        );
     }
 
     #[test]

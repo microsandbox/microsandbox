@@ -83,10 +83,6 @@ pub enum SandboxCommands {
     /// Show captured output from a sandbox.
     Logs(logs::LogsArgs),
 
-    /// Connect to a sandbox over SSH.
-    #[cfg(feature = "ssh")]
-    Ssh(super::ssh::SshArgs),
-
     /// Show detailed sandbox configuration and status.
     Inspect(inspect::InspectArgs),
 }
@@ -127,8 +123,6 @@ pub async fn run(command: SandboxCommands, log_level: Option<LogLevel>) -> anyho
         SandboxCommands::Exec(args) => exec::run(args).await,
         SandboxCommands::Copy(args) => copy::run(args).await,
         SandboxCommands::Logs(args) => logs::run(args).await,
-        #[cfg(feature = "ssh")]
-        SandboxCommands::Ssh(args) => super::ssh::run(args).await,
         SandboxCommands::Inspect(args) => inspect::run(args).await,
     }
 }
