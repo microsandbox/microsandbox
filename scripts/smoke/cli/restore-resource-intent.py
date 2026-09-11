@@ -118,8 +118,21 @@ finally:
     # Only names created by this isolated test are eligible for cleanup.
     cleanup = []
     for name in reversed(names):
-        result = subprocess.run([binary, "stop", name], env=env, input="", capture_output=True,
-                                text=True, timeout=30)
+        try:
+            result = subprocess.run([binary, "stop", name], env=env, input="", capture_output=True,
+                                    text=True, timeout=30)
+        except subprocess.TimeoutExpired as error:
+            # A stuck stop must not skip other VMs or hide the original test failure.
+            # TimeoutExpired may carry bytes even when text=True was requested.
+            stderr = error.stderr or ""
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            cleanup.append({"name": name, "exit": "timeout", "timeout_seconds": error.timeout,
+                            "stderr": stderr})
+            continue
+        except OSError as error:
+            cleanup.append({"name": name, "exit": "error", "stderr": str(error)})
+            continue
         cleanup.append({"name": name, "exit": result.returncode, "stderr": result.stderr})
     (root / "results.json").write_text(json.dumps(
         {"success": success, "layout": layout, "binary": binary, "rows": rows, "cleanup": cleanup}, indent=2))
