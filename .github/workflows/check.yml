@@ -1572,7 +1572,29 @@ jobs:
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
+            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live))' \
             --test-threads 2
+
+      # These tests require a captured guest and scoped fault injection; run every case
+      # explicitly, including all three eager modes, even if the general batch failed.
+      - name: Checkpoint lifecycle integration fixtures
+        if: ${{ !cancelled() }}
+        run: |
+          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          python3 scripts/smoke/cli/checkpoint-integration.py \
+            --binary build/msb --agent build/agentd \
+            --firmware "build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}" \
+            --archive build/rust-integration-tests.tar.zst \
+            --workspace "${{ github.workspace }}" \
+            --output build/checkpoint-integration-results
+
+      - name: Upload checkpoint lifecycle results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: checkpoint-integration-results
+          path: build/checkpoint-integration-results/
+          if-no-files-found: ignore
 
       - name: Disk usage
         if: always()

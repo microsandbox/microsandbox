@@ -130,6 +130,10 @@ class Smoke:
         self.remember(child)
         self.run("branch-" + child, "branch", source, "--name", child)
 
+    def restore(self, name, snapshot, *options):
+        self.remember(name)
+        self.run("restore-" + name, "restore", snapshot, "--name", name, *options)
+
     def stop(self, name):
         self.run("stop-" + name, "stop", name, "--timeout", "5")
         self.active.remove(name)
@@ -204,7 +208,7 @@ class Smoke:
         self.check_status("source", "Running")
         if disk["parent"] != full["snapshot_id"]:
             raise RuntimeError("capture lineage was not retained")
-        self.create("disk-child", "--from-snapshot", "work:disk")
+        self.restore("disk-child", "work:disk")
         self.check_markers("disk-child", "source", ram=False)
         self.stop("disk-child")
 
@@ -218,13 +222,19 @@ class Smoke:
         if head["head"] != disk["snapshot_id"]:
             raise RuntimeError("batch head followed argument order instead of ancestry")
         self.run("verify-imported-full", "snapshot", "verify", "received:full")
-        self.create("eager", "--from-snapshot", "received:full")
+        self.restore("eager", "received:full")
         self.check_markers("eager", "source")
         self.run("pause-eager", "pause", "eager")
+        _, error = self.run("paused-stop-refused", "stop", "eager", "--timeout", "5",
+                            expected_failure=True)
+        if "paused" not in error.lower():
+            raise RuntimeError("paused stop failed without explaining the paused state")
+        self.check_status("eager", "Paused")
+        self.run("resume-eager", "resume", "eager")
         self.stop("eager")
 
         before = set((self.home / "snapshots").rglob("snapshot.json"))
-        self.create("forked", "--from-snapshot", full_archive, "--forked")
+        self.restore("forked", full_archive, "--forked")
         if before != set((self.home / "snapshots").rglob("snapshot.json")):
             raise RuntimeError("direct archive restore installed an intermediate snapshot")
         # Unlink only archives created by this test, after the child is ready.

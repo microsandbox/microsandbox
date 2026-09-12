@@ -43,10 +43,10 @@ pub struct RestoreResourceArgs {
     /// Bind a host socket/named pipe to a guest-to-host vsock port: PATH:PORT[/stream|/dgram].
     #[arg(long)]
     pub vsock: Vec<String>,
-    /// Map SOURCE:GUEST[:OPTIONS], or select a captured private disk with GUEST alone.
+    /// Map `SOURCE:GUEST[:OPTIONS]`, or select a captured private disk with GUEST alone.
     #[arg(short, long, value_name = "SOURCE:GUEST|GUEST")]
     pub volume: Vec<String>,
-    /// Publish a child listener: [BIND:]HOST:GUEST[/tcp|udp].
+    /// Publish a child listener: `[BIND:]HOST:GUEST[/tcp|udp]`.
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,

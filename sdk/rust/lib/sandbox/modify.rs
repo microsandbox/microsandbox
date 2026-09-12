@@ -783,7 +783,9 @@ pub(crate) async fn restore_requested_resources(
     let resources = &config.spec.resources;
     let mut cpus = resources.cpus;
     let mut memory_mib = resources.memory_mib;
-    if resources.max_cpus > 1 {
+    // libkrun creates the CPU controller only when capacity exceeds boot CPUs.
+    // A fixed multi-CPU VM has no controller; its captured boot count is already final.
+    if resources.max_cpus > resources.cpus {
         let state =
             control_request_for(local, &config.spec.name, "{\"op\":\"cpu_state\"}\n".into())
                 .await?
@@ -2700,6 +2702,79 @@ mod tests {
     use super::*;
     use crate::backend::LocalBackend;
     use crate::size::SizeExt;
+
+    #[tokio::test]
+    async fn restored_fixed_cpu_counts_do_not_require_a_hotplug_controller() {
+        let home = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        // No runtime/control endpoint exists: fixed geometry needs no query.
+        for cpus in [1, 2, 4] {
+            let mut config = config(cpus, 256);
+            config.spec.resources.max_cpus = cpus;
+            config.spec.resources.max_memory_mib = 256;
+            restore_requested_resources(&local, &mut config)
+                .await
+                .unwrap();
+            assert_eq!(config.spec.resources.cpus, cpus);
+            assert_eq!(config.spec.resources.memory_mib, 256);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restored_hotplug_cpu_state_still_rejects_invalid_targets() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        let agent =
+            crate::runtime::sandbox_agent_socket_path_candidates_for(&local, "api").remove(0);
+        let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        let server = tokio::spawn(async move {
+            for (possible, requested) in [(3, 2), (4, 0), (4, 5)] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+                    "cpu_state"
+                );
+                let response = serde_json::json!({"ok":true,"cpu":{
+                    "possible":possible,"requested_online":requested,"actual_online":1,"enforced":1
+                }});
+                stream
+                    .get_mut()
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        for _ in 0..3 {
+            let mut config = config(1, 256);
+            config.spec.resources.max_cpus = 4;
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                restore_requested_resources(&local, &mut config),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.to_string().contains("outside captured capacity"));
+            assert_eq!(config.spec.resources.cpus, 1);
+        }
+        server.await.unwrap();
+    }
 
     #[cfg(unix)]
     #[tokio::test]

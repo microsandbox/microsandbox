@@ -3185,7 +3185,7 @@ mod tests {
         if reply.is_err() {
             let _ = child.kill().await;
         }
-        let reply = reply
+        let (reply, _startup_reader) = reply
             .expect("child waited on a lifecycle lock retained by its parent")
             .unwrap();
         let info: serde_json::Value = serde_json::from_str(&reply).unwrap();

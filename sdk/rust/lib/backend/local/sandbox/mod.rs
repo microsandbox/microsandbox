@@ -1406,6 +1406,7 @@ mod tests {
     #[cfg(unix)]
     use std::process::Command;
     use std::sync::Arc;
+    #[cfg(unix)]
     use std::time::Duration;
 
     use futures::StreamExt;

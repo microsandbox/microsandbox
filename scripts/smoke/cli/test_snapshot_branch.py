@@ -173,6 +173,12 @@ class SnapshotBranchSmokeTests(unittest.TestCase):
         self.assertTrue(all(call.kwargs["timeout"] > 0 for call in self.process.call_args_list))
         self.assertTrue(all(row["phase"] == "cleanup" for row in smoke.report["commands"]))
 
+    def test_restore_uses_dedicated_command_and_registers_cleanup(self):
+        smoke = self.smoke()
+        smoke.restore("child", "saved.msb", "--forked")
+        self.assertEqual(self.commands(), [["restore", "saved.msb", "--name", "child", "--forked"]])
+        self.assertEqual(smoke.active, ["child"])
+
     def test_failed_create_is_still_registered_for_cleanup(self):
         smoke = self.smoke()
         self.process.side_effect = subprocess.TimeoutExpired([sys.executable, "create"], 30)

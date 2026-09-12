@@ -947,7 +947,7 @@ impl Sandbox {
 
     /// Wait for graceful completion under one budget, including dispatch and runtime release.
     ///
-    /// Expiry returns [`MicrosandboxError::StopTimeout`] without killing. Zero has no
+    /// Expiry returns [`crate::MicrosandboxError::StopTimeout`] without killing. Zero has no
     /// dispatch budget. A delivered shutdown request may still complete after timeout.
     pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
         stop::stop(
