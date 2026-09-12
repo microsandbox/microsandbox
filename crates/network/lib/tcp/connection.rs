@@ -77,6 +77,7 @@ pub struct ConnectionTracker {
     connection_keys: HashSet<(SocketAddr, SocketAddr)>,
     /// Max concurrent connections (from NetworkConfig).
     max_connections: usize,
+    rejected_connections: u64,
 }
 
 /// Maximum number of poll iterations to attempt flushing remaining data
@@ -203,6 +204,7 @@ impl ConnectionTracker {
             connections: HashMap::new(),
             connection_keys: HashSet::new(),
             max_connections: max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS),
+            rejected_connections: 0,
         }
     }
 
@@ -228,7 +230,14 @@ impl ConnectionTracker {
         sockets: &mut SocketSet<'_>,
     ) -> bool {
         if self.connections.len() >= self.max_connections {
-            return false;
+            // Reclaim completed flows before rejecting a burst. Existing
+            // listeners have already consumed their SYN in the poll loop;
+            // an idle listener here is an invalid or reset handshake.
+            self.cleanup_closed(sockets);
+            if self.connections.len() >= self.max_connections {
+                self.rejected_connections = self.rejected_connections.saturating_add(1);
+                return false;
+            }
         }
 
         // Create smoltcp TCP socket with buffers.
@@ -416,16 +425,49 @@ impl ConnectionTracker {
         new
     }
 
+    /// Record bounded-cardinality diagnostics once per maintenance interval.
+    pub fn trace_stats(&self, sockets: &SocketSet<'_>) {
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+        let closing = self
+            .connections
+            .keys()
+            .filter(|&&handle| {
+                matches!(
+                    sockets.get::<tcp::Socket>(handle).state(),
+                    tcp::State::CloseWait
+                        | tcp::State::FinWait1
+                        | tcp::State::FinWait2
+                        | tcp::State::Closing
+                        | tcp::State::LastAck
+                        | tcp::State::TimeWait
+                )
+            })
+            .count();
+        tracing::debug!(
+            limit = self.max_connections,
+            tracked = self.connections.len(),
+            closing,
+            rejected_total = self.rejected_connections,
+            socket_buffer_bytes = self.connections.len() * (TCP_RX_BUF_SIZE + TCP_TX_BUF_SIZE),
+            "TCP connection budget"
+        );
+    }
+
     /// Remove closed connections and their sockets.
     ///
-    /// Only removes sockets in the `Closed` state. Sockets in `TimeWait`
-    /// are left for smoltcp to handle naturally (2*MSL timer), preventing
-    /// delayed duplicate segments from being accepted by a reused port.
+    /// Idle listeners represent failed/reset SYNs: this tracker never owns
+    /// persistent listening sockets. Closed sockets with a remote endpoint
+    /// still owe the guest an RST and must survive until smoltcp emits it.
+    /// TIME_WAIT remains intact to reject delayed duplicate segments.
     pub fn cleanup_closed(&mut self, sockets: &mut SocketSet<'_>) {
         let keys = &mut self.connection_keys;
         self.connections.retain(|&handle, conn| {
             let socket = sockets.get::<tcp::Socket>(handle);
-            if matches!(socket.state(), tcp::State::Closed) {
+            if matches!(socket.state(), tcp::State::Closed | tcp::State::Listen)
+                && socket.remote_endpoint().is_none()
+            {
                 keys.remove(&(conn.src, conn.dst));
                 sockets.remove(handle);
                 false

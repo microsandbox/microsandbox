@@ -3942,7 +3942,7 @@ mod tests {
                 name: "test".into(),
                 image: RootfsSource::Oci(OciRootfsSource {
                     reference: "alpine".into(),
-                    root_disk: None,
+                    root_disk: Some(crate::sandbox::RootDisk::tmpfs(512)),
                 }),
                 resources: microsandbox_types::SandboxResources {
                     memory_mib: 1024,

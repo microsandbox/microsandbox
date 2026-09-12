@@ -1,6 +1,9 @@
 name: Check
 
 on:
+  # Qualify an exact branch revision for internal commit-image publication,
+  # including stacked PRs whose base is not main. This workflow publishes nothing.
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:

@@ -19,7 +19,9 @@ use microsandbox_types::{
 };
 use msb_krun::backends::net::NetBackend;
 
-use crate::config::{MAX_NETWORK_CONNECTIONS, ResolvedNetworkConfig};
+use crate::config::{
+    HostNetworkLimits, HostNetworkLimitsError, MAX_NETWORK_CONNECTIONS, ResolvedNetworkConfig,
+};
 use crate::netstack::{
     backend::SmoltcpBackend,
     poll::{self, GatewayIps, PollLoopConfig},
@@ -28,16 +30,6 @@ use crate::netstack::{
 use crate::policy::{NetworkPolicy, NetworkProfile};
 use crate::secrets::handle::SecretsHandle;
 use crate::tls::state::{TlsState, TlsStateError};
-
-//--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-/// Hard ceiling for concurrent connections on shared, multi-tenant hosts.
-///
-/// This matches the network engine's existing default, preventing a tenant
-/// override from increasing host-side socket state above the normal budget.
-const MULTI_TENANT_MAX_CONNECTIONS: usize = 256;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -85,6 +77,10 @@ struct HostRoutes {
 /// Errors that prevent the smoltcp network from being created safely.
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkInitError {
+    /// The operator supplied an invalid shared-host connection budget.
+    #[error(transparent)]
+    HostNetworkLimits(#[from] HostNetworkLimitsError),
+
     /// The configured connection cap is above the hard safety limit.
     #[error("max_connections {configured} exceeds hard limit {limit}")]
     MaxConnectionsExceeded {
@@ -162,7 +158,8 @@ impl SmoltcpNetwork {
     /// `MultiTenant` applies platform-owned configuration floors before any
     /// sockets, resolvers, or TLS state are created. The requested tenant policy
     /// remains separate and is intersected with the platform's public-network
-    /// policy by the poll loop.
+    /// policy by the poll loop. The host process can configure its connection
+    /// ceiling with `MSB_HOST_MAX_TCP_CONNECTIONS` (1–4096; default 256).
     ///
     /// # Errors
     ///
@@ -173,16 +170,43 @@ impl SmoltcpNetwork {
         slot: u16,
         deployment_profile: DeploymentProfile,
     ) -> Result<Self, NetworkInitError> {
-        Self::build(config, slot, deployment_profile, HostRoutes::detect())
+        let limits = match deployment_profile {
+            DeploymentProfile::MultiTenant => HostNetworkLimits::from_environment()?,
+            DeploymentProfile::SingleTenant => HostNetworkLimits::default(),
+        };
+        Self::build_with_limits(
+            config,
+            slot,
+            deployment_profile,
+            HostRoutes::detect(),
+            limits,
+        )
     }
 
+    #[cfg(test)]
     fn build(
-        mut config: ResolvedNetworkConfig,
+        config: ResolvedNetworkConfig,
         slot: u16,
         deployment_profile: DeploymentProfile,
         host_routes: HostRoutes,
     ) -> Result<Self, NetworkInitError> {
-        enforce_deployment_profile(&mut config, deployment_profile);
+        Self::build_with_limits(
+            config,
+            slot,
+            deployment_profile,
+            host_routes,
+            HostNetworkLimits::default(),
+        )
+    }
+
+    fn build_with_limits(
+        mut config: ResolvedNetworkConfig,
+        slot: u16,
+        deployment_profile: DeploymentProfile,
+        host_routes: HostRoutes,
+        host_limits: HostNetworkLimits,
+    ) -> Result<Self, NetworkInitError> {
+        enforce_deployment_profile(&mut config, deployment_profile, host_limits);
         let platform_policy = Self::platform_policy(deployment_profile);
         let resolved_config = config;
         let config = resolved_config.config();
@@ -526,11 +550,16 @@ impl MetricsHandle {
 /// the platform public-network policy and the tenant policy independently so a
 /// broad tenant allow can never outrank the platform floor, while a tenant deny
 /// still remains effective.
-fn enforce_deployment_profile(config: &mut ResolvedNetworkConfig, profile: DeploymentProfile) {
+fn enforce_deployment_profile(
+    config: &mut ResolvedNetworkConfig,
+    profile: DeploymentProfile,
+    host_limits: HostNetworkLimits,
+) {
     if profile == DeploymentProfile::SingleTenant {
         return;
     }
 
+    let host_max_connections = host_limits.max_tcp_connections();
     config.clear_outbound_proxy();
 
     let config = config.config_mut();
@@ -545,9 +574,10 @@ fn enforce_deployment_profile(config: &mut ResolvedNetworkConfig, profile: Deplo
     let disabled_rebind_protection = !config.dns.rebind_protection;
     let trusted_host_cas = config.trust_host_cas;
     let had_outbound_proxy = config.outbound_proxy.is_some();
+    let requested_max_connections = config.max_connections;
     let connection_limit_clamped = config
         .max_connections
-        .is_some_and(|limit| limit > MULTI_TENANT_MAX_CONNECTIONS);
+        .is_some_and(|limit| limit > host_max_connections);
 
     config.interface = Default::default();
     config.ports.clear();
@@ -557,8 +587,15 @@ fn enforce_deployment_profile(config: &mut ResolvedNetworkConfig, profile: Deplo
     config.max_connections = Some(
         config
             .max_connections
-            .unwrap_or(MULTI_TENANT_MAX_CONNECTIONS)
-            .min(MULTI_TENANT_MAX_CONNECTIONS),
+            .unwrap_or(host_max_connections)
+            .min(host_max_connections),
+    );
+
+    tracing::debug!(
+        host_max_connections,
+        requested_max_connections,
+        effective_max_connections = config.max_connections,
+        "applied host TCP connection budget"
     );
 
     if interface_overridden
@@ -733,11 +770,15 @@ mod tests {
             address: "127.0.0.1:1080".parse().unwrap(),
             credentials: None,
         });
-        config.max_connections = Some(MULTI_TENANT_MAX_CONNECTIONS + 1);
+        config.max_connections = Some(crate::config::DEFAULT_HOST_MAX_TCP_CONNECTIONS + 1);
         config.policy = NetworkPolicy::allow_all();
         let mut resolved = resolved(config);
 
-        enforce_deployment_profile(&mut resolved, DeploymentProfile::MultiTenant);
+        enforce_deployment_profile(
+            &mut resolved,
+            DeploymentProfile::MultiTenant,
+            HostNetworkLimits::default(),
+        );
         let config = resolved.config();
 
         assert!(config.interface.mac.is_none());
@@ -747,12 +788,36 @@ mod tests {
         assert!(config.dns.rebind_protection);
         assert!(!config.trust_host_cas);
         assert!(config.outbound_proxy.is_none());
-        assert_eq!(config.max_connections, Some(MULTI_TENANT_MAX_CONNECTIONS));
+        assert_eq!(
+            config.max_connections,
+            Some(crate::config::DEFAULT_HOST_MAX_TCP_CONNECTIONS)
+        );
         assert!(resolved.config().outbound_proxy.is_none());
         assert!(resolved.outbound_proxy().is_none());
         // Tenant policy stays intact and is intersected with the platform
         // policy at evaluation time instead of being reordered or flattened.
         assert!(config.policy.default_egress.is_allow());
+    }
+
+    #[test]
+    fn host_budget_allows_more_connections_without_tenant_escalation() {
+        let limits = HostNetworkLimits::new(1024).unwrap();
+        for (requested, effective) in [
+            (None, 1024),
+            (Some(64), 64),
+            (Some(256), 256),
+            (Some(1024), 1024),
+            (Some(4096), 1024),
+        ] {
+            let mut config = NetworkConfig::default();
+            config.max_connections = requested;
+            config.dns.rebind_protection = false;
+            let mut config = resolved(config);
+            enforce_deployment_profile(&mut config, DeploymentProfile::MultiTenant, limits);
+            assert_eq!(config.config().max_connections, Some(effective));
+            assert!(config.config().dns.rebind_protection);
+            assert!(config.config().interface.mac.is_none());
+        }
     }
 
     #[test]
@@ -767,7 +832,11 @@ mod tests {
         });
 
         let mut resolved = resolved(config);
-        enforce_deployment_profile(&mut resolved, DeploymentProfile::SingleTenant);
+        enforce_deployment_profile(
+            &mut resolved,
+            DeploymentProfile::SingleTenant,
+            HostNetworkLimits::default(),
+        );
         let config = resolved.config();
 
         assert_eq!(config.interface.mtu, Some(9000));

@@ -623,10 +623,11 @@ pub fn smoltcp_poll_loop(
             tokio_handle.spawn(proxy.run());
         }
 
-        // Rate-limited cleanup: TIME_WAIT is 60s, session timeout is 60s,
-        // so checking once per second is more than sufficient.
+        // Periodic cleanup is the idle fallback. TCP creation also reclaims
+        // completed flows when the table is full, before rejecting a new SYN.
         if last_cleanup.elapsed() >= std::time::Duration::from_secs(1) {
             conn_tracker.cleanup_closed(&mut sockets);
+            conn_tracker.trace_stats(&sockets);
             port_publisher.cleanup_closed(&mut sockets);
             udp_relay.cleanup_expired();
             udp_fragments.cleanup_expired();
@@ -2297,19 +2298,191 @@ mod tests {
     }
 
     #[test]
+    fn closed_slot_is_reused_under_pressure_but_pending_reset_is_sent_first() {
+        let shared = Arc::new(SharedState::new(64));
+        let config = leak_poll_config();
+        let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
+        let mut iface = create_interface(&mut device, &config);
+        let mut sockets = SocketSet::new(vec![]);
+        let mut tracker = ConnectionTracker::new(Some(1));
+        let now = smoltcp_now();
+        handshake(
+            &mut tracker,
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+            40000,
+        );
+        let handle = sockets.iter().next().unwrap().0;
+        sockets.get_mut::<tcp::Socket>(handle).abort();
+        tracker.cleanup_closed(&mut sockets);
+        assert_eq!(
+            only_tcp_state(&sockets),
+            Some(tcp::State::Closed),
+            "pending RST must not be lost during cleanup"
+        );
+        let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40001);
+        let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
+        assert!(
+            !tracker.create_tcp_socket(src, dst, &mut sockets),
+            "the pending reset still owns its socket budget"
+        );
+        loop {
+            if matches!(
+                iface.poll_egress(now, &mut device, &mut sockets),
+                smoltcp::iface::PollResult::None
+            ) {
+                break;
+            }
+        }
+        let (_, _, _, _, rst) = last_tcp_reply(&shared).expect("RST must reach guest");
+        assert!(rst);
+        // No periodic cleanup call: allocating the next SYN reclaims the slot.
+        assert!(tracker.create_tcp_socket(src, dst, &mut sockets));
+        assert!(!tracker.has_socket_for(
+            &SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40000),
+            &dst
+        ));
+    }
+
+    #[test]
+    fn reset_during_handshake_does_not_leave_an_idle_listener_at_capacity() {
+        let shared = Arc::new(SharedState::new(64));
+        let config = leak_poll_config();
+        let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
+        let mut iface = create_interface(&mut device, &config);
+        let mut sockets = SocketSet::new(vec![]);
+        let mut tracker = ConnectionTracker::new(Some(1));
+        let now = smoltcp_now();
+        ingress(
+            build_arp_request_frame(GUEST_MAC, GUEST_IP, GATEWAY_IP),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+        );
+        let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40000);
+        let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
+        assert!(tracker.create_tcp_socket(src, dst, &mut sockets));
+        ingress(
+            build_tcp_frame(40000, 443, TcpControl::Syn, 1000, None, &[]),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+        );
+        let (server_seq, _, syn, _, _) = last_tcp_reply(&shared).unwrap();
+        assert!(syn);
+        assert_eq!(only_tcp_state(&sockets), Some(tcp::State::SynReceived));
+        ingress(
+            build_tcp_frame(40000, 443, TcpControl::Rst, 1001, Some(server_seq + 1), &[]),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+        );
+        assert_eq!(only_tcp_state(&sockets), Some(tcp::State::Listen));
+        let next_src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40001);
+        assert!(tracker.create_tcp_socket(next_src, dst, &mut sockets));
+        assert!(!tracker.has_socket_for(&src, &dst));
+    }
+
+    #[test]
+    fn connection_pressure_preserves_time_wait_protection() {
+        let shared = Arc::new(SharedState::new(64));
+        let config = leak_poll_config();
+        let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
+        let mut iface = create_interface(&mut device, &config);
+        let mut sockets = SocketSet::new(vec![]);
+        let mut tracker = ConnectionTracker::new(Some(1));
+        let now = smoltcp_now();
+        let (_, guest_seq) = handshake(
+            &mut tracker,
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+            40000,
+        );
+        let handle = sockets.iter().next().unwrap().0;
+        sockets.get_mut::<tcp::Socket>(handle).close();
+        loop {
+            if matches!(
+                iface.poll_egress(now, &mut device, &mut sockets),
+                smoltcp::iface::PollResult::None
+            ) {
+                break;
+            }
+        }
+        let (fin_seq, _, _, fin, _) = last_tcp_reply(&shared).unwrap();
+        assert!(fin);
+        ingress(
+            build_tcp_frame(
+                40000,
+                443,
+                TcpControl::None,
+                guest_seq,
+                Some(fin_seq + 1),
+                &[],
+            ),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+        );
+        ingress(
+            build_tcp_frame(
+                40000,
+                443,
+                TcpControl::Fin,
+                guest_seq,
+                Some(fin_seq + 1),
+                &[],
+            ),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+        );
+        assert_eq!(only_tcp_state(&sockets), Some(tcp::State::TimeWait));
+        tracker.cleanup_closed(&mut sockets);
+        let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40001);
+        let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
+        assert!(!tracker.create_tcp_socket(src, dst, &mut sockets));
+        assert_eq!(only_tcp_state(&sockets), Some(tcp::State::TimeWait));
+    }
+
+    #[test]
     fn full_connection_table_refuses_new_sockets() {
         // Once the table is full, new guest connections are refused. Uses a
         // small max to avoid 256 full handshakes; the gating logic is
         // identical to the 256 default.
         let mut tracker = ConnectionTracker::new(Some(4));
         let mut sockets = SocketSet::new(vec![]);
+        let shared = Arc::new(SharedState::new(64));
+        let config = leak_poll_config();
+        let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
+        let mut iface = create_interface(&mut device, &config);
+        let now = smoltcp_now();
         let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
 
         for port in 40000u16..40004 {
-            let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), port);
-            assert!(
-                tracker.create_tcp_socket(src, dst, &mut sockets),
-                "creation under the limit must succeed",
+            handshake(
+                &mut tracker,
+                &mut device,
+                &mut iface,
+                &mut sockets,
+                &shared,
+                now,
+                port,
             );
         }
         // Table full (4 slots held). The 5th guest SYN gets no socket — which

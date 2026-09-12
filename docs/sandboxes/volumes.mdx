@@ -13,6 +13,24 @@ Volumes give a sandbox persistent or shared storage by mounting host data, manag
 
 microsandbox supports four mount types on both backends: bind mounts, named volumes, disk-image volumes, and tmpfs.
 
+## Temporary files
+
+For OCI sandboxes with a disk-backed root, `/tmp` uses the root disk unless you
+explicitly mount another filesystem there. Large package downloads and build
+files therefore consume disk capacity and leave guest RAM available for build
+processes.
+For a new Cloud OCI sandbox that omits disk size, the writable-disk default
+matches requested RAM, bounded to 4–16 GiB. Explicit disk sizes and restored
+snapshot sizes take precedence.
+
+Disk-backed temporary files can survive stop/start and be included in snapshots;
+remove them when they are no longer needed.
+
+An explicit tmpfs mount remains available for workloads that need RAM-backed,
+per-boot scratch space. Existing sandbox configurations with a saved tmpfs mount
+retain it on restart. OCI roots explicitly configured as tmpfs keep their bounded
+`/tmp` tmpfs default.
+
 ## Cloud default volume
 
 <Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
