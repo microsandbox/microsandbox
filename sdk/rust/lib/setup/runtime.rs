@@ -848,18 +848,26 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(runtime.msb_path, home_msb);
-        assert_eq!(
-            fs::read(runtime.msb_path).unwrap(),
-            b"an older installed runtime"
-        );
+        // Read the fixture-owned path after checking the returned selection. A
+        // resolver result must never choose which file this assertion reads.
+        assert_eq!(fs::read(&home_msb).unwrap(), b"an older installed runtime");
     }
 
     #[cfg(feature = "embed-binaries")]
     #[tokio::test]
     async fn embedded_archive_is_installed_only_by_explicit_ensure() {
         let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("absent");
+        let expected_msb = home
+            .join(BIN_SUBDIR)
+            .join(microsandbox_utils::msb_binary_filename(
+                std::env::consts::OS,
+            ));
+        let expected_library = home
+            .join(LIB_SUBDIR)
+            .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
         let config = GlobalConfig {
-            home: Some(temp.path().join("absent")),
+            home: Some(home),
             ..Default::default()
         };
         assert!(matches!(
@@ -877,8 +885,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(runtime.origin, RuntimeOrigin::Installed);
-        assert!(runtime.msb_path.is_file());
-        assert!(runtime.libkrunfw_path.is_file());
+        // Assert exact destinations before checking fixture-owned paths. Archive
+        // contents and resolver results cannot redirect these filesystem probes.
+        assert_eq!(runtime.msb_path, expected_msb);
+        assert_eq!(runtime.libkrunfw_path, expected_library);
+        assert!(expected_msb.is_file());
+        assert!(expected_library.is_file());
         assert_eq!(
             resolve_runtime(&config).unwrap().origin,
             RuntimeOrigin::Home
