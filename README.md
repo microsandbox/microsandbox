@@ -156,8 +156,8 @@ Use `msb sandbox --help` to explore the group.
 >
 > ```sh
 > # Save now, resume later
-> msb snapshot create saved --from-sandbox app --full
-> msb create --name restored --from-snapshot app:saved
+> msb snapshot create --from-sandbox app --full -o saved.msb
+> msb create --name restored --from-snapshot saved.msb
 > ```
 >
 > ```sh
