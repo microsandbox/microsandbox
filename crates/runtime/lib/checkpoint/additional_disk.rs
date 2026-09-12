@@ -107,6 +107,9 @@ impl RuntimeOwnedAdditionalDisk {
             if let Some(fstype) = &mount.fstype {
                 binding.insert("fstype".into(), fstype.clone());
             }
+            if disk.lifecycle_owned {
+                binding.insert("lifecycle_owned".into(), "true".into());
+            }
             let provider = Self {
                 device_id: disk.id.clone(),
                 source,
@@ -329,6 +332,7 @@ mod tests {
             fstype: None,
             readonly: false,
             snapshot_owned: true,
+            lifecycle_owned: false,
         };
         let bootstrap = GuestBootstrap {
             disk_mounts: vec![BootstrapDiskMount {
@@ -383,6 +387,12 @@ mod tests {
         disk.format = msb_krun::DiskImageFormat::Raw;
         let registered = provider(disk.clone(), &bootstrap);
         assert_eq!(registered.binding()["managed_disk"], "true");
+        assert!(!registered.binding().contains_key("lifecycle_owned"));
+        disk.lifecycle_owned = true;
+        assert_eq!(
+            provider(disk.clone(), &bootstrap).binding()["lifecycle_owned"],
+            "true"
+        );
         assert_eq!(registered.binding()["guest_path"], "/data");
         assert_eq!(registered.binding()["fstype"], "ext4");
         assert_eq!(

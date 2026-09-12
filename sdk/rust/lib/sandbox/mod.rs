@@ -205,8 +205,9 @@ pub use ssh::{
 pub use status::SandboxStatus;
 pub use types::{
     DeploymentProfile, DiskImageFormat, FlatClone, HostPermissions, ImageBuilder, ImageSource,
-    IntoImage, MountBuilder, MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder,
-    RootDisk, RootDiskBuilder, RootfsSource, SecurityProfile, StatVirtualization, VolumeMount,
+    IntoImage, MountBuilder, MountOptions, NamedVolumeMode, OciRootfsSource, OwnedVolumeBuilder,
+    OwnedVolumeStorage, Patch, PatchBuilder, RootDisk, RootDiskBuilder, RootfsSource,
+    SecurityProfile, StatVirtualization, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------

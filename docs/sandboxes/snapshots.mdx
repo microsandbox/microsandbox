@@ -58,6 +58,8 @@ Strict validation checks the mount at restore time; it does not lock the host di
 
 Named disk volumes are captured as immutable disk generations. Restored children receive private copies; the source volume is unchanged. Arbitrary external disk-image mounts are not implicitly converted into snapshot-owned volumes.
 
+[Owned volumes](/sandboxes/volumes#owned-volumes) are included automatically in snapshots and branches. Each child gets private directory or disk contents; no host mapping is needed. Full captures also preserve supported open directory-volume handles, including unlinked regular files.
+
 ## Branch a running sandbox
 
 Use `branch` for an independent local child without first saving a full snapshot:
@@ -203,7 +205,7 @@ msb snapshot create after-pip-install --from-sandbox baseline --dest-dir /mnt/bi
 ```
 </CodeGroup>
 
-The default disk mode captures only the owned managed or flat root disk. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Use `--output ./saved.msb` (or `-o ./saved.msb`) in either mode to write an archive without installing a snapshot directory.
+The default disk mode captures the managed or flat root disk and owned volumes. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Use `--output ./saved.msb` (or `-o ./saved.msb`) in either mode to write an archive without installing a snapshot directory.
 
 ## Capture a running sandbox
 

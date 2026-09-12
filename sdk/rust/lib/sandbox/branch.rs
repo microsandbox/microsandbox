@@ -179,9 +179,12 @@ async fn branch(
             "source uses host-backed proxy, TLS or secret resources; explicit compatible authorization is required (or dangerously_inherit_resources for this local source)".into(),
         ));
     }
-    // Inheritance never copies a source's writable disks into the child configuration.
-    // Captured disk selection below materializes independent child-owned files instead.
-    config.spec.mounts.clear();
+    // Owned declarations contain no source host path. Retain them as the required inventory
+    // until capture proves that every one has independent child backing; clear external mounts.
+    config
+        .spec
+        .mounts
+        .retain(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }));
     config.spec.mounts.extend(options.spec.mounts);
     if !options.restore_resources.inherit || !options.spec.network.ports.is_empty() {
         config.spec.network.ports = options.spec.network.ports;
@@ -271,6 +274,7 @@ pub(crate) async fn capture_child(
         ));
     }
     let state = LocalBranchState::open(&closure)?;
+    crate::snapshot::validate_owned_inventory(&config.spec.mounts, &state.owned_volumes)?;
     if state.id != id {
         return Err(MicrosandboxError::Runtime("branch identity differs".into()));
     }
@@ -333,15 +337,24 @@ pub(crate) async fn capture_child(
             ));
         }
     }
-    let mounts = crate::snapshot::materialize_additional_disks(
-        &state.disks,
-        &state.resources,
+    let mut mounts = crate::snapshot::materialize_owned_volumes(
+        &state.owned_volumes,
         &closure,
         child,
-        root_device,
         &config.restore_resources,
     )
     .await?;
+    mounts.extend(
+        crate::snapshot::materialize_additional_disks(
+            &state.disks,
+            &state.resources,
+            &closure,
+            child,
+            root_device,
+            &config.restore_resources,
+        )
+        .await?,
+    );
     crate::snapshot::apply_additional_disks(config, mounts);
     config.checkpoint_restore = Some(CheckpointRestoreConfig {
         network_gateway_mac: microsandbox_runtime::checkpoint::captured_gateway_mac(

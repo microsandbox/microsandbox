@@ -36,16 +36,16 @@ pub use domain::{
     InterfaceOverridesPatch, LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MemoryPlacement,
     MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkPolicy, NetworkRateLimitDirection,
     NetworkRateLimiterConfig, NetworkRateLimiterConfigPatch, NetworkSpec, NetworkSpecPatch,
-    NumaPlacement, OciRootfsSource, OutboundProxy, Patch, PlacementProfile, PortProtocol,
-    PortRange, Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError, RateLimiterConfig,
-    Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxConfigPatch, SandboxLogLevel,
-    SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
+    NumaPlacement, OciRootfsSource, OutboundProxy, OwnedVolumeStorage, Patch, PlacementProfile,
+    PortProtocol, PortRange, Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError,
+    RateLimiterConfig, Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxConfigPatch,
+    SandboxLogLevel, SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
     SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec, ScopedUpstreamCaCert,
     ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretSubstitution,
     SecretViolationAction, SecretsConfig, SecretsConfigPatch, SecurityProfile, SnapshotSpec,
     Socks5Credentials, StatVirtualization, TlsConfig, TlsConfigPatch, TokenBucketConfig,
     TransparentHugePagePolicy, VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec,
-    VsockSocketType, VsockSpec, VsockSpecPatch, canonicalize_volume_mounts,
+    VsockSocketType, VsockSpec, VsockSpecPatch, canonicalize_volume_mounts, owned_volume_mount_id,
 };
 pub use error::{TypesError, TypesResult};
 pub use modify::{

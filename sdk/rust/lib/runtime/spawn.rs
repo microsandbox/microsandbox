@@ -410,7 +410,9 @@ pub async fn spawn_sandbox(
     // one-entry filesystem instead of exporting the source's parent directory.
     let file_mounts = resolve_file_mounts(config)?;
     let named_volumes = resolve_named_volumes(local, config).await?;
-    let disk_locks = lock_disk_mounts(config, &named_volumes)?;
+    let owned_root = local.sandboxes_dir().join(&config.spec.name);
+    super::owned_volumes::validate(&owned_root, &config.spec.mounts)?;
+    let disk_locks = lock_disk_mounts(config, &named_volumes, &owned_root)?;
     let metrics_reservation = if config.effective_metrics_interval().is_some() {
         reserve_metrics_slot(local, config, sandbox_id)
     } else {
@@ -1747,6 +1749,7 @@ fn validate_requested_named_volume_labels(
 fn lock_disk_mounts(
     config: &SandboxConfig,
     named_volumes: &HashMap<String, ResolvedNamedVolume>,
+    sandbox_dir: &Path,
 ) -> MicrosandboxResult<Vec<File>> {
     let mut locks = Vec::new();
     let mut requests = Vec::new();
@@ -1762,6 +1765,19 @@ fn lock_disk_mounts(
 
     for mount in &config.spec.mounts {
         match mount {
+            VolumeMount::Owned {
+                guest,
+                storage: storage @ microsandbox_types::OwnedVolumeStorage::Disk { .. },
+                options,
+                ..
+            } => {
+                requests.push(DiskLockRequest {
+                    path: super::owned_volumes::backing_path(sandbox_dir, guest, storage),
+                    readonly: options.readonly,
+                    label: format!("owned disk volume {guest:?}"),
+                    volume_name: None,
+                });
+            }
             VolumeMount::DiskImage { host, options, .. } => {
                 requests.push(DiskLockRequest {
                     path: host.clone(),
@@ -2292,6 +2308,30 @@ fn push_dir_mount_arg(
     quota_mib: Option<u32>,
 ) {
     let tag = guest_mount_tag(guest);
+    push_dir_mount_arg_with_tag(
+        mounts,
+        &tag,
+        host_display,
+        options,
+        stat_virtualization,
+        host_permissions,
+        follow_root_symlinks,
+        quota_mib,
+    );
+}
+
+/// Render a directory mount with the already-resolved device identity.
+#[allow(clippy::too_many_arguments)]
+fn push_dir_mount_arg_with_tag(
+    mounts: &mut Vec<String>,
+    tag: &str,
+    host_display: &impl std::fmt::Display,
+    options: MountOptions,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+    follow_root_symlinks: bool,
+    quota_mib: Option<u32>,
+) {
     let mut arg = format!("{tag}:{host_display}");
     let mut opts = mount_option_tokens(options);
     append_policy_options(
@@ -2572,6 +2612,13 @@ fn machine_cli_args(
     }
 
     let mut launch = LaunchConfig {
+        owned_volumes: config
+            .spec
+            .mounts
+            .iter()
+            .filter(|mount| matches!(mount, VolumeMount::Owned { .. }))
+            .cloned()
+            .collect(),
         db_path: db_path.to_path_buf(),
         db_connect_timeout_secs,
         log_dir: log_dir.to_path_buf(),
@@ -2772,6 +2819,64 @@ fn machine_cli_args(
     // typed guest-side mount instructions for agentd.
     for mount in &config.spec.mounts {
         match mount {
+            VolumeMount::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            } => {
+                let path = super::owned_volumes::backing_path(
+                    &local.sandboxes_dir().join(&config.spec.name),
+                    guest,
+                    storage,
+                );
+                let id = microsandbox_types::owned_volume_mount_id(guest);
+                match storage {
+                    microsandbox_types::OwnedVolumeStorage::Directory { quota_mib } => {
+                        push_dir_mount_arg_with_tag(
+                            &mut launch.mounts,
+                            &id,
+                            &path.display(),
+                            *options,
+                            *stat_virtualization,
+                            *host_permissions,
+                            false,
+                            Some(
+                                quota_mib.unwrap_or(crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB),
+                            ),
+                        );
+                        launch.bootstrap.dir_mounts.push(BootstrapDirMount {
+                            tag: id,
+                            guest_path: guest.clone(),
+                            flags: bootstrap_mount_flags(*options),
+                        });
+                    }
+                    microsandbox_types::OwnedVolumeStorage::Disk { .. } => {
+                        push_disk_mount_arg(
+                            &mut launch.disks,
+                            &id,
+                            &path.display(),
+                            &DiskImageFormat::Raw,
+                            *options,
+                            true,
+                        );
+                        // Must-understand provenance: named disks remain shared even though
+                        // they are also capture-eligible. Never infer lifetime from that bit.
+                        launch
+                            .disks
+                            .last_mut()
+                            .expect("owned disk was just appended")
+                            .push_str(":lifecycle-owned");
+                        launch.bootstrap.disk_mounts.push(BootstrapDiskMount {
+                            id,
+                            guest_path: guest.clone(),
+                            fstype: Some("ext4".into()),
+                            flags: bootstrap_mount_flags(*options),
+                        });
+                    }
+                }
+            }
             VolumeMount::Bind {
                 host,
                 guest,
@@ -5357,7 +5462,8 @@ mod tests {
             ..Default::default()
         };
 
-        let err = super::lock_disk_mounts(&config, &HashMap::new()).unwrap_err();
+        let err =
+            super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused")).unwrap_err();
         assert!(err.to_string().contains("more than once per sandbox"));
     }
 
@@ -5396,7 +5502,8 @@ mod tests {
         let mut named_volumes = HashMap::new();
         named_volumes.insert("data".to_string(), named_disk(disk));
 
-        let err = super::lock_disk_mounts(&config, &named_volumes).unwrap_err();
+        let err =
+            super::lock_disk_mounts(&config, &named_volumes, Path::new("unused")).unwrap_err();
         assert!(err.to_string().contains("more than once per sandbox"));
     }
 
