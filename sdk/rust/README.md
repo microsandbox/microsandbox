@@ -46,19 +46,18 @@ cargo add microsandbox
 | `embed-binaries` | no | Embed a compressed `msb` + `libkrunfw` archive for offline runtime installation; implies `local` |
 | `ssh` | no | SSH, SFTP, and interactive SSH helpers |
 
-Local snapshots and image-archive import/export are part of `local`; they are not separate Cargo features. The guest Agentd payload is owned by the `msb` binary build and is not downloaded or embedded independently by the SDK.
-
-For a cloud-only application that never installs or launches a local runtime:
-
 ```bash
+# Cloud only
 cargo add microsandbox --no-default-features --features cloud,net
-```
 
-For a local-only application with Cargo-time runtime installation:
-
-```bash
+# Local, with automatic runtime installation at build time
 cargo add microsandbox --no-default-features --features local,net,download-binaries,keyring
+
+# Local, without downloading or embedding runtime binaries
+cargo add microsandbox --no-default-features --features local,net
 ```
+
+For the last option, install the runtime with the [CLI installer](https://docs.microsandbox.dev/getting-started/quickstart) or call `setup::ensure_runtime()` at startup. See [Runtime setup](https://docs.microsandbox.dev/sdk/setup) for details.
 
 ## Quick Start
 

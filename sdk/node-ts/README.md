@@ -48,13 +48,25 @@ const { Sandbox } = require("microsandbox");
 | Windows | x86_64 | `@superradcompany/microsandbox-win32-x64-msvc` |
 | Windows | ARM64 | `@superradcompany/microsandbox-win32-arm64-msvc` |
 
-The matching platform package is installed through npm optional dependencies and carries the native addon plus runtime binaries. If optional dependencies are omitted, reinstall with optional dependencies enabled, install the matching platform package explicitly, or set `MSB_PATH` to a working `msb` binary.
+The matching platform package carries the native addon plus runtime binaries. Keep npm optional dependencies enabled: omitting them also removes the required addon, which `MSB_PATH` cannot replace.
 
 ## Installation
 
 ```bash
 npm install microsandbox
 ```
+
+Runtime setup is normally included. To provision `msb` + `libkrunfw` separately, use the [CLI installer](https://docs.microsandbox.dev/getting-started/quickstart) or explicitly install them from your application:
+
+```typescript
+import { install, isInstalled } from "microsandbox";
+
+if (!isInstalled()) {
+  await install();
+}
+```
+
+Use `MSB_PATH` and `MSB_LIBKRUNFW_PATH` to select an external runtime; this does not remove the npm package's bundled files. See [Runtime setup](https://docs.microsandbox.dev/sdk/setup) for custom paths and versions.
 
 ## Quick Start
 

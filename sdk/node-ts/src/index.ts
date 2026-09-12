@@ -24,6 +24,7 @@ export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox, SandboxListBuilder } from "./sandbox.js";
+export type { RestoreBuilder } from "./sandbox.js";
 import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
 /**
  * Native fluent builder for a sandbox. `new SandboxBuilder(name)` is

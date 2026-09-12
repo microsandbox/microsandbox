@@ -151,7 +151,6 @@ Use `msb sandbox --help` to explore the group.
 > # Fork a running sandbox.
 > msb branch app --name experiment
 > msb exec experiment -- python -c "print('An independent copy!')"
-> msb branch experiment --name another-experiment
 > ```
 >
 > ```sh
@@ -419,6 +418,7 @@ Practical ways to put microsandbox to work:
 > • <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist**: Elixir agentic engine, and cacheable actions that run in fresh sandboxes.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/link/A770EF"> **[langchain-microsandbox](https://github.com/kenwoodjw/langchain-microsandbox) by kenwoodjw**: Microsandbox integration for LangChain Deep Agents.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/history/A770EF"> **[Smithers](https://github.com/smithersai/smithers) by Smithers**: Agent workflows with full observability, rewind, fork, and replay.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/organization/A770EF"> **[AgentConnect](https://github.com/agentconnect-md/agentconnect)**: Bring multiple AI agents into your team's chats, issues, and pull requests.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/terminal/A770EF"> **[wrap](https://github.com/tobi/wrap) by Tobi Lütke**: Run coding agents and project commands in isolated Arch Linux microVMs.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **[Agent VM](https://github.com/wirenboard/agent-vm) by Wiren Board**: Run AI agents in safe VMs scoped to a local folder.
 

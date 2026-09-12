@@ -89,43 +89,38 @@ func resolveRegistryCACertPaths(o *SandboxConfig) error {
 // Extracted so tests can assert the JSON envelope without booting the runtime.
 func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
-		Image:               o.Image,
-		ImageFstype:         o.ImageFstype,
-		ImageBind:           o.ImageBind,
-		Snapshot:            o.Snapshot,
-		SnapshotDiskOnly:    o.SnapshotDiskOnly,
-		SnapshotBase:        o.SnapshotBase,
-		MemoryMiB:           o.MemoryMiB,
-		CPUs:                o.CPUs,
-		MaxMemoryMiB:        o.MaxMemoryMiB,
-		MaxCPUs:             o.MaxCPUs,
-		CPUPlacement:        string(o.CPUPlacement),
-		PlacementProfile:    o.PlacementProfile,
-		THP:                 string(o.THP),
-		Forked:              o.Forked,
-		ExternalMountPolicy: string(o.ExternalMountPolicy),
-		Workdir:             o.Workdir,
-		Shell:               o.Shell,
-		SecurityProfile:     string(o.SecurityProfile),
-		DeploymentProfile:   string(o.DeploymentProfile),
-		Hostname:            o.Hostname,
-		User:                o.User,
-		Replace:             o.Replace,
-		Env:                 o.Env,
-		Labels:              o.Labels,
-		Detached:            o.Detached,
-		Ephemeral:           o.Ephemeral,
-		LogLevel:            string(o.LogLevel),
-		QuietLogs:           o.QuietLogs,
-		Scripts:             o.Scripts,
-		PullPolicy:          string(o.PullPolicy),
-		MaxDurationSecs:     durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs:     durationSecsCeil(o.IdleTimeout),
-		Ports:               o.Ports,
-		PortsUDP:            o.PortsUDP,
-		PortBindings:        buildFFIPortBindings(o.PortBindings),
-		Vsock:               buildFFIVsockRoutes(o.Vsock),
-		RegistryInsecure:    o.RegistryInsecure,
+		Image:             o.Image,
+		ImageFstype:       o.ImageFstype,
+		ImageBind:         o.ImageBind,
+		MemoryMiB:         o.MemoryMiB,
+		CPUs:              o.CPUs,
+		MaxMemoryMiB:      o.MaxMemoryMiB,
+		MaxCPUs:           o.MaxCPUs,
+		CPUPlacement:      string(o.CPUPlacement),
+		PlacementProfile:  o.PlacementProfile,
+		THP:               string(o.THP),
+		Workdir:           o.Workdir,
+		Shell:             o.Shell,
+		SecurityProfile:   string(o.SecurityProfile),
+		DeploymentProfile: string(o.DeploymentProfile),
+		Hostname:          o.Hostname,
+		User:              o.User,
+		Replace:           o.Replace,
+		Env:               o.Env,
+		Labels:            o.Labels,
+		Detached:          o.Detached,
+		Ephemeral:         o.Ephemeral,
+		LogLevel:          string(o.LogLevel),
+		QuietLogs:         o.QuietLogs,
+		Scripts:           o.Scripts,
+		PullPolicy:        string(o.PullPolicy),
+		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
+		IdleTimeoutSecs:   durationSecsCeil(o.IdleTimeout),
+		Ports:             o.Ports,
+		PortsUDP:          o.PortsUDP,
+		PortBindings:      buildFFIPortBindings(o.PortBindings),
+		Vsock:             buildFFIVsockRoutes(o.Vsock),
+		RegistryInsecure:  o.RegistryInsecure,
 	}
 	if o.Entrypoint != nil {
 		entrypoint := append([]string{}, o.Entrypoint...)
@@ -1057,14 +1052,14 @@ func (s *Sandbox) Name() string { return s.inner.Name() }
 // ID returns the stable identity of this persisted sandbox.
 func (s *Sandbox) ID() string { return s.inner.ID() }
 
-// ExternalMountWarning describes an external filesystem mismatch accepted during relaxed restore.
+// ExternalMountWarning describes an unmapped filesystem or an accepted restore mismatch.
 type ExternalMountWarning struct {
 	GuestPath   string   `json:"guest_path"`
 	Reason      string   `json:"reason"`
 	StaleInodes []uint64 `json:"stale_inodes"`
 }
 
-// RestoreWarnings returns the structured warnings retained by relaxed full restore.
+// RestoreWarnings reports unmapped external filesystems and accepted restore mismatches.
 func (s *Sandbox) RestoreWarnings(ctx context.Context) ([]ExternalMountWarning, error) {
 	data, err := s.inner.RestoreWarnings(ctx)
 	if err != nil {

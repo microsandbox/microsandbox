@@ -70,7 +70,7 @@ func TestCowResidentCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The returned artifact path selects the exact member in its snapshot group.
-	child, err := CreateSandbox(ctx, name+"-child", WithFromSnapshot(snapshot.Path()), WithForked())
+	child, err := RestoreSandbox(ctx, snapshot.Path(), name+"-child", WithForked())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,5 +115,8 @@ func TestCowResidentCapture(t *testing.T) {
 	}
 	if strings.TrimSpace(branchResult.Stdout()) != "child" {
 		t.Fatal("branch lost private writes")
+	}
+	if err := child.Resume(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

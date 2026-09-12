@@ -140,37 +140,6 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
-    /// Create a sandbox from a snapshot artifact (path or name).
-    /// Mutually exclusive with `image()` / `imageWith()` — the
-    /// snapshot already pins the image reference and digest.
-    #[napi(js_name = "fromSnapshot")]
-    // Naming mirrors the Rust SDK (`SandboxBuilder::from_snapshot`),
-    // not Rust's `from_*` constructor convention. Clippy's
-    // wrong_self_convention lint trips on the `from_` prefix here;
-    // the alternative name would diverge from the rest of the SDK.
-    #[allow(clippy::wrong_self_convention)]
-    pub fn from_snapshot(&mut self, path_or_name: String) -> &Self {
-        let prev = self.take_inner();
-        self.inner = Some(prev.from_snapshot(path_or_name));
-        self
-    }
-
-    /// Supply the base for omitted disk layers and RAM objects in a snapshot archive.
-    #[napi]
-    pub fn snapshot_base(&mut self, base: String) -> &Self {
-        let prev = self.take_inner();
-        self.inner = Some(prev.snapshot_base(base));
-        self
-    }
-
-    /// Cold-boot only the disk state carried by a full snapshot.
-    #[napi(js_name = "diskOnly")]
-    pub fn disk_only(&mut self) -> &Self {
-        let prev = self.take_inner();
-        self.inner = Some(prev.disk_only());
-        self
-    }
-
     /// Number of virtual CPUs.
     #[napi]
     pub fn cpus(&mut self, count: u32) -> Result<&Self> {
@@ -241,34 +210,6 @@ impl JsSandboxBuilder {
         };
         let prev = self.take_inner();
         self.inner = Some(prev.thp(policy));
-        Ok(self)
-    }
-
-    /// Restore a full snapshot with private copy-on-write memory.
-    #[napi]
-    pub fn forked(&mut self) -> Result<&Self> {
-        let prev = self
-            .inner
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("builder already consumed"))?;
-        self.inner = Some(prev.forked());
-        Ok(self)
-    }
-
-    /// Select strict admission (default) or explicit relaxed external-mount restore.
-    #[napi(ts_args_type = "policy: 'strict' | 'relaxed'")]
-    pub fn external_mount_policy(&mut self, policy: String) -> Result<&Self> {
-        let policy = match policy.as_str() {
-            "strict" => microsandbox::sandbox::ExternalMountRestorePolicy::Strict,
-            "relaxed" => microsandbox::sandbox::ExternalMountRestorePolicy::Relaxed,
-            _ => {
-                return Err(napi::Error::from_reason(
-                    "external mount policy must be strict or relaxed",
-                ));
-            }
-        };
-        let previous = self.take_inner();
-        self.inner = Some(previous.external_mount_policy(policy));
         Ok(self)
     }
 
@@ -897,7 +838,7 @@ impl JsSandboxBuilder {
     }
 }
 
-fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
+pub(crate) fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
     bind.parse::<IpAddr>()
         .map_err(|_| napi::Error::from_reason(format!("invalid bind address: {bind}")))
 }
@@ -906,9 +847,9 @@ fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
 /// plus a method to await the final `Sandbox`.
 #[napi(js_name = "PullProgressCreate")]
 pub struct JsPullProgressCreate {
-    abort: tokio::task::AbortHandle,
-    stream: JsPullProgressStream,
-    task: std::sync::Arc<
+    pub(crate) abort: tokio::task::AbortHandle,
+    pub(crate) stream: JsPullProgressStream,
+    pub(crate) task: std::sync::Arc<
         tokio::sync::Mutex<
             Option<tokio::task::JoinHandle<microsandbox::MicrosandboxResult<RustSandbox>>>,
         >,

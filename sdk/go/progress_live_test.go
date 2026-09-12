@@ -18,7 +18,7 @@ func TestCreationProgressLive(t *testing.T) {
 	for _, observed := range []bool{true, false} {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		start := time.Now()
-		events, result := CreateSandboxWithProgress(ctx, fmt.Sprintf("progress-go-%d-%t", os.Getpid(), observed), WithFromSnapshot(snapshot), WithForked())
+		events, result := RestoreSandboxWithProgress(ctx, snapshot, fmt.Sprintf("progress-go-%d-%t", os.Getpid(), observed), WithForked())
 		activating := false
 		if observed {
 			for event := range events {

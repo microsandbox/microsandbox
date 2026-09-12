@@ -41,19 +41,40 @@ type CreationResult struct {
 // Always receive the result and close its Sandbox when finished. Ignoring progress never
 // delays or cancels creation. Cancel ctx to cancel creation, not just observation.
 func CreateSandboxWithProgress(ctx context.Context, name string, opts ...SandboxOption) (<-chan CreationProgress, <-chan CreationResult) {
-	events := make(chan CreationProgress, 64)
-	results := make(chan CreationResult, 1)
-	go func() {
-		defer close(events)
-		defer close(results)
+	return sandboxWithProgress(ctx, func(id uint64) (*ffi.Sandbox, error) {
 		config := SandboxConfig{}
 		for _, opt := range opts {
 			opt(&config)
 		}
 		if err := resolveRegistryCACertPaths(&config); err != nil {
-			results <- CreationResult{Err: err}
-			return
+			return nil, err
 		}
+		options := buildFFICreateOptions(config)
+		options.CreationProgress = id
+		return ffi.CreateSandbox(ctx, name, options)
+	})
+}
+
+// RestoreSandboxWithProgress restores a detached sandbox with bounded progress events.
+func RestoreSandboxWithProgress(ctx context.Context, snapshot, name string, opts ...RestoreOption) (<-chan CreationProgress, <-chan CreationResult) {
+	return sandboxWithProgress(ctx, func(id uint64) (*ffi.Sandbox, error) {
+		config := RestoreConfig{}
+		for _, opt := range opts {
+			opt(&config)
+		}
+		options := buildFFIRestoreOptions(snapshot, config)
+		options.CreationProgress = id
+		return ffi.RestoreSandbox(ctx, name, options)
+	})
+}
+
+func sandboxWithProgress(ctx context.Context, start func(uint64) (*ffi.Sandbox, error)) (<-chan CreationProgress, <-chan CreationResult) {
+
+	events := make(chan CreationProgress, 64)
+	results := make(chan CreationResult, 1)
+	go func() {
+		defer close(events)
+		defer close(results)
 		id, err := ffi.OpenCreationProgress(ctx)
 		if err != nil {
 			results <- CreationResult{Err: wrapFFI(err)}
@@ -79,9 +100,7 @@ func CreateSandboxWithProgress(ctx context.Context, name string, opts ...Sandbox
 				} // Telemetry never holds up creation.
 			}
 		}()
-		options := buildFFICreateOptions(config)
-		options.CreationProgress = id
-		inner, err := ffi.CreateSandbox(ctx, name, options)
+		inner, err := start(id)
 		stop()
 		<-done // No sender may remain when events is closed.
 		if err != nil {

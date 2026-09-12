@@ -129,9 +129,9 @@ async fn eager_preparation_boundary_live() {
     };
     let started = Instant::now();
     // Deliberately no .forked(): the stall must occur inside eager VMM reconstruction.
-    let (mut progress, mut task) = Sandbox::builder(&name)
-        .from_snapshot(&snapshot)
-        .create_with_progress()
+    let (mut progress, mut task) = Sandbox::restore(&snapshot)
+        .name(&name)
+        .restore_with_progress()
         .unwrap();
     let phases = Arc::new(Mutex::new(Vec::new()));
     let observed = phases.clone();
@@ -253,9 +253,9 @@ async fn portable_eager_forked_progress_and_stop_completion() {
             armed: true,
         };
         let started = Instant::now();
-        let builder = Sandbox::builder(&name).from_snapshot(&snapshot);
+        let builder = Sandbox::restore(&snapshot).name(&name);
         let builder = if forked { builder.forked() } else { builder };
-        let (mut progress, task) = builder.create_with_progress().unwrap();
+        let (mut progress, task) = builder.restore_with_progress().unwrap();
         let mut activating = false;
         while let Some(event) = progress.recv().await {
             println!(

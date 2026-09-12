@@ -43,7 +43,7 @@ pub struct JsSandboxPage {
     pub next_cursor: Option<String>,
 }
 
-/// A filesystem mismatch explicitly accepted by relaxed restore admission.
+/// An unmapped external filesystem or a mismatch accepted during relaxed restore.
 #[napi(object, object_from_js = false)]
 pub struct ExternalMountWarning {
     pub guest_path: String,
@@ -526,7 +526,7 @@ impl Sandbox {
         sb.stop().await.map_err(to_napi_error)
     }
 
-    /// Structured warnings for external filesystems admitted by relaxed full restore.
+    /// Warnings for unmapped external filesystems and accepted restore mismatches.
     #[napi]
     pub async fn restore_warnings(&self) -> Result<Vec<ExternalMountWarning>> {
         let sb = self.inner.get().await.ok_or_else(consumed_error)?;

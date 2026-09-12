@@ -6,49 +6,22 @@ keywords: ["TypeScript SDK", "TypeScript snapshots", "microsandbox snapshots"]
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create disk snapshots of stopped sandboxes and full checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+Create disk snapshots of running, paused, stopped, or crashed sandboxes, or full checkpoints of running and paused sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
-## SandboxBuilder
+## RestoreBuilder
 
-These entry points live on `SandboxBuilder` and `SandboxHandle`; they are the bridge between sandboxes and snapshot artifacts.
-
-#### <span className="msb-recv">sandbox.</span><span className="msb-hn">fromSnapshot()</span>
+`Sandbox.restore(snapshot)` selects a group head, `group:member`, artifact directory, or archive. Set the destination name, then call `restore()`; the result is detached. Disk snapshots cold-boot, while full snapshots resume captured execution without a new startup command.
 
 ```typescript
-fromSnapshot(pathOrName: string): SandboxBuilder
+const child = await Sandbox.restore("api:baseline")
+  .name("api-restored")
+  .forked()
+  .restore();
 ```
 
-<Accordion title="Example">
+Use `.forked()` for private CoW RAM, `.diskOnly()` for only a full snapshot's disk, and `.snapshotBase(base)` for a dependent archive. `restoreWithProgress()` returns progress events and an `awaitSandbox()` result. Image, CPU/RAM size, replacement, and startup-command setters are not accepted.
 
-```typescript
-const sb = await Sandbox.builder("worker")
-  .fromSnapshot("baseline:after-pip-install")
-  .create();
-```
-
-</Accordion>
-
-Create a sandbox from a snapshot artifact. Disk snapshots cold-boot; full snapshots resume captured execution. Mutually exclusive with [`.image()`](/sdk/typescript/sandbox#sandboxbuilder-image); the snapshot already pins the image. Documented in full on the [Sandbox](/sdk/typescript/sandbox#sandboxbuilder-fromsnapshot) page.
-
-Chain `.diskOnly()` after `.fromSnapshot()` to cold-boot only the disk state from a full snapshot. Without it, a full snapshot resumes its captured execution and does not run the image CMD.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Group head or <code>group:member</code> selector or filesystem path to an artifact directory or archive file.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="/sdk/typescript/sandbox#sandboxbuilder">SandboxBuilder</a></div>
-    <div className="msb-param-desc">The same builder, for chaining.</div>
-  </div>
-</div>
+Destination bindings use `.volume(guest, v => ...)`, `.port(...)`, `.portBind(...)`, `.portUdp(...)`, `.portUdpBind(...)`, `.vsock(...)`, and `.vsockDgram(...)`. Use `v => v.captured()` for a captured private volume. `.user(...)` sets the default user for new execs; `.logLevel(...)` configures host runtime logging. Host resources are not inherited unless `.dangerouslyInheritResources()` is selected. `.externalMountPolicy("strict" | "relaxed")` validates supplied filesystem mappings; it does not grant access.
 
 ## SandboxHandle
 
@@ -130,8 +103,8 @@ const plan = await worker.compact({ layers: 3, dryRun: true });
 const result = await worker.compact({ layers: 3 });
 await Snapshot.save("worker:checkpoint-b", "changes.msb", { since: "worker:checkpoint-a" });
 await Snapshot.load("changes.msb", undefined, "worker:checkpoint-a");
-const child = await Sandbox.builder("child")
-  .fromSnapshot("changes.msb").snapshotBase("worker:checkpoint-a").create();
+const child = await Sandbox.restore("changes.msb")
+  .name("child").snapshotBase("worker:checkpoint-a").restore();
 ```
 
 The count includes the oldest base but excludes the writable head. Omit `layers` to compact all sealed layers. `lastLayers` selects the newest N sealed export layers instead of `since`. Results expose physical counts, `materializedBytes`, `totalUs`, and `pauseUs`; materialized bytes are not reclaimed space. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.

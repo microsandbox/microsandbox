@@ -96,10 +96,13 @@ impl RegistryConfigBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxBuilder {
-    /// Select how full restore treats missing external bindings and stale captured handles.
-    /// Strict is the default. Explicit mappings use the existing volume builders at the
-    /// captured guest path; relaxed restore preserves the mount and reports degraded resources.
-    pub fn external_mount_policy(mut self, policy: super::ExternalMountRestorePolicy) -> Self {
+    /// Select validation of authorized external filesystem mappings and captured handles.
+    /// Strict is the default; relaxed accepts supported mismatches with warnings.
+    /// Neither policy grants host access. Unmapped filesystems remain unavailable in both modes.
+    pub(crate) fn external_mount_policy(
+        mut self,
+        policy: super::ExternalMountRestorePolicy,
+    ) -> Self {
         self.config.external_mount_policy = policy;
         self
     }
@@ -412,7 +415,7 @@ impl SandboxBuilder {
     ///
     /// Clean pages can be shared by children; writes remain private. This requires
     /// a full snapshot and cannot be combined with a fresh boot or disk-only restore.
-    pub fn forked(mut self) -> Self {
+    pub(crate) fn forked(mut self) -> Self {
         self.config.forked = true;
         self
     }
@@ -1211,7 +1214,7 @@ impl SandboxBuilder {
     /// file, or a bare name resolved under the default snapshots directory. Disk snapshots cold
     /// boot; full snapshots resume their captured execution unless [`disk_only`](Self::disk_only)
     /// is selected.
-    pub fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
+    pub(crate) fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
         self.pending_snapshot = Some(path_or_name.into());
         self.pending_snapshot_from_config = false;
         self
@@ -1222,13 +1225,13 @@ impl SandboxBuilder {
     /// This is a restore policy, not a different artifact kind. It must be combined with
     /// [`from_snapshot`](Self::from_snapshot), and the selected artifact must contain checkpoint
     /// state. Memory, execution, and device state are deliberately ignored.
-    pub fn disk_only(mut self) -> Self {
+    pub(crate) fn disk_only(mut self) -> Self {
         self.config.snapshot_restore_mode = SnapshotRestoreMode::DiskOnly;
         self
     }
 
     /// Supply the base snapshot or standalone archive for omitted disk layers and RAM objects.
-    pub fn snapshot_base(mut self, base: impl Into<String>) -> Self {
+    pub(crate) fn snapshot_base(mut self, base: impl Into<String>) -> Self {
         self.config.snapshot_base = Some(base.into());
         self
     }
@@ -1253,9 +1256,8 @@ impl SandboxBuilder {
 
     /// Build the configuration without creating the sandbox.
     ///
-    /// If [`from_snapshot`](Self::from_snapshot) was called, the snapshot
-    /// manifest is opened here and its pinned image reference, manifest
-    /// digest, and upper-layer source path are populated onto the config.
+    /// Snapshot restoration uses [`Sandbox::restore`](super::Sandbox::restore)
+    /// instead of the public creation builder.
     /// Backend-owned defaults were seeded before explicit builder methods were applied.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         self.materialize_config_scripts();
@@ -1588,10 +1590,8 @@ impl SandboxBuilder {
     /// for the sandbox creation result. Useful for CLI commands that want to
     /// display per-layer download/materialization progress during sandbox creation.
     ///
-    /// If the builder was configured via
-    /// [`from_snapshot`](Self::from_snapshot), snapshot resolution
-    /// happens inside the spawned task so this entry point stays
-    /// synchronous.
+    /// Snapshot restoration has its own `RestoreBuilder::restore_with_progress`
+    /// terminal; both operations spawn work without blocking the caller.
     #[cfg(feature = "local")]
     pub fn create_with_pull_progress(
         self,

@@ -12,10 +12,10 @@ async fn restored_creation_progress_and_ignored_observer() {
     for observed in [true, false] {
         let name = format!("progress-live-{}-{observed}", std::process::id());
         let started = std::time::Instant::now();
-        let (mut progress, task) = Sandbox::builder(&name)
-            .from_snapshot(&snapshot)
+        let (mut progress, task) = Sandbox::restore(&snapshot)
+            .name(&name)
             .forked()
-            .create_with_progress()
+            .restore_with_progress()
             .unwrap();
         if observed {
             let mut activating = false;
@@ -104,10 +104,10 @@ async fn cancelled_backing_preparation_reaps_and_reconciles() {
         .unwrap();
     }
     let name = format!("cancel-progress-{}", std::process::id());
-    let (mut progress, task) = Sandbox::builder(&name)
-        .from_snapshot(&snapshot)
+    let (mut progress, task) = Sandbox::restore(&snapshot)
+        .name(&name)
         .forked()
-        .create_with_progress()
+        .restore_with_progress()
         .unwrap();
     let waiting = tokio::time::timeout(Duration::from_secs(30), async {
         while let Some(event) = progress.recv().await {

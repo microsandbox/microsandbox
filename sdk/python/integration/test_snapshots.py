@@ -84,13 +84,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         else:
             source = sources[source_kind]
 
-        fork = await Sandbox.create(
-            fork_name,
-            from_snapshot=source,
-            cpus=1,
-            memory=512,
-            replace=True,
-        )
+        fork = await Sandbox.restore(source, name=fork_name)
         out = await fork.shell("cat /etc/alpine-release")
         assert out.success is True
         assert out.stdout_text.strip()

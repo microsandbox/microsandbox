@@ -10,7 +10,8 @@ use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
 use crate::helpers::{
-    extract_str_enum, is_exact_sdk_type, sandbox_builder_from_args, str_enum_member,
+    extract_str_enum, is_exact_sdk_type, restore_builder_from_args, sandbox_builder_from_args,
+    str_enum_member,
 };
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
@@ -57,7 +58,7 @@ pub struct PySandboxTouchResult {
     activity_seq: u64,
 }
 
-/// One explicitly accepted external filesystem mismatch during relaxed full restore.
+/// An unmapped external filesystem or a mismatch accepted during relaxed restore.
 #[pyclass(name = "ExternalMountWarning", get_all, frozen)]
 pub struct PyExternalMountWarning {
     guest_path: String,
@@ -237,6 +238,37 @@ impl PySandbox {
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("sandbox is busy"))?;
         let sandbox = guard.as_ref().ok_or_else(crate::error::consumed)?;
         Ok(sandbox.backend_kind().as_str().to_string())
+    }
+
+    /// Restore an installed snapshot or archive into a detached sandbox.
+    #[staticmethod]
+    #[pyo3(signature = (snapshot, *, name, **kwargs))]
+    fn restore<'py>(
+        py: Python<'py>,
+        snapshot: &Bound<'py, PyAny>,
+        name: String,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let builder = restore_builder_from_args(snapshot, name, kwargs)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(PySandbox::from_rust(
+                builder.restore().await.map_err(to_py_err)?,
+            ))
+        })
+    }
+
+    /// Restore with preparation and activation progress; await the session's result.
+    #[staticmethod]
+    #[pyo3(signature = (snapshot, *, name, **kwargs))]
+    fn restore_with_progress<'py>(
+        snapshot: &Bound<'py, PyAny>,
+        name: String,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<PyPullSession> {
+        let builder = restore_builder_from_args(snapshot, name, kwargs)?;
+        let _guard = pyo3_async_runtimes::tokio::get_runtime().enter();
+        let (progress, task) = builder.restore_with_progress().map_err(to_py_err)?;
+        Ok(PyPullSession::new(progress, task))
     }
 
     /// Create a sandbox from a name and keyword-only configuration.
@@ -985,7 +1017,7 @@ impl PySandbox {
     // Lifecycle
     //----------------------------------------------------------------------------------------------
 
-    /// Structured external-mount diagnostics retained by a relaxed full restore.
+    /// Warnings for unmapped external filesystems and accepted restore mismatches.
     fn restore_warnings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

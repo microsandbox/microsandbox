@@ -42,6 +42,7 @@ export interface NativeBindings {
   readonly defaultBackendInfo?: () => NapiBackendInfo;
   readonly Sandbox: NapiSandboxStatic;
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
+  readonly RestoreBuilder: new (snapshot: string) => NapiRestoreBuilder;
   readonly Volume: NapiVolumeStatic;
   readonly VolumeBuilder: NapiVolumeBuilderCtor;
   readonly Snapshot: NapiSnapshotStatic;
@@ -173,9 +174,6 @@ export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
  * not preserve `this` correctly. */
 export interface NapiSandboxBuilderSetters {
   image(s: string): this;
-  fromSnapshot(pathOrName: string): this;
-  snapshotBase(base: string): this;
-  diskOnly(): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
   /** Managed root disk of the given size in MiB. Requires an OCI image. */
@@ -189,8 +187,6 @@ export interface NapiSandboxBuilderSetters {
   memory(mib: number): this;
   maxMemory(mib: number): this;
   thp(policy: "always" | "madvise" | "never"): this;
-  forked(): this;
-  externalMountPolicy(policy: "strict" | "relaxed"): this;
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
@@ -254,6 +250,30 @@ export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
   connectOrCreate(): Promise<NapiSandbox>;
   createWithPullProgress(): Promise<NapiPullProgressCreate>;
   createWithProgress(): Promise<NapiPullProgressCreate>;
+}
+
+/** Restore exposes destination bindings, never fresh-boot configuration. */
+export interface NapiRestoreBuilderSetters {
+  name(name: string): this;
+  forked(): this;
+  diskOnly(): this;
+  snapshotBase(base: string): this;
+  logLevel(level: string): this;
+  user(user: string): this;
+  externalMountPolicy(policy: "strict" | "relaxed"): this;
+  dangerouslyInheritResources(): this;
+  volume(guest: string, configure: (mount: NapiMountBuilder) => NapiMountBuilder): this;
+  port(host: number, guest: number): this;
+  portBind(bind: string, host: number, guest: number): this;
+  portUdp(host: number, guest: number): this;
+  portUdpBind(bind: string, host: number, guest: number): this;
+  vsock(path: string, port: number): this;
+  vsockDgram(path: string, port: number): this;
+}
+
+export interface NapiRestoreBuilder extends NapiRestoreBuilderSetters {
+  restore(): Promise<NapiSandbox>;
+  restoreWithProgress(): Promise<NapiPullProgressCreate>;
 }
 
 export interface NapiSandboxRestartOptions {
@@ -1193,6 +1213,7 @@ export interface NapiBuiltNetworkPolicyDestination {
 }
 
 export interface NapiMountBuilder {
+  captured(): this;
   bind(host: string): this;
   named(name: string): this;
   namedWith(

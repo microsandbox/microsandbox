@@ -15,9 +15,6 @@ use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyModule};
 /// `detached` is consumed by the callers in `sandbox.rs`, not here.
 const KNOWN_CREATE_KWARGS: &[&str] = &[
     "image",
-    "from_snapshot",
-    "disk_only",
-    "snapshot_base",
     "memory",
     "cpus",
     "max_memory",
@@ -25,8 +22,6 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "cpu_placement",
     "placement_profile",
     "thp",
-    "forked",
-    "external_mount_policy",
     "workdir",
     "shell",
     "security",
@@ -63,6 +58,22 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Shared parsing vocabulary; restore applies its own resource authorization rules.
+trait ResourceBuilder: Sized {
+    fn volume(
+        self,
+        guest: impl Into<String>,
+        configure: impl FnOnce(
+            microsandbox::sandbox::MountBuilder,
+        ) -> microsandbox::sandbox::MountBuilder,
+    ) -> Self;
+    fn port(self, host: u16, guest: u16) -> Self;
+    fn port_bind(self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self;
+    fn port_udp_bind(self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self;
+    fn vsock(self, path: impl AsRef<std::path::Path>, port: u32) -> Self;
+    fn vsock_dgram(self, path: impl AsRef<std::path::Path>, port: u32) -> Self;
+}
 
 /// Tuple returned by [`parse_init_kwarg`]: `(cmd, args, env)`.
 type ParsedInit = (String, Vec<String>, Vec<(String, String)>);
@@ -155,6 +166,105 @@ pub(crate) fn str_enum_member(py: Python<'_>, enum_name: &str, value: &str) -> P
 // Functions: Config Conversion
 //--------------------------------------------------------------------------------------------------
 
+/// Parse restore-only options without importing fresh-boot defaults or setters.
+pub(crate) fn restore_builder_from_args(
+    snapshot: &Bound<'_, PyAny>,
+    name: String,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<microsandbox::sandbox::RestoreBuilder> {
+    let snapshot = if let Ok(value) = snapshot.extract::<String>() {
+        value
+    } else {
+        snapshot
+            .call_method0("__fspath__")
+            .and_then(|path| path.extract::<String>())
+            .map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err("snapshot must be str or os.PathLike[str]")
+            })?
+    };
+    let mut builder = microsandbox::Sandbox::restore(snapshot).name(name);
+    let Some(kwargs) = kwargs else {
+        return Ok(builder);
+    };
+    for (key, _) in kwargs.iter() {
+        let key = key.extract::<String>()?;
+        if ![
+            "forked",
+            "disk_only",
+            "snapshot_base",
+            "log_level",
+            "user",
+            "volumes",
+            "captured_volumes",
+            "ports",
+            "vsock",
+            "external_mount_policy",
+            "dangerously_inherit_resources",
+        ]
+        .contains(&key.as_str())
+        {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "unexpected restore option: {key}"
+            )));
+        }
+    }
+    if extract_opt::<bool>(kwargs, "forked")?.unwrap_or(false) {
+        builder = builder.forked();
+    }
+    if extract_opt::<bool>(kwargs, "disk_only")?.unwrap_or(false) {
+        builder = builder.disk_only();
+    }
+    if extract_opt::<bool>(kwargs, "dangerously_inherit_resources")?.unwrap_or(false) {
+        builder = builder.dangerously_inherit_resources();
+    }
+    if let Some(base) = extract_opt::<String>(kwargs, "snapshot_base")? {
+        builder = builder.snapshot_base(base);
+    }
+    if let Some(user) = extract_opt::<String>(kwargs, "user")? {
+        builder = builder.user(user);
+    }
+    if let Some(value) = kwargs.get_item("log_level")?.filter(|v| !v.is_none()) {
+        let level = extract_str_enum(&value, "LogLevel")?;
+        builder = builder.log_level(match level.as_str() {
+            "trace" => LogLevel::Trace,
+            "debug" => LogLevel::Debug,
+            "info" => LogLevel::Info,
+            "warn" => LogLevel::Warn,
+            "error" => LogLevel::Error,
+            _ => return Err(pyo3::exceptions::PyValueError::new_err("invalid log_level")),
+        });
+    }
+    if let Some(policy) = extract_opt::<String>(kwargs, "external_mount_policy")? {
+        builder = builder.external_mount_policy(match policy.as_str() {
+            "strict" => microsandbox::sandbox::ExternalMountRestorePolicy::Strict,
+            "relaxed" => microsandbox::sandbox::ExternalMountRestorePolicy::Relaxed,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "external_mount_policy must be strict or relaxed",
+                ));
+            }
+        });
+    }
+    if let Some(volumes) = kwargs.get_item("volumes")?.filter(|v| !v.is_none()) {
+        for (guest, mount) in require_mapping_dict(&volumes, "volumes")?.iter() {
+            let mount = config_dict(&mount, "MountConfig")?;
+            builder = apply_mount(builder, guest.extract()?, &mount)?;
+        }
+    }
+    if let Some(paths) = extract_opt::<Vec<String>>(kwargs, "captured_volumes")? {
+        for guest in paths {
+            builder = builder.volume(guest, |mount| mount.captured());
+        }
+    }
+    if let Some(ports) = kwargs.get_item("ports")?.filter(|v| !v.is_none()) {
+        builder = apply_ports(builder, &ports, PortBindingSource::PublicConfig)?;
+    }
+    if let Some(vsock) = kwargs.get_item("vsock")?.filter(|v| !v.is_none()) {
+        builder = apply_vsock_routes(builder, &vsock)?;
+    }
+    Ok(builder)
+}
+
 /// Build a `SandboxBuilder` from the `(name, **kwargs)` form of
 /// `Sandbox.create`.
 ///
@@ -170,7 +280,7 @@ pub fn sandbox_builder_from_args(
 ) -> PyResult<SandboxBuilder> {
     let Some(kwargs) = kwargs else {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "image= or from_snapshot= is required",
+            "image= is required; use Sandbox.restore() for snapshots",
         ));
     };
 
@@ -179,67 +289,13 @@ pub fn sandbox_builder_from_args(
     let image_present = kwargs
         .get_item("image")?
         .is_some_and(|value| !value.is_none());
-    let snapshot_present = kwargs
-        .get_item("from_snapshot")?
-        .is_some_and(|value| !value.is_none());
-    if !snapshot_present
-        && kwargs
-            .get_item("snapshot_base")?
-            .is_some_and(|value| !value.is_none())
-    {
+    if !image_present {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "snapshot_base requires from_snapshot",
+            "image= is required; use Sandbox.restore() for snapshots",
         ));
     }
-    let disk_only = match kwargs
-        .get_item("disk_only")?
-        .filter(|value| !value.is_none())
-    {
-        Some(value) => value.extract::<bool>()?,
-        None => false,
-    };
-    if image_present && snapshot_present {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "pass either image= or from_snapshot=, not both",
-        ));
-    }
-    if !image_present && !snapshot_present {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "image= or from_snapshot= is required",
-        ));
-    }
-    if disk_only && !snapshot_present {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "disk_only requires from_snapshot",
-        ));
-    }
-
     let mut builder = microsandbox::Sandbox::builder(name);
-
-    if snapshot_present {
-        // Create from a snapshot. Accept str or PathLike.
-        let snap_obj = kwargs.get_item("from_snapshot")?.unwrap();
-        let snap_str: String = if let Ok(s) = snap_obj.extract::<String>() {
-            s
-        } else if let Ok(fspath) = snap_obj.call_method0("__fspath__") {
-            fspath.extract()?
-        } else {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "from_snapshot must be str or os.PathLike",
-            ));
-        };
-        // Resolve through the shared async builder: a group/member or snapshot identity is not
-        // a directory name. A Python-only existence check would reject these valid selectors.
-        builder = builder.from_snapshot(snap_str);
-        if let Some(base) = kwargs.get_item("snapshot_base")?
-            && !base.is_none()
-        {
-            builder = builder.snapshot_base(base.extract::<String>()?);
-        }
-        if disk_only {
-            builder = builder.disk_only();
-        }
-    } else {
+    {
         let image_obj = kwargs.get_item("image")?.unwrap();
         // Accept an open image reference/path or the concrete ImageSource
         // configuration type. Arbitrary objects with similarly named
@@ -329,21 +385,7 @@ pub fn sandbox_builder_from_args(
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         builder = builder.thp(policy);
     }
-    if extract_opt::<bool>(kwargs, "forked")?.unwrap_or(false) {
-        builder = builder.forked();
-    }
-    if let Some(policy) = extract_opt::<String>(kwargs, "external_mount_policy")? {
-        let policy = match policy.as_str() {
-            "strict" => microsandbox::sandbox::ExternalMountRestorePolicy::Strict,
-            "relaxed" => microsandbox::sandbox::ExternalMountRestorePolicy::Relaxed,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "external_mount_policy must be strict or relaxed",
-                ));
-            }
-        };
-        builder = builder.external_mount_policy(policy);
-    }
+
     if let Some(workdir) = extract_opt::<String>(kwargs, "workdir")? {
         builder = builder.workdir(workdir);
     }
@@ -848,11 +890,11 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
 // Functions: Mount
 //--------------------------------------------------------------------------------------------------
 
-fn apply_mount(
-    builder: microsandbox::sandbox::SandboxBuilder,
+fn apply_mount<B: ResourceBuilder>(
+    builder: B,
     guest_path: String,
     mount: &Bound<'_, PyDict>,
-) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+) -> PyResult<B> {
     let readonly = extract_opt::<bool>(mount, "readonly")?.unwrap_or(false);
     let noexec = extract_opt::<bool>(mount, "noexec")?.unwrap_or(false);
     let nosuid = extract_opt::<bool>(mount, "nosuid")?.unwrap_or(false);
@@ -1439,11 +1481,11 @@ fn apply_network(
     Ok(builder)
 }
 
-fn apply_ports(
-    mut builder: microsandbox::sandbox::SandboxBuilder,
+fn apply_ports<B: ResourceBuilder>(
+    mut builder: B,
     ports: &Bound<'_, PyAny>,
     source: PortBindingSource,
-) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+) -> PyResult<B> {
     if let Some(ports_dict) = mapping_to_dict(ports)? {
         for (host_obj, guest_obj) in ports_dict.iter() {
             let host_port: u16 = host_obj.extract()?;
@@ -1563,10 +1605,10 @@ fn apply_rate_limiter(
 
 /// Apply the compact `{host_socket: port}` stream shorthand or a sequence of
 /// typed `VsockRoute` values for stream/datagram routes.
-fn apply_vsock_routes(
-    mut builder: microsandbox::sandbox::SandboxBuilder,
+fn apply_vsock_routes<B: ResourceBuilder>(
+    mut builder: B,
     routes: &Bound<'_, PyAny>,
-) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+) -> PyResult<B> {
     if let Some(routes_dict) = mapping_to_dict(routes)? {
         for (host_socket, port) in routes_dict.iter() {
             builder = builder.vsock(host_socket.extract::<String>()?, port.extract::<u32>()?);
@@ -1694,8 +1736,8 @@ fn reject_unknown_kwargs(kwargs: &Bound<'_, PyDict>) -> PyResult<()> {
     let listed = unknown
         .iter()
         .map(|k| {
-            if k == "snapshot" {
-                "'snapshot' (did you mean 'from_snapshot'?)".to_string()
+            if k == "snapshot" || k == "from_snapshot" {
+                format!("'{k}' (use Sandbox.restore() for snapshots)")
             } else {
                 format!("'{k}'")
             }
@@ -2023,3 +2065,40 @@ fn extract_required<'py, T: FromPyObject<'py>>(
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("{key} is required")))?
         .extract()
 }
+
+//--------------------------------------------------------------------------------------------------
+// Macros
+//--------------------------------------------------------------------------------------------------
+
+macro_rules! resource_builder {
+    ($builder:ty) => {
+        impl ResourceBuilder for $builder {
+            fn volume(
+                self,
+                guest: impl Into<String>,
+                configure: impl FnOnce(
+                    microsandbox::sandbox::MountBuilder,
+                ) -> microsandbox::sandbox::MountBuilder,
+            ) -> Self {
+                self.volume(guest, configure)
+            }
+            fn port(self, host: u16, guest: u16) -> Self {
+                self.port(host, guest)
+            }
+            fn port_bind(self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self {
+                self.port_bind(bind, host, guest)
+            }
+            fn port_udp_bind(self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self {
+                self.port_udp_bind(bind, host, guest)
+            }
+            fn vsock(self, path: impl AsRef<std::path::Path>, port: u32) -> Self {
+                self.vsock(path, port)
+            }
+            fn vsock_dgram(self, path: impl AsRef<std::path::Path>, port: u32) -> Self {
+                self.vsock_dgram(path, port)
+            }
+        }
+    };
+}
+resource_builder!(SandboxBuilder);
+resource_builder!(microsandbox::sandbox::RestoreBuilder);

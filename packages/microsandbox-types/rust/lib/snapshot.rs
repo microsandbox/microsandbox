@@ -24,18 +24,21 @@ pub struct DiskCompactionResult {
     /// Measured VM pause through resume, zero for stopped sources and dry runs.
     pub pause_us: u64,
 }
-/// How full restore handles unavailable external bind mounts and stale captured objects.
+/// How full restore validates authorized external filesystem mappings and captured objects.
+///
+/// This policy does not authorize or inherit host resources. Intentionally unmapped
+/// filesystems remain unavailable under either policy; backend operations return EIO.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExternalMountRestorePolicy {
-    /// Refuse activation if a captured external resource cannot be reconstructed.
+    /// Refuse activation when a supplied mapping or its captured objects cannot be reconstructed.
     #[default]
     Strict,
-    /// Keep the mount present and return filesystem errors for unavailable resources.
+    /// Accept supported mapping mismatches with warnings and errors for stale or unavailable objects.
     Relaxed,
 }
 
-/// A degraded external resource retained by an explicitly relaxed full restore.
+/// An unmapped external filesystem or a mismatch accepted during relaxed full restore.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalMountWarning {
     /// Guest-visible mount path.

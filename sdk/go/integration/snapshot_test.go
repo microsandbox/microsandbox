@@ -18,7 +18,7 @@ import (
 // does not dominate the Go integration suite.
 const snapshotIntegrationRootDiskSizeMiB = 256
 
-func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
+func TestSandboxHandleSnapshotAndRestore(t *testing.T) {
 	ctx := integrationCtx(t)
 	baseName := uniqueIntegrationName(t, "go-sdk-snapshot-base")
 	forkName := uniqueIntegrationName(t, "go-sdk-snapshot-fork")
@@ -115,11 +115,11 @@ func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
 	}
 
 	phaseStart = time.Now()
-	fork, err := createSandbox(t, ctx, forkName, microsandbox.WithFromSnapshot(snapshotSelector))
+	fork, err := microsandbox.RestoreSandbox(ctx, snapshotSelector, forkName)
 	if err != nil {
-		t.Fatalf("CreateSandbox with WithFromSnapshot: %v", err)
+		t.Fatalf("RestoreSandbox: %v", err)
 	}
-	logSnapshotPhase(t, "create sandbox from snapshot", phaseStart)
+	logSnapshotPhase(t, "restore sandbox from snapshot", phaseStart)
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -129,7 +129,7 @@ func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
 
 	// Verify the fork is a working sandbox sourced from the snapshot:
 	// /etc/alpine-release exists in the alpine image's rootfs, so reading
-	// it back via the fork confirms WithFromSnapshot resolved + mounted the
+	// it back via the fork confirms RestoreSandbox resolved + mounted the
 	// snapshot's rootfs rather than handing back an empty fs.
 	got, err := fork.FS().ReadString(ctx, "/etc/alpine-release")
 	if err != nil {

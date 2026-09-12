@@ -36,6 +36,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod creation_progress;
+mod restore;
 
 use std::{
     collections::HashMap,
@@ -1045,6 +1046,7 @@ struct RootDiskOpts {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SandboxCreateOpts {
     creation_progress: Option<u64>,
     image: Option<String>,
@@ -1057,11 +1059,6 @@ struct SandboxCreateOpts {
     /// Deprecated flat spelling of a managed root disk size. Still
     /// accepted so older Go SDK versions keep working against this dylib.
     oci_upper_size_mib: Option<u32>,
-    snapshot: Option<String>,
-    #[serde(default)]
-    snapshot_disk_only: bool,
-    #[serde(default)]
-    snapshot_base: Option<String>,
     memory_mib: Option<u32>,
     cpus: Option<u8>,
     max_memory_mib: Option<u32>,
@@ -1069,8 +1066,6 @@ struct SandboxCreateOpts {
     cpu_placement: Option<String>,
     placement_profile: Option<String>,
     thp: Option<String>,
-    forked: Option<bool>,
-    external_mount_policy: Option<microsandbox::sandbox::ExternalMountRestorePolicy>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -1958,6 +1953,14 @@ fn apply_volume(
     guest_path: &str,
     m: &MountSpec,
 ) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
+    let mount = volume_mount(guest_path, m)?;
+    Ok(builder.volume(guest_path, |_| mount))
+}
+
+fn volume_mount(
+    guest_path: &str,
+    m: &MountSpec,
+) -> Result<microsandbox::sandbox::MountBuilder, FfiError> {
     // Disk mounts have additional fields that need to be parsed before
     // entering the closure (so `?` works cleanly on the format string).
     let disk_format = if let Some(ref f) = m.format {
@@ -2050,7 +2053,8 @@ fn apply_volume(
         ));
     }
 
-    Ok(builder.volume(guest_path, move |mb| {
+    let mb = microsandbox::sandbox::MountBuilder::new(guest_path);
+    Ok({
         let mut mb = if let Some(ref host) = bind {
             // A caller-provided guest-write quota overrides the protective
             // default; None keeps it.
@@ -2120,7 +2124,7 @@ fn apply_volume(
             mb = mb.owner(uid, gid);
         }
         mb
-    }))
+    })
 }
 
 fn parse_named_mode(s: &str) -> Result<FfiNamedMode, FfiError> {
@@ -2233,24 +2237,14 @@ pub unsafe extern "C" fn msb_sandbox_create(
 
         Ok(Box::pin(async move {
             let mut builder = Sandbox::builder(&name);
-            if opts.image.is_some() && opts.snapshot.is_some() {
-                return Err(FfiError::invalid_argument(
-                    "image and snapshot are mutually exclusive",
-                ));
-            }
+
             if opts.root_disk.is_some() && opts.oci_upper_size_mib.is_some() {
                 return Err(FfiError::invalid_argument(
                     "root_disk and oci_upper_size_mib are mutually exclusive",
                 ));
             }
-            if (opts.root_disk.is_some() || opts.oci_upper_size_mib.is_some())
-                && opts.snapshot.is_some()
-            {
-                return Err(FfiError::invalid_argument(
-                    "root_disk is not valid when booting from a snapshot",
-                ));
-            }
-            if opts.image_bind.is_some() && (opts.image.is_some() || opts.snapshot.is_some()) {
+
+            if opts.image_bind.is_some() && opts.image.is_some() {
                 return Err(FfiError::invalid_argument(
                     "image_bind is mutually exclusive with image and snapshot",
                 ));
@@ -2272,15 +2266,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 // Deprecated flat spelling: managed root disk of that size.
                 builder = builder.root_disk(size_mib);
             }
-            if let Some(snapshot) = opts.snapshot {
-                builder = builder.from_snapshot(snapshot);
-            }
-            if opts.snapshot_disk_only {
-                builder = builder.disk_only();
-            }
-            if let Some(base) = opts.snapshot_base {
-                builder = builder.snapshot_base(base);
-            }
+
             if let Some(m) = opts.memory_mib {
                 builder = builder.memory(m);
             }
@@ -2308,12 +2294,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     .map_err(FfiError::invalid_argument)?;
                 builder = builder.thp(policy);
             }
-            if opts.forked.unwrap_or(false) {
-                builder = builder.forked();
-            }
-            if let Some(policy) = opts.external_mount_policy {
-                builder = builder.external_mount_policy(policy);
-            }
+
             if let Some(w) = opts.workdir {
                 builder = builder.workdir(w);
             }

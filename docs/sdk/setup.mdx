@@ -8,6 +8,19 @@ Local sandboxes use the `msb` executable and `libkrunfw` library. Depending on t
 
 The default install root is `~/.microsandbox/` (`%USERPROFILE%\.microsandbox` on Windows). Explicit setup is useful when you want installation failures to surface at process startup or when you are preparing an offline environment.
 
+## Bring your own runtime
+
+You can provision `msb` + `libkrunfw` with the [CLI installer](/getting-started/quickstart) or the SDK helpers below. For a custom location, set `MSB_PATH` and `MSB_LIBKRUNFW_PATH` to the matching pair.
+
+- **Node.js:** npm's platform package bundles both the runtime and the required native addon. External runtime paths are supported, but `--omit=optional` also removes the addon; there is no separate runtime-free package today.
+- **Rust:** runtime embedding is opt-in. To also skip the default Cargo-time runtime download, install with:
+
+```bash
+cargo add microsandbox --no-default-features --features local,net
+```
+
+You can still call Rust's `setup::ensure_runtime()` explicitly at startup with these features.
+
 ## Install and verify
 
 Check for the runtime and install it only when needed. These installation helpers reuse an existing complete installation. Rust `resolve_runtime()` performs no downloads or writes; `ensure_runtime()` installs only when no runtime is installed, and propagates incomplete or invalid explicit-path errors.

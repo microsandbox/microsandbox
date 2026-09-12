@@ -15,32 +15,19 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
-func TestForkedRestoreOption(t *testing.T) {
-	var config SandboxConfig
+func TestDedicatedRestoreOptions(t *testing.T) {
+	var config RestoreConfig
 	WithForked()(&config)
-	if !config.Forked {
-		t.Fatal("forked option was lost")
-	}
-	// Restore policy is construction-only, not a property of stopped sandbox disks.
-	if err := json.Unmarshal([]byte(`{"resources":{"cpus":1,"memory_mib":128}}`), &config); err != nil {
-		t.Fatal(err)
-	}
-	if config.Forked {
-		t.Fatal("forked option leaked into persisted configuration")
-	}
-}
-
-func TestExternalMountPolicyIsConstructionOnly(t *testing.T) {
-	var config SandboxConfig
 	WithExternalMountPolicy(ExternalMountRelaxed)(&config)
-	if buildFFICreateOptions(config).ExternalMountPolicy != "relaxed" {
-		t.Fatal("external mount policy was not forwarded")
+	wire := buildFFIRestoreOptions("saved", config)
+	if !wire.Forked || wire.ExternalMountPolicy != "relaxed" || wire.Snapshot != "saved" {
+		t.Fatal("restore options were lost")
 	}
-	if err := json.Unmarshal([]byte(`{"resources":{"cpus":1,"memory_mib":128}}`), &config); err != nil {
-		t.Fatal(err)
-	}
-	if config.ExternalMountPolicy != "" {
-		t.Fatal("restore-only policy leaked into persisted configuration")
+	typ := reflect.TypeOf(SandboxConfig{})
+	for _, name := range []string{"Snapshot", "Forked", "ExternalMountPolicy"} {
+		if _, ok := typ.FieldByName(name); ok {
+			t.Fatalf("creation still exposes %s", name)
+		}
 	}
 }
 
@@ -139,16 +126,8 @@ func TestWithImageDisk(t *testing.T) {
 	}
 }
 
-func TestWithFromSnapshot(t *testing.T) {
-	o := SandboxConfig{}
-	WithFromSnapshot("after-pip-install")(&o)
-	if o.Snapshot != "after-pip-install" {
-		t.Errorf("got %q, want %q", o.Snapshot, "after-pip-install")
-	}
-}
-
 func TestWithSnapshotDiskOnly(t *testing.T) {
-	o := SandboxConfig{}
+	o := RestoreConfig{}
 	WithSnapshotDiskOnly()(&o)
 	if !o.SnapshotDiskOnly {
 		t.Fatal("SnapshotDiskOnly = false, want true")

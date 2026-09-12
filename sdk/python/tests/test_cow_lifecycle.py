@@ -1,5 +1,6 @@
 """Opt-in live CoW lifecycle check using a matching runtime/kernel bundle."""
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -12,9 +13,7 @@ from microsandbox import Sandbox, Snapshot
 @pytest.mark.asyncio
 async def test_cow_resident_capture_and_child_isolation():
     name = f"cow8-python-{os.getpid()}"
-    source = await Sandbox.create(
-        name, image="alpine", memory=256
-    )
+    source = await Sandbox.create(name, image="alpine", memory=256)
     child = None
     branches = []
     try:
@@ -29,9 +28,7 @@ async def test_cow_resident_capture_and_child_isolation():
         assert (Path(snapshot.path) / "snapshot.json").is_file()
         await paused.resume()
         # The returned artifact path selects the exact member in its snapshot group.
-        child = await Sandbox.create(
-            f"{name}-child", from_snapshot=snapshot.path, forked=True
-        )
+        child = await Sandbox.restore(snapshot.path, name=f"{name}-child", forked=True)
         result = await child.exec("cat", ["/dev/shm/sdk-marker"])
         assert result.stdout_text.strip() == "source"
         await child.exec("sh", ["-c", "echo child > /dev/shm/sdk-marker"])
@@ -42,9 +39,17 @@ async def test_cow_resident_capture_and_child_isolation():
         result = await source.exec("cat", ["/dev/shm/sdk-marker"])
         assert result.stdout_text.strip() == "source"
         await child.pause()
+        await child.resume()
     finally:
-        for branched in reversed(branches):
-            await branched.stop()
-        if child is not None:
-            await child.stop()
-        await source.stop()
+        async def cleanup(sandbox):
+            if str((await Sandbox.get(await sandbox.name)).status) == "paused":
+                await sandbox.resume()
+            await sandbox.stop()
+
+        results = await asyncio.gather(
+            *(cleanup(sandbox) for sandbox in [*branches, *([child] if child else []), source]),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result

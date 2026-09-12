@@ -333,15 +333,24 @@ func TestFFIWireShape_LegacyConfigFieldMapsToRootDisk(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_WithFromSnapshot(t *testing.T) {
-	got := marshalCreateOptions(t, WithFromSnapshot("after-pip-install"), WithSnapshotDiskOnly())
+func TestFFIWireShape_Restore(t *testing.T) {
+	config := RestoreConfig{}
+	WithSnapshotDiskOnly()(&config)
+	raw, err := json.Marshal(buildFFIRestoreOptions("after-pip-install", config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
 	if v := mustField(t, got, "snapshot"); v != "after-pip-install" {
 		t.Fatalf("snapshot = %v, want %q", v, "after-pip-install")
 	}
 	if _, present := got["image"]; present {
 		t.Fatal("image must not appear in payload when only snapshot is set")
 	}
-	if v := mustField(t, got, "snapshot_disk_only"); v != true {
+	if v := mustField(t, got, "disk_only"); v != true {
 		t.Fatalf("snapshot_disk_only = %v, want true", v)
 	}
 }
@@ -753,7 +762,7 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			DNS: &DNSConfig{
 				Nameservers: []string{"1.1.1.1:53"},
 			},
-			Strict:  true,
+			Strict:   true,
 			IPv4Pool: "172.31.240.0/24",
 			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),

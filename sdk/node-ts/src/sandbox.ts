@@ -20,6 +20,7 @@ import {
   type NapiPullProgressStream,
   type NapiSandbox,
   type NapiSandboxBuilderSetters,
+  type NapiRestoreBuilderSetters,
   type NapiSandboxConfig,
   type NapiSandboxListOptions,
   type NapiSandboxPage,
@@ -83,6 +84,12 @@ export interface SandboxBuilder extends NapiSandboxBuilderSetters {
   createWithProgress(): Promise<CreationProgressCreate>;
 }
 
+/** Restore a snapshot or archive as a detached sandbox with explicit host bindings. */
+export interface RestoreBuilder extends NapiRestoreBuilderSetters {
+  restore(): Promise<Sandbox>;
+  restoreWithProgress(): Promise<CreationProgressCreate>;
+}
+
 export interface SandboxPingResult {
   readonly name: string;
   readonly latencyMs: number;
@@ -93,7 +100,7 @@ export interface SandboxTouchResult {
   readonly activitySeq: number;
 }
 
-/** A mismatch admitted by explicit relaxed full restore. */
+/** An unmapped external filesystem or a mismatch accepted during relaxed restore. */
 export interface ExternalMountWarning {
   readonly guestPath: string;
   readonly reason: string;
@@ -206,6 +213,25 @@ export class CreationProgressCreate {
 }
 
 export class Sandbox implements AsyncDisposable {
+  /** Prepare restoration; no VM starts until the builder's restore terminal. */
+  static restore(snapshot: string): RestoreBuilder {
+    const builder = new napi.RestoreBuilder(snapshot);
+    const restore = builder.restore.bind(builder);
+    const progress = builder.restoreWithProgress.bind(builder);
+    let name = "";
+    const setName = builder.name.bind(builder);
+    builder.name = (value: string) => {
+      setName(value);
+      name = value;
+      return builder;
+    };
+    (builder as unknown as RestoreBuilder).restore = async () =>
+      new Sandbox(await withMappedErrors(restore), name);
+    (builder as unknown as RestoreBuilder).restoreWithProgress = async () =>
+      new CreationProgressCreate(await withMappedErrors(progress), name);
+    return builder as unknown as RestoreBuilder;
+  }
+
   /** @internal */
   readonly inner: NapiSandbox;
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
@@ -539,7 +565,7 @@ export class Sandbox implements AsyncDisposable {
 
   // -- lifecycle ----------------------------------------------------------
 
-  /** Read structured external-filesystem warnings from a relaxed full restore. */
+  /** Read warnings for unmapped external filesystems and accepted restore mismatches. */
   async restoreWarnings(): Promise<ExternalMountWarning[]> {
     return withMappedErrors(() => this.inner.restoreWarnings());
   }

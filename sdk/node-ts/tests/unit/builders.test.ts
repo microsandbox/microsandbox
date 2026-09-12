@@ -352,24 +352,34 @@ describe("PatchBuilder", () => {
 });
 
 describe("SandboxBuilder.build", () => {
-  it.each(["strict", "relaxed"] as const)("accepts external mount policy %s", async (policy) => {
-    const cfg = await Sandbox.builder("external-policy")
-      .image("alpine")
-      .externalMountPolicy(policy)
-      .build();
-    expect(cfg).toHaveProperty("externalMountPolicy", policy);
+  it.each(["strict", "relaxed"] as const)("accepts restore mount policy %s", (policy) => {
+    const builder = Sandbox.restore("saved").name("external-policy");
+    expect(builder.externalMountPolicy(policy)).toBe(builder);
   });
 
   it("rejects unknown external mount policies without consuming the builder", async () => {
-    const builder = Sandbox.builder("external-policy").image("alpine");
+    const builder = Sandbox.restore("saved").name("external-policy");
     expect(() => builder.externalMountPolicy("unsafe" as "strict"))
       .toThrow("external mount policy must be strict or relaxed");
-    await expect(builder.externalMountPolicy("strict").build()).resolves.toBeDefined();
+    expect(builder.externalMountPolicy("strict")).toBe(builder);
   });
 
-  it("rejects forked for a fresh boot", async () => {
-    await expect(Sandbox.builder("forked-policy").image("alpine").forked().build())
-      .rejects.toThrow("forked requires a full snapshot");
+  it("keeps restore and creation surfaces separate", () => {
+    const create = Sandbox.builder("fresh");
+    const restore = Sandbox.restore("saved");
+    for (const method of ["fromSnapshot", "forked", "diskOnly", "snapshotBase", "externalMountPolicy"]) {
+      expect(create).not.toHaveProperty(method);
+    }
+    for (const method of ["image", "memory", "cpus", "cmd", "replace", "create"]) {
+      expect(restore).not.toHaveProperty(method);
+    }
+  });
+
+  it("rejects a missing restore source and cannot reuse its consumed builder", async () => {
+    const builder = Sandbox.restore(`/tmp/msb-missing-restore-${process.pid}/snapshot.json`)
+      .name(`missing-restore-${process.pid}`);
+    await expect(builder.restore()).rejects.toThrow();
+    expect(() => builder.name("retry")).toThrow("RestoreBuilder already consumed");
   });
 
   it("requires .image()", async () => {

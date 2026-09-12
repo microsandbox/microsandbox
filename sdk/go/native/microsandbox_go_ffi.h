@@ -1017,4 +1017,13 @@ char *msb_creation_progress_recv(uint64_t cancel_id,
 
 char *msb_creation_progress_close(uint64_t id, unsigned char *buf, uintptr_t len);
 
+/**
+ * Restore a detached sandbox through a dedicated C entry point.
+ */
+char *msb_sandbox_restore(uint64_t cancel_id,
+                          const char *name,
+                          const char *opts_json,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
 #endif  /* MICROSANDBOX_GO_FFI_H */

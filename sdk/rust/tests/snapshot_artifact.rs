@@ -709,11 +709,12 @@ async fn from_snapshot_rejects_full_artifact_without_checkpoint_closure() {
     let tmp = TempDir::new().unwrap();
     let (dir, _) = make_artifact_with_scope(tmp.path(), "full-snap", b"upper", SnapshotScope::Full);
 
-    let err = microsandbox::Sandbox::builder("restore-scope-test")
-        .from_snapshot(dir.to_string_lossy().to_string())
-        .build()
+    let err = microsandbox::Sandbox::restore(dir.to_string_lossy().to_string())
+        .name("restore-scope-test")
+        .restore()
         .await
-        .unwrap_err();
+        .err()
+        .expect("incomplete full snapshot must be rejected");
     assert!(
         err.to_string().contains("snapshot"),
         "unexpected error: {err}"
@@ -2165,11 +2166,12 @@ async fn from_snapshot_rejects_unknown_required_extension_but_open_works() {
         .unwrap();
     assert_eq!(snap.manifest().requires, vec!["msb.future/1".to_string()]);
 
-    let err = microsandbox::Sandbox::builder("requires-gate-test")
-        .from_snapshot(dir.to_string_lossy().to_string())
-        .build()
+    let err = microsandbox::Sandbox::restore(dir.to_string_lossy().to_string())
+        .name("requires-gate-test")
+        .restore()
         .await
-        .unwrap_err();
+        .err()
+        .expect("unknown required extension must be rejected");
     assert!(
         err.to_string().contains("msb.future/1"),
         "unexpected error: {err}"

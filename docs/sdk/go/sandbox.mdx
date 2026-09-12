@@ -29,12 +29,12 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 Full restores use strict external-filesystem admission by default. Pass `WithExternalMountPolicy(ExternalMountRelaxed)` to accept supported mismatches, then inspect `sandbox.RestoreWarnings(ctx)`. Each `ExternalMountWarning` has `GuestPath`, `Reason`, and `StaleInodes []uint64`. `ExternalMountStrict` explicitly selects the default. Existing mount options select the destination paths. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
 
-### Creation progress
+### Creation and restore progress
 
-`CreateSandboxWithProgress` returns a bounded event channel and a single-result channel. Ignoring events does not delay creation. Always receive the result and close the sandbox when finished; cancel `ctx` to cancel creation.
+`CreateSandboxWithProgress` and `RestoreSandboxWithProgress` return a bounded event channel and a single-result channel. Ignoring events does not delay the operation. Always receive the result and close the handle when finished; restored sandboxes are detached, so use `Stop` or `Destroy` to stop them. Cancel `ctx` to cancel the operation.
 
 ```go
-events, result := m.CreateSandboxWithProgress(ctx, "child", m.WithFromSnapshot("saved"), m.WithForked())
+events, result := m.RestoreSandboxWithProgress(ctx, "saved", "child", m.WithForked())
 for event := range events {
     fmt.Println(event.Kind, event.Progress.Phase, event.Progress.CompletedBytes)
 }
@@ -1119,7 +1119,7 @@ Require every supplied label. Repeated selectors are AND-matched.
 func WithImage(image string) SandboxOption
 ```
 
-Set the root filesystem source: an OCI image name, local directory path, or disk image path (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Required unless [`WithFromSnapshot`](#withfromsnapshot) is used. Use [`WithImageDisk`](#withimagedisk) when a disk-image root needs an explicit filesystem type.
+Set the root filesystem source: an OCI image name, local directory path, or disk image path (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Required for creation; use `RestoreSandbox` for snapshots. Use [`WithImageDisk`](#withimagedisk) when a disk-image root needs an explicit filesystem type.
 
 <p className="msb-label">Parameters</p>
 
@@ -1200,34 +1200,6 @@ Use a disk image as the root filesystem and optionally provide the inner filesys
 
 ---
 
-#### <span className="msb-recv"></span><span className="msb-hn">WithFromSnapshot()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
-
-<Tooltip tip="Snapshots use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-func WithFromSnapshot(pathOrName string) SandboxOption
-```
-
-Boot from a snapshot artifact by bare name, artifact directory, or archive file. Mutually exclusive with [`WithImage`](#withimage). See [Snapshots](/sdk/go/snapshots).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Snapshot bare name, artifact directory, or archive file.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv"></span><span className="msb-hn">WithSnapshotDiskOnly()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
-
-```go
-func WithSnapshotDiskOnly() SandboxOption
-```
-
-Cold-boot only the disk state carried by a full snapshot. Use with [`WithFromSnapshot()`](#withfromsnapshot). Without it, a full snapshot resumes its captured execution and does not run the image CMD.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithMemory()</span>
 

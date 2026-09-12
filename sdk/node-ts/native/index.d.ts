@@ -400,6 +400,8 @@ export type JsMetricsStream = MetricsStream
  * Validation is deferred to the terminal `.build()` call.
  */
 export declare class MountBuilder {
+  /** Restore this captured private disk without a host binding. */
+  captured(): this
   constructor(guest: string)
   /** Bind a host directory at the guest path. */
   bind(host: string): this
@@ -728,6 +730,63 @@ export declare class RegistryConfigBuilder {
 }
 export type JsRegistryConfigBuilder = RegistryConfigBuilder
 
+/** Snapshot restoration with explicit destination resource bindings. */
+export declare class RestoreBuilder {
+  /** Select an installed snapshot or archive; this does not start a VM. */
+  constructor(snapshot: string)
+  /** Choose the destination sandbox name. */
+  name(name: string): this
+  /** Explicitly reuse locally validated source resource bindings. */
+  dangerouslyInheritResources(): this
+  /** Supply the base for omitted disk layers and RAM objects in a snapshot archive. */
+  snapshotBase(base: string): this
+  /** Cold-boot only the disk state carried by a full snapshot. */
+  diskOnly(): this
+  /** Restore a full snapshot with private copy-on-write memory. */
+  forked(): this
+  /**
+   * Validate authorized filesystem mappings strictly (default) or allow supported mismatches.
+   * Neither policy inherits resources; unmapped filesystems remain unavailable.
+   */
+  externalMountPolicy(policy: 'strict' | 'relaxed'): this
+  /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
+  logLevel(level: string): this
+  /** Default running user. */
+  user(user: string): this
+  /**
+   * Configure a volume mount via a callback. The callback receives a
+   * `MountBuilder` already pre-bound to `guestPath`.
+   */
+  volume(guestPath: string, configure: (arg: MountBuilder) => MountBuilder): this
+  /** Publish a TCP port from host -> guest. */
+  port(hostPort: number, guestPort: number): this
+  /** Publish a TCP port from host -> guest on a specific host bind address. */
+  portBind(bind: string, hostPort: number, guestPort: number): this
+  /** Publish a UDP port from host -> guest. */
+  portUdp(hostPort: number, guestPort: number): this
+  /** Publish a UDP port from host -> guest on a specific host bind address. */
+  portUdpBind(bind: string, hostPort: number, guestPort: number): this
+  /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
+  vsock(hostPath: string, port: number): this
+  /** Expose a host Unix datagram socket on a guest-to-host vsock port. */
+  vsockDgram(hostPath: string, port: number): this
+  /**
+   * Restore a detached sandbox and wait until ready.
+   *
+   * # Safety
+   * The builder is consumed before suspension; callers must not reuse it.
+   */
+  restore(): Promise<Sandbox>
+  /**
+   * Restore with image, snapshot preparation and activation progress.
+   *
+   * # Safety
+   * The builder is consumed before suspension; callers must not reuse it.
+   */
+  restoreWithProgress(): Promise<JsPullProgressCreate>
+}
+export type JsRestoreBuilder = RestoreBuilder
+
 /**
  * Fluent builder for the root disk of an OCI image.
  *
@@ -1010,7 +1069,7 @@ export declare class Sandbox {
   attachShell(): Promise<number>
   /** Stop the sandbox gracefully and wait for it to exit. */
   stop(): Promise<void>
-  /** Structured warnings for external filesystems admitted by relaxed full restore. */
+  /** Warnings for unmapped external filesystems and accepted restore mismatches. */
   restoreWarnings(): Promise<Array<ExternalMountWarning>>
   /** Create an independent local CoW child without a durable full snapshot. */
   branch(name: string): Promise<Sandbox>
@@ -1109,16 +1168,6 @@ export declare class SandboxBuilder {
    * ```
    */
   rootDisk(sizeMibOrConfigure: number | ((d: RootDiskBuilder) => RootDiskBuilder)): this
-  /**
-   * Create a sandbox from a snapshot artifact (path or name).
-   * Mutually exclusive with `image()` / `imageWith()` — the
-   * snapshot already pins the image reference and digest.
-   */
-  fromSnapshot(pathOrName: string): this
-  /** Supply the base for omitted disk layers and RAM objects in a snapshot archive. */
-  snapshotBase(base: string): this
-  /** Cold-boot only the disk state carried by a full snapshot. */
-  diskOnly(): this
   /** Number of virtual CPUs. */
   cpus(count: number): this
   /** Boot-time maximum possible virtual CPUs. */
@@ -1133,10 +1182,6 @@ export declare class SandboxBuilder {
   maxMemory(mib: number): this
   /** Guest transparent huge-page policy selected at boot. */
   thp(policy: 'always' | 'madvise' | 'never'): this
-  /** Restore a full snapshot with private copy-on-write memory. */
-  forked(): this
-  /** Select strict admission (default) or explicit relaxed external-mount restore. */
-  externalMountPolicy(policy: 'strict' | 'relaxed'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
   logLevel(level: string): this
   /** Suppress sandbox logs. */
@@ -1900,7 +1945,7 @@ export interface ExitStatus {
   success: boolean
 }
 
-/** A filesystem mismatch explicitly accepted by relaxed restore admission. */
+/** An unmapped external filesystem or a mismatch accepted during relaxed restore. */
 export interface ExternalMountWarning {
   guestPath: string
   reason: string

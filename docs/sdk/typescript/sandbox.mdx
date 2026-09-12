@@ -38,17 +38,17 @@ Return one [`SandboxMetrics`](#sandboxmetrics) snapshot for every running sandbo
 
 ### External mount restore
 
-Full restores use strict external-filesystem admission by default. Select `.externalMountPolicy("relaxed")` on the builder to accept supported mismatches, then inspect `await sandbox.restoreWarnings()`. Each warning has `guestPath`, `reason`, and `staleInodes: readonly bigint[]`. Existing volume bindings select the destination paths. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+`Sandbox.restore()` leaves host resources unmapped unless explicitly supplied or inherited. `.externalMountPolicy("strict")` validates supplied filesystem bindings; `"relaxed"` accepts supported mismatches without granting access to omitted resources. Inspect `await sandbox.restoreWarnings()` for unmapped paths and accepted mismatches. Each warning has `guestPath`, `reason`, and `staleInodes: readonly bigint[]`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
 
-### Creation progress
+### Creation and restore progress
 
-`createWithProgress()` includes image preparation and local snapshot startup. Ignoring events does not delay creation; `awaitSandbox()` supplies the authoritative result.
+Use `createWithProgress()` for fresh creation and `restoreWithProgress()` for snapshots. Ignoring events does not delay the operation; `awaitSandbox()` supplies the authoritative result.
 
 ```typescript
-const creation = await Sandbox.builder("child")
-  .fromSnapshot("saved")
+const creation = await Sandbox.restore("saved")
+  .name("child")
   .forked()
-  .createWithProgress();
+  .restoreWithProgress();
 for await (const event of creation) {
   if (event.kind === "startup") console.log(event.phase, event.completedBytes, event.totalBytes);
 }
@@ -1133,33 +1133,6 @@ When `true`, the sandbox and all its persisted state are removed automatically o
   </div>
 </div>
 
-#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">fromSnapshot()</span>
-
-<Tooltip tip="Snapshots use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-fromSnapshot(pathOrName: string): this
-```
-
-Boot from a previously captured snapshot instead of a fresh image. The image reference and upper-layer source are pinned from the snapshot manifest. See [Snapshots](/sdk/typescript/snapshots).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Snapshot name or filesystem path to an artifact directory or archive file.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">diskOnly()</span>
-
-```typescript
-diskOnly(): this
-```
-
-Cold-boot only the disk state carried by a full snapshot. Chain after [`fromSnapshot()`](#fromsnapshot). Without it, a full snapshot resumes its captured execution and does not run the image CMD.
-
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">hostname()</span>
 
 <Tooltip tip="Not accepted on microsandbox cloud; the platform assigns the hostname."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -1221,7 +1194,7 @@ Auto-drain the sandbox after this many seconds of inactivity (no active exec ses
 image(src: string): this
 ```
 
-Set the root filesystem source. Accepts OCI image names (`"alpine"`), local directory paths, or disk image paths. The format is auto-detected. **Required** unless [`fromSnapshot`](#sandboxbuilder-fromsnapshot) is used.
+Set the root filesystem source. Accepts OCI image names (`"alpine"`), local directory paths, or disk image paths. The format is auto-detected. **Required** for creation; use `Sandbox.restore()` for snapshots.
 
 <p className="msb-label">Parameters</p>
 

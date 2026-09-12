@@ -8,6 +8,16 @@ use crate::MicrosandboxResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Build a detached sandbox from a snapshot, never an image or replacement startup command.
+///
+/// ```compile_fail
+/// use microsandbox::Sandbox;
+/// Sandbox::restore("saved").name("child").memory(128);
+/// ```
+///
+/// ```compile_fail
+/// use microsandbox::Sandbox;
+/// Sandbox::builder("child").from_snapshot("saved");
+/// ```
 pub struct RestoreBuilder {
     pub(crate) inner: SandboxBuilder,
 }
@@ -153,7 +163,8 @@ macro_rules! resource_methods {
                 self
             }
 
-            /// Choose strict or relaxed compatibility validation for explicitly mapped filesystems.
+            /// Choose strict or relaxed compatibility validation for authorized filesystem mappings.
+            /// Unmapped filesystems remain unavailable in either mode; this does not inherit resources.
             pub fn external_mount_policy(mut self, policy: ExternalMountRestorePolicy) -> Self {
                 self.inner = self.inner.external_mount_policy(policy);
                 self
@@ -192,3 +203,55 @@ macro_rules! resource_methods {
 
 resource_methods!(RestoreBuilder);
 resource_methods!(super::branch::BranchBuilder);
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_starts_without_host_bindings() {
+        let restore = Sandbox::restore("saved").name("child");
+        assert!(restore.inner.config.spec.mounts.is_empty());
+        assert!(restore.inner.config.spec.network.ports.is_empty());
+        assert!(!restore.inner.config.restore_resources.inherit);
+        assert!(restore.inner.config.spec.runtime.user.is_none());
+    }
+
+    #[test]
+    fn restore_tracks_authorized_and_captured_volumes() {
+        let restore = Sandbox::restore("saved")
+            .name("child")
+            .volume("/data", |v| v.bind("/tmp/explicit-restore-binding"))
+            .volume("/private", |v| v.captured());
+        assert!(
+            restore
+                .inner
+                .config
+                .restore_resources
+                .mapped
+                .contains("/data")
+        );
+        assert!(
+            restore
+                .inner
+                .config
+                .restore_resources
+                .captured
+                .contains("/private")
+        );
+        let restore = restore.volume("/data", |v| v.captured());
+        assert!(
+            !restore
+                .inner
+                .config
+                .restore_resources
+                .mapped
+                .contains("/data")
+        );
+        assert!(restore.inner.config.spec.mounts.is_empty());
+    }
+}

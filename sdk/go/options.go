@@ -24,27 +24,22 @@ type SandboxConfig struct {
 	// RootDisk is nil.
 	//
 	// Deprecated: set RootDisk (via WithRootDisk / RootDisk.Managed) instead.
-	OCIUpperSizeMiB     uint32
-	ociUpperSizeSet     bool
-	Snapshot            string
-	SnapshotDiskOnly    bool
-	SnapshotBase        string
-	MemoryMiB           uint32
-	CPUs                uint8
-	MaxMemoryMiB        uint32
-	MaxCPUs             uint8
-	CPUPlacement        CPUPlacement
-	PlacementProfile    string
-	THP                 THPPolicy
-	Forked              bool
-	ExternalMountPolicy ExternalMountRestorePolicy
-	Workdir             string
-	Shell               string
-	SecurityProfile     SecurityProfile
-	DeploymentProfile   DeploymentProfile
-	Hostname            string
-	User                string
-	Replace             bool
+	OCIUpperSizeMiB   uint32
+	ociUpperSizeSet   bool
+	MemoryMiB         uint32
+	CPUs              uint8
+	MaxMemoryMiB      uint32
+	MaxCPUs           uint8
+	CPUPlacement      CPUPlacement
+	PlacementProfile  string
+	THP               THPPolicy
+	Workdir           string
+	Shell             string
+	SecurityProfile   SecurityProfile
+	DeploymentProfile DeploymentProfile
+	Hostname          string
+	User              string
+	Replace           bool
 	// ReplaceWithTimeout, if non-nil, sets a specific timeout between
 	// SIGTERM and SIGKILL when replacing an existing sandbox. nil means
 	// "use the runtime default" (10s when Replace is set). Setting this
@@ -90,7 +85,8 @@ type SandboxOption func(*SandboxConfig)
 // CPUPlacement controls how sandbox vCPU threads are placed on host processors.
 type CPUPlacement string
 
-// ExternalMountRestorePolicy selects admission of external filesystem identity changes.
+// ExternalMountRestorePolicy selects validation of authorized filesystem mappings.
+// Neither policy inherits resources; unmapped filesystems remain unavailable.
 type ExternalMountRestorePolicy string
 
 const (
@@ -491,13 +487,14 @@ type THPPolicy string
 
 // WithForked restores a full snapshot with private copy-on-write memory.
 // It cannot be combined with a fresh boot or disk-only restore.
-func WithForked() SandboxOption {
-	return func(o *SandboxConfig) { o.Forked = true }
+func WithForked() RestoreOption {
+	return func(o *RestoreConfig) { o.Forked = true }
 }
 
-// WithExternalMountPolicy selects strict (default) or explicit relaxed full restore.
-func WithExternalMountPolicy(policy ExternalMountRestorePolicy) SandboxOption {
-	return func(o *SandboxConfig) { o.ExternalMountPolicy = policy }
+// WithExternalMountPolicy selects strict (default) or relaxed validation of mapped filesystems.
+// It does not authorize or inherit host resources.
+func WithExternalMountPolicy(policy ExternalMountRestorePolicy) RestoreOption {
+	return func(o *RestoreConfig) { o.ExternalMountPolicy = policy }
 }
 
 const (
@@ -676,26 +673,20 @@ func WithImageDisk(path string, fstype string) SandboxOption {
 // WithBindRootfs uses a host directory directly as the sandbox root filesystem
 // (a bind rootfs): the directory's contents become the guest root filesystem
 // as-is, with no OCI pull and no overlay. Mutually exclusive with WithImage,
-// WithImageDisk, and WithFromSnapshot.
+// WithImageDisk.
 func WithBindRootfs(path string) SandboxOption {
 	return func(o *SandboxConfig) { o.ImageBind = path }
 }
 
-// WithFromSnapshot creates from a snapshot artifact by bare name or filesystem path.
-// It is mutually exclusive with WithImage.
-func WithFromSnapshot(pathOrName string) SandboxOption {
-	return func(o *SandboxConfig) { o.Snapshot = pathOrName }
-}
-
 // WithSnapshotDiskOnly cold-boots only the disk state carried by a full snapshot.
-// It must be combined with WithFromSnapshot.
-func WithSnapshotDiskOnly() SandboxOption {
-	return func(o *SandboxConfig) { o.SnapshotDiskOnly = true }
+// Use with RestoreSandbox.
+func WithSnapshotDiskOnly() RestoreOption {
+	return func(o *RestoreConfig) { o.SnapshotDiskOnly = true }
 }
 
 // WithSnapshotBase supplies the exact base snapshot or standalone base archive for a delta archive.
-func WithSnapshotBase(base string) SandboxOption {
-	return func(o *SandboxConfig) { o.SnapshotBase = base }
+func WithSnapshotBase(base string) RestoreOption {
+	return func(o *RestoreConfig) { o.SnapshotBase = base }
 }
 
 // WithMemory sets the memory limit in MiB (default 512MiB).

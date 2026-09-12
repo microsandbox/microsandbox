@@ -9,11 +9,6 @@ STUB_PATH = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
 
 EXPECTED_KWARGS = [
     "image",
-    "from_snapshot",
-    "disk_only",
-    "snapshot_base",
-    "forked",
-    "external_mount_policy",
     "memory",
     "cpus",
     "max_memory",
@@ -88,8 +83,6 @@ def test_create_closed_values_are_precisely_typed() -> None:
     }
 
     assert annotations["security"] == "SecurityProfile | None"
-    assert annotations["forked"] == "bool"
-    assert annotations["external_mount_policy"] == "Literal['strict', 'relaxed']"
     assert annotations["init"] == "str | InitConfig | InitOptions | None"
     assert annotations["pull_policy"] == "PullPolicy | None"
     assert annotations["log_level"] == "LogLevel | None"
@@ -162,3 +155,11 @@ def test_lifecycle_convergence_methods_are_typed() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert "connect_or_start" in handle_methods
+
+
+def test_restore_has_only_destination_options() -> None:
+    restore = _method("restore")
+    names = {arg.arg for arg in restore.args.kwonlyargs}
+    assert {"name", "forked", "disk_only", "snapshot_base", "volumes", "ports", "vsock"} <= names
+    assert not names & {"image", "memory", "cpus", "cmd", "replace", "detached", "from_snapshot"}
+    assert names == {arg.arg for arg in _method("restore_with_progress").args.kwonlyargs}

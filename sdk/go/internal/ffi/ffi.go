@@ -267,6 +267,8 @@ static msb_cancel_alloc_fn       ptr_msb_cancel_alloc       = NULL;
 static msb_cancel_trigger_fn     ptr_msb_cancel_trigger     = NULL;
 static msb_cancel_unregister_fn  ptr_msb_cancel_unregister  = NULL;
 static msb_sandbox_create_fn     ptr_msb_sandbox_create     = NULL;
+typedef char *(*msb_sandbox_restore_fn)(uint64_t, const char *, const char *, uint8_t *, size_t);
+static msb_sandbox_restore_fn ptr_msb_sandbox_restore = NULL;
 typedef char *(*msb_creation_progress_open_fn)(uint8_t *, size_t);
 typedef char *(*msb_creation_progress_recv_fn)(uint64_t, uint64_t, uint8_t *, size_t);
 typedef char *(*msb_creation_progress_close_fn)(uint64_t, uint8_t *, size_t);
@@ -463,6 +465,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_cancel_unregister);
 	RESOLVE_OPTIONAL(msb_default_backend_info);
 	RESOLVE(msb_sandbox_create);
+	RESOLVE(msb_sandbox_restore);
 	RESOLVE_OPTIONAL(msb_creation_progress_open);
 	RESOLVE_OPTIONAL(msb_creation_progress_recv);
 	RESOLVE_OPTIONAL(msb_creation_progress_close);
@@ -634,6 +637,10 @@ void call_msb_cancel_trigger(uint64_t id) {
 }
 void call_msb_cancel_unregister(uint64_t id) {
 	if (ptr_msb_cancel_unregister) ptr_msb_cancel_unregister(id);
+}
+bool has_sandbox_restore(void) { return ptr_msb_sandbox_restore != NULL; }
+char *call_msb_sandbox_restore(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
+    return ptr_msb_sandbox_restore ? ptr_msb_sandbox_restore(cancel_id, name, opts_json, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_create(uint64_t cancel_id, const char *name, const char *opts_json, bool connect_or_create, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_create ? ptr_msb_sandbox_create(cancel_id, name, opts_json, connect_or_create, buf, buf_len) : NULL;
@@ -1672,9 +1679,6 @@ type CreateOptions struct {
 	ImageFstype          string               `json:"image_fstype,omitempty"`
 	ImageBind            string               `json:"image_bind,omitempty"`
 	RootDisk             *RootDiskSpec        `json:"root_disk,omitempty"`
-	Snapshot             string               `json:"snapshot,omitempty"`
-	SnapshotDiskOnly     bool                 `json:"snapshot_disk_only,omitempty"`
-	SnapshotBase         string               `json:"snapshot_base,omitempty"`
 	MemoryMiB            uint32               `json:"memory_mib,omitempty"`
 	CPUs                 uint8                `json:"cpus,omitempty"`
 	MaxMemoryMiB         uint32               `json:"max_memory_mib,omitempty"`
@@ -1682,8 +1686,6 @@ type CreateOptions struct {
 	CPUPlacement         string               `json:"cpu_placement,omitempty"`
 	PlacementProfile     string               `json:"placement_profile,omitempty"`
 	THP                  string               `json:"thp,omitempty"`
-	Forked               bool                 `json:"forked,omitempty"`
-	ExternalMountPolicy  string               `json:"external_mount_policy,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
 	SecurityProfile      string               `json:"security_profile,omitempty"`
@@ -1985,9 +1987,7 @@ func createSandbox(ctx context.Context, name string, opts CreateOptions, connect
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
-	if opts.ExternalMountPolicy != "" && !bool(C.has_external_mount_restore()) {
-		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support external mount restore policy; update the native SDK"}
-	}
+
 	optsJSON, err := json.Marshal(opts)
 	if err != nil {
 		return nil, fmt.Errorf("marshal opts: %w", err)
@@ -2016,6 +2016,49 @@ func createSandbox(ctx context.Context, name string, opts CreateOptions, connect
 			releaseHandle(h)
 		}
 		return nil, fmt.Errorf("parse create response: %w", err)
+	}
+	s := &Sandbox{name: name, id: resp.ID, backendKind: resp.BackendKind}
+	s.handle.Store(resp.Handle)
+	return s, nil
+}
+
+// RestoreSandbox uses the dedicated native restore entry point.
+func RestoreSandbox(ctx context.Context, name string, opts RestoreOptions) (*Sandbox, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if !bool(C.has_sandbox_restore()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support Sandbox restore; update the native SDK"}
+	}
+
+	optsJSON, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal opts: %w", err)
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cOpts := C.CString(string(optsJSON))
+	defer C.free(unsafe.Pointer(cOpts))
+
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_restore(cancelID, cName, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Handle      uint64 `json:"handle"`
+		BackendKind string `json:"backend_kind"`
+		ID          string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		// Rust has allocated a handle we can no longer trust. Best-effort
+		// recover the handle from the response so we can release it;
+		// otherwise the VM and registry entry would leak.
+		if h := salvageHandle(out); h != 0 {
+			releaseHandle(h)
+		}
+		return nil, fmt.Errorf("parse restore response: %w", err)
 	}
 	s := &Sandbox{name: name, id: resp.ID, backendKind: resp.BackendKind}
 	s.handle.Store(resp.Handle)
