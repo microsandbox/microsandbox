@@ -100,11 +100,37 @@ The flat root gives Docker a direct ext4 filesystem. That matters because Docker
 
 ### Alternative: a separate disk for Docker data
 
-To keep the default layered root, replace `--root-disk flat:10G` in the start command with:
+A flat root disk is the easiest way to run Docker in a sandbox. If you prefer to keep the default layered root, give Docker a separate owned ext4 disk at `/var/lib/docker`:
 
-```sh
---mount-owned /var/lib/docker:kind=disk,size=10G
+<CodeGroup>
+```sh macOS & Linux
+msb run --name docker-demo --replace \
+  --memory 2G \
+  --mount-owned /var/lib/docker:kind=disk,size=10G \
+  --script start='dockerd >/tmp/dockerd.log 2>&1 &
+  timeout 60 sh -c "until docker info>/dev/null 2>&1;do sleep 1;done" || {
+    cat /tmp/dockerd.log
+    false
+  }
+  exec sh' \
+  --entrypoint start \
+  docker:dind
 ```
+
+```powershell Windows
+msb run --name docker-demo --replace `
+  --memory 2G `
+  --mount-owned /var/lib/docker:kind=disk,size=10G `
+  --script start='dockerd >/tmp/dockerd.log 2>&1 &
+  timeout 60 sh -c "until docker info>/dev/null 2>&1;do sleep 1;done" || {
+    cat /tmp/dockerd.log
+    false
+  }
+  exec sh' `
+  --entrypoint start `
+  docker:dind
+```
+</CodeGroup>
 
 Docker gets a private ext4 disk for its data while the rest of the sandbox keeps its layered root. The disk survives stop/start and is removed with the sandbox.
 
