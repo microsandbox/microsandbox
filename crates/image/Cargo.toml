@@ -26,7 +26,7 @@ oci-spec.workspace = true
 rand.workspace = true
 rustls-pki-types.workspace = true
 scopeguard.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true

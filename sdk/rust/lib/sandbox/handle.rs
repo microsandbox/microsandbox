@@ -33,7 +33,8 @@ use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult}
 /// [`SandboxHandle::connect`].
 pub const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Default timeout for [`SandboxHandle::stop`] before escalation.
+/// Default graceful budget for explicit restart/destroy convergence options.
+/// [`SandboxHandle::stop`] itself has no built-in deadline.
 pub const DEFAULT_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Default timeout for observing stopped state after force termination.
@@ -48,7 +49,7 @@ pub const DEFAULT_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_
 pub struct RestartOptions {
     /// Force termination instead of requesting graceful shutdown.
     pub force: bool,
-    /// Graceful-shutdown observation timeout before escalation.
+    /// Graceful-shutdown completion budget; expiry does not force termination.
     pub timeout: std::time::Duration,
     /// Start the replacement runtime in detached mode.
     pub detached: bool,
@@ -59,7 +60,7 @@ pub struct RestartOptions {
 pub struct DestroyOptions {
     /// Force termination instead of requesting graceful shutdown.
     pub force: bool,
-    /// Graceful-shutdown observation timeout before escalation.
+    /// Graceful-shutdown completion budget; expiry does not force termination.
     pub timeout: std::time::Duration,
 }
 
@@ -670,53 +671,30 @@ impl SandboxHandle {
             .await
     }
 
-    /// Stop the sandbox gracefully using the default stop timeout.
+    /// Request graceful shutdown and wait indefinitely for this run's runtime ownership release.
+    /// Cancelling the wait does not kill the sandbox or undo a delivered request.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
-        self.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
+        super::stop::stop(
+            self.backend.clone(),
+            &self.name,
+            self.identity(),
+            self.is_local_ephemeral(),
+            None,
+        )
+        .await
     }
 
-    /// Stop the sandbox gracefully with an explicit timeout before escalation.
+    /// Graceful completion under one budget, without implicit force termination.
+    /// Zero returns a timeout before dispatch; a delivered request may finish later.
     pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
-        let current = self.refresh().await?;
-        if sandbox_status_is_terminal(current.status_snapshot()) {
-            return Ok(());
-        }
-
-        if timeout.is_zero() {
-            current.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await?;
-            return Ok(());
-        }
-
-        current.request_stop().await?;
-        match tokio::time::timeout(timeout, current.wait_until_stopped()).await {
-            Ok(Ok(_)) => {
-                // Windows: the DB can record the guest poweroff while the VM
-                // process never exits; a successful stop must mean "no
-                // process".
-                #[cfg(all(feature = "local", windows))]
-                current.reap_leaked_local_runtime().await?;
-                return Ok(());
-            }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => {}
-        }
-
-        tracing::warn!(
-            sandbox = %current.name,
-            timeout_secs = timeout.as_secs(),
-            "graceful stop exceeded timeout, escalating to kill"
-        );
-        current.request_kill().await?;
-        match tokio::time::timeout(DEFAULT_KILL_TIMEOUT, current.wait_until_stopped()).await {
-            Ok(result) => {
-                result?;
-                Ok(())
-            }
-            Err(_) => Err(MicrosandboxError::Runtime(format!(
-                "timed out observing stopped state for sandbox '{}'",
-                current.name
-            ))),
-        }
+        super::stop::stop(
+            self.backend.clone(),
+            &self.name,
+            self.identity(),
+            self.is_local_ephemeral(),
+            Some(timeout),
+        )
+        .await
     }
 
     /// Request graceful shutdown without waiting for observed stopped state.
@@ -935,21 +913,6 @@ impl SandboxHandle {
                     .await
             }
         }
-    }
-
-    /// Kill any leftover VM process still backing this local sandbox after
-    /// its DB row went terminal. No-op for cloud handles.
-    #[cfg(all(feature = "local", windows))]
-    async fn reap_leaked_local_runtime(&self) -> MicrosandboxResult<()> {
-        let Some(local) = self.local() else {
-            return Ok(());
-        };
-        let Some(local_backend) = self.backend.as_local() else {
-            return Ok(());
-        };
-        super::reap_leaked_runtime_process(local_backend, local.db_id, &self.name)
-            .await
-            .map(|_| ())
     }
 
     fn is_local_ephemeral(&self) -> bool {

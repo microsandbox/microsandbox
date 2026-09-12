@@ -255,6 +255,23 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Select strict admission (default) or explicit relaxed external-mount restore.
+    #[napi(ts_args_type = "policy: 'strict' | 'relaxed'")]
+    pub fn external_mount_policy(&mut self, policy: String) -> Result<&Self> {
+        let policy = match policy.as_str() {
+            "strict" => microsandbox::sandbox::ExternalMountRestorePolicy::Strict,
+            "relaxed" => microsandbox::sandbox::ExternalMountRestorePolicy::Relaxed,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "external mount policy must be strict or relaxed",
+                ));
+            }
+        };
+        let previous = self.take_inner();
+        self.inner = Some(previous.external_mount_policy(policy));
+        Ok(self)
+    }
+
     /// Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`.
     #[napi(js_name = "logLevel")]
     pub fn log_level(&mut self, level: String) -> Result<&Self> {
@@ -856,6 +873,25 @@ impl JsSandboxBuilder {
         let (handle, task) = b.create_with_pull_progress().map_err(to_napi_error)?;
         Ok(JsPullProgressCreate {
             stream: JsPullProgressStream::from_handle(handle),
+            abort: task.abort_handle(),
+            task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
+        })
+    }
+
+    /// Create with image, snapshot preparation and activation progress.
+    ///
+    /// # Safety
+    /// Same consumed-builder ownership requirement as `create`.
+    #[napi(js_name = "createWithProgress")]
+    pub async unsafe fn create_with_progress(&mut self) -> Result<JsPullProgressCreate> {
+        let builder = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
+        let (handle, task) = builder.create_with_progress().map_err(to_napi_error)?;
+        Ok(JsPullProgressCreate {
+            stream: JsPullProgressStream::from_creation(handle),
+            abort: task.abort_handle(),
             task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
         })
     }
@@ -870,6 +906,7 @@ fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
 /// plus a method to await the final `Sandbox`.
 #[napi(js_name = "PullProgressCreate")]
 pub struct JsPullProgressCreate {
+    abort: tokio::task::AbortHandle,
     stream: JsPullProgressStream,
     task: std::sync::Arc<
         tokio::sync::Mutex<
@@ -880,6 +917,12 @@ pub struct JsPullProgressCreate {
 
 #[napi]
 impl JsPullProgressCreate {
+    /// Cancel creation, independently of whether awaitSandbox is already waiting.
+    #[napi]
+    pub fn cancel(&self) {
+        self.abort.abort();
+    }
+
     /// The progress event stream. Iterate with `for await...of` or
     /// poll with `.recv()`. The stream closes once the pull completes.
     #[napi(getter)]

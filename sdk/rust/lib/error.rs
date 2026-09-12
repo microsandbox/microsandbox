@@ -146,6 +146,19 @@ pub enum MicrosandboxError {
     #[error("runtime error: {0}")]
     Runtime(String),
 
+    /// Graceful shutdown did not establish completion within the caller's budget.
+    #[error(
+        "graceful stop of sandbox {name:?} ({identity}) timed out after {timeout:?} waiting for shutdown completion and runtime release; the shutdown request may still complete; no kill was requested"
+    )]
+    StopTimeout {
+        /// Sandbox name.
+        name: String,
+        /// Persisted identity targeted by this stop operation.
+        identity: String,
+        /// Total budget including dispatch and ownership observation.
+        timeout: std::time::Duration,
+    },
+
     /// The sandbox process exited before the agent relay became
     /// available. Carries the sandbox name and the structured
     /// `boot-error.json` record so the CLI can render a useful inline

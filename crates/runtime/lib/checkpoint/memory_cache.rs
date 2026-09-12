@@ -51,6 +51,7 @@ pub struct CachedMemory {
 pub struct MemoryCache {
     pub(super) root: PathBuf,
     pub(super) page_size: u64,
+    progress: Option<crate::startup_progress::StartupProgressCallback>,
 }
 
 type ObjectSlices = BTreeMap<ObjectId, Vec<(u64, u64, u64)>>;
@@ -83,6 +84,7 @@ impl MemoryCache {
             Ok(Self {
                 root,
                 page_size: page_size as u64,
+                progress: None,
             })
         }
         #[cfg(windows)]
@@ -100,6 +102,7 @@ impl MemoryCache {
             Ok(Self {
                 root,
                 page_size: u64::from(info.dwPageSize),
+                progress: None,
             })
         }
         #[cfg(not(any(unix, windows)))]
@@ -109,6 +112,22 @@ impl MemoryCache {
                 io::ErrorKind::Unsupported,
                 "private memory cache is not qualified on this backend",
             ))
+        }
+    }
+
+    /// Attach the nonblocking runtime telemetry producer.
+    #[cfg(any(feature = "runner", test))]
+    pub(crate) fn with_progress(
+        mut self,
+        progress: crate::startup_progress::StartupProgressCallback,
+    ) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    fn report(&self, phase: crate::startup_progress::StartupPhase) {
+        if let Some(progress) = &self.progress {
+            progress(crate::startup_progress::StartupProgress::phase(phase));
         }
     }
 
@@ -135,8 +154,20 @@ impl MemoryCache {
         read_object: impl Fn(&ObjectId, &mut Vec<u8>) -> io::Result<CheckpointObjectReadTiming> + Sync,
     ) -> io::Result<CachedMemory> {
         self.materialize_with_baseline_inner(manifest, identity, None, |objects, staging| {
+            let total_bytes = objects.values().flatten().map(|slice| slice.2).sum();
+            let mut completed_bytes = 0;
             let timings = consume_verified_objects(objects, read_object, |slices, bytes| {
-                write_object_slices(staging, slices, bytes)
+                let written: u64 = slices.iter().map(|slice| slice.2).sum();
+                write_object_slices(staging, slices, bytes)?;
+                completed_bytes += written;
+                if let Some(progress) = &self.progress {
+                    progress(crate::startup_progress::StartupProgress {
+                        phase: crate::startup_progress::StartupPhase::PreparingMemoryBacking,
+                        completed_bytes,
+                        total_bytes: Some(total_bytes),
+                    });
+                }
+                Ok(())
             })?;
             tracing::info!(
                 target: "microsandbox_checkpoint_timing",
@@ -199,6 +230,7 @@ impl MemoryCache {
             .ok_or_else(|| invalid("empty or overflowing memory topology"))?;
         let path = self.entry_path(identity);
         if let Some(file) = open_pinned(&path, length)? {
+            self.report(crate::startup_progress::StartupPhase::ReusingMemoryBacking);
             return Ok(CachedMemory {
                 path,
                 identity: identity.clone(),
@@ -215,8 +247,12 @@ impl MemoryCache {
         // build lock: waiters must not acquire different inodes for the same identity.
         let build_lock =
             microsandbox_utils::process_lock::open_lock_file(&path.with_extension("build-lock"))?;
-        microsandbox_utils::process_lock::lock_exclusive(&build_lock)?;
+        if !microsandbox_utils::process_lock::try_lock_exclusive(&build_lock)? {
+            self.report(crate::startup_progress::StartupPhase::WaitingForMemoryBacking);
+            microsandbox_utils::process_lock::lock_exclusive(&build_lock)?;
+        }
         if let Some(file) = open_pinned(&path, length)? {
+            self.report(crate::startup_progress::StartupPhase::ReusingMemoryBacking);
             return Ok(CachedMemory {
                 path,
                 identity: identity.clone(),
@@ -228,6 +264,7 @@ impl MemoryCache {
             });
         }
 
+        self.report(crate::startup_progress::StartupPhase::PreparingMemoryBacking);
         let staging_dir = tempfile::Builder::new()
             .prefix(".memory-")
             .tempdir_in(&self.root)?;
@@ -303,6 +340,7 @@ impl MemoryCache {
             staging.set_permissions(std::fs::Permissions::from_mode(0o400))?;
         }
         let syncing = Instant::now();
+        self.report(crate::startup_progress::StartupPhase::SyncingMemoryBacking);
         staging.sync_all()?;
         let file_sync_us = syncing.elapsed().as_micros();
         // Windows readers deliberately deny write sharing. Close the completed writer before
@@ -761,6 +799,48 @@ mod tests {
         assert!(!cache.evict(&id).unwrap());
         drop(second);
         assert!(cache.evict(&id).unwrap());
+    }
+
+    #[test]
+    fn preparation_progress_counts_written_slices_and_reports_warm_reuse() {
+        use crate::startup_progress::StartupPhase;
+        let directory = tempfile::tempdir().unwrap();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let cache =
+            MemoryCache::open(directory.path())
+                .unwrap()
+                .with_progress(std::sync::Arc::new(move |event| {
+                    observed.lock().unwrap().push(event);
+                }));
+        let (manifest, id, bytes) = fixture(cache.page_size);
+        let first = cache
+            .materialize_parallel(&manifest, &id, |_, buffer| {
+                buffer.extend_from_slice(&bytes);
+                Ok(CheckpointObjectReadTiming::default())
+            })
+            .unwrap();
+        let recorded = events.lock().unwrap().clone();
+        let bytes_event = recorded
+            .iter()
+            .find(|event| event.total_bytes.is_some())
+            .unwrap();
+        // This fixture writes the same verified object into two guest slices. Count each
+        // destination once, excluding the intervening zero page, not each object read.
+        assert_eq!(bytes_event.completed_bytes, 2 * bytes.len() as u64);
+        assert_eq!(bytes_event.total_bytes, Some(2 * bytes.len() as u64));
+        assert_eq!(
+            recorded.last().unwrap().phase,
+            StartupPhase::SyncingMemoryBacking
+        );
+        let _second = cache
+            .materialize_parallel(&manifest, &id, |_, _| panic!("warm read"))
+            .unwrap();
+        assert_eq!(
+            events.lock().unwrap().last().unwrap().phase,
+            StartupPhase::ReusingMemoryBacking
+        );
+        drop(first);
     }
 
     #[test]

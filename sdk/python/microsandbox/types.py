@@ -147,6 +147,7 @@ class ExecEventType(StrEnum):
 
 
 class PullEventType(StrEnum):
+    STARTUP = "startup"
     RESOLVING = "resolving"
     RESOLVED = "resolved"
     LAYER_DOWNLOAD_PROGRESS = "layer_download_progress"

@@ -131,6 +131,10 @@ pub(crate) struct RestoreOverrideIntent {
 /// registry credentials, replacement flags, and resolved snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
+    /// Operation-local observer; never persisted or retained as a stream owner.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) creation_progress: Option<tokio::sync::mpsc::WeakSender<crate::CreationProgress>>,
     /// Backend-neutral sandbox task description shared across SDKs and services.
     #[serde(flatten)]
     pub spec: SandboxSpec,
@@ -244,6 +248,14 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_restore_mode: SnapshotRestoreMode,
 
+    /// Explicit failure policy for external resources during full execution restore.
+    #[serde(default)]
+    pub(crate) external_mount_policy: microsandbox_types::ExternalMountRestorePolicy,
+
+    /// Resource choices apply to this restore/branch only, never later starts or branches.
+    #[serde(skip)]
+    pub(crate) restore_resources: super::restore_resources::RestoreResources,
+
     /// Whether this create operation resumed execution from a full snapshot.
     #[serde(skip)]
     pub(crate) resumed_from_full_snapshot: bool,
@@ -304,6 +316,7 @@ impl SandboxConfig {
             config.forked = false;
         }
         config.snapshot_restore_mode = SnapshotRestoreMode::Full;
+        config.restore_resources = Default::default();
         config.resumed_from_full_snapshot = false;
         #[cfg(feature = "local")]
         {
@@ -772,6 +785,8 @@ impl Default for SandboxConfig {
                 ..Default::default()
             },
             registry_auth: None,
+            #[cfg(feature = "local")]
+            creation_progress: None,
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
@@ -791,6 +806,8 @@ impl Default for SandboxConfig {
             branch_source: None,
             forked: false,
             snapshot_restore_mode: SnapshotRestoreMode::Full,
+            external_mount_policy: microsandbox_types::ExternalMountRestorePolicy::Strict,
+            restore_resources: Default::default(),
             resumed_from_full_snapshot: false,
             #[cfg(feature = "local")]
             snapshot_upper_layers: Vec::new(),
@@ -1768,6 +1785,10 @@ mod tests {
                 },
                 snapshot_restore_mode: restore_mode,
                 checkpoint_restore: Some(CheckpointRestoreConfig {
+                    network_gateway_mac: None,
+                    external_mount_policy: Default::default(),
+                    external_mounts: Vec::new(),
+                    unavailable_disks: Default::default(),
                     local_branch: false,
                     forked: false,
                     closure: PathBuf::from("/tmp/checkpoint"),

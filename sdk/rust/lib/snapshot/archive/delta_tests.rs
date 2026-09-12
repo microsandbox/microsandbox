@@ -124,6 +124,12 @@ async fn fixture(
         schema: "microsandbox.checkpoint/1".into(),
         checkpoint_id: format!("checkpoint_{generation}"),
         capture_intent: CaptureIntent::FullSnapshot,
+        geometry: microsandbox_image::checkpoint::CheckpointGeometry {
+            vcpus: 1,
+            max_vcpus: 1,
+            memory_mib: 128,
+            max_memory_mib: 128,
+        },
         architecture: std::env::consts::ARCH.into(),
         pause_generation: generation,
         execution_state: store
@@ -225,6 +231,158 @@ async fn unpack(path: &Path, stage: &Path) -> ArchiveInventory {
         .unwrap()
 }
 
+async fn with_additional_disks(
+    local: &LocalBackend,
+    snapshot: Snapshot,
+    generation: u64,
+) -> Snapshot {
+    let root = snapshot.path().join(CHECKPOINT_DIRECTORY);
+    let closure = CheckpointClosure::open_portable(&root, None).unwrap();
+    let mut checkpoint = closure.checkpoint().clone();
+    let store = LocalObjectStore::open(&root).unwrap();
+    for number in 1..=2 {
+        let layer_id = format!("layer_{:032x}", 100 * generation + number);
+        let path = root.join("layers").join(format!("{layer_id}.raw"));
+        std::fs::write(&path, vec![(10 * generation + number) as u8; 65536]).unwrap();
+        let disk = DiskGenerationManifest {
+            schema: "microsandbox.disk-generation/1".into(),
+            volume_id: format!("vol_data_{number}"),
+            device_id: format!("data_{number}"),
+            generation,
+            layers: vec![DiskLayerRef {
+                layer_id: layer_id.clone(),
+                format: "raw".into(),
+                virtual_size: 65536,
+                predecessor: None,
+                integrity_root: sparse_file_integrity(&path).unwrap().root,
+            }],
+            head: layer_id,
+            pause_generation: checkpoint.pause_generation,
+        };
+        // Runtime inventories may put additional device IDs before the root. Neither loading
+        // nor direct restore may confuse that manifest order with the selected root chain.
+        checkpoint.disks.insert(
+            0,
+            store
+                .put_bytes(&disk.to_canonical_bytes().unwrap())
+                .unwrap(),
+        );
+    }
+    let bytes = checkpoint.to_canonical_bytes().unwrap();
+    let root_id = ObjectId::from_bytes(&bytes).unwrap();
+    std::fs::write(root.join("checkpoint.json"), bytes).unwrap();
+    let mut manifest = snapshot.manifest().clone();
+    let SnapshotState::Checkpoint(state) = &mut manifest.state else {
+        unreachable!()
+    };
+    state.checkpoint_root = root_id.to_string();
+    std::fs::write(
+        snapshot.path().join(DESCRIPTOR_FILENAME),
+        manifest.to_canonical_bytes().unwrap(),
+    )
+    .unwrap();
+    store::open_snapshot(local, snapshot.path().to_str().unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn incremental_selectors_only_count_root_layers_and_include_each_additional_disk_whole() {
+    let temp = tempfile::tempdir().unwrap();
+    let local = LocalBackend::builder()
+        .home(temp.path().join("home"))
+        .build()
+        .await
+        .unwrap();
+    let base = fixture(&local, &temp.path().join("base"), 1, None, true).await;
+    let head = fixture(&local, &temp.path().join("head"), 2, Some(&base), true).await;
+    let base = with_additional_disks(&local, base, 1).await;
+    let head = with_additional_disks(&local, head, 2).await;
+    for (label, opts) in [
+        (
+            "since",
+            SaveOpts {
+                since: Some(base.path().to_string_lossy().into_owned()),
+                plain_tar: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "last",
+            SaveOpts {
+                last_layers: Some(1),
+                plain_tar: true,
+                ..Default::default()
+            },
+        ),
+    ] {
+        let archive = temp.path().join(format!("{label}.msb"));
+        save_snapshot(&local, head.path().to_str().unwrap(), &archive, opts)
+            .await
+            .unwrap();
+        let stage = temp.path().join(format!("unpacked-{label}"));
+        let inventory = unpack(&archive, &stage).await;
+        let dependencies = validate(&inventory).unwrap().unwrap();
+        assert_eq!(
+            dependencies.disks.len(),
+            1,
+            "only the oldest root layer is omitted"
+        );
+        let LayerIdentity::Checkpoint(root) = &dependencies.disks[0].identity else {
+            unreachable!()
+        };
+        assert_eq!(root.layer_id, format!("layer_{:032x}", 1));
+        for number in 1..=2 {
+            let name = format!("layer_{:032x}.raw", 200 + number);
+            let entry = inventory
+                .entries
+                .iter()
+                .find(|entry| entry.path.ends_with(&name))
+                .unwrap();
+            assert!(
+                entry.included,
+                "{label} must include whole additional disk {number}"
+            );
+            assert!(
+                inventory_entry_target(&entry.path, &stage, &stage.join("cache"))
+                    .unwrap()
+                    .is_file()
+            );
+        }
+        // Exercise direct-archive restore's resolver as well as installed/batch loading.
+        resolve(
+            &local,
+            &inventory,
+            &stage,
+            &stage.join("cache"),
+            Some(base.path().to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+        let loaded =
+            load_snapshot_with_base(&local, &archive, None, Some(base.path().to_str().unwrap()))
+                .await
+                .unwrap();
+        let closure =
+            CheckpointClosure::open_portable(loaded.path().join(CHECKPOINT_DIRECTORY), None)
+                .unwrap();
+        assert_eq!(closure.disks().len(), 3);
+        for number in 1..=2 {
+            let disk = closure
+                .disks()
+                .iter()
+                .find(|disk| disk.device_id == format!("data_{number}"))
+                .unwrap();
+            assert_eq!(disk.generation, 2);
+            assert_eq!(disk.layers.len(), 1);
+            assert_eq!(
+                std::fs::read(closure.disk_layer_path(&disk.layers[0])).unwrap(),
+                vec![(20 + number) as u8; 65536]
+            );
+        }
+    }
+}
+
 async fn chain(disk: bool) {
     let temp = tempfile::tempdir().unwrap();
     let local = LocalBackend::builder()
@@ -297,10 +455,16 @@ async fn chain(disk: bool) {
         if generation == 12 {
             // Direct archive restore must use the same dependency resolver, without installation.
             let child = temp.path().join("child");
-            let result =
-                materialize_archive_for_child_with_base(&local, &archive, &child, false, base)
-                    .await
-                    .unwrap();
+            let result = materialize_archive_for_child_with_base(
+                &local,
+                &archive,
+                &child,
+                false,
+                base,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
             assert!(result.checkpoint_restore.is_some());
             let closure =
                 CheckpointClosure::open_portable(child.join(".checkpoint-restore"), None).unwrap();
@@ -790,7 +954,8 @@ async fn standalone_base_archive_resolves_ram_but_dependent_base_archive_is_refu
             &delta,
             &child,
             false,
-            Some(base_archive.to_str().unwrap())
+            Some(base_archive.to_str().unwrap()),
+            &Default::default(),
         )
         .await
         .unwrap()

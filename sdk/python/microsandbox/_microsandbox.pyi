@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from microsandbox.types import (
     BackendKind,
@@ -95,6 +95,7 @@ class Sandbox:
         disk_only: bool = False,
         snapshot_base: str | None = None,
         forked: bool = False,
+        external_mount_policy: Literal["strict", "relaxed"] = "strict",
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -138,6 +139,7 @@ class Sandbox:
         disk_only: bool = False,
         snapshot_base: str | None = None,
         forked: bool = False,
+        external_mount_policy: Literal["strict", "relaxed"] = "strict",
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -196,6 +198,7 @@ class Sandbox:
         disk_only: bool = False,
         snapshot_base: str | None = None,
         forked: bool = False,
+        external_mount_policy: Literal["strict", "relaxed"] = "strict",
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -368,7 +371,9 @@ class Sandbox:
         until_ms: float | None = None,
         follow: bool = False,
     ) -> LogStream: ...
+    async def restore_warnings(self) -> list[ExternalMountWarning]: ...
     async def stop(self, timeout: float | None = None) -> None: ...
+    async def stop_with_timeout(self, timeout: float) -> None: ...
     async def branch(self, name: str) -> Sandbox: ...
     async def pause(self) -> None: ...
     async def resume(self) -> None: ...
@@ -481,6 +486,7 @@ class SandboxHandle:
     async def connect(self, timeout: float | None = None) -> Sandbox: ...
     async def connect_or_start(self, *, detached: bool = False) -> Sandbox: ...
     async def stop(self, timeout: float | None = None) -> None: ...
+    async def stop_with_timeout(self, timeout: float) -> None: ...
     async def branch(self, name: str) -> Sandbox: ...
     async def pause(self) -> None: ...
     async def resume(self) -> None: ...
@@ -894,6 +900,14 @@ class ImagePruneReport:
     @property
     def bytes_reclaimed(self) -> int | None: ...
 
+class ExternalMountWarning:
+    @property
+    def guest_path(self) -> str: ...
+    @property
+    def reason(self) -> str: ...
+    @property
+    def stale_inodes(self) -> list[int]: ...
+
 class Snapshot:
     @staticmethod
     async def create(
@@ -1050,6 +1064,7 @@ class SnapshotHandle:
     async def remove(self, *, force: bool = False) -> None: ...
 
 class PullSession:
+    def cancel(self) -> None: ...
     @property
     def progress(self) -> PullProgressIter: ...
     async def result(self) -> Sandbox: ...
@@ -1064,6 +1079,8 @@ class PullProgressIter:
 
 class PullEvent:
     event_type: PullEventType
+    phase: str | None
+    completed_bytes: int | None
     reference: str | None
     manifest_digest: str | None
     layer_count: int | None

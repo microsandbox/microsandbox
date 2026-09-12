@@ -36,6 +36,27 @@ Return one [`SandboxMetrics`](#sandboxmetrics) snapshot for every running sandbo
 
 ## Sandbox
 
+### External mount restore
+
+Full restores use strict external-filesystem admission by default. Select `.externalMountPolicy("relaxed")` on the builder to accept supported mismatches, then inspect `await sandbox.restoreWarnings()`. Each warning has `guestPath`, `reason`, and `staleInodes: readonly bigint[]`. Existing volume bindings select the destination paths. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+
+### Creation progress
+
+`createWithProgress()` includes image preparation and local snapshot startup. Ignoring events does not delay creation; `awaitSandbox()` supplies the authoritative result.
+
+```typescript
+const creation = await Sandbox.builder("child")
+  .fromSnapshot("saved")
+  .forked()
+  .createWithProgress();
+for await (const event of creation) {
+  if (event.kind === "startup") console.log(event.phase, event.completedBytes, event.totalBytes);
+}
+const sandbox = await creation.awaitSandbox();
+```
+
+Startup phases report preparing, waiting for RAM backing, preparing RAM backing, reusing backing, syncing, and activating. Totals are absent for indeterminate work. Preparation does not consume the activation timeout. Call `creation.cancel()` to cancel creation, then await its result. `createWithPullProgress()` remains image-only.
+
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">builder()</span>
 
 ```typescript
@@ -770,7 +791,7 @@ await sandbox.stop();
 
 </Accordion>
 
-Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to 10_000 ms for a clean exit; if the sandbox is still running after that, it is force-killed.
+Wait indefinitely for graceful shutdown and release of the targeted runtime's ownership. Success allows immediate removal without racing teardown. No implicit kill is requested. Paused or unreachable sandboxes return errors; resume or kill explicitly. Ignoring a Promise does not cancel its operation.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">waitForStatus()</span>
 
@@ -812,14 +833,14 @@ await sandbox.stopWithTimeout(5000);
 
 </Accordion>
 
-Gracefully shut down the sandbox with an explicit observation timeout before force-kill escalation. `0` force-kills immediately. Resolves successfully either way - it does not throw on timeout expiry.
+Apply one total budget to graceful dispatch and completion. Expiry throws `StopTimeoutError` without killing; `0` expires before dispatch. A delivered request can complete later. Only explicit `kill()` requests force termination.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeoutMs</code><span className="msb-type">number</span></div>
-    <div className="msb-param-desc">Milliseconds to wait for a clean exit before force-killing. <code>0</code> skips the grace period.</div>
+    <div className="msb-param-desc">Total graceful-completion budget, as an integer from 0 to 4294967295 milliseconds. Zero expires before dispatch.</div>
   </div>
 </div>
 
@@ -2580,7 +2601,7 @@ Stop and remove this exact sandbox. A stale handle cannot destroy a same-name re
 stop()
 ```
 
-Gracefully shut down. Waits up to 10_000 ms for pending writes to flush, then force-kills
+Wait indefinitely for graceful completion and release of the targeted runtime's ownership. Never implicitly kills.
 
 <p className="msb-label">Returns</p>
 
@@ -2594,7 +2615,7 @@ Gracefully shut down. Waits up to 10_000 ms for pending writes to flush, then fo
 stopWithTimeout(timeoutMs)
 ```
 
-Same as `stop()` with an explicit timeout in milliseconds; `0` force-kills immediately
+Same completion contract as `stop()` under one total milliseconds budget. Expiry throws `StopTimeoutError` without killing; zero expires before dispatch.
 
 <p className="msb-label">Returns</p>
 

@@ -16,19 +16,7 @@ pub struct CreateArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     ///
     /// May be omitted when a config file supplies `image`.
-    #[arg(conflicts_with = "from_snapshot")]
     pub image: Option<String>,
-
-    /// Create from a snapshot artifact instead of an image.
-    #[arg(long = "from-snapshot", value_name = "PATH_OR_NAME")]
-    pub from_snapshot: Option<String>,
-
-    /// Cold-boot only the disk state when the source is a full snapshot.
-    #[arg(long, requires = "from_snapshot")]
-    pub disk_only: bool,
-    /// Exact base snapshot or standalone base archive required by a dependent snapshot archive.
-    #[arg(long, requires = "from_snapshot")]
-    pub snapshot_base: Option<String>,
 
     /// Sandbox configuration options.
     #[command(flatten)]
@@ -54,24 +42,19 @@ pub async fn run(
     }
 
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
-    let image = resolved.image(args.image.as_deref(), args.from_snapshot.as_deref())?;
+    let image = resolved.image(args.image.as_deref(), None)?;
+    if matches!(image, sandbox_config::ResolvedImage::Snapshot(_)) {
+        anyhow::bail!("snapshot sources require `msb restore SNAPSHOT --name NAME`");
+    }
     let builder = resolved.apply(Sandbox::builder(&name))?;
-    let mut builder = image.apply(builder)?;
-    if args.disk_only {
-        builder = builder.disk_only();
-    }
-    if let Some(base) = &args.snapshot_base {
-        builder = builder.snapshot_base(base);
-    }
+    let builder = image.apply(builder)?;
     let builder = if resolved.loaded() {
         apply_sandbox_opts_after_config(builder, &args.sandbox)?
     } else {
         apply_sandbox_opts(builder, &args.sandbox)?
     };
 
-    let (mut progress, task) = builder
-        .detached(true)
-        .create_detached_with_pull_progress()?;
+    let (mut progress, task) = builder.detached(true).create_detached_with_progress()?;
     let mut display = if args.sandbox.quiet {
         ui::PullProgressDisplay::quiet(&image.display())
     } else {
@@ -79,12 +62,13 @@ pub async fn run(
     };
 
     while let Some(event) = progress.recv().await {
-        display.handle_event(event);
+        display.handle_creation_event(event);
     }
 
     match task.await {
         Ok(Ok(sandbox)) => {
             display.finish();
+            super::common::display_restore_warnings(&sandbox).await;
             sandbox.detach().await;
             // Print auto-generated name to stdout so it's scriptable.
             if !is_named {

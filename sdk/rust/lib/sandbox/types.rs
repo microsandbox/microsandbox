@@ -78,6 +78,7 @@ enum MountKind {
     },
     Tmpfs,
     Disk(PathBuf),
+    Captured,
     Unset,
 }
 
@@ -402,6 +403,34 @@ impl MountBuilder {
         self
     }
 
+    /// Select the snapshot's disk contents at this guest path for a private child disk.
+    /// Only restore and branch builders accept this operation-local choice.
+    pub fn captured(mut self) -> Self {
+        self.mount = MountKind::Captured;
+        self
+    }
+
+    pub(crate) fn build_restore(
+        mut self,
+    ) -> crate::MicrosandboxResult<Result<VolumeMount, String>> {
+        if !matches!(self.mount, MountKind::Captured) {
+            return self.build().map(Ok);
+        }
+        if self.options != MountOptions::default()
+            || self.size_mib.is_some()
+            || self.follow_root_symlinks
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "captured disks retain their captured mount options".into(),
+            ));
+        }
+        // Reuse ordinary guest-path and invalid-option validation without opening any host
+        // resource. This temporary kind never reaches the sandbox configuration.
+        self.mount = MountKind::Tmpfs;
+        let mount = self.build()?;
+        Ok(Err(mount.guest().to_string()))
+    }
+
     /// Build the volume mount.
     pub fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
         if let Some(err) = self.error {
@@ -569,6 +598,11 @@ impl MountBuilder {
                     fstype: self.disk_fstype,
                     options: self.options,
                 }
+            }
+            MountKind::Captured => {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "captured() requires a restore or branch builder".into(),
+                ));
             }
             MountKind::Unset => {
                 return Err(crate::MicrosandboxError::InvalidConfig(

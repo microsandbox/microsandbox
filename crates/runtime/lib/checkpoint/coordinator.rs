@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use microsandbox_agent_client::AgentClient;
 use microsandbox_image::checkpoint::{
-    AdmittedObject, CaptureIntent, CaptureObjectBatch, CheckpointManifest, ContentRef,
-    DeviceStateRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
-    MemoryManifest, ObjectId, ResourceDescriptor, ResourceTreatment,
+    AdmittedObject, CaptureIntent, CaptureObjectBatch, CheckpointGeometry, CheckpointManifest,
+    ContentRef, DeviceStateRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent,
+    MemoryExtentContent, MemoryManifest, ObjectId, ResourceDescriptor, ResourceTreatment,
 };
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::core::{
@@ -21,6 +21,7 @@ use microsandbox_protocol::core::{
 use microsandbox_protocol::message::{Message, MessageType};
 use msb_krun::{IncrementalCaptureDecision, MemoryCaptureOptions, MemoryCapturePlan};
 
+use super::additional_disk::RuntimeOwnedAdditionalDisk;
 use super::capture_pipeline::{MEMORY_OBJECT_PACK_SIZE, MemoryObjectSink};
 use super::disk::RuntimeOwnedRootDisk;
 use super::local_memory::{LocalMemoryCapture, LocalMemoryPin};
@@ -41,6 +42,7 @@ pub(super) const TYPE_FS: u32 = 26;
 // hashing, fsync, directory publication, and restore-time object opens.
 const MEMORY_SCAN_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 const WORKLOAD_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+const EXTERNAL_WORKLOAD_FREEZE_TIMEOUT: Duration = Duration::from_secs(30);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -54,8 +56,10 @@ pub(crate) struct CheckpointCoordinator {
     agent_sock: PathBuf,
     workload_control: Arc<WorkloadControl>,
     root_disk: Option<RuntimeOwnedRootDisk>,
+    additional_disks: BTreeMap<String, RuntimeOwnedAdditionalDisk>,
+    unsupported_additional_disks: BTreeMap<String, String>,
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
-    network_resource_binding: Option<String>,
+    network_resource_binding: Option<BTreeMap<String, String>>,
     previous_memory: Option<MemoryManifest>,
     previous_memory_objects: Vec<AdmittedObject>,
     memory_cache: Option<super::MemoryCache>,
@@ -106,6 +110,8 @@ struct PausedCaptureTimings {
     managed_disk_us: u128,
     memory_plan_us: u128,
     memory_capture_us: u128,
+    guest_bytes_read: u64,
+    unplugged_bytes_skipped: u64,
     extent_overlay_us: u128,
     memory_manifest_us: u128,
     checkpoint_publish_us: u128,
@@ -120,6 +126,7 @@ struct PausedCaptureTimings {
 }
 
 struct FrozenWorkload {
+    external_mounts_synced: bool,
     gate: InputGate,
     attempt_id: String,
     protocol_generation: u8,
@@ -337,13 +344,55 @@ impl CheckpointCoordinator {
         let store = LocalObjectStore::open(runtime_dir.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
         let root_disk = RuntimeOwnedRootDisk::open(runtime_dir, vm)?;
+        let additional_disks = RuntimeOwnedAdditionalDisk::open_all(&vm.disks, guest_bootstrap)?;
+        let unsupported_additional_disks = vm
+            .disks
+            .iter()
+            .filter(|disk| disk.snapshot_owned && !additional_disks.contains_key(&disk.id))
+            .map(|disk| (disk.id.clone(), format!("{:?}", disk.format)))
+            .collect();
         let block_root =
             vm.rootfs_vmdk.is_some() || vm.rootfs_disk.is_some() || vm.rootfs_disk_spec.is_some();
-        let fs_resource_bindings = runtime_owned_fs_bindings(block_root);
+        let mut fs_resource_bindings = runtime_owned_fs_bindings(block_root);
+        fs_resource_bindings.extend(super::external_mounts::bindings(
+            runtime_dir,
+            vm,
+            guest_bootstrap,
+        )?);
         let network_resource_binding = guest_bootstrap
             .network
             .as_ref()
-            .map(serde_json::to_string)
+            .map(|network| -> Result<BTreeMap<String, String>, String> {
+                #[cfg(feature = "net")]
+                {
+                    // Recapturing a child retains its original virtual gateway,
+                    // not the child's independently allocated host slot.
+                    let gateway = vm
+                        .checkpoint_restore
+                        .as_ref()
+                        .and_then(|restore| restore.network_gateway_mac)
+                        .unwrap_or_else(|| {
+                            microsandbox_network::network::SmoltcpNetwork::default_gateway_mac(
+                                vm.sandbox_slot,
+                            )
+                        });
+                    Ok(BTreeMap::from([
+                        (
+                            "guest_network".into(),
+                            serde_json::to_string(network).map_err(|error| error.to_string())?,
+                        ),
+                        (
+                            "gateway_mac".into(),
+                            serde_json::to_string(&gateway).map_err(|error| error.to_string())?,
+                        ),
+                    ]))
+                }
+                #[cfg(not(feature = "net"))]
+                {
+                    let _ = network;
+                    Err("network capture requires the net feature".into())
+                }
+            })
             .transpose()
             .map_err(|error| format!("serialize effective guest network binding: {error}"))?;
         Ok(Self {
@@ -353,6 +402,8 @@ impl CheckpointCoordinator {
             agent_sock: agent_sock.to_path_buf(),
             workload_control,
             root_disk,
+            additional_disks,
+            unsupported_additional_disks,
             fs_resource_bindings,
             network_resource_binding,
             previous_memory: None,
@@ -550,7 +601,9 @@ impl CheckpointCoordinator {
         let mut admitted = admit_resources(
             vm,
             &self.fs_resource_bindings,
-            self.network_resource_binding.as_deref(),
+            &self.additional_disks,
+            &self.unsupported_additional_disks,
+            self.network_resource_binding.as_ref(),
         )
         .map_err(CheckpointFailure::before_pause)?;
         let admission_us = admission_started.elapsed().as_micros();
@@ -595,6 +648,21 @@ impl CheckpointCoordinator {
             }
         };
         let freeze_us = freeze_started.elapsed().as_micros();
+        if self.fs_resource_bindings.values().any(|binding| {
+            binding
+                .get("role")
+                .is_some_and(|role| role == "external_bind")
+        }) && !workload.external_mounts_synced
+        {
+            let _ = std::fs::remove_dir_all(&staging);
+            if user_pause.is_none() {
+                self.thaw_workload(workload)
+                    .map_err(CheckpointFailure::paused)?;
+            }
+            return Err(CheckpointFailure::before_pause(
+                "external mount capture requires a clean guest writeback boundary; finish active filesystem uploads and retry with the matching guest agent",
+            ));
+        }
         admitted.resources.push(workload.resource_descriptor());
 
         let vm_pause_window_started = Instant::now();
@@ -763,6 +831,8 @@ impl CheckpointCoordinator {
             memory_mode = ?captured.result.memory_mode,
             memory_logical_bytes = captured.result.memory_logical_bytes,
             memory_emitted_bytes = captured.result.memory_emitted_bytes,
+            guest_bytes_read = captured.timings.guest_bytes_read,
+            unplugged_bytes_skipped = captured.timings.unplugged_bytes_skipped,
             total_us = total_started.elapsed().as_micros(),
             admission_us,
             staging_us,
@@ -811,9 +881,27 @@ impl CheckpointCoordinator {
                 "guest protocol does not support workload freeze",
             ));
         }
-        let deadline = Instant::now() + WORKLOAD_CONTROL_TIMEOUT;
-        let (gate, host_input) = self.gate_input(deadline)?;
+        let gate_deadline = Instant::now() + WORKLOAD_CONTROL_TIMEOUT;
+        let (gate, host_input) = self.gate_input(gate_deadline)?;
+        let external_mount_tags = self
+            .fs_resource_bindings
+            .values()
+            .filter(|binding| {
+                binding
+                    .get("role")
+                    .is_some_and(|role| role == "external_bind")
+            })
+            .filter_map(|binding| binding.get("guest_tag").cloned())
+            .collect::<Vec<_>>();
+        // Gating keeps its original deadline. The external-only request budget begins
+        // after gating and includes freezer work, the guest's 20s flush, and output cut.
+        let deadline = freeze_request_deadline(
+            gate_deadline,
+            Instant::now(),
+            !external_mount_tags.is_empty(),
+        );
         let mut workload = FrozenWorkload {
+            external_mounts_synced: false,
             gate,
             attempt_id: attempt_id.to_string(),
             protocol_generation,
@@ -823,6 +911,7 @@ impl CheckpointCoordinator {
             guest_bulk_bytes: 0,
         };
         let request = WorkloadFreeze {
+            external_mount_tags,
             attempt_id: attempt_id.to_string(),
             host_input,
         };
@@ -885,6 +974,7 @@ impl CheckpointCoordinator {
             )
         })?;
         workload.input_credit = frozen.input_credit;
+        workload.external_mounts_synced = frozen.external_mounts_synced;
         workload.guest_bulk_bytes = frozen.guest_bulk_bytes_target;
         Ok(workload)
     }
@@ -1004,6 +1094,30 @@ impl CheckpointCoordinator {
                 }
                 local_disks.push(rollover.manifest);
                 rollover.device_state
+            } else if *device_type == TYPE_BLOCK && self.additional_disks.contains_key(device_id) {
+                let disk_started = Instant::now();
+                let captured = self
+                    .additional_disks
+                    .get_mut(device_id)
+                    .expect("registered additional disk was checked above")
+                    .capture(vm, &self.runtime, staging, pause_generation)
+                    .map_err(CheckpointFailure::resumable)?;
+                timings.managed_disk_us += disk_started.elapsed().as_micros();
+                if !local {
+                    let bytes = captured
+                        .manifest
+                        .to_canonical_bytes()
+                        .map_err(CheckpointFailure::resumable)?;
+                    let id = batch
+                        .put_bytes(&bytes)
+                        .map_err(CheckpointFailure::resumable)?;
+                    batch
+                        .link_into(&id, staging)
+                        .map_err(CheckpointFailure::resumable)?;
+                    disk_roots.push(id);
+                }
+                local_disks.push(captured.manifest);
+                captured.device_state
             } else if *device_type == TYPE_BLOCK {
                 vm.capture_block_device_state(device_id)
                     .and_then(|state| {
@@ -1120,6 +1234,8 @@ impl CheckpointCoordinator {
                     .finish(memory_plan.generation().get(), memory_plan.topology().get())
                     .map_err(CheckpointFailure::resumable)?;
                 timings.memory_capture_us = started.elapsed().as_micros();
+                timings.guest_bytes_read = stats.guest_bytes_read;
+                timings.unplugged_bytes_skipped = stats.unplugged_bytes_skipped;
                 let state = super::LocalBranchState {
                     id: checkpoint_id.into(),
                     architecture: std::env::consts::ARCH.into(),
@@ -1140,7 +1256,7 @@ impl CheckpointCoordinator {
                 std::fs::write(staging.join("branch.json"), bytes)
                     .map_err(CheckpointFailure::resumable)?;
                 std::fs::rename(staging, final_path).map_err(CheckpointFailure::resumable)?;
-                tracing::info!(target: "microsandbox_checkpoint_timing", operation = "local_memory_capture", incremental, reflink, capture_us = timings.memory_capture_us);
+                tracing::info!(target: "microsandbox_checkpoint_timing", operation = "local_memory_capture", incremental, reflink, capture_us = timings.memory_capture_us, guest_bytes_read = stats.guest_bytes_read, unplugged_bytes_skipped = stats.unplugged_bytes_skipped);
                 Ok((memory, stats))
             })();
             let (memory, stats) = match captured {
@@ -1205,6 +1321,8 @@ impl CheckpointCoordinator {
             }
         };
         timings.memory_capture_us = memory_capture_started.elapsed().as_micros();
+        timings.guest_bytes_read = stats.guest_bytes_read;
+        timings.unplugged_bytes_skipped = stats.unplugged_bytes_skipped;
         timings.pipeline_wait_us = pipeline_stats.wait_us;
         timings.object_persist_worker_us = pipeline_stats.persist_us;
         timings.object_packs = pipeline_stats.packs;
@@ -1268,6 +1386,12 @@ impl CheckpointCoordinator {
             checkpoint_id: checkpoint_id.into(),
             capture_intent: intent,
             architecture: std::env::consts::ARCH.into(),
+            geometry: CheckpointGeometry {
+                vcpus: self.boot_geometry.0,
+                max_vcpus: self.boot_geometry.1.max(self.boot_geometry.0),
+                memory_mib: self.boot_geometry.2,
+                max_memory_mib: self.boot_geometry.3.max(self.boot_geometry.2),
+            },
             pause_generation,
             execution_state: execution_id,
             memory: memory_id,
@@ -1439,6 +1563,10 @@ impl FrozenWorkload {
             kind: "agent".into(),
             treatment: ResourceTreatment::Serialize,
             binding: BTreeMap::from([
+                (
+                    "external_mounts_synced".into(),
+                    self.external_mounts_synced.to_string(),
+                ),
                 ("attempt_id".into(), self.attempt_id.clone()),
                 (
                     "protocol_generation".into(),
@@ -1487,6 +1615,18 @@ impl std::error::Error for CheckpointFailure {}
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn freeze_request_deadline(
+    gate_deadline: Instant,
+    gate_completed: Instant,
+    external_mounts: bool,
+) -> Instant {
+    if external_mounts {
+        gate_completed + EXTERNAL_WORKLOAD_FREEZE_TIMEOUT
+    } else {
+        gate_deadline
+    }
+}
 
 async fn root_growth_request(
     client: &AgentClient,
@@ -1582,7 +1722,9 @@ where
 fn admit_resources(
     vm: &msb_krun::VmControl,
     fs_resource_bindings: &BTreeMap<String, BTreeMap<String, String>>,
-    network_resource_binding: Option<&str>,
+    additional_disks: &BTreeMap<String, RuntimeOwnedAdditionalDisk>,
+    unsupported_additional_disks: &BTreeMap<String, String>,
+    network_resource_binding: Option<&BTreeMap<String, String>>,
 ) -> Result<AdmittedResources, String> {
     let inventory = vm
         .virtio_device_inventory()
@@ -1604,7 +1746,15 @@ fn admit_resources(
         } else {
             None
         };
-        if *device_type == TYPE_BLOCK && !matches!(device_id.as_str(), "vda" | "vdb") {
+        if *device_type == TYPE_BLOCK
+            && !matches!(device_id.as_str(), "vda" | "vdb")
+            && !additional_disks.contains_key(device_id)
+        {
+            if let Some(format) = unsupported_additional_disks.get(device_id) {
+                return Err(format!(
+                    "managed block resource {device_id} uses unsupported checkpoint format {format}; additional disk capture supports standalone raw and qcow2"
+                ));
+            }
             return Err(format!(
                 "additional block resource {device_id} has no immutable-generation provider"
             ));
@@ -1616,11 +1766,16 @@ fn admit_resources(
         };
         let mut binding = BTreeMap::new();
         binding.insert("device_id".into(), device_id.clone());
+        if *device_type == TYPE_BLOCK
+            && let Some(disk) = additional_disks.get(device_id)
+        {
+            binding.extend(disk.binding().clone());
+        }
         if *device_type == TYPE_NET {
             let network = network_resource_binding.ok_or_else(|| {
                 format!("active network resource {device_id} has no effective guest binding")
             })?;
-            binding.insert("guest_network".into(), network.into());
+            binding.extend(network.clone());
         }
         if let Some(fs_binding) = fs_binding {
             binding.extend(fs_binding.clone());
@@ -1976,6 +2131,27 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn external_flush_budget_starts_after_gate_without_extending_ordinary_control() {
+        let start = std::time::Instant::now();
+        let gate_deadline = start + super::WORKLOAD_CONTROL_TIMEOUT;
+        let gate_completed = start + std::time::Duration::from_secs(4);
+        assert_eq!(
+            super::freeze_request_deadline(gate_deadline, gate_completed, false),
+            gate_deadline
+        );
+        let external = super::freeze_request_deadline(gate_deadline, gate_completed, true);
+        assert_eq!(
+            external.duration_since(gate_completed),
+            std::time::Duration::from_secs(30)
+        );
+        assert!(external > gate_completed + std::time::Duration::from_secs(20));
+        assert_eq!(
+            super::WORKLOAD_CONTROL_TIMEOUT,
+            std::time::Duration::from_secs(10)
+        );
+    }
+
+    #[test]
     fn unavailable_freezer_requires_explicit_matching_evidence() {
         use microsandbox_protocol::core::{WorkloadFailure, WorkloadFailureDisposition};
         let mut error = CoreError {
@@ -2295,6 +2471,7 @@ mod tests {
     fn captured_agent_descriptor_retains_transport_debt() {
         let control = WorkloadControl::new();
         let workload = FrozenWorkload {
+            external_mounts_synced: false,
             gate: control.gate(),
             attempt_id: "checkpoint-42".into(),
             protocol_generation: 9,
@@ -2340,6 +2517,7 @@ mod tests {
             MessageType::WorkloadFrozen,
             7,
             &WorkloadFrozen {
+                external_mounts_synced: false,
                 attempt_id: "checkpoint-42".into(),
                 guest_bulk_bytes_target: 0,
                 input_credit: WorkloadTransportCredit::default(),
@@ -2359,6 +2537,7 @@ mod tests {
             MessageType::WorkloadFrozen,
             7,
             &WorkloadFrozen {
+                external_mounts_synced: false,
                 attempt_id: "checkpoint-41".into(),
                 guest_bulk_bytes_target: 0,
                 input_credit: WorkloadTransportCredit::default(),

@@ -154,6 +154,7 @@ pub struct PassthroughFs {
     init_file: Option<Mutex<File>>,
     stat_store: Option<StatStore>,
     quota: Option<super::quota::DirQuota>,
+    invalid_inodes: RwLock<std::collections::BTreeSet<u64>>,
 }
 
 #[repr(C, packed)]
@@ -184,6 +185,20 @@ enum StatStoreBackend {
 //--------------------------------------------------------------------------------------------------
 
 impl PassthroughFs {
+    /// Validate an external checkpoint without opening any destination host paths.
+    pub fn validate_external_state(bytes: &[u8]) -> io::Result<()> {
+        mobility::validate_unavailable(bytes)
+    }
+
+    /// Validate and translate only the isolated facade's selected host basename.
+    pub(crate) fn prepare_single_file_state(
+        bytes: &[u8],
+        source: &CStr,
+        destination: &CStr,
+    ) -> io::Result<(Vec<u8>, super::ExternalSingleFileIndex)> {
+        mobility::prepare_single_file_state(bytes, source, destination)
+    }
+
     /// Charge the quota for growing from `old_len` to `new_end` bytes.
     pub(super) fn quota_charge_growth(&self, old_len: u64, new_end: u64) -> io::Result<()> {
         if let Some(quota) = &self.quota {

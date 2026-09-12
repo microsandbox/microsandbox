@@ -42,6 +42,20 @@ Snapshots are still manual. CoW uses a protected local memory cache; the first u
 
 If a restore fails after creating a child record, remove that child and create a new one from the snapshot. An incomplete restore cannot be started as a fresh VM or modified; the original snapshot remains reusable.
 
+## External mounts
+
+Full snapshots preserve the guest's open-handle state for directory bind mounts, named directory volumes, and isolated single-file binds. Their host filesystem contents remain external dependencies: capturing a snapshot does not copy or freeze later host edits. Restore validates the captured binding and object identities before resuming. Use the existing mount options, keyed by guest path, when the destination needs an explicit replacement binding; a path recorded by another host is not permission to access it. A remapped single-file bind may use a different host basename while keeping the captured guest filename and sibling isolation.
+
+Capture supports tracked objects that can be reopened safely. Guest-renamed objects are preserved when still reopenable, but open-unlinked files and special objects fail capture explicitly; snapshots do not copy host data to make those cases portable. Symlink validation checks link text without reading target files or recursively copying or hashing target contents.
+
+Strict admission is the default. `msb create --from-snapshot saved --external-mount-policy relaxed` explicitly allows supported mismatches and prints structured warnings. The SDK equivalents are Rust `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)`, Python `external_mount_policy="relaxed"`, TypeScript `.externalMountPolicy("relaxed")`, and Go `WithExternalMountPolicy(ExternalMountRelaxed)`. Read warnings with Rust/Python `restore_warnings`, TypeScript `restoreWarnings`, or Go `RestoreWarnings`; each identifies the guest path, reason, and stale inode IDs. Stale captured objects fail with `ESTALE` when an operation reaches the filesystem backend; unavailable exports similarly return `EIO`. Relaxed mode does not recreate missing files or grant access to unmapped paths.
+
+Full snapshots also retain clean guest filesystem cache pages. Reads or memory mappings may therefore return previously captured bytes before reaching the backend; relaxed restore does not promise immediate cache invalidation. Capture synchronizes dirty guest writes before admitting external mounts, so the saved cache is not permission to replay stale dirty writes onto a changed destination.
+
+Strict admission checks the mount at restore time; it does not lock the host directory afterward. Source and child writes still reach the same files, and host edits can affect both. Cached attributes and file contents can expire separately—even a read's length can be stale. Coordinate shared writes in your application; use managed disk volumes when children need private filesystem state.
+
+Named disk volumes are captured as immutable disk generations. Restored children receive private copies; the source volume is unchanged. Arbitrary external disk-image mounts are not implicitly converted into snapshot-owned volumes.
+
 ## Branch a running sandbox
 
 Use `branch` for an independent local child without first saving a full snapshot:
@@ -50,7 +64,7 @@ Use `branch` for an independent local child without first saving a full snapshot
 msb branch baseline --name worker
 ```
 
-The child resumes the captured processes, memory, and disk state. Its writes do not affect the source. CoW memory is built in—no `--forked` flag is needed. A running source resumes after capture; a user-paused source stays paused. Branches work on supported Linux, macOS, and Windows hosts, require a new child name, and cannot inherit published host ports.
+The child resumes the captured processes, memory, and disk state. Its private memory and managed-disk writes do not affect the source; external mounts remain shared host dependencies unless explicitly remapped. CoW memory is built in—no `--forked` flag is needed. A running source resumes after capture; a user-paused source stays paused. Branches work on supported Linux, macOS, and Windows hosts, require a new child name, and cannot inherit published host ports.
 
 The SDK methods are Rust `source.branch("worker").await?`, Python `await source.branch("worker")`, TypeScript `await source.branch("worker")`, and Go `source.Branch(ctx, "worker")`. They also work on sandbox handles returned by `get`.
 
@@ -187,7 +201,7 @@ msb snapshot create after-pip-install --from-sandbox baseline --dest-dir /mnt/bi
 ```
 </CodeGroup>
 
-The default disk mode captures only the owned managed or flat root disk. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Direct `--archive ./saved.msb` capture works in either mode without installing a snapshot directory.
+The default disk mode captures only the owned managed or flat root disk. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Use `--output ./saved.msb` (or `-o ./saved.msb`) in either mode to write an archive without installing a snapshot directory.
 
 ## Capture a running sandbox
 
@@ -236,7 +250,13 @@ If capture saves the snapshot but cannot recover the source, the command fails a
 
 Creating a sandbox from the resulting snapshot restores into a child-owned disk generation and installs a fresh VM Generation ID. Before your processes continue, the guest kernel corrects its wall clock and acknowledges activation; the runtime then thaws the workload and publishes network access last. Full restore requires the matching clock-aware kernel. Older development full snapshots must be recaptured, or restored with `--disk-only` where supported. Restore is eager: the archive or installed artifact is no longer needed after construction succeeds.
 
+RAM preparation has no fixed timeout, including the first forked restore on slow storage. SDK creation progress reports this work; `activating` means the VM is constructed and ready to resume, not that it is already usable. Clock synchronization and workload thaw still have bounded waits. You can cancel creation or apply your own overall deadline.
+
 Full restore preserves captured processes, but not the host connections that controlled them. Open a new client connection after restore. Inherited process output is drained without being sent to new clients; host filesystem and TCP transfers must be restarted.
+
+Application TCP connections also depend on host-side proxy state that is not captured. Applications need reconnect/retry handling; a restored socket can wait for its protocol timeout instead of failing immediately. This is separate from reconnecting the SDK or CLI client.
+
+Full restore and branching preserve the virtual gateway's identity so cached ARP/IPv6 neighbour entries still work. Each child gets an independent host network backend, not the source's connections. Older development full snapshots without a captured gateway identity must be recaptured; `--disk-only` does not require it.
 
 ## Export changes and compact a disk chain
 
@@ -307,7 +327,7 @@ archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
 ```bash CLI
 msb snapshot create after-pip-install \
     --from-sandbox baseline \
-    --archive /tmp/after-pip-install.msb
+    -o /tmp/after-pip-install.msb
 ```
 </CodeGroup>
 
@@ -322,7 +342,7 @@ msb run --name worker --from-snapshot ./after-pip-install.msb -- python -V
 The same archive path works with the SDK restore methods shown below. The archive is unpacked into child-owned staging, so no intermediate installed snapshot is loaded into `~/.microsandbox/snapshots`.
 
 <Note>
-Direct capture records the pinned image identity, but does not bundle the cached OCI image. A flat snapshot already contains the complete disk, so restore only needs the pinned image's configuration from cache or the registry; it does not download the original disk layers again. Layered snapshots still need their base image artifacts. For an offline target, create an installed snapshot and use `msb snapshot save --with-image` instead.
+Direct capture records the pinned image identity, but does not bundle the cached OCI image. A flat snapshot already contains the complete disk, so restore only needs the pinned image's configuration from cache or the registry; it does not download the original disk layers again. Layered snapshots still need their base image artifacts. For an offline target, create an installed snapshot and use `msb snapshot save --with-image`: it bundles image configuration for flat roots, and the complete base-image cache for layered roots.
 </Note>
 
 ## Boot from a snapshot

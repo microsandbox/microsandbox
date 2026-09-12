@@ -12,7 +12,7 @@ msb snapshot create saved --from-sandbox source
 msb create --name child --from-snapshot saved
 
 # Direct archive: no installed snapshot directory or index row.
-msb snapshot create exported --from-sandbox source --archive ./exported.msb
+msb snapshot create exported --from-sandbox source --output ./exported.msb
 msb create --name archive-child --from-snapshot ./exported.msb
 ```
 

@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use microsandbox_image::checkpoint::{
-    CheckpointClosure, MemoryExtentContent, ObjectId, ResourceDescriptor, ResourceTreatment,
+    CheckpointClosure, CheckpointGeometry, MemoryExtentContent, ObjectId, ResourceDescriptor,
+    ResourceTreatment,
 };
 use microsandbox_protocol::core::{
     Ready, WORKLOAD_TRANSPORT_BARRIER_VERSION, WorkloadTransportCredit, WorkloadTransportPosition,
@@ -30,6 +31,7 @@ const MAX_MEMORY_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Fully admitted checkpoint state ready to install during [`msb_krun::Vm::enter`].
 pub(crate) struct PreparedCheckpointRestore {
+    geometry: CheckpointGeometry,
     execution: msb_krun::ExecutionState,
     devices: Vec<PreparedDeviceRestore>,
     memory: Option<CheckpointMemoryRestore>,
@@ -39,6 +41,8 @@ pub(crate) struct PreparedCheckpointRestore {
 
 /// Agent identity and latch attempt restored with the guest memory image.
 pub(crate) struct RestoredAgentState {
+    /// Host-only backend reconstruction diagnostics, populated before activation.
+    pub(crate) external_mount_reports: Vec<ExternalMountReport>,
     /// Protocol generation spoken by the captured agent.
     pub(crate) protocol_generation: u8,
     /// Cached ready payload used for post-activation client handshakes.
@@ -53,6 +57,13 @@ pub(crate) struct RestoredAgentState {
     pub(crate) guest_bulk_bytes_target: u64,
 }
 
+/// One external backend's reconstruction report, shared only within the destination runtime.
+pub(crate) struct ExternalMountReport {
+    pub(crate) guest_path: String,
+    pub(crate) unavailable: Option<String>,
+    pub(crate) stale_inodes: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+}
+
 enum PreparedDeviceRestore {
     Block {
         device_id: String,
@@ -63,6 +74,7 @@ enum PreparedDeviceRestore {
 
 struct CheckpointMemoryRestore {
     closure: CheckpointClosure,
+    progress: Option<crate::startup_progress::StartupProgressCallback>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -70,6 +82,24 @@ struct CheckpointMemoryRestore {
 //--------------------------------------------------------------------------------------------------
 
 impl PreparedCheckpointRestore {
+    /// Captured additional block devices in transport order, including unmapped ones.
+    pub(crate) fn additional_blocks(&self) -> Vec<(&str, &msb_krun::BlockDeviceState)> {
+        let mut blocks: Vec<_> = self
+            .devices
+            .iter()
+            .filter_map(|device| match device {
+                PreparedDeviceRestore::Block { device_id, state }
+                    if !matches!(device_id.as_str(), "vda" | "vdb") =>
+                {
+                    Some((device_id.as_str(), state))
+                }
+                _ => None,
+            })
+            .collect();
+        blocks.sort_by_key(|(_, state)| state.transport.irq_line);
+        blocks
+    }
+
     /// Borrow disk admission while the prepared durable restore owns its validated closure.
     pub(crate) fn disk_closure(&self) -> Option<&CheckpointClosure> {
         self.memory.as_ref().map(|memory| &memory.closure)
@@ -113,6 +143,12 @@ impl PreparedCheckpointRestore {
         let backing =
             msb_krun::PrivateMemoryBacking::new(file, regions).map_err(|e| e.to_string())?;
         Ok(Self {
+            geometry: CheckpointGeometry {
+                vcpus: state.vcpus,
+                max_vcpus: state.max_cpus.max(state.vcpus),
+                memory_mib: state.memory_mib,
+                max_memory_mib: state.max_memory_mib.max(state.memory_mib),
+            },
             execution,
             devices,
             memory: None,
@@ -170,12 +206,30 @@ impl PreparedCheckpointRestore {
         );
 
         Ok(Self {
+            geometry: closure.checkpoint().geometry,
             execution,
             devices,
-            memory: Some(CheckpointMemoryRestore { closure }),
+            memory: Some(CheckpointMemoryRestore {
+                closure,
+                progress: None,
+            }),
             local_memory: None,
             agent,
         })
+    }
+
+    /// Validate the launcher configuration before preparing RAM backing or entering the VM.
+    pub(crate) fn validate_geometry(&self, config: &crate::vm::VmConfig) -> Result<(), String> {
+        let requested = CheckpointGeometry {
+            vcpus: config.vcpus,
+            max_vcpus: config.max_cpus.max(config.vcpus),
+            memory_mib: config.memory_mib,
+            max_memory_mib: config.max_memory_mib.max(config.memory_mib),
+        };
+        if requested != self.geometry {
+            return Err("restore VM construction geometry differs from captured geometry".into());
+        }
+        Ok(())
     }
 
     /// Install all restore sources and leave the VM at an explicit activation gate.
@@ -183,6 +237,7 @@ impl PreparedCheckpointRestore {
         self,
         vm: &mut msb_krun::Vm,
         cache_root: Option<PathBuf>,
+        progress: crate::startup_progress::StartupProgressCallback,
     ) -> Result<RestoredAgentState, String> {
         vm.set_execution_restore(self.execution);
         if let Some(backing) = self.local_memory {
@@ -193,7 +248,9 @@ impl PreparedCheckpointRestore {
                 .as_ref()
                 .expect("durable restore memory")
                 .closure;
-            let cache = super::MemoryCache::open(root).map_err(|e| e.to_string())?;
+            let cache = super::MemoryCache::open(root)
+                .map_err(|e| e.to_string())?
+                .with_progress(progress);
             let cached = cache
                 .materialize_parallel(
                     closure.memory(),
@@ -223,7 +280,9 @@ impl PreparedCheckpointRestore {
                 .map_err(|e| e.to_string())?;
             vm.set_private_memory_backing(backing);
         } else {
-            vm.set_memory_restore(self.memory.expect("durable restore memory"));
+            let mut memory = self.memory.expect("durable restore memory");
+            memory.progress = Some(progress);
+            vm.set_memory_restore(memory);
         }
         for device in self.devices {
             match device {
@@ -275,6 +334,23 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
         // Read and identity-check each packed object exactly once with bounded read-ahead.
         // Guest ranges are disjoint and only this construction thread writes them; workers
         // never obtain guest-memory access or permit activation before verification completes.
+        // Count required object-backed slices, not untouched capacity or bytes verified
+        // speculatively by reader threads. The existing observer coalesces these updates.
+        let total_bytes = objects
+            .values()
+            .flatten()
+            .map(|(range, _)| range.length())
+            .sum();
+        let report_progress = |completed_bytes| {
+            if let Some(progress) = &self.progress {
+                progress(crate::startup_progress::StartupProgress {
+                    phase: crate::startup_progress::StartupPhase::PreparingSnapshot,
+                    completed_bytes,
+                    total_bytes: Some(total_bytes),
+                });
+            }
+        };
+        report_progress(0);
         let object_count = objects.len();
         let pipeline = super::object_pipeline::consume_verified_objects(
             objects,
@@ -308,6 +384,7 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
                     guest_write_us += write_started.elapsed().as_micros();
                     guest_object_bytes = guest_object_bytes.saturating_add(range.length());
                 }
+                report_progress(guest_object_bytes);
                 Ok(())
             },
         )?;
@@ -329,6 +406,45 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
             "checkpoint memory restore timing"
         );
         Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: Restore diagnostics
+//--------------------------------------------------------------------------------------------------
+
+impl RestoredAgentState {
+    /// Persist health after backend reconstruction and before public activation.
+    pub(crate) fn publish_mount_warnings(
+        &self,
+        runtime_dir: &std::path::Path,
+    ) -> Result<(), String> {
+        use std::io::Write;
+        let warnings = self.external_mount_reports.iter().filter_map(|report| {
+            let stale_inodes = report.stale_inodes.lock().unwrap().clone();
+            let reason = match &report.unavailable {
+                Some(reason) => reason.clone(),
+                None if !stale_inodes.is_empty() => "captured objects are missing, replaced, or changed; backend requests for their retained handles return ESTALE (clean cached reads may still succeed)".into(),
+                None => return None,
+            };
+            Some(microsandbox_types::ExternalMountWarning { guest_path: report.guest_path.clone(), reason, stale_inodes })
+        }).collect::<Vec<_>>();
+        // The guest can write /.msb (runtime_dir); these host-authored diagnostics
+        // must live outside that share so resumed code cannot erase the warning.
+        let sandbox_dir = runtime_dir
+            .parent()
+            .ok_or("runtime has no host-only parent")?;
+        let path = sandbox_dir.join(".restore-mount-warnings.tmp");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        file.write_all(&serde_json::to_vec(&warnings).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        super::replace_file(&path, &sandbox_dir.join("restore-mount-warnings.json"))
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -447,6 +563,7 @@ fn parse_restored_agent_resource(
         return Err("combined checkpoint has a dedicated guest bulk counter".into());
     }
     Ok(RestoredAgentState {
+        external_mount_reports: Vec::new(),
         protocol_generation,
         ready,
         host_input,
@@ -521,6 +638,37 @@ mod tests {
         assert_eq!(restored.ready.boot_time_ns, 10);
         assert_eq!(restored.ready.init_time_ns, 20);
         assert_eq!(restored.ready.ready_time_ns, 30);
+    }
+
+    #[test]
+    fn mount_warnings_are_published_outside_the_guest_runtime_share() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let runtime = sandbox.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let mut restored =
+            parse_restored_agent_resource(&agent_resource(PROTOCOL_VERSION), "attempt").unwrap();
+        restored
+            .external_mount_reports
+            .push(super::ExternalMountReport {
+                guest_path: "/external".into(),
+                unavailable: Some("export unavailable".into()),
+                stale_inodes: Default::default(),
+            });
+        restored.publish_mount_warnings(&runtime).unwrap();
+        assert!(!runtime.join("restore-mount-warnings.json").exists());
+        let warnings: Vec<microsandbox_types::ExternalMountWarning> = serde_json::from_slice(
+            &std::fs::read(sandbox.path().join("restore-mount-warnings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].guest_path, "/external");
+        // Writing the guest-visible lookalike cannot replace the host's record.
+        std::fs::write(runtime.join("restore-mount-warnings.json"), b"[]").unwrap();
+        let retained: Vec<microsandbox_types::ExternalMountWarning> = serde_json::from_slice(
+            &std::fs::read(sandbox.path().join("restore-mount-warnings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retained, warnings);
     }
 
     #[test]

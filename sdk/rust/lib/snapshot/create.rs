@@ -63,6 +63,7 @@ struct FileSnapshotMetadata<'a> {
     manifest_digest: String,
     source_sandbox: &'a str,
     root_disk: SnapshotRootDisk,
+    user: Option<String>,
 }
 
 #[derive(Clone)]
@@ -380,6 +381,7 @@ async fn capture_installed(
             manifest_digest: manifest_digest_str,
             source_sandbox: &source_sandbox,
             root_disk,
+            user: sandbox_config.spec.runtime.user.clone(),
         },
     )
     .await;
@@ -670,6 +672,9 @@ pub(super) async fn create_snapshot_archive(
         root_disk,
     )?;
     manifest.parent = lineage.parent.clone();
+    manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults {
+        user: sandbox_config.spec.runtime.user.clone(),
+    })?;
     if record_integrity && let SnapshotState::File(file) = &mut manifest.state {
         for index in 0..file.layers.len() {
             let source = &disk.sources[index].path;
@@ -859,6 +864,9 @@ async fn capture_full_snapshot(
 
         let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        // The database follows live resize targets; it cannot describe the original RAM map.
+        // Use the runtime-owned geometry bound to this exact checkpoint instead.
+        let geometry = closure.checkpoint().geometry;
         let requirements_summary = BTreeMap::from([
             (
                 "architecture".into(),
@@ -872,24 +880,21 @@ async fn capture_full_snapshot(
                 "memory_bytes".into(),
                 serde_json::Value::from(checkpoint.memory_logical_bytes),
             ),
-            (
-                "vcpus".into(),
-                serde_json::Value::from(sandbox_config.spec.resources.cpus),
-            ),
+            ("vcpus".into(), serde_json::Value::from(geometry.vcpus)),
             (
                 "max_vcpus".into(),
-                serde_json::Value::from(sandbox_config.spec.resources.max_cpus),
+                serde_json::Value::from(geometry.max_vcpus),
             ),
             (
                 "memory_mib".into(),
-                serde_json::Value::from(sandbox_config.spec.resources.memory_mib),
+                serde_json::Value::from(geometry.memory_mib),
             ),
             (
                 "max_memory_mib".into(),
-                serde_json::Value::from(sandbox_config.spec.resources.max_memory_mib),
+                serde_json::Value::from(geometry.max_memory_mib),
             ),
         ]);
-        let manifest = Manifest {
+        let mut manifest = Manifest {
             schema: SCHEMA.into(),
             snapshot_id,
             scope: SnapshotScope::Full,
@@ -914,6 +919,9 @@ async fn capture_full_snapshot(
             requires: Vec::new(),
             extensions: BTreeMap::new(),
         };
+        manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults {
+            user: sandbox_config.spec.runtime.user.clone(),
+        })?;
         manifest
             .validate()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -1005,6 +1013,7 @@ async fn build_artifact(
         manifest_digest: manifest_digest_str,
         source_sandbox,
         root_disk,
+        user,
     } = metadata;
     let total_started = Instant::now();
     let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
@@ -1063,7 +1072,7 @@ async fn build_artifact(
     // descriptor is published so they never alter snapshot identity.
     let descriptor_started = Instant::now();
     super::metadata::write(dir, labels).await?;
-    let manifest = new_file_manifest_with_id(
+    let mut manifest = new_file_manifest_with_id(
         snapshot_id,
         disk,
         captured
@@ -1076,6 +1085,7 @@ async fn build_artifact(
         source_sandbox,
         root_disk,
     )?;
+    manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults { user })?;
     let canonical = manifest
         .to_canonical_bytes()
         .map_err(|e| MicrosandboxError::Custom(format!("manifest serialize: {e}")))?;
@@ -1752,6 +1762,7 @@ mod tests {
             manifest_digest: format!("sha256:{}", "a".repeat(64)),
             source_sandbox: "box",
             root_disk,
+            user: None,
         }
     }
 
@@ -1796,6 +1807,12 @@ mod tests {
             schema: "microsandbox.checkpoint/1".into(),
             checkpoint_id: "checkpoint_fixture".into(),
             capture_intent: CaptureIntent::FullSnapshot,
+            geometry: microsandbox_image::checkpoint::CheckpointGeometry {
+                vcpus: 1,
+                max_vcpus: 1,
+                memory_mib: 128,
+                max_memory_mib: 128,
+            },
             architecture: std::env::consts::ARCH.into(),
             pause_generation: 7,
             execution_state: store.put_bytes(b"execution").unwrap(),

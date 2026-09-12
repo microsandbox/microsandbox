@@ -17,9 +17,21 @@ use crate::backend::LocalBackend;
 use crate::backend::sandbox::SandboxIdentity;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Sandbox, SandboxHandle};
+use super::{Sandbox, SandboxBuilder, SandboxHandle};
 #[cfg(feature = "local")]
 use super::{SandboxConfig, SandboxStatus, modify};
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Prepare a direct local branch with explicit child resource bindings.
+pub struct BranchBuilder {
+    backend: Arc<dyn Backend>,
+    source: String,
+    identity: SandboxIdentity,
+    pub(crate) inner: SandboxBuilder,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -28,27 +40,73 @@ use super::{SandboxConfig, SandboxStatus, modify};
 impl Sandbox {
     /// Branch current execution into an independent local child using private CoW RAM.
     /// The source keeps its running/paused state; no durable full snapshot is created.
-    pub async fn branch(&self, name: impl Into<String>) -> MicrosandboxResult<Sandbox> {
-        branch(
+    pub fn branch(&self, name: impl Into<String>) -> BranchBuilder {
+        BranchBuilder::new(
             self.backend().clone(),
             self.name(),
             self.identity(),
             name.into(),
         )
-        .await
     }
 }
 
 impl SandboxHandle {
     /// Branch a running or user-paused local sandbox without connecting to its guest.
-    pub async fn branch(&self, name: impl Into<String>) -> MicrosandboxResult<Sandbox> {
-        branch(
+    pub fn branch(&self, name: impl Into<String>) -> BranchBuilder {
+        BranchBuilder::new(
             self.backend.clone(),
             self.name(),
             self.identity(),
             name.into(),
         )
-        .await
+    }
+}
+
+impl BranchBuilder {
+    fn new(
+        backend: Arc<dyn Backend>,
+        source: &str,
+        identity: SandboxIdentity,
+        name: String,
+    ) -> Self {
+        let mut inner = SandboxBuilder::new(name);
+        inner.config.spec.mounts.clear();
+        inner.config.spec.network.ports.clear();
+        inner.config.spec.vsock = Default::default();
+        inner.config.spec.runtime.user = None;
+        Self {
+            backend,
+            source: source.into(),
+            identity,
+            inner,
+        }
+    }
+
+    /// Capture source execution and start an independent child; preserve source running/paused state.
+    pub async fn branch(mut self) -> MicrosandboxResult<Sandbox> {
+        self.inner.validate_vsock_routes()?;
+        if let Some(error) = self.inner.build_error.take() {
+            return Err(error);
+        }
+        branch(self.backend, &self.source, self.identity, self.inner.config).await
+    }
+
+    /// Branch with the shared startup progress and task cancellation contract.
+    #[cfg(feature = "local")]
+    pub fn branch_with_progress(
+        mut self,
+    ) -> MicrosandboxResult<(
+        crate::CreationProgressHandle,
+        tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+    )> {
+        let (handle, sender) = crate::progress::channel();
+        self.inner.config.creation_progress = Some(sender.downgrade());
+        let task = tokio::spawn(async move {
+            let result = self.branch().await;
+            drop(sender);
+            result
+        });
+        Ok((handle, task))
     }
 }
 
@@ -61,7 +119,7 @@ async fn branch(
     _backend: Arc<dyn Backend>,
     _source: &str,
     _identity: SandboxIdentity,
-    _name: String,
+    _options: super::SandboxConfig,
 ) -> MicrosandboxResult<Sandbox> {
     Err(MicrosandboxError::InvalidConfig(
         "direct branching requires a local backend".into(),
@@ -73,8 +131,9 @@ async fn branch(
     backend: Arc<dyn Backend>,
     source: &str,
     identity: SandboxIdentity,
-    name: String,
+    options: SandboxConfig,
 ) -> MicrosandboxResult<Sandbox> {
+    let name = options.spec.name.clone();
     super::validate_sandbox_name(&name)?;
     let local = backend.as_local().ok_or_else(|| {
         MicrosandboxError::InvalidConfig("direct branching requires a local backend".into())
@@ -110,12 +169,39 @@ async fn branch(
         .active_config()?
         .unwrap_or(handle.config()?)
         .clone_for_persistence();
-    if !config.spec.network.ports.is_empty() {
+    if !options.restore_resources.inherit
+        && (config.spec.network.outbound_proxy.is_some()
+            || config.spec.network.secrets.is_some()
+            || config.spec.network.tls.is_some()
+            || config.spec.network.trust_host_cas)
+    {
         return Err(MicrosandboxError::InvalidConfig(
-            "branch cannot inherit published host ports; remove port publications before branching"
-                .into(),
+            "source uses host-backed proxy, TLS or secret resources; explicit compatible authorization is required (or dangerously_inherit_resources for this local source)".into(),
         ));
     }
+    // Inheritance never copies a source's writable disks into the child configuration.
+    // Captured disk selection below materializes independent child-owned files instead.
+    config.spec.mounts.clear();
+    config.spec.mounts.extend(options.spec.mounts);
+    if !options.restore_resources.inherit || !options.spec.network.ports.is_empty() {
+        config.spec.network.ports = options.spec.network.ports;
+    }
+    if let Some(user) = options.spec.runtime.user {
+        config.spec.runtime.user = Some(user);
+    }
+    config.restore_resources = options.restore_resources;
+    if !config.restore_resources.inherit {
+        // Retained guest streams reset; an omitted route grants no source host access.
+        config.spec.vsock = Default::default();
+    }
+    for route in options.spec.vsock.routes {
+        config.spec.vsock.routes.retain(|existing| {
+            existing.port != route.port || existing.socket_type != route.socket_type
+        });
+        config.spec.vsock.routes.push(route);
+    }
+    config.external_mount_policy = options.external_mount_policy;
+    config.creation_progress = options.creation_progress;
     let capabilities =
         modify::control_request_for_run(local, source, run, "{\"op\":\"capabilities\"}\n".into())
             .await?;
@@ -204,9 +290,15 @@ pub(crate) async fn capture_child(
         },
         _ => crate::snapshot::SnapshotRootDisk::Managed,
     };
-    match state.disks.as_slice() {
+    let root_device = crate::snapshot::root_device(&layout);
+    let root_disks = state
+        .disks
+        .iter()
+        .filter(|disk| matches!(disk.device_id.as_str(), "vda" | "vdb"))
+        .collect::<Vec<_>>();
+    match root_disks.as_slice() {
         [] if matches!(layout, crate::snapshot::SnapshotRootDisk::Tmpfs { .. }) => {}
-        [disk] => {
+        [disk] if Some(disk.device_id.as_str()) == root_device => {
             disk.to_canonical_bytes()
                 .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
             if disk.pause_generation != state.pause_generation {
@@ -241,7 +333,24 @@ pub(crate) async fn capture_child(
             ));
         }
     }
+    let mounts = crate::snapshot::materialize_additional_disks(
+        &state.disks,
+        &state.resources,
+        &closure,
+        child,
+        root_device,
+        &config.restore_resources,
+    )
+    .await?;
+    crate::snapshot::apply_additional_disks(config, mounts);
     config.checkpoint_restore = Some(CheckpointRestoreConfig {
+        network_gateway_mac: microsandbox_runtime::checkpoint::captured_gateway_mac(
+            &state.resources,
+        )
+        .map_err(MicrosandboxError::SnapshotIntegrity)?,
+        external_mount_policy: config.external_mount_policy,
+        external_mounts: Vec::new(),
+        unavailable_disks: Default::default(),
         local_branch: true,
         forked: true,
         closure,

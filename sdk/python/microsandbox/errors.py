@@ -60,6 +60,11 @@ class ExecTimeoutError(MicrosandboxError):
     code = "exec-timeout"
 
 
+class StopTimeoutError(MicrosandboxError, TimeoutError):
+    """Graceful shutdown did not complete within its budget; no kill was requested."""
+    code = "stop-timeout"
+
+
 class ExecFailedError(MicrosandboxError):
     """Command execution failed."""
     code = "exec-failed"

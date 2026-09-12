@@ -121,7 +121,9 @@ typedef char *(*msb_sandbox_handle_modify_fn)(uint64_t cancel_id, const char *na
 typedef char *(*msb_sandbox_close_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_stop_gracefully_fn)(uint64_t cancel_id, uint64_t handle, uint8_t has_timeout, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_restore_warnings_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_resume_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
@@ -265,6 +267,12 @@ static msb_cancel_alloc_fn       ptr_msb_cancel_alloc       = NULL;
 static msb_cancel_trigger_fn     ptr_msb_cancel_trigger     = NULL;
 static msb_cancel_unregister_fn  ptr_msb_cancel_unregister  = NULL;
 static msb_sandbox_create_fn     ptr_msb_sandbox_create     = NULL;
+typedef char *(*msb_creation_progress_open_fn)(uint8_t *, size_t);
+typedef char *(*msb_creation_progress_recv_fn)(uint64_t, uint64_t, uint8_t *, size_t);
+typedef char *(*msb_creation_progress_close_fn)(uint64_t, uint8_t *, size_t);
+static char *(*ptr_msb_creation_progress_open)(uint8_t *, size_t) = NULL;
+static char *(*ptr_msb_creation_progress_recv)(uint64_t, uint64_t, uint8_t *, size_t) = NULL;
+static char *(*ptr_msb_creation_progress_close)(uint64_t, uint8_t *, size_t) = NULL;
 static msb_sandbox_handle_lifecycle_fn ptr_msb_sandbox_handle_lifecycle = NULL;
 static msb_sandbox_lookup_fn     ptr_msb_sandbox_lookup     = NULL;
 static msb_default_backend_info_fn ptr_msb_default_backend_info = NULL;
@@ -282,7 +290,9 @@ static msb_sandbox_handle_modify_fn ptr_msb_sandbox_handle_modify = NULL;
 static msb_sandbox_close_fn      ptr_msb_sandbox_close      = NULL;
 static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
 static msb_sandbox_stop_fn       ptr_msb_sandbox_stop       = NULL;
+static msb_sandbox_stop_gracefully_fn ptr_msb_sandbox_stop_gracefully = NULL;
 static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
+static msb_sandbox_restore_warnings_fn ptr_msb_sandbox_restore_warnings = NULL;
 static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
 static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
 static msb_sandbox_resume_fn ptr_msb_sandbox_resume = NULL;
@@ -453,6 +463,9 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_cancel_unregister);
 	RESOLVE_OPTIONAL(msb_default_backend_info);
 	RESOLVE(msb_sandbox_create);
+	RESOLVE_OPTIONAL(msb_creation_progress_open);
+	RESOLVE_OPTIONAL(msb_creation_progress_recv);
+	RESOLVE_OPTIONAL(msb_creation_progress_close);
 	RESOLVE(msb_sandbox_handle_lifecycle);
 	RESOLVE(msb_sandbox_lookup);
 	RESOLVE(msb_sandbox_connect);
@@ -469,7 +482,9 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_close);
 	RESOLVE(msb_sandbox_detach);
 	RESOLVE(msb_sandbox_stop);
+	RESOLVE_OPTIONAL(msb_sandbox_stop_gracefully);
 	RESOLVE(msb_sandbox_request_stop);
+	RESOLVE_OPTIONAL(msb_sandbox_restore_warnings);
 	RESOLVE(msb_sandbox_pause);
 	RESOLVE(msb_sandbox_branch);
 	RESOLVE(msb_sandbox_resume);
@@ -623,6 +638,11 @@ void call_msb_cancel_unregister(uint64_t id) {
 char *call_msb_sandbox_create(uint64_t cancel_id, const char *name, const char *opts_json, bool connect_or_create, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_create ? ptr_msb_sandbox_create(cancel_id, name, opts_json, connect_or_create, buf, buf_len) : NULL;
 }
+
+bool has_creation_progress(void) { return ptr_msb_creation_progress_open && ptr_msb_creation_progress_recv && ptr_msb_creation_progress_close; }
+char *call_creation_progress_open(uint8_t *buf, size_t len) { return ptr_msb_creation_progress_open(buf, len); }
+char *call_creation_progress_recv(uint64_t cancel, uint64_t id, uint8_t *buf, size_t len) { return ptr_msb_creation_progress_recv(cancel, id, buf, len); }
+char *call_creation_progress_close(uint64_t id, uint8_t *buf, size_t len) { return ptr_msb_creation_progress_close(id, buf, len); }
 char *call_msb_sandbox_handle_lifecycle(uint64_t cancel_id, const char *name, const char *expected_id, const char *operation, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_lifecycle ? ptr_msb_sandbox_handle_lifecycle(cancel_id, name, expected_id, operation, opts_json, buf, buf_len) : NULL;
 }
@@ -675,8 +695,16 @@ char *call_msb_sandbox_detach(uint64_t cancel_id, uint64_t handle, uint8_t *buf,
 char *call_msb_sandbox_stop(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_stop ? ptr_msb_sandbox_stop(cancel_id, handle, timeout_ms, buf, buf_len) : NULL;
 }
+bool has_graceful_stop_wait(void) { return ptr_msb_sandbox_stop_gracefully != NULL; }
+char *call_msb_sandbox_stop_gracefully(uint64_t cancel_id, uint64_t handle, uint8_t has_timeout, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_stop_gracefully ? ptr_msb_sandbox_stop_gracefully(cancel_id, handle, has_timeout, timeout_ms, buf, buf_len) : NULL;
+}
 char *call_msb_sandbox_request_stop(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_request_stop ? ptr_msb_sandbox_request_stop(cancel_id, handle, buf, buf_len) : NULL;
+}
+bool has_external_mount_restore(void) { return ptr_msb_sandbox_restore_warnings != NULL; }
+char *call_msb_sandbox_restore_warnings(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_restore_warnings ? ptr_msb_sandbox_restore_warnings(cancel_id, handle, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_pause(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_pause ? ptr_msb_sandbox_pause(cancel_id, handle, buf, buf_len) : NULL;
@@ -1201,6 +1229,7 @@ const (
 	KindVolumeNotFound         = "volume_not_found"
 	KindVolumeAlreadyExists    = "volume_already_exists"
 	KindExecTimeout            = "exec_timeout"
+	KindStopTimeout            = "stop_timeout"
 	KindNoDefaultCommand       = "no_default_command"
 	KindInvalidConfig          = "invalid_config"
 	KindInvalidArgument        = "invalid_argument"
@@ -1638,6 +1667,7 @@ type SandboxPage struct {
 // Zero-valued scalar fields are omitted; pointer fields preserve explicit zero.
 // The Rust side applies defaults when optional fields are absent.
 type CreateOptions struct {
+	CreationProgress     uint64               `json:"creation_progress,omitempty"`
 	Image                string               `json:"image,omitempty"`
 	ImageFstype          string               `json:"image_fstype,omitempty"`
 	ImageBind            string               `json:"image_bind,omitempty"`
@@ -1653,6 +1683,7 @@ type CreateOptions struct {
 	PlacementProfile     string               `json:"placement_profile,omitempty"`
 	THP                  string               `json:"thp,omitempty"`
 	Forked               bool                 `json:"forked,omitempty"`
+	ExternalMountPolicy  string               `json:"external_mount_policy,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
 	SecurityProfile      string               `json:"security_profile,omitempty"`
@@ -1740,21 +1771,21 @@ type MountSpec struct {
 
 // NetworkOptions is the JSON representation of the network config block.
 type NetworkOptions struct {
-	CustomPolicy        *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
-	DNS                 *DNSOptions                `json:"dns,omitempty"`
-	DNSRebindProtection *bool                      `json:"dns_rebind_protection,omitempty"`
-	DenyDomains         []string                   `json:"deny_domains,omitempty"`
-	DenyDomainSuffixes  []string                   `json:"deny_domain_suffixes,omitempty"`
-	TLS                 *TLSOptions                `json:"tls,omitempty"`
-	Strict             *bool                      `json:"strict,omitempty"`
-	Ports               map[uint16]uint16          `json:"ports,omitempty"`
-	PortBindings        []PortBindingOptions       `json:"port_bindings,omitempty"`
-	IPv4Pool            string                     `json:"ipv4_pool,omitempty"`
-	IPv6Pool            string                     `json:"ipv6_pool,omitempty"`
-	MaxConnections      *uint                      `json:"max_connections,omitempty"`
-	RateLimiter         *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
-	SecretViolationAction string                   `json:"secret_violation_action,omitempty"`
-	TrustHostCAs        *bool                      `json:"trust_host_cas,omitempty"`
+	CustomPolicy          *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
+	DNS                   *DNSOptions                `json:"dns,omitempty"`
+	DNSRebindProtection   *bool                      `json:"dns_rebind_protection,omitempty"`
+	DenyDomains           []string                   `json:"deny_domains,omitempty"`
+	DenyDomainSuffixes    []string                   `json:"deny_domain_suffixes,omitempty"`
+	TLS                   *TLSOptions                `json:"tls,omitempty"`
+	Strict                *bool                      `json:"strict,omitempty"`
+	Ports                 map[uint16]uint16          `json:"ports,omitempty"`
+	PortBindings          []PortBindingOptions       `json:"port_bindings,omitempty"`
+	IPv4Pool              string                     `json:"ipv4_pool,omitempty"`
+	IPv6Pool              string                     `json:"ipv6_pool,omitempty"`
+	MaxConnections        *uint                      `json:"max_connections,omitempty"`
+	RateLimiter           *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
+	SecretViolationAction string                     `json:"secret_violation_action,omitempty"`
+	TrustHostCAs          *bool                      `json:"trust_host_cas,omitempty"`
 }
 
 // RateLimiterOptions limits one traffic direction; a nil bucket leaves that
@@ -1861,14 +1892,14 @@ type ScopedVerifyUpstream struct {
 
 // SecretOptions is the JSON representation of a single credential.
 type SecretOptions struct {
-	EnvVar              string                     `json:"env_var"`
-	Value               string                     `json:"value"`
-	Allow               []string                   `json:"allow,omitempty"`
-	Passthrough         []string                   `json:"passthrough,omitempty"`
-	Placeholder         string                     `json:"placeholder,omitempty"`
-	RequireTLSIdentity  *bool                      `json:"require_tls_identity,omitempty"`
-	Substitution        SecretSubstitutionOptions  `json:"substitution,omitempty"`
-	ViolationAction     string                     `json:"violation_action,omitempty"`
+	EnvVar             string                    `json:"env_var"`
+	Value              string                    `json:"value"`
+	Allow              []string                  `json:"allow,omitempty"`
+	Passthrough        []string                  `json:"passthrough,omitempty"`
+	Placeholder        string                    `json:"placeholder,omitempty"`
+	RequireTLSIdentity *bool                     `json:"require_tls_identity,omitempty"`
+	Substitution       SecretSubstitutionOptions `json:"substitution,omitempty"`
+	ViolationAction    string                    `json:"violation_action,omitempty"`
 }
 
 // SecretSubstitutionOptions selects request locations for substitution.
@@ -1891,6 +1922,51 @@ type PatchOptions struct {
 	Link    string  `json:"link,omitempty"`
 }
 
+// OpenCreationProgress reserves an operation-local, bounded event stream.
+func OpenCreationProgress(ctx context.Context) (uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := ensureLoaded(); err != nil {
+		return 0, err
+	}
+	if !bool(C.has_creation_progress()) {
+		return 0, fmt.Errorf("installed native SDK does not support creation progress")
+	}
+	return openCreationProgress(ctx, func() (uint64, error) {
+		out, err := callSync(func(buf []byte) error {
+			return errorFromPtr(C.call_creation_progress_open((*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf))))
+		})
+		if err != nil {
+			return 0, err
+		}
+		var reply struct {
+			Handle uint64 `json:"handle"`
+		}
+		err = json.Unmarshal([]byte(out), &reply)
+		if err == nil && reply.Handle == 0 {
+			err = fmt.Errorf("native creation progress returned an invalid handle")
+		}
+		return reply.Handle, err
+	}, CloseCreationProgress)
+}
+
+// ReceiveCreationProgress waits for the next event or context cancellation.
+func ReceiveCreationProgress(ctx context.Context, id uint64) (json.RawMessage, error) {
+	out, err := call(ctx, func(cancel C.uint64_t, buf *C.uint8_t, n C.size_t) *C.char {
+		return C.call_creation_progress_recv(cancel, C.uint64_t(id), buf, n)
+	})
+	return json.RawMessage(out), err
+}
+
+// CloseCreationProgress releases the operation's stream after its receiver has stopped.
+func CloseCreationProgress(id uint64) error {
+	_, err := callSync(func(buf []byte) error {
+		return errorFromPtr(C.call_creation_progress_close(C.uint64_t(id), (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf))))
+	})
+	return err
+}
+
 // CreateSandbox creates and boots a sandbox, returning a handle the caller
 // must Close when done.
 //
@@ -1908,6 +1984,9 @@ func ConnectOrCreateSandbox(ctx context.Context, name string, opts CreateOptions
 func createSandbox(ctx context.Context, name string, opts CreateOptions, connectOrCreate bool) (*Sandbox, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
+	}
+	if opts.ExternalMountPolicy != "" && !bool(C.has_external_mount_restore()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support external mount restore policy; update the native SDK"}
 	}
 	optsJSON, err := json.Marshal(opts)
 	if err != nil {
@@ -1990,8 +2069,8 @@ type SandboxHandleInfo struct {
 type SandboxHandleLifecycleOptions struct {
 	Detached bool `json:"detached,omitempty"`
 	Force    bool `json:"force,omitempty"`
-	// Keep zero on the wire: it means immediate escalation for lifecycle
-	// convergence and must not be mistaken for an omitted/default timeout.
+	// Keep zero on the wire: an explicit zero deadline must not be mistaken
+	// for an omitted/default timeout. Graceful stop never escalates to kill.
 	TimeoutMs uint64 `json:"timeout_ms"`
 	Status    string `json:"status,omitempty"`
 }
@@ -2005,6 +2084,11 @@ func sandboxHandleLifecycle(
 ) (string, error) {
 	if err := ensureLoaded(); err != nil {
 		return "", err
+	}
+	if operation == "stop_gracefully" || operation == "stop_with_timeout" || operation == "request_stop" {
+		if err := requireGracefulStopWait(); err != nil {
+			return "", err
+		}
 	}
 	optsJSON, err := json.Marshal(opts)
 	if err != nil {
@@ -2111,6 +2195,19 @@ func SandboxHandleVoidLifecycle(
 ) error {
 	_, err := sandboxHandleLifecycle(ctx, name, id, operation, opts)
 	return err
+}
+
+// StopSandboxHandle preserves persisted identity and distinguishes no deadline from zero.
+func StopSandboxHandle(ctx context.Context, name, id string, timeoutMs *uint64) error {
+	operation, opts := stopLifecycleRequest(timeoutMs)
+	return SandboxHandleVoidLifecycle(ctx, name, id, operation, opts)
+}
+
+func stopLifecycleRequest(timeoutMs *uint64) (string, SandboxHandleLifecycleOptions) {
+	if timeoutMs == nil {
+		return "stop_gracefully", SandboxHandleLifecycleOptions{}
+	}
+	return "stop_with_timeout", SandboxHandleLifecycleOptions{TimeoutMs: *timeoutMs}
 }
 
 // BackendInfo is the secret-safe backend diagnostic shape returned by Rust.
@@ -2517,15 +2614,31 @@ func (s *Sandbox) Detach(ctx context.Context) error {
 	return err
 }
 
-// Stop gracefully stops the sandbox and waits for stopped observation.
-func (s *Sandbox) Stop(ctx context.Context, timeoutMs uint64) error {
+// Stop waits for graceful shutdown; nil has no deadline and a present zero expires immediately.
+func (s *Sandbox) Stop(ctx context.Context, timeoutMs *uint64) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
+	if err := requireGracefulStopWait(); err != nil {
+		return err
+	}
+	var hasTimeout C.uint8_t
+	var millis C.uint64_t
+	if timeoutMs != nil {
+		hasTimeout = 1
+		millis = C.uint64_t(*timeoutMs)
+	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_stop(cancelID, s.h(), C.uint64_t(timeoutMs), buf, bufLen)
+		return C.call_msb_sandbox_stop_gracefully(cancelID, s.h(), hasTimeout, millis, buf, bufLen)
 	})
 	return err
+}
+
+func requireGracefulStopWait() error {
+	if !bool(C.has_graceful_stop_wait()) {
+		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support graceful stop without forced termination; update the native SDK"}
+	}
+	return nil
 }
 
 // RequestStop requests graceful shutdown without waiting for stopped observation.
@@ -2533,10 +2646,26 @@ func (s *Sandbox) RequestStop(ctx context.Context) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
+	if err := requireGracefulStopWait(); err != nil {
+		return err
+	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_sandbox_request_stop(cancelID, s.h(), buf, bufLen)
 	})
 	return err
+}
+
+// RestoreWarnings returns the runtime's structured relaxed-restore warnings as JSON.
+func (s *Sandbox) RestoreWarnings(ctx context.Context) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if !bool(C.has_external_mount_restore()) {
+		return "", &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support external mount restore diagnostics; update the native SDK"}
+	}
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_restore_warnings(cancelID, s.h(), buf, bufLen)
+	})
 }
 
 // Branch creates an independent local child through the host runtime.

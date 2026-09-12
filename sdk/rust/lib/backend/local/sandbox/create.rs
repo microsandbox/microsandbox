@@ -5,6 +5,8 @@
 //! impl's `create`/`create_detached` and the pull-progress shims on
 //! [`Sandbox`] and `SandboxBuilder` all dispatch here.
 
+mod cleanup;
+
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +29,8 @@ use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
     sandbox_rootfs as sandbox_rootfs_entity,
 };
+use crate::runtime::handle::StartupProcess;
+use crate::runtime::spawn::EnsuredNamedVolumes;
 use crate::runtime::{
     ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes, spawn_sandbox,
 };
@@ -36,6 +40,7 @@ use crate::sandbox::{
     remove_dir_if_exists, validate_env, validate_hostname, validate_labels, validate_sandbox_name,
     validate_volume_mounts,
 };
+use cleanup::CreationCleanup;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -213,10 +218,15 @@ impl LocalBackend {
                 &sandbox_dir,
                 disk_only,
                 config.snapshot_base.as_deref(),
+                &config.restore_resources,
             ))
             .await?;
             config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
+            if config.spec.runtime.user.is_none() {
+                config.spec.runtime.user = materialized.manifest.restore_defaults()?.user;
+            }
             config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
+            crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
             crate::sandbox::apply_snapshot_root_layout(
                 &mut config,
@@ -281,9 +291,11 @@ impl LocalBackend {
                         &source,
                         &sandbox_dir,
                         &root_layout,
+                        &config.restore_resources,
                     )
                     .await?;
                     config.checkpoint_restore = Some(materialized.restore);
+                    crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
                     config.snapshot_upper_layers = materialized.upper_layers;
                     config.suppress_launch_for_full_restore();
                 }
@@ -292,12 +304,16 @@ impl LocalBackend {
                         &source,
                         &sandbox_dir,
                         &root_layout,
+                        &config.restore_resources,
                     )
                     .await?;
+                    crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
                     config.snapshot_upper_layers = materialized.upper_layers;
                 }
             }
         }
+        crate::sandbox::resolve_external_mounts(self, &mut config).await?;
+
         // Archive descriptors are resolved here, after the builder's initial validation.
         // Do not let a disk archive turn an explicit CoW restore into a fresh boot.
         if config.forked && config.checkpoint_restore.is_none() {
@@ -617,7 +633,13 @@ impl LocalBackend {
         // Sandbox-time named-volume creation is one-shot create intent. Provision
         // before inserting the sandbox row so volume conflicts or incompatibilities
         // cannot leave a stopped sandbox that never booted.
-        let created_named_volumes = ensure_named_volumes(self, &config).await?;
+        let created_named_volumes = Arc::new(ensure_named_volumes(self, &config).await?);
+        let mut creation_cleanup = CreationCleanup::new(
+            backend.clone(),
+            config.spec.name.clone(),
+            _transition_guard,
+            created_named_volumes.clone(),
+        );
 
         // Claim the persisted identity in Starting state. Running is published only after the
         // guest agent and all create-time validation are ready for callers.
@@ -652,21 +674,18 @@ impl LocalBackend {
         let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
             Err(e) => {
-                if created_named_volumes.is_empty() {
-                    let _ = Self::compare_and_set_sandbox_status(
-                        write_db,
-                        sandbox_id,
-                        &[SandboxStatus::Starting],
-                        SandboxStatus::Stopped,
-                    )
-                    .await;
-                } else {
-                    rollback_created_named_volumes(self, &created_named_volumes).await;
-                    let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
-                }
+                self.rollback_failed_startup(
+                    write_db,
+                    sandbox_id,
+                    &persisted_config.spec.name,
+                    &created_named_volumes,
+                )
+                .await
+                .map_err(|cleanup| crate::MicrosandboxError::Runtime(format!("{e}; {cleanup}")))?;
                 return Err(e);
             }
         };
+        creation_cleanup.retain_process(local_state.handle.clone());
         returned_config.checkpoint_restore = None;
         returned_config.snapshot_upper_layers.clear();
         let mut sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
@@ -704,13 +723,16 @@ impl LocalBackend {
             Self::persist_oci_manifest_pin(write_db, sandbox_id, manifest_digest).await
         {
             sandbox.terminate_creation_owner().await;
-            if created_named_volumes.is_empty() {
-                let _ =
-                    Self::update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
-            } else {
-                rollback_created_named_volumes(self, &created_named_volumes).await;
-                let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
-            }
+            // A bounded termination attempt can expire before runtime ownership ends.
+            // Keep the original failure, but never remove storage without the lifecycle lock.
+            self.rollback_failed_startup(
+                write_db,
+                sandbox_id,
+                sandbox.name(),
+                &created_named_volumes,
+            )
+            .await
+            .map_err(|cleanup| crate::MicrosandboxError::Runtime(format!("{err}; {cleanup}")))?;
             return Err(err);
         }
 
@@ -721,38 +743,38 @@ impl LocalBackend {
             match sandbox.fs().stat(workdir).await {
                 Ok(metadata) if metadata.kind == FsEntryKind::Directory => {}
                 Ok(_) => {
-                    sandbox.terminate_creation_owner().await;
-                    if created_named_volumes.is_empty() {
-                        let _ = Self::update_sandbox_status(
-                            write_db,
-                            sandbox_id,
-                            SandboxStatus::Stopped,
-                        )
-                        .await;
-                    } else {
-                        rollback_created_named_volumes(self, &created_named_volumes).await;
-                        let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
-                    }
-                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    let error = crate::MicrosandboxError::InvalidConfig(format!(
                         "workdir is not a directory in guest: {workdir}"
-                    )));
+                    ));
+                    sandbox.terminate_creation_owner().await;
+                    self.rollback_failed_startup(
+                        write_db,
+                        sandbox_id,
+                        sandbox.name(),
+                        &created_named_volumes,
+                    )
+                    .await
+                    .map_err(|cleanup| {
+                        crate::MicrosandboxError::Runtime(format!("{error}; {cleanup}"))
+                    })?;
+                    return Err(error);
                 }
                 Err(_) => {
-                    sandbox.terminate_creation_owner().await;
-                    if created_named_volumes.is_empty() {
-                        let _ = Self::update_sandbox_status(
-                            write_db,
-                            sandbox_id,
-                            SandboxStatus::Stopped,
-                        )
-                        .await;
-                    } else {
-                        rollback_created_named_volumes(self, &created_named_volumes).await;
-                        let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
-                    }
-                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    let error = crate::MicrosandboxError::InvalidConfig(format!(
                         "workdir does not exist in guest: {workdir}"
-                    )));
+                    ));
+                    sandbox.terminate_creation_owner().await;
+                    self.rollback_failed_startup(
+                        write_db,
+                        sandbox_id,
+                        sandbox.name(),
+                        &created_named_volumes,
+                    )
+                    .await
+                    .map_err(|cleanup| {
+                        crate::MicrosandboxError::Runtime(format!("{error}; {cleanup}"))
+                    })?;
+                    return Err(error);
                 }
             }
         }
@@ -760,7 +782,14 @@ impl LocalBackend {
         if let Some(closure) = restore_closure {
             // Do not lose the recovery discriminator if any preceding creation check failed.
             // RAM/device state has been consumed and the runtime owns its disk chain and pins.
-            if let Err(error) = Self::complete_sandbox_restore(write_db, sandbox_id).await {
+            if let Err(error) = Self::complete_sandbox_restore(
+                write_db,
+                sandbox_id,
+                &persisted_config,
+                sandbox.config(),
+            )
+            .await
+            {
                 sandbox.terminate_creation_owner().await;
                 return Err(error);
             }
@@ -771,18 +800,87 @@ impl LocalBackend {
         if matches!(mode, SpawnMode::Detached) {
             sandbox.finish_detached_creation().await?;
         }
+        creation_cleanup.disarm();
         Ok(sandbox)
     }
 
-    /// Clear only the pending construction intent, preserving any concurrent desired edits.
+    /// Roll back a failed launch while the caller still owns the name transition.
+    async fn rollback_failed_startup(
+        &self,
+        write_db: &DbWriteConnection,
+        sandbox_id: i32,
+        sandbox_name: &str,
+        created_named_volumes: &EnsuredNamedVolumes,
+    ) -> MicrosandboxResult<()> {
+        // A timeout is not evidence of process exit. Keep the runtime ownership guard through
+        // database reconciliation and volume rollback; no live owner may lose its storage.
+        let Some(_runtime_guard) = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+            &self.config().run_dir(),
+            sandbox_name,
+        )?
+        else {
+            return Err(crate::MicrosandboxError::Runtime(format!(
+                "startup cleanup pending: runtime still owns sandbox {sandbox_name:?}",
+            )));
+        };
+        run_entity::Entity::update_many()
+            .col_expr(
+                run_entity::Column::Status,
+                Expr::value(run_entity::RunStatus::Terminated),
+            )
+            .col_expr(
+                run_entity::Column::TerminationReason,
+                Expr::value(run_entity::TerminationReason::Failed),
+            )
+            .col_expr(
+                run_entity::Column::TerminatedAt,
+                Expr::value(chrono::Utc::now().naive_utc()),
+            )
+            .filter(run_entity::Column::SandboxId.eq(sandbox_id))
+            .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
+            .exec(write_db)
+            .await?;
+        if created_named_volumes.is_empty() {
+            let _ = Self::compare_and_set_sandbox_status(
+                write_db,
+                sandbox_id,
+                &[SandboxStatus::Starting, SandboxStatus::Running],
+                SandboxStatus::Stopped,
+            )
+            .await;
+        } else {
+            rollback_created_named_volumes(self, created_named_volumes).await;
+            let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
+        }
+        Ok(())
+    }
+
+    /// Finish construction and project captured targets without overwriting desired edits.
     async fn complete_sandbox_restore(
         db: &DbWriteConnection,
         sandbox_id: i32,
+        construction: &SandboxConfig,
+        restored: &SandboxConfig,
     ) -> MicrosandboxResult<()> {
+        // Construction needs the original boot geometry, but future starts/modifications need
+        // the captured requested sizes. Replace only values that still match construction:
+        // a concurrent explicit desired edit must survive this readiness publication.
         sandbox_entity::Entity::update_many()
             .col_expr(
                 sandbox_entity::Column::Config,
-                Expr::cust("json_remove(config, '$.checkpoint_restore')"),
+                Expr::cust_with_values(
+                    "json_set(json_remove(config, '$.checkpoint_restore'), \
+                     '$.resources.cpus', CASE WHEN json_extract(config, '$.resources.cpus') = ? \
+                     THEN ? ELSE json_extract(config, '$.resources.cpus') END, \
+                     '$.resources.memory_mib', CASE WHEN json_extract(config, '$.resources.memory_mib') = ? \
+                     THEN ? ELSE json_extract(config, '$.resources.memory_mib') END)",
+                    [
+                        u32::from(construction.spec.resources.cpus),
+                        u32::from(restored.spec.resources.cpus),
+                        construction.spec.resources.memory_mib,
+                        restored.spec.resources.memory_mib,
+                    ],
+                ),
             )
             .filter(sandbox_entity::Column::Id.eq(sandbox_id))
             .exec(db)
@@ -804,19 +902,63 @@ impl LocalBackend {
     /// the local-variant state plus the (possibly mutated) config.
     pub(super) async fn create_sandbox_inner(
         &self,
-        config: SandboxConfig,
+        mut config: SandboxConfig,
         sandbox_id: i32,
         mode: SpawnMode,
         lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
     ) -> MicrosandboxResult<(crate::backend::SandboxLocalState, SandboxConfig)> {
-        let (mut handle, agent_sock_path) =
+        let (handle, agent_sock_path) =
             spawn_sandbox(self, &config, sandbox_id, mode, lifecycle_guard).await?;
+        let mut startup_process = StartupProcess::new(handle);
         let log_dir = self.sandboxes_dir().join(&config.spec.name).join("logs");
+        if let Err(error) = startup_process
+            .handle_mut()
+            .wait_for_preparation(&config.creation_progress)
+            .await
+        {
+            // Preserve the runtime's structured diagnosis when an invalid checkpoint
+            // closes the startup channel before activation can be announced.
+            let error = Self::read_boot_start_error(&log_dir, &config.spec.name).unwrap_or(error);
+            if let Err(cleanup) = startup_process
+                .handle_mut()
+                .terminate_failed_startup()
+                .await
+            {
+                return Err(crate::MicrosandboxError::Runtime(format!(
+                    "{error}; {cleanup}"
+                )));
+            }
+            // A legacy runtime can close telemetry before publishing its error. Once this
+            // exact child is reaped, one final read also covers publication during teardown.
+            return Err(Self::read_boot_start_error(&log_dir, &config.spec.name).unwrap_or(error));
+        }
+        // Cold backing construction and lock waits do not consume activation's budget.
+        let startup_deadline = tokio::time::Instant::now() + AGENT_RELAY_READY_TIMEOUT;
 
         // Wait for the relay socket to become available.
-        let client =
-            Self::wait_for_relay(&agent_sock_path, &log_dir, &mut handle, &config.spec.name)
-                .await?;
+        let client = match Self::wait_for_relay(
+            &agent_sock_path,
+            &log_dir,
+            startup_process.handle_mut(),
+            &config.spec.name,
+            startup_deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(error) => {
+                if let Err(cleanup) = startup_process
+                    .handle_mut()
+                    .terminate_failed_startup()
+                    .await
+                {
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "{error}; {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
 
         if let Ok(ready) = client.ready() {
             tracing::info!(
@@ -826,9 +968,34 @@ impl LocalBackend {
                 "sandbox ready",
             );
         }
+        if config.checkpoint_restore.is_some() {
+            // Resource reporting is part of readiness, not an unbounded wait after it.
+            let restored = tokio::time::timeout_at(
+                startup_deadline,
+                crate::sandbox::restore_requested_resources(self, &mut config),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(crate::MicrosandboxError::Runtime(
+                    "startup deadline expired while reading restored resource targets".into(),
+                ))
+            });
+            if let Err(error) = restored {
+                if let Err(cleanup) = startup_process
+                    .handle_mut()
+                    .terminate_failed_startup()
+                    .await
+                {
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "{error}; {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
+        }
         // Even detached launches remain creator-owned until catalog publication and validation
         // finish. Cancellation or failure before that boundary must terminate this exact child.
-        let handle = Some(Arc::new(Mutex::new(handle)));
+        let handle = Some(Arc::new(Mutex::new(startup_process.into_handle())));
 
         Ok((
             crate::backend::SandboxLocalState {
@@ -850,13 +1017,14 @@ impl LocalBackend {
         log_dir: &std::path::Path,
         handle: &mut ProcessHandle,
         sandbox_name: &str,
+        timeout: std::time::Duration,
     ) -> MicrosandboxResult<AgentClient> {
         tracing::debug!(
             sock = %sock_path.display(),
             pid = handle.pid(),
             "wait_for_relay: waiting for agent socket"
         );
-        let deadline = tokio::time::Instant::now() + AGENT_RELAY_READY_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + timeout;
         let max_backoff = std::time::Duration::from_millis(10);
         let mut backoff = std::time::Duration::from_millis(1);
         let mut attempts = 0u32;
@@ -916,7 +1084,11 @@ impl LocalBackend {
 
                     // Keep early retries tight so relay readiness doesn't inherit a
                     // coarse fixed delay on warm starts.
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(
+                        backoff
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
                     backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
                 }
                 Ok(Err(e)) => {
@@ -928,7 +1100,7 @@ impl LocalBackend {
                     if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
                         return Err(error);
                     }
-                    return Err(e.into());
+                    return Err(relay_readiness_timeout(sandbox_name, timeout, &e));
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -945,9 +1117,7 @@ impl LocalBackend {
                     if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
                         return Err(error);
                     }
-                    return Err(crate::MicrosandboxError::Runtime(format!(
-                        "timed out waiting for agent relay: {e}"
-                    )));
+                    return Err(relay_readiness_timeout(sandbox_name, timeout, &e));
                 }
             }
         }
@@ -1730,6 +1900,19 @@ fn snapshot_root_layout_from_config(
     })
 }
 
+/// Keep an expired readiness budget distinct from the last transient socket failure.
+fn relay_readiness_timeout(
+    sandbox_name: &str,
+    timeout: std::time::Duration,
+    last_error: &impl std::fmt::Display,
+) -> crate::MicrosandboxError {
+    crate::MicrosandboxError::Runtime(format!(
+        "sandbox {sandbox_name:?} startup timed out after {} seconds before agent readiness; \
+         restore preparation may still be pending; last connection error: {last_error}",
+        timeout.as_secs_f64(),
+    ))
+}
+
 /// Derive a stable, filesystem-safe transition-lock path for one sandbox name.
 fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
     microsandbox_runtime::ipc::sandbox_transition_lock_path(run_dir, name)
@@ -1838,6 +2021,291 @@ mod tests {
         drop(ChildStageGuard::new(stage.clone()));
 
         assert!(!stage.exists());
+    }
+
+    #[test]
+    fn readiness_deadline_reports_timeout_not_only_missing_socket() {
+        let error = super::relay_readiness_timeout(
+            "slow-restore",
+            super::AGENT_RELAY_READY_TIMEOUT,
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        )
+        .to_string();
+        assert!(error.contains("startup timed out after 180 seconds"));
+        assert!(error.contains("slow-restore"));
+        assert!(error.contains("restore preparation"));
+        assert!(error.contains("last connection error"));
+    }
+
+    #[cfg(unix)]
+    async fn exercise_readiness_deadline(silent_peer: bool) -> String {
+        use crate::runtime::handle::{ProcessHandle, StartupProcess};
+
+        let directory = tempfile::Builder::new()
+            .prefix("msb-readiness")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket = directory.path().join("agent.sock");
+        let server = if silent_peer {
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            Some(tokio::spawn(async move {
+                let (_connection, _) = listener.accept().await.unwrap();
+                // Accept the transport but never finish the agent handshake, exercising the
+                // connection-attempt deadline rather than an immediately missing endpoint.
+                std::future::pending::<()>().await;
+            }))
+        } else {
+            None
+        };
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut owner = StartupProcess::new(ProcessHandle::new(
+            child.id().unwrap(),
+            "slow-restore".into(),
+            child,
+            Vec::new(),
+            None,
+            None,
+        ));
+        let result = LocalBackend::wait_for_relay(
+            &socket,
+            directory.path(),
+            owner.handle_mut(),
+            "slow-restore",
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        let still_alive = owner.handle_mut().try_wait().unwrap().is_none();
+        owner.handle_mut().terminate_failed_startup().await.unwrap();
+        if let Some(server) = server {
+            server.abort();
+            let _ = server.await;
+        }
+        assert!(still_alive, "fixture exited before readiness expired");
+        let error = result
+            .err()
+            .expect("relay unexpectedly became ready")
+            .to_string();
+        assert!(
+            error.contains("startup timed out after 0.05 seconds"),
+            "{error}"
+        );
+        assert!(error.contains("slow-restore"), "{error}");
+        assert!(error.contains("last connection error"), "{error}");
+        error
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_loop_reports_missing_socket_deadline() {
+        let error = exercise_readiness_deadline(false).await;
+        assert!(
+            error.contains("No such file") || error.contains("not found"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_loop_reports_stalled_handshake_deadline() {
+        let error = exercise_readiness_deadline(true).await;
+        assert!(error.contains("deadline has elapsed"), "{error}");
+    }
+
+    async fn exercise_failed_startup_rollback(with_created_volume: bool, status: SandboxStatus) {
+        use crate::db::entity::volume as volume_entity;
+        use crate::runtime::ensure_named_volumes;
+        use crate::sandbox::SandboxBuilder;
+
+        let directory = tempdir().unwrap();
+        let rootfs = directory.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+        let local = LocalBackend::builder()
+            .home(directory.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let mut builder = SandboxBuilder::new("rollback-owner").image(rootfs.display().to_string());
+        if with_created_volume {
+            builder = builder.volume("/data", |mount| {
+                mount.named_with("created-during-startup", |volume| volume.ensure_exists())
+            });
+        }
+        let mut config = builder.build().await.unwrap();
+        config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            network_gateway_mac: None,
+            external_mount_policy: Default::default(),
+            external_mounts: Vec::new(),
+            unavailable_disks: Default::default(),
+            local_branch: false,
+            forked: true,
+            closure: directory.path().join("pending-checkpoint"),
+            checkpoint_root: "blake3:pending".into(),
+            checkpoint_id: "pending".into(),
+        });
+        let pools = local.db().await.unwrap();
+        let write_db = pools.write();
+        let _transition = microsandbox_runtime::ipc::try_acquire_transition_guard(
+            &local.config().run_dir(),
+            &config.spec.name,
+        )
+        .unwrap()
+        .unwrap();
+        let created = ensure_named_volumes(&local, &config).await.unwrap();
+        let sandbox_id = LocalBackend::insert_starting_sandbox_record(write_db, &config)
+            .await
+            .unwrap();
+        LocalBackend::update_sandbox_status(write_db, sandbox_id, status)
+            .await
+            .unwrap();
+        let active_run = run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(write_db)
+        .await
+        .unwrap()
+        .last_insert_id;
+
+        let sandbox_before = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(write_db)
+            .await
+            .unwrap()
+            .unwrap();
+        let run_before = run_entity::Entity::find_by_id(active_run)
+            .one(write_db)
+            .await
+            .unwrap()
+            .unwrap();
+        let volumes_before = volume_entity::Entity::find().all(write_db).await.unwrap();
+        assert_eq!(volumes_before.len(), usize::from(with_created_volume));
+        let volume_path = local.volume_path("created-during-startup");
+        if with_created_volume {
+            fs::write(volume_path.join("sentinel"), b"still owned").unwrap();
+            // Sandbox deletion cascades to run rows. Check the actual run state at each
+            // deletion, rather than inferring reconciliation from the rows being absent.
+            for (table, id) in [("sandbox", sandbox_id), ("volume", volumes_before[0].id)] {
+                write_db
+                    .execute_unprepared(&format!(
+                        "CREATE TRIGGER check_{table}_rollback BEFORE DELETE ON {table}
+                     WHEN OLD.id = {id} BEGIN
+                     SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM run WHERE id = {active_run}
+                     AND status = 'Terminated' AND termination_reason = 'Failed'
+                     AND terminated_at IS NOT NULL)
+                     THEN RAISE(ABORT, 'rollback before run reconciliation') END; END;"
+                    ))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let runtime_owner = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+            &local.config().run_dir(),
+            &config.spec.name,
+        )
+        .unwrap()
+        .unwrap();
+        let error = local
+            .rollback_failed_startup(write_db, sandbox_id, &config.spec.name, &created)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("startup cleanup pending"),
+            "{error}"
+        );
+        assert_eq!(
+            sandbox_entity::Entity::find_by_id(sandbox_id)
+                .one(write_db)
+                .await
+                .unwrap(),
+            Some(sandbox_before)
+        );
+        assert_eq!(
+            run_entity::Entity::find_by_id(active_run)
+                .one(write_db)
+                .await
+                .unwrap(),
+            Some(run_before)
+        );
+        assert_eq!(
+            volume_entity::Entity::find().all(write_db).await.unwrap(),
+            volumes_before
+        );
+        if with_created_volume {
+            assert_eq!(
+                fs::read(volume_path.join("sentinel")).unwrap(),
+                b"still owned"
+            );
+        }
+
+        drop(runtime_owner);
+        local
+            .rollback_failed_startup(write_db, sandbox_id, &config.spec.name, &created)
+            .await
+            .unwrap();
+        if with_created_volume {
+            assert!(!volume_path.exists());
+            assert!(
+                volume_entity::Entity::find()
+                    .all(write_db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                sandbox_entity::Entity::find_by_id(sandbox_id)
+                    .one(write_db)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                run_entity::Entity::find_by_id(active_run)
+                    .one(write_db)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            let sandbox = sandbox_entity::Entity::find_by_id(sandbox_id)
+                .one(write_db)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(sandbox.status, SandboxStatus::Stopped);
+            let run = run_entity::Entity::find_by_id(active_run)
+                .one(write_db)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.status, run_entity::RunStatus::Terminated);
+            assert_eq!(
+                run.termination_reason,
+                Some(run_entity::TerminationReason::Failed)
+            );
+            assert!(run.terminated_at.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_startup_rollback_waits_for_runtime_before_stopping_record() {
+        exercise_failed_startup_rollback(false, SandboxStatus::Starting).await;
+    }
+
+    #[tokio::test]
+    async fn failed_startup_rollback_preserves_owned_volumes_then_reconciles_before_deletion() {
+        exercise_failed_startup_rollback(true, SandboxStatus::Starting).await;
+    }
+
+    #[tokio::test]
+    async fn post_readiness_rollback_preserves_live_row_restore_intent_and_storage() {
+        // Pin/workdir validation occurs after Running publication. Both the no-volume
+        // and created-volume paths must keep this live state until the owner releases it.
+        exercise_failed_startup_rollback(false, SandboxStatus::Running).await;
+        exercise_failed_startup_rollback(true, SandboxStatus::Running).await;
     }
 
     #[test]
@@ -2046,6 +2514,10 @@ mod tests {
         let pools = open_test_pools(&temp.path().join("test.db")).await;
         let mut config = test_config_with_rootfs("pending", bind_rootfs(temp.path().to_path_buf()));
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            network_gateway_mac: None,
+            external_mount_policy: Default::default(),
+            external_mounts: Vec::new(),
+            unavailable_disks: Default::default(),
             local_branch: false,
             forked: true,
             closure: temp.path().join("checkpoint"),
@@ -2074,7 +2546,10 @@ mod tests {
 
         // Ordinary post-success/snapshot projections must not perpetuate one-shot restore input.
         assert!(pending.clone_for_persistence().checkpoint_restore.is_none());
-        LocalBackend::complete_sandbox_restore(pools.write(), id)
+        let mut restored = config.clone();
+        restored.spec.resources.cpus = 2;
+        restored.spec.resources.memory_mib = 768;
+        LocalBackend::complete_sandbox_restore(pools.write(), id, &config, &restored)
             .await
             .unwrap();
         let model = sandbox_entity::Entity::find_by_id(id)
@@ -2085,7 +2560,41 @@ mod tests {
         let completed: SandboxConfig = serde_json::from_str(&model.config).unwrap();
         assert!(completed.checkpoint_restore.is_none());
         assert_eq!(completed.spec.name, "pending");
+        assert_eq!(completed.spec.resources.cpus, 2);
+        assert_eq!(completed.spec.resources.memory_mib, 768);
         LocalBackend::validate_completed_restore(&completed).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_completion_preserves_concurrent_desired_resource_edits() {
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("test.db")).await;
+        let mut construction =
+            test_config_with_rootfs("edited", bind_rootfs(temp.path().to_path_buf()));
+        construction.spec.resources.cpus = 1;
+        construction.spec.resources.max_cpus = 4;
+        construction.spec.resources.memory_mib = 256;
+        construction.spec.resources.max_memory_mib = 1024;
+        let mut edited = construction.clone();
+        edited.spec.resources.cpus = 3;
+        let id = LocalBackend::insert_sandbox_record(pools.write(), &edited)
+            .await
+            .unwrap();
+        let mut restored = construction.clone();
+        restored.spec.resources.cpus = 2;
+        restored.spec.resources.memory_mib = 768;
+        LocalBackend::complete_sandbox_restore(pools.write(), id, &construction, &restored)
+            .await
+            .unwrap();
+        let model = sandbox_entity::Entity::find_by_id(id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let completed: SandboxConfig = serde_json::from_str(&model.config).unwrap();
+        assert_eq!(completed.spec.resources.cpus, 3);
+        assert_eq!(completed.spec.resources.memory_mib, 768);
+        assert_eq!(completed.spec.resources.max_memory_mib, 1024);
     }
 
     #[tokio::test]

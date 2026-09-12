@@ -86,6 +86,9 @@ struct HostRoutes {
 /// Errors that prevent the smoltcp network from being created safely.
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkInitError {
+    /// A checkpoint supplied an unusable virtual gateway Ethernet address.
+    #[error("captured gateway MAC must be a nonzero unicast address distinct from the guest")]
+    InvalidGatewayMac,
     /// The configured connection cap is above the hard safety limit.
     #[error("max_connections {configured} exceeds hard limit {limit}")]
     MaxConnectionsExceeded {
@@ -169,6 +172,28 @@ impl HostRoutes {
 }
 
 impl SmoltcpNetwork {
+    /// Gateway identity for an ordinary cold boot in the given host slot.
+    pub fn default_gateway_mac(slot: u16) -> [u8; 6] {
+        derive_gateway_mac(slot)
+    }
+
+    /// Preserve a captured gateway before starting this fresh network backend.
+    ///
+    /// Host sockets, policy, queues and port ownership remain child-owned. Only
+    /// the Ethernet identity visible to captured ARP/ND caches is retained.
+    /// Panics if called after the network poll thread has started.
+    pub fn with_captured_gateway_mac(mut self, mac: [u8; 6]) -> Result<Self, NetworkInitError> {
+        assert!(
+            self.poll_handle.is_none(),
+            "gateway identity must be set before network start"
+        );
+        if mac == [0; 6] || mac[0] & 1 != 0 || mac == self.guest_mac {
+            return Err(NetworkInitError::InvalidGatewayMac);
+        }
+        self.gateway_mac = mac;
+        Ok(self)
+    }
+
     /// Creates the network backend from a fully resolved runtime configuration.
     ///
     /// `MultiTenant` applies platform-owned configuration floors before any
@@ -754,6 +779,58 @@ mod tests {
 
     fn routes(ipv4: bool, ipv6: bool) -> HostRoutes {
         HostRoutes { ipv4, ipv6 }
+    }
+
+    #[test]
+    fn captured_gateway_survives_new_slots_without_sharing_backends() {
+        let mut source_config = NetworkConfig::default();
+        // A user-supplied guest MAC cannot reveal the source gateway's slot.
+        source_config.interface.mac = Some([2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+        let source = SmoltcpNetwork::build(
+            resolved(source_config),
+            7,
+            DeploymentProfile::SingleTenant,
+            routes(true, true),
+        )
+        .unwrap();
+        let mut config = NetworkConfig::default();
+        config.interface.mac = Some(source.guest_mac);
+        config.interface.ipv4_address = source.guest_ipv4;
+        config.interface.ipv6_address = source.guest_ipv6;
+        for slot in [8, 400] {
+            let child = SmoltcpNetwork::build(
+                resolved(config.clone()),
+                slot,
+                DeploymentProfile::SingleTenant,
+                routes(true, true),
+            )
+            .unwrap()
+            .with_captured_gateway_mac(source.gateway_mac)
+            .unwrap();
+            assert_eq!(child.gateway_mac, source.gateway_mac);
+            assert_eq!(child.gateway_ipv4, source.gateway_ipv4);
+            assert_eq!(child.gateway_ipv6, source.gateway_ipv6);
+            assert_eq!(child.guest_mac, source.guest_mac);
+            assert!(!Arc::ptr_eq(&child.shared, &source.shared));
+        }
+        assert_eq!(source.gateway_mac, SmoltcpNetwork::default_gateway_mac(7));
+    }
+
+    #[test]
+    fn captured_gateway_rejects_unusable_ethernet_addresses() {
+        for mac in [[0; 6], [1, 2, 3, 4, 5, 6], derive_guest_mac(8)] {
+            let network = SmoltcpNetwork::build(
+                resolved(NetworkConfig::default()),
+                8,
+                DeploymentProfile::SingleTenant,
+                routes(true, true),
+            )
+            .unwrap();
+            assert!(matches!(
+                network.with_captured_gateway_mac(mac),
+                Err(NetworkInitError::InvalidGatewayMac)
+            ));
+        }
     }
 
     #[test]

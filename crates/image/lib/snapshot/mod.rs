@@ -10,6 +10,7 @@
 pub mod manifest;
 #[doc(hidden)]
 pub mod migration;
+mod restore_defaults;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -24,3 +25,4 @@ pub use manifest::{
     SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState, UpperIntegrity,
     UpperLayer, layer_path,
 };
+pub use restore_defaults::{RESTORE_DEFAULTS_EXTENSION, RestoreDefaults};

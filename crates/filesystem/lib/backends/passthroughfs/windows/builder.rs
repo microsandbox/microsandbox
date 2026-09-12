@@ -90,6 +90,9 @@ pub struct PassthroughConfig {
     /// `None` keeps the legacy `0:0` fallback. Only consulted while stat
     /// virtualization is enabled.
     pub default_owner: Option<(u32, u32)>,
+
+    /// Explicit external-mount checkpoint policy and destination diagnostic report.
+    pub external_checkpoint: Option<super::super::ExternalCheckpointOptions>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -186,6 +189,7 @@ impl PassthroughFs {
             init_file,
             stat_store,
             quota,
+            invalid_inodes: RwLock::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -249,6 +253,7 @@ impl Default for PassthroughConfig {
             quota_bytes: None,
             quota_root: None,
             default_owner: None,
+            external_checkpoint: None,
         }
     }
 }

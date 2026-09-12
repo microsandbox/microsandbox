@@ -75,9 +75,9 @@ use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 use super::network_slot::NetworkSlot;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
-use crate::runtime::handle::ProcessHandle;
 #[cfg(windows)]
 use crate::runtime::handle::WindowsJob;
+use crate::runtime::handle::{ProcessHandle, StartupProcess};
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     backend::LocalBackend,
@@ -118,6 +118,8 @@ const MIN_BLOCK_WRITEBACK_LIMIT_BYTES: u64 = 128 * 1024 * 1024;
 #[derive(Debug, Deserialize)]
 struct StartupInfo {
     pid: u32,
+    #[serde(default)]
+    startup_events: bool,
 }
 
 #[derive(Clone)]
@@ -672,7 +674,7 @@ pub async fn spawn_sandbox(
     ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
 
     // Spawn and Windows lock release form one handoff, before waiting for startup JSON.
-    let mut child = {
+    let child = {
         match spawn_runtime_command(
             &mut cmd,
             mode,
@@ -699,92 +701,21 @@ pub async fn spawn_sandbox(
     tracing::debug!(pid = _pid, sandbox = %config.spec.name, "spawn_sandbox: process started");
 
     #[cfg(windows)]
-    if let Some(job) = &child_job
-        && let Err(err) = job.assign_pid(_pid)
-    {
-        let status = terminate_startup_process(&mut child).await;
-        release_metrics_reservation(config, metrics_reservation.as_ref());
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "failed to assign sandbox process to Windows job (status: {status:?}): {err}"
-        )));
-    }
+    let job_assignment = child_job
+        .as_ref()
+        .map(|job| job.assign_pid(_pid))
+        .transpose();
 
-    let line = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        read_startup_line(&mut child, startup_pipe),
-    )
-    .await
-    {
-        Ok(Ok(line)) => line,
-        Ok(Err(err)) => {
-            terminate_startup_process(&mut child).await;
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(err);
-        }
-        Err(_) => {
-            terminate_startup_process(&mut child).await;
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(crate::MicrosandboxError::Runtime(
-                "sandbox startup timeout: no JSON received within 30 seconds".into(),
-            ));
-        }
-    };
-
-    let startup: StartupInfo = match serde_json::from_str(line.trim()) {
-        Ok(info) => info,
-        Err(_) => {
-            let status = terminate_startup_process(&mut child).await;
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            tracing::debug!(
-                raw_line = ?line,
-                exit_status = ?status,
-                "spawn_sandbox: failed to parse startup JSON"
-            );
-            return Err(crate::MicrosandboxError::Runtime(format!(
-                "sandbox process exited ({status:?}) before sending startup info \
-                 (line: {line:?}, check stderr above for details)"
-            )));
-        }
-    };
-    if startup.pid != _pid {
-        let status = terminate_startup_process(&mut child).await;
-        release_metrics_reservation(config, metrics_reservation.as_ref());
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "sandbox startup PID mismatch: spawned pid {_pid}, startup pid {} \
-             (status: {status:?})",
-            startup.pid
-        )));
-    }
-
-    tracing::debug!(
-        vm_pid = startup.pid,
-        agent_sock = %agent_sock_path.display(),
-        "spawn_sandbox: startup JSON received"
-    );
-
-    #[cfg(unix)]
-    let handle = ProcessHandle::new(
-        startup.pid,
+    // Install cancellation ownership before the first post-spawn await, including failures
+    // during Windows job assignment and the initial startup reply.
+    let mut startup_process = StartupProcess::new(ProcessHandle::new(
+        _pid,
         config.spec.name.clone(),
         child,
         disk_locks,
+        #[cfg(unix)]
         parent_watchdog.map(|pipe| pipe.write_fd),
-        metrics_reservation.as_ref().map(|reservation| {
-            MetricsReservationCleanup::new(
-                reservation.shm_name.clone(),
-                reservation.slot,
-                reservation.generation,
-                Some(reservation.registry.clone()),
-            )
-        }),
-    );
-
-    #[cfg(windows)]
-    let handle = ProcessHandle::new(
-        startup.pid,
-        config.spec.name.clone(),
-        child,
-        disk_locks,
+        #[cfg(windows)]
         child_job,
         metrics_reservation.as_ref().map(|reservation| {
             MetricsReservationCleanup::new(
@@ -794,9 +725,86 @@ pub async fn spawn_sandbox(
                 Some(reservation.registry.clone()),
             )
         }),
+    ));
+
+    #[cfg(windows)]
+    if let Err(err) = job_assignment {
+        let error = crate::MicrosandboxError::Runtime(format!(
+            "failed to assign sandbox process to Windows job: {err}"
+        ));
+        let cleanup = startup_process
+            .handle_mut()
+            .terminate_failed_startup()
+            .await;
+        return Err(startup_error_with_cleanup(error, cleanup));
+    }
+
+    let startup_result = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        read_startup_line(startup_process.child_mut(), startup_pipe),
+    )
+    .await
+    {
+        Ok(reply) => reply
+            .and_then(|(line, reader)| parse_startup_info(&line, _pid).map(|info| (info, reader))),
+        Err(_) => Err(crate::MicrosandboxError::Runtime(
+            "sandbox startup timeout: no JSON received within 30 seconds".into(),
+        )),
+    };
+    let (startup, reader) = match startup_result {
+        Ok(startup) => startup,
+        Err(error) => {
+            // Decide why launch failed before cleanup. Reaping can fail independently and
+            // must never replace the timeout, read error, bad JSON or mismatched identity.
+            let cleanup = startup_process
+                .handle_mut()
+                .terminate_failed_startup()
+                .await;
+            return Err(startup_error_with_cleanup(error, cleanup));
+        }
+    };
+
+    if startup.startup_events {
+        startup_process.handle_mut().startup_reader = Some(reader);
+    }
+
+    tracing::debug!(
+        vm_pid = startup.pid,
+        agent_sock = %agent_sock_path.display(),
+        "spawn_sandbox: startup JSON received"
     );
 
-    Ok((handle, agent_sock_path))
+    Ok((startup_process.into_handle(), agent_sock_path))
+}
+
+/// Validate the reply before cleanup so a teardown failure cannot hide its diagnosis.
+fn parse_startup_info(line: &str, expected_pid: u32) -> MicrosandboxResult<StartupInfo> {
+    let startup: StartupInfo = serde_json::from_str(line.trim()).map_err(|error| {
+        MicrosandboxError::Runtime(format!(
+            "invalid sandbox startup JSON: {error} (line: {line:?}, check stderr for details)"
+        ))
+    })?;
+    if startup.pid != expected_pid {
+        return Err(MicrosandboxError::Runtime(format!(
+            "sandbox startup PID mismatch: spawned pid {expected_pid}, startup pid {}",
+            startup.pid,
+        )));
+    }
+    Ok(startup)
+}
+
+/// Keep the original typed failure when cleanup succeeds; report both when it does not.
+fn startup_error_with_cleanup(
+    startup: MicrosandboxError,
+    cleanup: MicrosandboxResult<std::process::ExitStatus>,
+) -> MicrosandboxError {
+    match cleanup {
+        Ok(status) => {
+            tracing::debug!(?status, error = %startup, "failed startup process reaped");
+            startup
+        }
+        Err(cleanup) => MicrosandboxError::Runtime(format!("{startup}; {cleanup}")),
+    }
 }
 
 /// Start the process after releasing ownership that cannot be inherited on Windows.
@@ -1200,7 +1208,7 @@ fn write_launch_config_file(
 async fn read_startup_line(
     child: &mut tokio::process::Child,
     startup_pipe: Option<Pipe>,
-) -> MicrosandboxResult<String> {
+) -> MicrosandboxResult<(String, Box<dyn AsyncBufRead + Send + Unpin>)> {
     let mut reader: Box<dyn AsyncBufRead + Send + Unpin> = match startup_pipe {
         Some(pipe) => {
             let Pipe { read_fd, write_fd } = pipe;
@@ -1219,14 +1227,14 @@ async fn read_startup_line(
 
     let mut line = String::new();
     reader.read_line(&mut line).await?;
-    Ok(line)
+    Ok((line, reader))
 }
 
 #[cfg(windows)]
 async fn read_startup_line(
     child: &mut tokio::process::Child,
     startup_pipe: Option<StartupPipe>,
-) -> MicrosandboxResult<String> {
+) -> MicrosandboxResult<(String, Box<dyn AsyncBufRead + Send + Unpin>)> {
     let mut reader: Box<dyn AsyncBufRead + Send + Unpin> = match startup_pipe {
         Some(pipe) => {
             let server = pipe.server;
@@ -1243,7 +1251,7 @@ async fn read_startup_line(
 
     let mut line = String::new();
     reader.read_line(&mut line).await?;
-    Ok(line)
+    Ok((line, reader))
 }
 
 #[cfg(unix)]
@@ -2227,13 +2235,6 @@ pub(crate) async fn acquire_sandbox_lifecycle_guard(
     }
 }
 
-async fn terminate_startup_process(
-    child: &mut tokio::process::Child,
-) -> Option<std::process::ExitStatus> {
-    let _ = child.start_kill();
-    child.wait().await.ok()
-}
-
 /// Resolve bind mounts whose host source is a regular file.
 ///
 /// The runtime opens the source directly through `SingleFileFs`; this map only
@@ -2246,6 +2247,19 @@ fn resolve_file_mounts(
         let VolumeMount::Bind { host, guest, .. } = mount else {
             continue;
         };
+        if let Some(binding) = config.checkpoint_restore.as_ref().and_then(|restore| {
+            restore
+                .external_mounts
+                .iter()
+                .find(|binding| binding.mount.guest_path == *guest)
+        }) {
+            // A missing or type-changed export must retain its captured transport,
+            // never be reclassified from a file facade into a directory share.
+            if let Some(filename) = &binding.filename {
+                file_mounts.insert(guest.clone(), (filename.clone(), binding.mount.tag.clone()));
+            }
+            continue;
+        }
         if !host.is_file() {
             continue;
         }
@@ -2327,19 +2341,49 @@ fn push_file_mount_arg(
     });
 }
 
-/// Collect a `id:host_path:format[:ro]` disk entry.
+/// Collect a `id:host_path:format[:ro][:snapshot-owned]` disk entry.
 fn push_disk_mount_arg(
     disks: &mut Vec<String>,
     id: &str,
     host_display: &impl std::fmt::Display,
     format: &DiskImageFormat,
     options: MountOptions,
+    snapshot_owned: bool,
 ) {
     let mut arg = format!("{id}:{host_display}:{}", format.as_str());
     if options.readonly {
         arg.push_str(":ro");
     }
+    if snapshot_owned {
+        arg.push_str(":snapshot-owned");
+    }
     disks.push(arg);
+}
+
+/// Recognize only the exact private file created by additional-disk restore for this sandbox.
+/// Canonical parent equality prevents a symlinked directory or a textual prefix from granting
+/// managed ownership to an external image. The launcher separately retains the file's disk lock.
+fn is_owned_restored_disk(host: &Path, sandbox: &Path, id: &str, format: DiskImageFormat) -> bool {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return false;
+    }
+    let Ok(sandbox) = sandbox.canonicalize() else {
+        return false;
+    };
+    let directory = sandbox.join("additional-disks");
+    let Ok(canonical_directory) = directory.canonicalize() else {
+        return false;
+    };
+    if canonical_directory != directory {
+        return false;
+    }
+    let expected = directory.join(format!("{id}.{}", format.as_str()));
+    host.canonicalize().is_ok_and(|path| path == expected)
+        && std::fs::metadata(&expected).is_ok_and(|metadata| metadata.is_file())
 }
 
 fn mount_option_tokens(options: MountOptions) -> Vec<String> {
@@ -2430,7 +2474,7 @@ fn agentd_path_override(
 /// Output is at most 20 bytes — the kernel's virtio-blk serial length limit.
 /// Layout: `<slug[..11]>_<8-hex>`. The slug-part is a debugging hint; the
 /// 8-hex suffix is what actually disambiguates.
-fn guest_mount_tag(guest_path: &str) -> String {
+pub(crate) fn guest_mount_tag(guest_path: &str) -> String {
     use std::fmt::Write as _;
 
     const SLUG_MAX: usize = 11;
@@ -2808,6 +2852,7 @@ fn machine_cli_args(
                             &path.display(),
                             format,
                             *options,
+                            true,
                         );
                         launch.bootstrap.disk_mounts.push(BootstrapDiskMount {
                             id,
@@ -2857,7 +2902,20 @@ fn machine_cli_args(
                 options,
             } => {
                 let id = guest_mount_tag(guest);
-                push_disk_mount_arg(&mut launch.disks, &id, &host.display(), format, *options);
+                let snapshot_owned = is_owned_restored_disk(
+                    host,
+                    &local.sandboxes_dir().join(&config.spec.name),
+                    &id,
+                    *format,
+                );
+                push_disk_mount_arg(
+                    &mut launch.disks,
+                    &id,
+                    &host.display(),
+                    format,
+                    *options,
+                    snapshot_owned,
+                );
                 launch.bootstrap.disk_mounts.push(BootstrapDiskMount {
                     id,
                     guest_path: guest.clone(),
@@ -2954,7 +3012,9 @@ mod tests {
         AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
-    use super::{agentd_path_override, block_writeback_policy, machine_cli_args};
+    use super::{
+        agentd_path_override, block_writeback_policy, is_owned_restored_disk, machine_cli_args,
+    };
     use crate::{
         LogLevel,
         backend::LocalBackend,
@@ -2965,6 +3025,115 @@ mod tests {
         },
         volume::VolumeKind,
     };
+
+    #[test]
+    fn restored_disk_ownership_requires_exact_sandbox_directory_and_device_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let sandbox = directory.path().join("child");
+        let owned = sandbox.join("additional-disks");
+        std::fs::create_dir_all(&owned).unwrap();
+        let disk = owned.join("data_12.raw");
+        std::fs::write(&disk, []).unwrap();
+        assert!(is_owned_restored_disk(
+            &disk,
+            &sandbox,
+            "data_12",
+            DiskImageFormat::Raw
+        ));
+        assert!(!is_owned_restored_disk(
+            &disk,
+            &sandbox,
+            "other",
+            DiskImageFormat::Raw
+        ));
+        assert!(!is_owned_restored_disk(
+            &disk,
+            &sandbox,
+            "data_12",
+            DiskImageFormat::Qcow2
+        ));
+        assert!(!is_owned_restored_disk(
+            &disk,
+            &directory.path().join("other"),
+            "data_12",
+            DiskImageFormat::Raw
+        ));
+        assert!(!is_owned_restored_disk(
+            &disk,
+            &sandbox,
+            "../data_12",
+            DiskImageFormat::Raw
+        ));
+
+        #[cfg(unix)]
+        {
+            let another = directory.path().join("symlinked-child");
+            std::fs::create_dir(&another).unwrap();
+            std::os::unix::fs::symlink(&owned, another.join("additional-disks")).unwrap();
+            assert!(!is_owned_restored_disk(
+                &disk,
+                &another,
+                "data_12",
+                DiskImageFormat::Raw
+            ));
+        }
+    }
+    #[test]
+    fn startup_cleanup_failure_preserves_each_startup_diagnosis() {
+        let failures = [
+            crate::MicrosandboxError::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "startup pipe read failed",
+            )),
+            crate::MicrosandboxError::Runtime(
+                "sandbox startup timeout: no JSON received within 30 seconds".into(),
+            ),
+            super::parse_startup_info("not JSON", 42).unwrap_err(),
+            super::parse_startup_info(r#"{"pid":43}"#, 42).unwrap_err(),
+        ];
+        for failure in failures {
+            let original = failure.to_string();
+            let error = super::startup_error_with_cleanup(
+                failure,
+                Err(crate::MicrosandboxError::Runtime(
+                    "startup cleanup pending: runtime process 42 has not exited".into(),
+                )),
+            )
+            .to_string();
+            assert!(error.contains(&original), "{error}");
+            assert!(error.contains("startup cleanup pending"), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_startup_cleanup_keeps_the_original_error_variant() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let error = super::startup_error_with_cleanup(
+            crate::MicrosandboxError::from(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "startup pipe closed",
+            )),
+            Ok(std::process::ExitStatus::from_raw(0)),
+        );
+        assert!(
+            matches!(error, crate::MicrosandboxError::Io(ref io) if io.kind() == std::io::ErrorKind::BrokenPipe)
+        );
+    }
+
+    #[test]
+    fn startup_reply_requires_the_exact_owned_process() {
+        assert_eq!(
+            super::parse_startup_info(" {\"pid\":42}\n", 42)
+                .unwrap()
+                .pid,
+            42
+        );
+        assert!(super::parse_startup_info("", 42).is_err());
+        assert!(super::parse_startup_info("{}", 42).is_err());
+        assert!(super::parse_startup_info(r#"{"pid":43}"#, 42).is_err());
+    }
 
     #[cfg(windows)]
     #[test]
@@ -4191,6 +4360,10 @@ mod tests {
             },
         ];
         config.checkpoint_restore = Some(CheckpointRestoreConfig {
+            network_gateway_mac: None,
+            external_mount_policy: Default::default(),
+            external_mounts: Vec::new(),
+            unavailable_disks: Default::default(),
             local_branch: false,
             forked: false,
             closure: PathBuf::from("/tmp/checkpoint"),
@@ -4789,10 +4962,8 @@ mod tests {
         let rendered = render_args_with_named_volumes(&config, &named_volumes);
         let tag = super::guest_mount_tag("/var/lib/docker");
 
-        assert!(
-            rendered.windows(2).any(|pair| pair[0] == "--disk"
-                && pair[1] == format!("{tag}:{}:raw", raw_path.display()))
-        );
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--disk"
+            && pair[1] == format!("{tag}:{}:raw:snapshot-owned", raw_path.display())));
         assert!(rendered.contains(&format!(
             "MSB_DISK_MOUNTS={tag}:/var/lib/docker:fstype=ext4"
         )));
@@ -5035,10 +5206,8 @@ mod tests {
 
         let rendered = render_args_with_named_volumes(&config, &resolved);
         let tag = super::guest_mount_tag("/data");
-        assert!(
-            rendered.windows(2).any(|pair| pair[0] == "--disk"
-                && pair[1] == format!("{tag}:{}:raw", volume.path.display()))
-        );
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--disk"
+            && pair[1] == format!("{tag}:{}:raw:snapshot-owned", volume.path.display())));
         assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/data:fstype=ext4")));
 
         let owned_config = SandboxBuilder::new("owned-test")

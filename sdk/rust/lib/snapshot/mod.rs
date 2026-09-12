@@ -356,15 +356,23 @@ pub(crate) async fn materialize_archive_for_child(
     child_stage: &Path,
     disk_only: bool,
     base: Option<&str>,
+    choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<archive::ArchiveChildMaterialization> {
-    archive::materialize_archive_for_child_with_base(local, archive, child_stage, disk_only, base)
-        .await
+    archive::materialize_archive_for_child_with_base(
+        local,
+        archive,
+        child_stage,
+        disk_only,
+        base,
+        choices,
+    )
+    .await
 }
 
 pub(crate) use restore::{
-    materialize_checkpoint_child_disk_state, materialize_checkpoint_child_state,
-    materialize_checkpoint_disk_for_child, materialize_checkpoint_for_child,
-    materialize_file_snapshot_for_child,
+    apply_additional_disks, materialize_additional_disks, materialize_checkpoint_child_disk_state,
+    materialize_checkpoint_child_state, materialize_checkpoint_disk_for_child,
+    materialize_checkpoint_for_child, materialize_file_snapshot_for_child, root_device,
 };
 
 pub(crate) use create::CHECKPOINT_DIRECTORY;

@@ -177,6 +177,20 @@ pub struct DeviceStateRef {
     pub state: ObjectId,
 }
 
+/// Original construction layout, independent of live CPU/memory resize targets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointGeometry {
+    /// CPU count supplied at construction, not the current online count.
+    pub vcpus: u8,
+    /// Number of possible CPUs constructed for this VM.
+    pub max_vcpus: u8,
+    /// Initially populated RAM in MiB; hotplug RAM occupies a separate address range.
+    pub memory_mib: u32,
+    /// Reserved RAM capacity in MiB, including the initial RAM.
+    pub max_memory_mib: u32,
+}
+
 /// Root manifest binding one complete same-epoch checkpoint.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -189,6 +203,8 @@ pub struct CheckpointManifest {
     pub capture_intent: CaptureIntent,
     /// Guest architecture.
     pub architecture: String,
+    /// Immutable layout required to reconstruct the captured address space and devices.
+    pub geometry: CheckpointGeometry,
     /// VM-wide pause boundary shared by every captured participant.
     pub pause_generation: u64,
     /// Encoded hypervisor execution state.
@@ -280,6 +296,13 @@ impl CheckpointManifest {
     fn validate_body(&self) -> ImageResult<()> {
         if self.checkpoint_id.is_empty() || self.architecture.is_empty() {
             return manifest_error("checkpoint is missing identity or architecture");
+        }
+        if self.geometry.vcpus == 0
+            || self.geometry.vcpus > self.geometry.max_vcpus
+            || self.geometry.memory_mib == 0
+            || self.geometry.memory_mib > self.geometry.max_memory_mib
+        {
+            return manifest_error("checkpoint has invalid construction geometry");
         }
         if self.disks.len() > MAX_COMPONENTS
             || self.devices.len() > MAX_COMPONENTS
@@ -452,6 +475,58 @@ manifest_methods!(CheckpointManifest, "microsandbox.checkpoint/1");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_checkpoint_requires_valid_original_geometry() {
+        let object = ObjectId::from_bytes(b"state").unwrap();
+        let mut manifest = CheckpointManifest {
+            schema: "microsandbox.checkpoint/1".into(),
+            checkpoint_id: "checkpoint_geometry".into(),
+            capture_intent: CaptureIntent::FullSnapshot,
+            architecture: "aarch64".into(),
+            geometry: CheckpointGeometry {
+                vcpus: 2,
+                max_vcpus: 8,
+                memory_mib: 8192,
+                max_memory_mib: 32768,
+            },
+            pause_generation: 1,
+            execution_state: object.clone(),
+            memory: object,
+            disks: Vec::new(),
+            devices: Vec::new(),
+            resources: Vec::new(),
+            requires: Vec::new(),
+        };
+        let bytes = manifest.to_canonical_bytes().unwrap();
+        assert_eq!(CheckpointManifest::from_bytes(&bytes).unwrap(), manifest);
+        // Earlier development full captures cannot reconstruct hotplug topology reliably.
+        let mut old = serde_json::to_value(&manifest).unwrap();
+        old.as_object_mut().unwrap().remove("geometry");
+        assert!(CheckpointManifest::from_bytes(&serde_json::to_vec(&old).unwrap()).is_err());
+        let original_geometry = manifest.geometry;
+        for geometry in [
+            CheckpointGeometry {
+                vcpus: 0,
+                ..original_geometry
+            },
+            CheckpointGeometry {
+                max_vcpus: 1,
+                ..original_geometry
+            },
+            CheckpointGeometry {
+                memory_mib: 0,
+                ..original_geometry
+            },
+            CheckpointGeometry {
+                max_memory_mib: 4096,
+                ..original_geometry
+            },
+        ] {
+            manifest.geometry = geometry;
+            assert!(manifest.to_canonical_bytes().is_err());
+        }
+    }
 
     #[test]
     fn incremental_memory_manifest_may_slice_reused_objects() {

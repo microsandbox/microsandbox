@@ -16,7 +16,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::time::{self, Duration};
 
 use microsandbox_protocol::AGENT_TRANSPORT_DUAL_PORT_CMDLINE;
-use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::bulk::{
     BULK_HEADER_SIZE, BULK_PROTOCOL_VERSION, BulkCancel, BulkCancelReason, BulkCredit, BulkFinish,
@@ -2592,6 +2591,36 @@ async fn handle_message_with_charge(
                             .park_bulk_output()
                             .await
                             .map_err(|error| AgentdError::ExecSession(error.into()))?;
+                        // Agent upload workers are outside the workload cgroup. A capture
+                        // cannot certify clean external pages while one may still write.
+                        // Resident pause remains available; only mount capture needs this proof.
+                        let external_mount_tags = request.external_mount_tags.clone();
+                        let external_mounts_synced = if external_mount_tags.is_empty() {
+                            true
+                        } else if state.bulk_write_workers.is_empty() {
+                            let permit = crate::mount_checkpoint::try_start_sync();
+                            if let Some(permit) = permit {
+                                matches!(
+                                    time::timeout(
+                                        std::time::Duration::from_secs(20),
+                                        tokio::task::spawn_blocking(move || {
+                                            // A timed-out join does not cancel syncfs. Keep the
+                                            // reservation in the worker until the actual flush ends.
+                                            let _permit = permit;
+                                            crate::mount_checkpoint::sync_external_mounts(
+                                                external_mount_tags,
+                                            )
+                                        }),
+                                    )
+                                    .await,
+                                    Ok(Ok(Ok(())))
+                                )
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
                         let reply = Message::with_payload(
                             MessageType::WorkloadFrozen,
                             msg.id,
@@ -2599,6 +2628,7 @@ async fn handle_message_with_charge(
                                 attempt_id: request.attempt_id,
                                 guest_bulk_bytes_target: state.frozen_guest_bulk_bytes,
                                 input_credit: state.input_window.credit()?,
+                                external_mounts_synced,
                             },
                         )
                         .map_err(|error| {
@@ -3106,8 +3136,12 @@ async fn handle_message_with_charge(
             }
             state.fs.clear();
 
-            request_guest_poweroff()?;
-            return Err(AgentdError::Shutdown);
+            // A request is not completion. In handoff mode the foreign init owns the
+            // shutdown schedule; keep serving until the kernel actually powers off.
+            // Exiting agentd here can itself tear down the VM and bypass that schedule.
+            if let Err(error) = request_guest_poweroff() {
+                eprintln!("agentd: graceful poweroff request failed: {error}");
+            }
         }
 
         _ => {
@@ -4064,24 +4098,9 @@ fn request_guest_poweroff() -> AgentdResult<()> {
         libc::sync();
     }
 
-    // Handoff mode: ask the new init (PID 1) to shut down.
-    // SIGRTMIN+4 is systemd's poweroff signal; sysvinit-derived inits
-    // typically default-handle it as a clean exit. Either way, PID 1
-    // exiting causes the kernel to panic the guest, which the VMM
-    // observes as a clean shutdown.
-    if crate::handoff::signal_init_shutdown().is_ok() {
-        std::thread::sleep(HANDOFF_POWEROFF_TIMEOUT);
-    }
-
-    // Reaching this point means the init ignored the poweroff request, so
-    // the guest is going down hard (SIGTERM fallback, then the host's
-    // VMM-process kill as backstop). Force filesystems toward a clean
-    // terminal state first — without the process sweep, since the foreign
-    // init's services are not ours to kill.
-    crate::teardown::teardown_filesystems(false);
-
-    let _ = crate::handoff::signal_init_term();
-    Ok(())
+    // Foreign init owns both shutdown duration and filesystem teardown. No timer or
+    // fallback signal may convert this graceful request into forced termination.
+    crate::handoff::signal_init_shutdown()
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -4143,6 +4162,7 @@ mod tests {
             MessageType::WorkloadFreeze,
             u32::MAX,
             &WorkloadFreeze {
+                external_mount_tags: Vec::new(),
                 attempt_id: "cut".into(),
                 host_input: Default::default(),
             },
@@ -4211,6 +4231,7 @@ mod tests {
                 MessageType::WorkloadFreeze,
                 u32::MAX,
                 &WorkloadFreeze {
+                    external_mount_tags: Vec::new(),
                     attempt_id: "prefix".into(),
                     host_input: target,
                 },
@@ -4366,6 +4387,7 @@ mod tests {
             MessageType::WorkloadFreeze,
             u32::MAX,
             &WorkloadFreeze {
+                external_mount_tags: Vec::new(),
                 attempt_id: "mixed-prefix".into(),
                 host_input: target,
             },
@@ -5528,6 +5550,7 @@ mod tests {
                 MessageType::WorkloadFreeze,
                 0,
                 &WorkloadFreeze {
+                    external_mount_tags: Vec::new(),
                     attempt_id: "capture".into(),
                     host_input: WorkloadTransportPosition::default(),
                 },

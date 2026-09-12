@@ -32,6 +32,7 @@ pub struct Sandbox {
     inner: Arc<SharedHandle<microsandbox::sandbox::Sandbox>>,
     backend_kind: &'static str,
     id: String,
+    stop_name: String,
     owns_lifecycle: bool,
 }
 
@@ -40,6 +41,14 @@ pub struct Sandbox {
 pub struct JsSandboxPage {
     pub sandboxes: Vec<JsSandboxHandle>,
     pub next_cursor: Option<String>,
+}
+
+/// A filesystem mismatch explicitly accepted by relaxed restore admission.
+#[napi(object, object_from_js = false)]
+pub struct ExternalMountWarning {
+    pub guest_path: String,
+    pub reason: String,
+    pub stale_inodes: Vec<BigInt>,
 }
 
 /// A streaming subscription for sandbox metrics at a regular interval.
@@ -78,11 +87,13 @@ impl Sandbox {
     pub fn from_rust(inner: microsandbox::sandbox::Sandbox) -> Self {
         let backend_kind = inner.backend_kind().as_str();
         let id = inner.id().to_string();
+        let stop_name = inner.name().to_string();
         let owns_lifecycle = inner.owns_lifecycle();
         Sandbox {
             inner: Arc::new(SharedHandle::new(inner)),
             backend_kind,
             id,
+            stop_name,
             owns_lifecycle,
         }
     }
@@ -515,12 +526,29 @@ impl Sandbox {
         sb.stop().await.map_err(to_napi_error)
     }
 
+    /// Structured warnings for external filesystems admitted by relaxed full restore.
+    #[napi]
+    pub async fn restore_warnings(&self) -> Result<Vec<ExternalMountWarning>> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        Ok(sb
+            .restore_warnings()
+            .await
+            .map_err(to_napi_error)?
+            .into_iter()
+            .map(|warning| ExternalMountWarning {
+                guest_path: warning.guest_path,
+                reason: warning.reason,
+                stale_inodes: warning.stale_inodes.into_iter().map(BigInt::from).collect(),
+            })
+            .collect())
+    }
+
     /// Create an independent local CoW child without a durable full snapshot.
     #[napi]
     pub async fn branch(&self, name: String) -> Result<Sandbox> {
         let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         Ok(Sandbox::from_rust(
-            sb.branch(name).await.map_err(to_napi_error)?,
+            sb.branch(name).branch().await.map_err(to_napi_error)?,
         ))
     }
 
@@ -553,12 +581,27 @@ impl Sandbox {
         sb.request_stop().await.map_err(to_napi_error)
     }
 
-    /// Stop gracefully with an explicit timeout before escalating to SIGKILL.
+    /// One graceful-completion budget; expiry rejects without killing, including zero.
     #[napi]
     pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
-        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let timeout = Duration::from_millis(timeout_ms.into());
-        sb.stop_with_timeout(timeout).await.map_err(to_napi_error)
+        let expired = || {
+            to_napi_error(microsandbox::MicrosandboxError::StopTimeout {
+                name: self.stop_name.clone(),
+                identity: self.id.clone(),
+                timeout,
+            })
+        };
+        // Include admission in the same budget and reject zero before polling any work.
+        if timeout.is_zero() {
+            return Err(expired());
+        }
+        tokio::time::timeout(timeout, async {
+            let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+            sb.stop().await.map_err(to_napi_error)
+        })
+        .await
+        .map_err(|_| expired())?
     }
 
     /// Kill the sandbox immediately and wait for observed exit.

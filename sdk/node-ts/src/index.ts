@@ -44,6 +44,7 @@ export type {
   SandboxPage,
   SandboxPingResult,
   SandboxTouchResult,
+  ExternalMountWarning,
 } from "./sandbox.js";
 export type {
   ChangeKind,
@@ -429,6 +430,7 @@ export {
   CloudHttpError,
   DatabaseError,
   ExecTimeoutError,
+  StopTimeoutError,
   HttpError,
   ImageError,
   ImageInUseError,
@@ -552,6 +554,8 @@ export type { SandboxMetrics } from "./metrics.js";
 
 // Pull progress
 export type { PullProgress } from "./pull-progress.js";
+export { CreationProgressCreate } from "./sandbox.js";
+export type { CreationProgress, CreationProgressStream, StartupPhase } from "./creation-progress.js";
 
 // Network policy
 export { ViolationActions } from "./violation-action.js";

@@ -130,7 +130,7 @@ try:
     assert run("grandchild-marker", "exec", grandchild, "--", "cat", "/dev/shm/cow-marker").stdout.strip() == "private-a"
     archive = str(root / "direct.msb")
     run("direct-full", "snapshot", "create", prefix + "-direct", "--from-sandbox", source,
-        "--full", "--archive", archive, "--info")
+        "--full", "--output", archive, "--info")
     child = prefix + "-archive"
     names.append(child)
     run("direct-restore", "create", "-n", child, "--from-snapshot", archive,

@@ -40,7 +40,7 @@ pub const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
 /// Maximum physical depth of one file-state closure.
 pub const MAX_FILE_LAYERS: usize = 256;
 /// Must-understand extensions implemented by this runtime.
-pub const SUPPORTED_REQUIRES: &[&str] = &[];
+pub const SUPPORTED_REQUIRES: &[&str] = &[super::RESTORE_DEFAULTS_EXTENSION];
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -474,6 +474,7 @@ impl Manifest {
         for value in self.extensions.values() {
             validate_json_value(value, 0)?;
         }
+        self.restore_defaults()?;
         Ok(())
     }
 
@@ -874,6 +875,34 @@ mod tests {
             requires: Vec::new(),
             extensions: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn restore_defaults_are_required_bounded_and_round_trip() {
+        let mut manifest = descriptor();
+        let original = manifest.to_canonical_bytes().unwrap();
+        manifest
+            .set_restore_defaults(super::super::RestoreDefaults::default())
+            .unwrap();
+        assert_eq!(manifest.to_canonical_bytes().unwrap(), original);
+        let defaults = super::super::RestoreDefaults {
+            user: Some("0:0".into()),
+        };
+        manifest.set_restore_defaults(defaults.clone()).unwrap();
+        assert!(
+            manifest
+                .requires
+                .iter()
+                .any(|key| key == super::super::RESTORE_DEFAULTS_EXTENSION)
+        );
+        assert!(manifest.unsupported_requires().is_empty());
+        let restored = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
+        assert_eq!(restored.restore_defaults().unwrap(), defaults);
+        manifest.extensions.insert(
+            super::super::RESTORE_DEFAULTS_EXTENSION.into(),
+            serde_json::json!({"user":""}),
+        );
+        assert!(manifest.validate().is_err());
     }
 
     #[test]

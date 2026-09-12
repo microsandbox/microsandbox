@@ -62,6 +62,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<sandbox::PySandboxStopResult>()?;
     m.add_class::<sandbox::PySandboxPingResult>()?;
     m.add_class::<sandbox::PySandboxTouchResult>()?;
+    m.add_class::<sandbox::PyExternalMountWarning>()?;
     m.add_class::<sandbox::PySandboxPage>()?;
     m.add_class::<sandbox_handle::PySandboxHandle>()?;
     m.add_class::<exec::PyExecOutput>()?;

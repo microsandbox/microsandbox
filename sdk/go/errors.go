@@ -161,6 +161,9 @@ const (
 
 	// ErrSnapshotSourceRecovery indicates capture succeeded but source recovery failed.
 	ErrSnapshotSourceRecovery
+
+	// ErrStopTimeout indicates graceful shutdown exceeded its budget without requesting a kill.
+	ErrStopTimeout
 )
 
 func (k ErrorKind) String() string {
@@ -181,6 +184,8 @@ func (k ErrorKind) String() string {
 		return "VolumeAlreadyExists"
 	case ErrExecTimeout:
 		return "ExecTimeout"
+	case ErrStopTimeout:
+		return "StopTimeout"
 	case ErrExecFailed:
 		return "ExecFailed"
 	case ErrFilesystem:
@@ -368,6 +373,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrVolumeAlreadyExists
 	case ffi.KindExecTimeout:
 		return ErrExecTimeout
+	case ffi.KindStopTimeout:
+		return ErrStopTimeout
 	case ffi.KindNoDefaultCommand:
 		return ErrNoDefaultCommand
 	case ffi.KindFilesystem:

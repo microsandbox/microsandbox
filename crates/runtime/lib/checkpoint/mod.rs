@@ -1,13 +1,17 @@
 //! Runtime-owned composite checkpoint production.
 
 #[cfg(feature = "runner")]
+mod additional_disk;
+#[cfg(feature = "runner")]
 mod capture_pipeline;
 #[cfg(feature = "runner")]
 mod coordinator;
 mod disk;
+mod external_mounts;
 mod local;
 mod local_memory;
 mod memory_cache;
+mod network;
 mod object_pipeline;
 #[cfg(feature = "runner")]
 mod restore;
@@ -24,11 +28,13 @@ pub use disk::{
 };
 #[cfg(feature = "runner")]
 pub(crate) use disk::{recover_runtime_owned_root, seed_restored_root_disk};
+pub use external_mounts::ExternalMountAuthorization;
 pub use local::LocalBranchState;
 pub use local_memory::LocalMemory;
 pub use memory_cache::{CachedMemory, CachedMemoryRegion, MemoryCache};
+pub use network::captured_gateway_mac;
 #[cfg(feature = "runner")]
-pub(crate) use restore::{PreparedCheckpointRestore, RestoredAgentState};
+pub(crate) use restore::{ExternalMountReport, PreparedCheckpointRestore, RestoredAgentState};
 
 //--------------------------------------------------------------------------------------------------
 // Functions

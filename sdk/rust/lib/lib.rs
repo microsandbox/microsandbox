@@ -22,6 +22,8 @@ pub(crate) mod db;
 pub mod image;
 pub mod logs;
 #[cfg(feature = "local")]
+pub mod progress;
+#[cfg(feature = "local")]
 pub mod runtime;
 pub mod sandbox;
 #[cfg(feature = "local")]
@@ -64,6 +66,8 @@ pub use microsandbox_protocol as protocol;
 pub use microsandbox_types::RegistryAuth;
 pub use microsandbox_types::SandboxLogLevel as LogLevel;
 pub use microsandbox_utils::size;
+#[cfg(feature = "local")]
+pub use progress::{CreationProgress, CreationProgressHandle, StartupPhase, StartupProgress};
 pub use sandbox::exec::{ExecControl, ExecEvent, ExecHandle};
 #[cfg(feature = "ssh")]
 pub use sandbox::ssh::{
@@ -88,10 +92,11 @@ pub use sandbox::{
     TlsConfigPatch,
 };
 pub use sandbox::{
-    ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpecPatch, Sandbox,
-    SandboxConfig, SandboxConfigPatch, SandboxListBuilder, SandboxMetrics, SandboxPage,
-    SandboxPingResult, SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch,
-    SandboxTouchResult, VsockSpecPatch, validate_sandbox_name,
+    ExecOutput, ExternalMountRestorePolicy, ExternalMountWarning, MAX_HOSTNAME_BYTES,
+    MAX_SANDBOX_NAME_BYTES, NetworkSpecPatch, Sandbox, SandboxConfig, SandboxConfigPatch,
+    SandboxListBuilder, SandboxMetrics, SandboxPage, SandboxPingResult, SandboxPolicyPatch,
+    SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxTouchResult, VsockSpecPatch,
+    validate_sandbox_name,
 };
 #[cfg(feature = "local")]
 pub use snapshot::{

@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	// Restart and Destroy retain their explicit convergence deadline; Stop has none.
 	defaultStopTimeout = 10 * time.Second
 	defaultKillTimeout = 5 * time.Second
 )
@@ -88,42 +89,43 @@ func resolveRegistryCACertPaths(o *SandboxConfig) error {
 // Extracted so tests can assert the JSON envelope without booting the runtime.
 func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
-		Image:             o.Image,
-		ImageFstype:       o.ImageFstype,
-		ImageBind:         o.ImageBind,
-		Snapshot:          o.Snapshot,
-		SnapshotDiskOnly:  o.SnapshotDiskOnly,
-		SnapshotBase:      o.SnapshotBase,
-		MemoryMiB:         o.MemoryMiB,
-		CPUs:              o.CPUs,
-		MaxMemoryMiB:      o.MaxMemoryMiB,
-		MaxCPUs:           o.MaxCPUs,
-		CPUPlacement:      string(o.CPUPlacement),
-		PlacementProfile:  o.PlacementProfile,
-		THP:               string(o.THP),
-		Forked:            o.Forked,
-		Workdir:           o.Workdir,
-		Shell:             o.Shell,
-		SecurityProfile:   string(o.SecurityProfile),
-		DeploymentProfile: string(o.DeploymentProfile),
-		Hostname:          o.Hostname,
-		User:              o.User,
-		Replace:           o.Replace,
-		Env:               o.Env,
-		Labels:            o.Labels,
-		Detached:          o.Detached,
-		Ephemeral:         o.Ephemeral,
-		LogLevel:          string(o.LogLevel),
-		QuietLogs:         o.QuietLogs,
-		Scripts:           o.Scripts,
-		PullPolicy:        string(o.PullPolicy),
-		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs:   durationSecsCeil(o.IdleTimeout),
-		Ports:             o.Ports,
-		PortsUDP:          o.PortsUDP,
-		PortBindings:      buildFFIPortBindings(o.PortBindings),
-		Vsock:             buildFFIVsockRoutes(o.Vsock),
-		RegistryInsecure:  o.RegistryInsecure,
+		Image:               o.Image,
+		ImageFstype:         o.ImageFstype,
+		ImageBind:           o.ImageBind,
+		Snapshot:            o.Snapshot,
+		SnapshotDiskOnly:    o.SnapshotDiskOnly,
+		SnapshotBase:        o.SnapshotBase,
+		MemoryMiB:           o.MemoryMiB,
+		CPUs:                o.CPUs,
+		MaxMemoryMiB:        o.MaxMemoryMiB,
+		MaxCPUs:             o.MaxCPUs,
+		CPUPlacement:        string(o.CPUPlacement),
+		PlacementProfile:    o.PlacementProfile,
+		THP:                 string(o.THP),
+		Forked:              o.Forked,
+		ExternalMountPolicy: string(o.ExternalMountPolicy),
+		Workdir:             o.Workdir,
+		Shell:               o.Shell,
+		SecurityProfile:     string(o.SecurityProfile),
+		DeploymentProfile:   string(o.DeploymentProfile),
+		Hostname:            o.Hostname,
+		User:                o.User,
+		Replace:             o.Replace,
+		Env:                 o.Env,
+		Labels:              o.Labels,
+		Detached:            o.Detached,
+		Ephemeral:           o.Ephemeral,
+		LogLevel:            string(o.LogLevel),
+		QuietLogs:           o.QuietLogs,
+		Scripts:             o.Scripts,
+		PullPolicy:          string(o.PullPolicy),
+		MaxDurationSecs:     durationSecsCeil(o.MaxDuration),
+		IdleTimeoutSecs:     durationSecsCeil(o.IdleTimeout),
+		Ports:               o.Ports,
+		PortsUDP:            o.PortsUDP,
+		PortBindings:        buildFFIPortBindings(o.PortBindings),
+		Vsock:               buildFFIVsockRoutes(o.Vsock),
+		RegistryInsecure:    o.RegistryInsecure,
 	}
 	if o.Entrypoint != nil {
 		entrypoint := append([]string{}, o.Entrypoint...)
@@ -277,15 +279,24 @@ func durationMillisCeil(d time.Duration) uint64 {
 	if d <= 0 {
 		return 0
 	}
-	return uint64((d + time.Millisecond - 1) / time.Millisecond)
+	// Divide before rounding so a large valid Duration cannot overflow.
+	millis := uint64(d / time.Millisecond)
+	if d%time.Millisecond != 0 {
+		millis++
+	}
+	return millis
 }
 
-func stopTimeoutMillis(opts []StopOption) uint64 {
-	o := lifecycleOptions{timeout: defaultStopTimeout}
+func stopTimeoutMillis(opts []StopOption) *uint64 {
+	o := lifecycleOptions{}
 	for _, opt := range opts {
 		opt(&o)
 	}
-	return durationMillisCeil(o.timeout)
+	if !o.timeoutSet {
+		return nil
+	}
+	timeout := durationMillisCeil(o.timeout)
+	return &timeout
 }
 
 func killTimeoutMillis(opts []KillOption) uint64 {
@@ -333,17 +344,17 @@ func sandboxTouchResultFromFFI(result *ffi.SandboxTouchResult) *SandboxTouchResu
 // buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
 func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	out := &ffi.NetworkOptions{
-		DNSRebindProtection: n.DNSRebindProtection,
-		DenyDomains:         n.DenyDomains,
-		DenyDomainSuffixes:  n.DenyDomainSuffixes,
-		Ports:               n.Ports,
-		PortBindings:        buildFFIPortBindings(n.PortBindings),
-		IPv4Pool:            n.IPv4Pool,
-		IPv6Pool:            n.IPv6Pool,
-		MaxConnections:      n.MaxConnections,
-		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
+		DNSRebindProtection:   n.DNSRebindProtection,
+		DenyDomains:           n.DenyDomains,
+		DenyDomainSuffixes:    n.DenyDomainSuffixes,
+		Ports:                 n.Ports,
+		PortBindings:          buildFFIPortBindings(n.PortBindings),
+		IPv4Pool:              n.IPv4Pool,
+		IPv6Pool:              n.IPv6Pool,
+		MaxConnections:        n.MaxConnections,
+		RateLimiter:           buildFFINetworkRateLimiter(n.RateLimiter),
 		SecretViolationAction: string(n.SecretViolationAction),
-		TrustHostCAs:        n.TrustHostCAs,
+		TrustHostCAs:          n.TrustHostCAs,
 	}
 
 	if n.Strict {
@@ -572,7 +583,8 @@ type sandboxListOptions struct {
 type SandboxListOption func(*sandboxListOptions)
 
 type lifecycleOptions struct {
-	timeout time.Duration
+	timeout    time.Duration
+	timeoutSet bool
 }
 
 type connectOrStartOptions struct {
@@ -627,9 +639,13 @@ type SandboxTouchResult struct {
 	ActivitySeq uint64
 }
 
-// WithStopTimeout sets how long Stop waits for graceful shutdown before force-killing.
+// WithStopTimeout bounds Stop's wait for graceful shutdown. Expiry returns an
+// error without force-killing; zero expires before sending a shutdown request.
 func WithStopTimeout(timeout time.Duration) StopOption {
-	return func(o *lifecycleOptions) { o.timeout = timeout }
+	return func(o *lifecycleOptions) {
+		o.timeout = timeout
+		o.timeoutSet = true
+	}
 }
 
 // WithKillTimeout sets how long Kill waits for stopped-state observation.
@@ -913,9 +929,16 @@ func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrSta
 	return &Sandbox{inner: inner}, nil
 }
 
-// Stop gracefully stops the sandbox and waits until stopped state is observed.
+// Stop requests graceful shutdown and waits for this exact sandbox run to finish.
+// There is no built-in timeout. Context cancellation or WithStopTimeout ends only
+// the wait and never force-kills the sandbox.
 func (h *SandboxHandle) Stop(ctx context.Context, opts ...StopOption) error {
-	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "stop", ffi.SandboxHandleLifecycleOptions{TimeoutMs: stopTimeoutMillis(opts)}))
+	return wrapFFI(ffi.StopSandboxHandle(ctx, h.name, h.id, stopTimeoutMillis(opts)))
+}
+
+// StopWithTimeout bounds graceful shutdown observation without force-killing.
+func (h *SandboxHandle) StopWithTimeout(ctx context.Context, timeout time.Duration) error {
+	return h.Stop(ctx, WithStopTimeout(timeout))
 }
 
 // RequestStop requests graceful shutdown and returns once the request is sent.
@@ -1034,13 +1057,40 @@ func (s *Sandbox) Name() string { return s.inner.Name() }
 // ID returns the stable identity of this persisted sandbox.
 func (s *Sandbox) ID() string { return s.inner.ID() }
 
+// ExternalMountWarning describes an external filesystem mismatch accepted during relaxed restore.
+type ExternalMountWarning struct {
+	GuestPath   string   `json:"guest_path"`
+	Reason      string   `json:"reason"`
+	StaleInodes []uint64 `json:"stale_inodes"`
+}
+
+// RestoreWarnings returns the structured warnings retained by relaxed full restore.
+func (s *Sandbox) RestoreWarnings(ctx context.Context) ([]ExternalMountWarning, error) {
+	data, err := s.inner.RestoreWarnings(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	var warnings []ExternalMountWarning
+	if err := json.Unmarshal([]byte(data), &warnings); err != nil {
+		return nil, err
+	}
+	return warnings, nil
+}
+
 func (s *Sandbox) identityHandle() *SandboxHandle {
 	return &SandboxHandle{name: s.Name(), id: s.ID(), backendKind: s.BackendKind()}
 }
 
-// Stop gracefully stops the sandbox and waits until stopped state is observed.
+// Stop requests graceful shutdown and waits for this exact sandbox run to finish.
+// There is no built-in timeout. Context cancellation or WithStopTimeout ends only
+// the wait and never force-kills the sandbox.
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
 	return wrapFFI(s.inner.Stop(ctx, stopTimeoutMillis(opts)))
+}
+
+// StopWithTimeout bounds graceful shutdown observation without force-killing.
+func (s *Sandbox) StopWithTimeout(ctx context.Context, timeout time.Duration) error {
+	return s.Stop(ctx, WithStopTimeout(timeout))
 }
 
 // RequestStop requests graceful shutdown and returns once the request is sent.

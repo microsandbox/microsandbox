@@ -154,4 +154,4 @@ For a batch, `--set-head` requires one unambiguous tip; it refuses competing tip
 
 Missing historical checkpoints are okay when payload dependencies are complete. But a missing parent may prevent proving a fast-forward. Filling a history hole does not retrospectively select some other retained tip; select that tip explicitly or import it again once its ancestry is known.
 
-Direct archive capture (`snapshot create --archive`) and direct archive restore still skip installed snapshot directories. `msb branch` still creates a local child without publishing a durable snapshot. Neither operation implicitly moves a group's head; a later explicit capture can join a group using the child's recorded ancestry.
+Direct archive capture (`snapshot create --output PATH`, or `-o PATH`) and direct archive restore still skip installed snapshot directories. `msb branch` still creates a local child without publishing a durable snapshot. Neither operation implicitly moves a group's head; a later explicit capture can join a group using the child's recorded ancestry.

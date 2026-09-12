@@ -186,10 +186,8 @@ impl JsSandboxHandle {
 
     /// Stop the sandbox gracefully.
     ///
-    /// Lets the sandbox finish writing any pending data to disk before
-    /// it exits, so files written inside the sandbox aren't lost across
-    /// a later restart. Waits 10_000 ms by default before force-kill;
-    /// override with `stopWithTimeout(timeoutMs)`.
+    /// Wait indefinitely for the targeted runtime to finish gracefully and release
+    /// ownership. No implicit kill; use `stopWithTimeout` for a bounded wait.
     #[napi]
     pub async fn stop(&self) -> Result<()> {
         self.inner.stop().await.map_err(to_napi_error)
@@ -199,7 +197,11 @@ impl JsSandboxHandle {
     #[napi]
     pub async fn branch(&self, name: String) -> Result<crate::sandbox::Sandbox> {
         Ok(crate::sandbox::Sandbox::from_rust(
-            self.inner.branch(name).await.map_err(to_napi_error)?,
+            self.inner
+                .branch(name)
+                .branch()
+                .await
+                .map_err(to_napi_error)?,
         ))
     }
 
@@ -221,8 +223,8 @@ impl JsSandboxHandle {
         self.inner.request_stop().await.map_err(to_napi_error)
     }
 
-    /// Stop the sandbox gracefully with an explicit timeout in
-    /// milliseconds before escalation.
+    /// One graceful-completion budget in milliseconds. Timeout rejects without killing;
+    /// zero expires before dispatch.
     #[napi]
     pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
         let timeout = std::time::Duration::from_millis(timeout_ms.into());

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ExecTimeoutError,
+  StopTimeoutError,
   ImageNotFoundError,
   MetricsDisabledError,
   MicrosandboxError,
@@ -12,6 +13,14 @@ import {
 import { mapNapiError } from "../../dist/internal/error-mapping.js";
 
 describe("mapNapiError", () => {
+  it("preserves graceful stop timeout as a distinct error", () => {
+    const raw = new Error('[StopTimeout] sandbox "busy" timed out; no kill was requested');
+    const mapped = mapNapiError(raw);
+    expect(mapped).toBeInstanceOf(StopTimeoutError);
+    expect((mapped as StopTimeoutError).code).toBe("stopTimeout");
+    expect(mapped.message).toContain("no kill was requested");
+    expect(mapped.cause).toBe(raw);
+  });
   for (const kind of ["installed", "archive", null]) {
     it(`retains source recovery metadata with ${kind ?? "unpublished"} artifact`, () => {
       const recovery = {

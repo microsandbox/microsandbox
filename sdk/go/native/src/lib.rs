@@ -35,9 +35,12 @@
 // be repetitive without adding signal.
 #![allow(clippy::missing_safety_doc)]
 
+mod creation_progress;
+
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
+    future::Future,
     net::IpAddr,
     os::raw::{c_char, c_uchar},
     path::PathBuf,
@@ -453,6 +456,7 @@ mod error_kind {
     pub const VOLUME_NOT_FOUND: &str = "volume_not_found";
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
+    pub const STOP_TIMEOUT: &str = "stop_timeout";
     pub const NO_DEFAULT_COMMAND: &str = "no_default_command";
     pub const INVALID_CONFIG: &str = "invalid_config";
     pub const INVALID_ARGUMENT: &str = "invalid_argument";
@@ -534,6 +538,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
+            MicrosandboxError::StopTimeout { .. } => error_kind::STOP_TIMEOUT,
             MicrosandboxError::NoDefaultCommand => error_kind::NO_DEFAULT_COMMAND,
             MicrosandboxError::InvalidConfig(_) => error_kind::INVALID_CONFIG,
             MicrosandboxError::SandboxFsOps(_) => error_kind::FILESYSTEM,
@@ -1041,6 +1046,7 @@ struct RootDiskOpts {
 
 #[derive(serde::Deserialize)]
 struct SandboxCreateOpts {
+    creation_progress: Option<u64>,
     image: Option<String>,
     image_fstype: Option<String>,
     /// Host directory used directly as the root filesystem (bind rootfs).
@@ -1064,6 +1070,7 @@ struct SandboxCreateOpts {
     placement_profile: Option<String>,
     thp: Option<String>,
     forked: Option<bool>,
+    external_mount_policy: Option<microsandbox::sandbox::ExternalMountRestorePolicy>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -2304,6 +2311,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if opts.forked.unwrap_or(false) {
                 builder = builder.forked();
             }
+            if let Some(policy) = opts.external_mount_policy {
+                builder = builder.external_mount_policy(policy);
+            }
             if let Some(w) = opts.workdir {
                 builder = builder.workdir(w);
             }
@@ -2482,6 +2492,8 @@ pub unsafe extern "C" fn msb_sandbox_create(
 
             let sandbox = if connect_or_create {
                 builder.detached(opts.detached).connect_or_create().await?
+            } else if let Some(progress) = opts.creation_progress {
+                creation_progress::create(builder.detached(opts.detached), progress).await?
             } else if opts.detached {
                 builder.create_detached().await?
             } else {
@@ -2751,6 +2763,36 @@ async fn identified_sandbox_handle(
     Ok(handle)
 }
 
+/// Include catalog lookup in the same deadline as graceful completion. In particular, an
+/// explicit zero must not poll lookup (which may reconcile catalog/runtime state).
+async fn stop_identified_with_timeout<L>(
+    name: &str,
+    identity: &str,
+    timeout: Duration,
+    lookup: L,
+) -> Result<(), FfiError>
+where
+    L: Future<Output = Result<microsandbox::sandbox::SandboxHandle, FfiError>>,
+{
+    let expired = || {
+        FfiError::from(MicrosandboxError::StopTimeout {
+            name: name.to_string(),
+            identity: identity.to_string(),
+            timeout,
+        })
+    };
+    if timeout.is_zero() {
+        return Err(expired());
+    }
+    tokio::time::timeout(timeout, async {
+        let handle = lookup.await?;
+        // Do not restart the budget after lookup; the outer deadline covers both stages.
+        handle.stop().await.map_err(FfiError::from)
+    })
+    .await
+    .map_err(|_| expired())?
+}
+
 fn registered_sandbox_json(sandbox: Sandbox) -> Result<String, FfiError> {
     let backend_kind = sandbox.backend_kind().as_str();
     let id = sandbox.id().to_string();
@@ -2785,6 +2827,19 @@ pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
             })?;
 
         Ok(Box::pin(async move {
+            if operation == "stop_with_timeout" {
+                let timeout = opts.timeout_ms.ok_or_else(|| {
+                    FfiError::invalid_argument("stop_with_timeout requires timeout_ms")
+                })?;
+                stop_identified_with_timeout(
+                    &name,
+                    &expected_id,
+                    Duration::from_millis(timeout),
+                    identified_sandbox_handle(&name, &expected_id),
+                )
+                .await?;
+                return Ok(r#"{"ok":true}"#.to_string());
+            }
             let handle = identified_sandbox_handle(&name, &expected_id).await?;
             match operation.as_str() {
                 "refresh" => Ok(sandbox_handle_json(&handle)),
@@ -2809,6 +2864,10 @@ pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
                     handle
                         .stop_with_timeout(Duration::from_millis(opts.timeout_ms.unwrap_or(10_000)))
                         .await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "stop_gracefully" => {
+                    handle.stop().await?;
                     Ok(r#"{"ok":true}"#.to_string())
                 }
                 "request_stop" => {
@@ -3198,6 +3257,23 @@ pub unsafe extern "C" fn msb_sandbox_detach(
 // Sandbox — stop (graceful) and stop_and_wait
 // ---------------------------------------------------------------------------
 
+/// Read structured filesystem warnings retained by relaxed full restore.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_restore_warnings(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sandbox = get(handle)?;
+        Ok(Box::pin(async move {
+            let warnings = sandbox.restore_warnings().await.map_err(FfiError::from)?;
+            serde_json::to_string(&warnings).map_err(|error| FfiError::internal(error.to_string()))
+        }))
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_stop(
     cancel_id: u64,
@@ -3215,6 +3291,39 @@ pub unsafe extern "C" fn msb_sandbox_stop(
             Ok(r#"{"ok":true}"#.into())
         }))
     })
+}
+
+/// Wait for graceful shutdown without forced termination. An absent timeout is unbounded.
+/// This distinct symbol also gates the revised stop semantics for older native libraries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_stop_gracefully(
+    cancel_id: u64,
+    handle: Handle,
+    has_timeout: u8,
+    timeout_ms: u64,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let timeout = graceful_stop_timeout(has_timeout, timeout_ms)?;
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            match timeout {
+                Some(timeout) => sb.stop_with_timeout(timeout).await,
+                None => sb.stop().await,
+            }
+            .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+fn graceful_stop_timeout(has_timeout: u8, timeout_ms: u64) -> Result<Option<Duration>, FfiError> {
+    match has_timeout {
+        0 => Ok(None),
+        1 => Ok(Some(Duration::from_millis(timeout_ms))),
+        _ => Err(FfiError::invalid_argument("has_timeout must be 0 or 1")),
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -3253,7 +3362,7 @@ pub unsafe extern "C" fn msb_sandbox_branch(
         };
         Ok(Box::pin(async move {
             let sb = if let Some(live) = live {
-                live.branch(child).await.map_err(FfiError::from)?
+                live.branch(child).branch().await.map_err(FfiError::from)?
             } else {
                 Sandbox::get(&source)
                     .await
@@ -7379,6 +7488,85 @@ fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bounded_stop_zero_does_not_poll_identity_lookup() {
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        let error = stop_identified_with_timeout("worker", "local:42", Duration::ZERO, async {
+            polled.store(true, Ordering::SeqCst);
+            std::future::pending().await
+        })
+        .await
+        .unwrap_err();
+
+        assert!(!polled.load(Ordering::SeqCst));
+        assert_eq!(error.kind, error_kind::STOP_TIMEOUT);
+        assert!(error.message.contains("worker"));
+        assert!(error.message.contains("local:42"));
+        assert!(error.message.contains("0ns"));
+    }
+
+    #[tokio::test]
+    async fn bounded_stop_deadline_includes_pending_identity_lookup() {
+        struct DropProbe<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        let dropped = std::sync::atomic::AtomicBool::new(false);
+        let timeout = Duration::from_millis(20);
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            stop_identified_with_timeout("worker", "local:42", timeout, async {
+                let _probe = DropProbe(&dropped);
+                polled.store(true, Ordering::SeqCst);
+                std::future::pending().await
+            }),
+        )
+        .await
+        .expect("pending catalog lookup escaped the stop deadline")
+        .unwrap_err();
+
+        assert!(polled.load(Ordering::SeqCst));
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(error.kind, error_kind::STOP_TIMEOUT);
+        assert!(error.message.contains("worker"));
+        assert!(error.message.contains("local:42"));
+        assert!(error.message.contains("20ms"));
+    }
+
+    #[tokio::test]
+    async fn bounded_stop_preserves_identity_lookup_failure() {
+        let error =
+            stop_identified_with_timeout("worker", "local:42", Duration::from_secs(1), async {
+                Err(FfiError::new(
+                    error_kind::SANDBOX_REPLACED,
+                    "identity changed",
+                ))
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, error_kind::SANDBOX_REPLACED);
+        assert_eq!(error.message, "identity changed");
+    }
+
+    #[test]
+    fn graceful_stop_timeout_preserves_absent_zero_and_explicit_values() {
+        let timeout = |has_timeout, millis| {
+            graceful_stop_timeout(has_timeout, millis)
+                .unwrap_or_else(|error| panic!("{}", error.message))
+        };
+        assert_eq!(timeout(0, 0), None);
+        assert_eq!(timeout(0, u64::MAX), None);
+        assert_eq!(timeout(1, 0), Some(Duration::ZERO));
+        assert_eq!(timeout(1, 30_000), Some(Duration::from_secs(30)));
+        assert_eq!(timeout(1, u64::MAX), Some(Duration::from_millis(u64::MAX)));
+        assert!(graceful_stop_timeout(2, 0).is_err());
+    }
 
     #[test]
     fn source_recovery_error_preserves_ffi_payload() {

@@ -1,4 +1,5 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
+import { validateStopTimeout } from "./internal/stop.js";
 import {
   compactionResultFromJson,
   type DiskCompactionOptions,
@@ -179,10 +180,8 @@ export class SandboxHandle {
   }
 
   /**
-   * Gracefully shut down the sandbox. Lets it finish writing any
-   * pending data to disk before it exits, so files written inside the
-   * sandbox aren't lost across a later restart. Force-kills after
-   * 10_000 ms by default; use `stopWithTimeout` to override.
+   * Wait indefinitely for graceful shutdown and release of the targeted runtime's
+   * ownership. No implicit kill; use `stopWithTimeout` for a bounded wait.
    */
   async stop(): Promise<void> {
     await withMappedErrors(() => this.inner.stop());
@@ -209,12 +208,11 @@ export class SandboxHandle {
   }
 
   /**
-   * Stop gracefully with an explicit timeout in milliseconds. If the
-   * sandbox is still running after this window, it is force-killed.
-   * `0` force-kills immediately. Resolves successfully either way —
-   * does not throw on timeout expiry.
+   * One graceful-completion budget in milliseconds. Expiry throws StopTimeoutError
+   * without killing. Zero expires before dispatch; a delivered request may finish later.
    */
   async stopWithTimeout(timeoutMs: number): Promise<void> {
+    validateStopTimeout(timeoutMs);
     await withMappedErrors(() => this.inner.stopWithTimeout(timeoutMs));
   }
 

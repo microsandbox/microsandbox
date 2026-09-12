@@ -42,6 +42,26 @@ pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Backend>> {
     Ok(backend)
 }
 
+/// Display relaxed-restore diagnostics even when ordinary progress is quiet.
+pub(crate) async fn display_restore_warnings(sandbox: &Sandbox) {
+    if !sandbox.config().resumed_from_full_snapshot() {
+        return;
+    }
+    match sandbox.restore_warnings().await {
+        Ok(warnings) => {
+            for warning in warnings {
+                ui::warn(&format!(
+                    "external mount {}: {} (stale inodes: {:?})",
+                    warning.guest_path, warning.reason, warning.stale_inodes,
+                ));
+            }
+        }
+        // Creation already succeeded. Reporting a diagnostic-read failure must not imply
+        // rollback or discard the live handle and accidentally trigger its drop policy.
+        Err(error) => ui::warn(&format!("could not read restore warnings: {error}")),
+    }
+}
+
 /// Borrow the `LocalBackend` inside the resolved default backend, or error.
 pub fn local_backend_ref(backend: &Arc<dyn Backend>) -> anyhow::Result<&LocalBackend> {
     backend
@@ -126,10 +146,6 @@ pub struct SandboxOpts {
     /// Guest transparent huge-page policy selected at boot.
     #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
     pub thp: Option<String>,
-
-    /// Restore a full snapshot with private copy-on-write memory.
-    #[arg(long, requires = "from_snapshot", conflicts_with = "disk_only")]
-    pub forked: bool,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     /// OPTIONS may include paired `uid=<N>,gid=<N>` for directory-backed mounts.
@@ -988,7 +1004,6 @@ impl SandboxOpts {
             || self.memory.is_some()
             || self.max_memory.is_some()
             || self.thp.is_some()
-            || self.forked
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -1264,9 +1279,6 @@ fn apply_sandbox_opts_inner(
             .map_err(anyhow::Error::msg)?;
         builder = builder.thp(policy);
     }
-    if opts.forked {
-        builder = builder.forked();
-    }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);
     }
@@ -1424,7 +1436,7 @@ fn apply_sandbox_opts_inner(
 
 /// Parse `HOST_PATH:PORT[/stream|/dgram]` without treating colons in the
 /// host path as separators. Stream is intentionally the compact default.
-fn parse_vsock_route(spec: &str) -> anyhow::Result<(PathBuf, u32, VsockSocketType)> {
+pub(crate) fn parse_vsock_route(spec: &str) -> anyhow::Result<(PathBuf, u32, VsockSocketType)> {
     let (host_socket, endpoint) = spec.rsplit_once(':').ok_or_else(|| {
         anyhow::anyhow!("--vsock must use HOST_PATH:PORT[/stream|/dgram], got {spec:?}")
     })?;
@@ -1793,6 +1805,23 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
     Ok(builder.volume(guest, move |mount| {
         configure_volume_mount(mount, &source, is_path, options)
     }))
+}
+
+/// Restore-only guest-path shorthand; explicit mappings retain the existing path grammar.
+pub(crate) fn parse_restore_volume(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
+    if spec.starts_with('/') && !spec.contains(':') {
+        return Ok((spec.into(), MountBuilder::new(spec).captured()));
+    }
+    let parsed = parse_volume_mount_spec(spec)?;
+    let guest = parsed.guest.to_string();
+    let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
+    let mount = configure_volume_mount(
+        MountBuilder::new(&guest),
+        parsed.source,
+        is_path,
+        parsed.options,
+    );
+    Ok((guest, mount))
 }
 
 /// Parse and materialize a bind mount with the shared `-v/--volume` options.

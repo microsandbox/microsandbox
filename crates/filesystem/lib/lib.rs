@@ -23,12 +23,16 @@ pub mod backends;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(any(unix, windows))]
+pub use backends::passthroughfs::ExternalCheckpointOptions;
 #[cfg(windows)]
 pub use backends::passthroughfs::{
     HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
 };
 #[cfg(windows)]
 pub use backends::singlefilefs::SingleFileFs;
+#[cfg(any(unix, windows))]
+pub use backends::unavailable::UnavailableFs;
 #[cfg(unix)]
 pub use backends::{
     dualfs::{

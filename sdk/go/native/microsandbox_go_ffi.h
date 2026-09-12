@@ -164,11 +164,30 @@ char *msb_sandbox_close(uint64_t cancel_id, Handle handle, unsigned char *buf, u
 
 char *msb_sandbox_detach(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
+/**
+ * Read structured filesystem warnings retained by relaxed full restore.
+ */
+char *msb_sandbox_restore_warnings(uint64_t cancel_id,
+                                   Handle handle,
+                                   unsigned char *buf,
+                                   uintptr_t buf_len);
+
 char *msb_sandbox_stop(uint64_t cancel_id,
                        Handle handle,
                        uint64_t timeout_ms,
                        unsigned char *buf,
                        uintptr_t buf_len);
+
+/**
+ * Wait for graceful shutdown without forced termination. An absent timeout is unbounded.
+ * This distinct symbol also gates the revised stop semantics for older native libraries.
+ */
+char *msb_sandbox_stop_gracefully(uint64_t cancel_id,
+                                  Handle handle,
+                                  uint8_t has_timeout,
+                                  uint64_t timeout_ms,
+                                  unsigned char *buf,
+                                  uintptr_t buf_len);
 
 char *msb_sandbox_pause(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
@@ -988,5 +1007,14 @@ char *msb_sandbox_attach_shell(uint64_t cancel_id,
                                Handle handle,
                                unsigned char *buf,
                                uintptr_t buf_len);
+
+char *msb_creation_progress_open(unsigned char *buf, uintptr_t len);
+
+char *msb_creation_progress_recv(uint64_t cancel_id,
+                                 uint64_t id,
+                                 unsigned char *buf,
+                                 uintptr_t len);
+
+char *msb_creation_progress_close(uint64_t id, unsigned char *buf, uintptr_t len);
 
 #endif  /* MICROSANDBOX_GO_FFI_H */

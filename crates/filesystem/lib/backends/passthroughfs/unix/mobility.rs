@@ -3,15 +3,18 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
-    io,
-    os::fd::{FromRawFd, RawFd},
+    io::{self, Read},
+    os::{
+        fd::{AsRawFd, FromRawFd, RawFd},
+        unix::fs::MetadataExt,
+    },
     sync::{Arc, Mutex, RwLock, atomic::Ordering},
 };
 
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
 #[cfg(target_os = "macos")]
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 #[cfg(target_os = "macos")]
 use std::{
     ffi::{CStr, CString, OsStr},
@@ -20,6 +23,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{DirSnapshot, PassthroughDirEntry, PassthroughDirHandle, PassthroughFs, inode};
 use crate::backends::{
@@ -37,6 +41,7 @@ use crate::backends::{
 //--------------------------------------------------------------------------------------------------
 
 const KIND: &[u8; 8] = b"MSBPTUNX";
+const EXTERNAL_KIND: &[u8; 8] = b"MSBPTEX1";
 const MAX_PATH_DEPTH: usize = 256;
 const MAX_COMPONENT_BYTES: usize = 255;
 const GUEST_O_CREAT: u32 = 0x40;
@@ -56,6 +61,28 @@ struct PassthroughState {
     inodes: Vec<InodeState>,
     files: Vec<FileHandleState>,
     dirs: Vec<DirHandleState>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ExternalState {
+    state: PassthroughState,
+    identities: BTreeMap<u64, ObjectIdentity>,
+    invalid_inodes: BTreeSet<u64>,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
+struct ObjectIdentity {
+    device: u64,
+    inode: u64,
+    kind: u32,
+    permissions: u32,
+    owner: (u32, u32),
+    size: u64,
+    modified_seconds: i64,
+    modified_nanos: i64,
+    changed_seconds: i64,
+    changed_nanos: i64,
+    content: Vec<u8>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -89,6 +116,7 @@ struct DirEntryState {
 }
 
 pub(super) struct PreparedState {
+    invalid_inodes: BTreeSet<u64>,
     next_inode: u64,
     next_handle: u64,
     writeback: bool,
@@ -157,24 +185,105 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
         ));
     }
 
+    let state = PassthroughState {
+        next_inode: fs.next_inode.load(Ordering::Acquire),
+        next_handle: fs.next_handle.load(Ordering::Acquire),
+        writeback: fs.writeback.load(Ordering::Acquire),
+        quota: fs.quota.as_ref().map(|quota| quota.capture_state()),
+        inodes: inode_states,
+        files,
+        dirs,
+    };
+    if fs.cfg.external_checkpoint.is_none() {
+        return mobility::encode(KIND, &state);
+    }
+    if state.writeback {
+        return Err(invalid_state(
+            "external checkpoint cannot retain negotiated writeback cache",
+        ));
+    }
+    let identities = state
+        .inodes
+        .iter()
+        .map(|saved| {
+            let identity = object_identity(fs, saved)?;
+            let inodes = fs.inodes.read().unwrap();
+            let tracked = inodes
+                .get(&saved.inode)
+                .ok_or_else(|| invalid_state("captured inode disappeared"))?;
+            if (identity.device, identity.inode) != (tracked.dev, tracked.ino) {
+                return Err(invalid_state(
+                    "external pathname no longer names the guest's captured object",
+                ));
+            }
+            Ok((saved.inode, identity))
+        })
+        .collect::<io::Result<BTreeMap<_, _>>>()?;
     mobility::encode(
-        KIND,
-        &PassthroughState {
-            next_inode: fs.next_inode.load(Ordering::Acquire),
-            next_handle: fs.next_handle.load(Ordering::Acquire),
-            writeback: fs.writeback.load(Ordering::Acquire),
-            quota: fs.quota.as_ref().map(|quota| quota.capture_state()),
-            inodes: inode_states,
-            files,
-            dirs,
+        EXTERNAL_KIND,
+        &ExternalState {
+            state,
+            identities,
+            invalid_inodes: fs.invalid_inodes.read().unwrap().clone(),
         },
     )
 }
 
 pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedState> {
+    if let Some(options) = &fs.cfg.external_checkpoint {
+        let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+        validate_external_shape(&external)?;
+        validate_semantics(fs, &external.state, external.invalid_inodes.contains(&1))?;
+        let mut invalid = external.invalid_inodes;
+        // Reconstruct parents first. A missing parent invalidates its descendants even if
+        // an unrelated replacement happens to expose the same leaf names.
+        external
+            .state
+            .inodes
+            .sort_by_key(|saved| saved.components.len());
+        let mut invalid_paths = Vec::<Vec<Vec<u8>>>::new();
+        let mut verified = BTreeMap::new();
+        for saved in &external.state.inodes {
+            let identity = &external.identities[&saved.inode];
+            let current = object_identity(fs, saved);
+            let valid = !invalid_paths
+                .iter()
+                .any(|path| saved.components.starts_with(path))
+                && current
+                    .as_ref()
+                    .is_ok_and(|current| same_object(identity, current, options.remapped));
+            if !valid {
+                if !options.relaxed {
+                    return Err(invalid_state(format!(
+                        "external object {} is missing, replaced, or changed",
+                        saved.inode
+                    )));
+                }
+                invalid.insert(saved.inode);
+                invalid_paths.push(saved.components.clone());
+            } else {
+                verified.insert(saved.inode, current.expect("valid identity"));
+            }
+        }
+        external
+            .state
+            .inodes
+            .retain(|saved| !invalid.contains(&saved.inode));
+        external
+            .state
+            .files
+            .retain(|saved| !invalid.contains(&saved.inode));
+        external
+            .state
+            .dirs
+            .retain(|saved| !invalid.contains(&saved.inode));
+        let mut prepared = rebuild(fs, external.state, Some(&verified))?;
+        prepared.invalid_inodes = invalid;
+        return Ok(prepared);
+    }
     let state: PassthroughState = mobility::decode(KIND, bytes)?;
-    validate_semantics(fs, &state)?;
-    rebuild(fs, state)
+    validate_semantics(fs, &state, false)?;
+    rebuild(fs, state, None)
 }
 
 pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
@@ -190,7 +299,209 @@ pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
     fs.next_handle
         .store(prepared.next_handle, Ordering::Release);
     fs.writeback.store(prepared.writeback, Ordering::Release);
+    if let Some(options) = &fs.cfg.external_checkpoint {
+        *options.invalid_inodes.lock().unwrap() = prepared.invalid_inodes.iter().copied().collect();
+    }
+    *fs.invalid_inodes.write().unwrap() = prepared.invalid_inodes;
     Ok(())
+}
+
+/// Validate an external payload without opening any destination path.
+pub(super) fn validate_unavailable(bytes: &[u8]) -> io::Result<()> {
+    let external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+    validate_external_shape(&external)?;
+    validate_shape(&external.state, false, external.invalid_inodes.contains(&1))
+}
+
+pub(super) fn prepare_single_file_state(
+    bytes: &[u8],
+    source: &std::ffi::CStr,
+    destination: &std::ffi::CStr,
+) -> io::Result<(
+    Vec<u8>,
+    crate::backends::passthroughfs::ExternalSingleFileIndex,
+)> {
+    let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+    validate_external_shape(&external)?;
+    validate_shape(&external.state, false, external.invalid_inodes.contains(&1))?;
+    if !external.state.dirs.is_empty() {
+        return Err(invalid_state(
+            "single-file state contains a real directory handle",
+        ));
+    }
+    validate_components(&[destination.to_bytes().to_vec()])?;
+    for inode in &mut external.state.inodes {
+        if inode.inode == 1 {
+            continue;
+        }
+        if inode.components != [source.to_bytes().to_vec()]
+            || external.identities[&inode.inode].kind != libc::S_IFREG as u32
+        {
+            return Err(invalid_state(
+                "single-file state references a sibling or non-file object",
+            ));
+        }
+        inode.components = vec![destination.to_bytes().to_vec()];
+    }
+    if external.state.files.iter().any(|handle| handle.inode == 1) {
+        return Err(invalid_state(
+            "single-file state opens the real parent directory",
+        ));
+    }
+    let index = crate::backends::passthroughfs::ExternalSingleFileIndex {
+        inodes: external
+            .state
+            .inodes
+            .iter()
+            .map(|inode| inode.inode)
+            .collect(),
+        files: external
+            .state
+            .files
+            .iter()
+            .map(|handle| (handle.handle, handle.inode))
+            .collect(),
+        invalid_inodes: external.invalid_inodes.clone(),
+    };
+    Ok((mobility::encode(EXTERNAL_KIND, &external)?, index))
+}
+
+fn validate_external_shape(external: &ExternalState) -> io::Result<()> {
+    if external.state.writeback
+        || external.identities.len() != external.state.inodes.len()
+        || external
+            .state
+            .inodes
+            .iter()
+            .any(|saved| !external.identities.contains_key(&saved.inode))
+        || external.invalid_inodes.iter().any(|inode| {
+            *inode == 0
+                || *inode == 2
+                || *inode >= external.state.next_inode
+                || external.identities.contains_key(inode)
+        })
+        || external
+            .identities
+            .values()
+            .any(|identity| match identity.kind {
+                kind if kind == libc::S_IFREG as u32 || kind == libc::S_IFLNK as u32 => {
+                    identity.content.len() != 32
+                }
+                kind if kind == libc::S_IFDIR as u32 => !identity.content.is_empty(),
+                _ => true,
+            })
+        || (external.invalid_inodes.contains(&1) && !external.state.inodes.is_empty())
+    {
+        return Err(invalid_state(
+            "invalid external filesystem identity manifest",
+        ));
+    }
+    Ok(())
+}
+
+fn same_object(saved: &ObjectIdentity, current: &ObjectIdentity, remapped: bool) -> bool {
+    saved.kind == current.kind
+        && (remapped || (saved.device == current.device && saved.inode == current.inode))
+        && (remapped || (saved.permissions == current.permissions && saved.owner == current.owner))
+        // Directory contents remain external and mutable. Existing directory iterators
+        // keep their captured sequence, while new lookups see the current namespace.
+        && (saved.kind == libc::S_IFDIR as u32
+            || (saved.size == current.size && saved.content == current.content
+                && (remapped || (saved.modified_seconds == current.modified_seconds
+                    && saved.modified_nanos == current.modified_nanos))))
+}
+
+fn object_identity(fs: &PassthroughFs, saved: &InodeState) -> io::Result<ObjectIdentity> {
+    let raw = open_inode_components(fs, &saved.components)?;
+    let pinned = unsafe { File::from_raw_fd(raw) };
+    let before = pinned.metadata()?;
+    let kind = before.mode() & libc::S_IFMT as u32;
+    let mut content = Vec::new();
+    if kind == libc::S_IFREG as u32 {
+        let fd = open_components(fs, &saved.components, libc::O_RDONLY | libc::O_NOFOLLOW)?;
+        let mut readable = unsafe { File::from_raw_fd(fd) };
+        let metadata = readable.metadata()?;
+        if (metadata.dev(), metadata.ino()) != (before.dev(), before.ino()) {
+            return Err(invalid_state(
+                "external object changed while reopening for capture",
+            ));
+        }
+        let mut hash = Sha256::new();
+        let mut buffer = [0_u8; 128 * 1024];
+        loop {
+            let count = readable.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+        content = hash.finalize().to_vec();
+    } else if kind == libc::S_IFLNK as u32 {
+        let (name, parent) = saved
+            .components
+            .split_last()
+            .ok_or_else(|| invalid_state("symlink root"))?;
+        let parent_fd = open_components(fs, parent, directory_open_flags())?;
+        let parent = unsafe { File::from_raw_fd(parent_fd) };
+        let name = std::ffi::CString::new(name.as_slice())
+            .map_err(|_| invalid_state("invalid symlink name"))?;
+        let mut target = vec![0_u8; 64 * 1024];
+        let count = unsafe {
+            libc::readlinkat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                target.as_mut_ptr().cast(),
+                target.len(),
+            )
+        };
+        if count < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if count as usize == target.len() {
+            return Err(invalid_state("external symlink target too long"));
+        }
+        target.truncate(count as usize);
+        content = Sha256::digest(target).to_vec();
+    } else if kind != libc::S_IFDIR as u32 {
+        return Err(invalid_state(
+            "external special objects are not checkpointable",
+        ));
+    }
+    let after = pinned.metadata()?;
+    if (
+        before.dev(),
+        before.ino(),
+        before.len(),
+        before.mtime(),
+        before.mtime_nsec(),
+        before.ctime(),
+        before.ctime_nsec(),
+    ) != (
+        after.dev(),
+        after.ino(),
+        after.len(),
+        after.mtime(),
+        after.mtime_nsec(),
+        after.ctime(),
+        after.ctime_nsec(),
+    ) {
+        return Err(invalid_state(
+            "external object changed while recording its identity",
+        ));
+    }
+    Ok(ObjectIdentity {
+        device: before.dev(),
+        inode: before.ino(),
+        kind,
+        permissions: before.mode() & 0o7777,
+        owner: (before.uid(), before.gid()),
+        size: before.len(),
+        modified_seconds: before.mtime(),
+        modified_nanos: before.mtime_nsec(),
+        changed_seconds: before.ctime(),
+        changed_nanos: before.ctime_nsec(),
+        content,
+    })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -258,7 +569,11 @@ fn capture_inodes(fs: &PassthroughFs) -> io::Result<Vec<InodeState>> {
 // Functions: Validation and reconstruction
 //--------------------------------------------------------------------------------------------------
 
-fn validate_semantics(fs: &PassthroughFs, state: &PassthroughState) -> io::Result<()> {
+fn validate_semantics(
+    fs: &PassthroughFs,
+    state: &PassthroughState,
+    invalid_root: bool,
+) -> io::Result<()> {
     if state.quota.is_some() != fs.quota.is_some() {
         return Err(invalid_state("passthrough quota configuration differs"));
     }
@@ -271,6 +586,10 @@ fn validate_semantics(fs: &PassthroughFs, state: &PassthroughState) -> io::Resul
         quota.validate_state(quota_state)?;
     }
 
+    validate_shape(state, fs.cfg.readonly(), invalid_root)
+}
+
+fn validate_shape(state: &PassthroughState, readonly: bool, invalid_root: bool) -> io::Result<()> {
     let mut inode_ids = BTreeSet::new();
     let mut paths = BTreeSet::new();
     let mut root_count = 0;
@@ -296,7 +615,7 @@ fn validate_semantics(fs: &PassthroughFs, state: &PassthroughState) -> io::Resul
         }
         max_inode = max_inode.max(inode.inode);
     }
-    if root_count != 1 || state.next_inode <= max_inode {
+    if root_count != usize::from(!invalid_root) || state.next_inode <= max_inode {
         return Err(invalid_state("invalid passthrough root or next inode"));
     }
 
@@ -307,7 +626,7 @@ fn validate_semantics(fs: &PassthroughFs, state: &PassthroughState) -> io::Resul
             || !handles.insert(handle.handle)
             || !inode_ids.contains(&handle.inode)
             || handle.flags & 0b11 == 0b11
-            || (fs.cfg.readonly() && handle.flags & 0b11 != 0)
+            || (readonly && handle.flags & 0b11 != 0)
         {
             return Err(invalid_state("invalid passthrough file handle"));
         }
@@ -344,7 +663,11 @@ fn validate_semantics(fs: &PassthroughFs, state: &PassthroughState) -> io::Resul
     Ok(())
 }
 
-fn rebuild(fs: &PassthroughFs, mut state: PassthroughState) -> io::Result<PreparedState> {
+fn rebuild(
+    fs: &PassthroughFs,
+    mut state: PassthroughState,
+    verified: Option<&BTreeMap<u64, ObjectIdentity>>,
+) -> io::Result<PreparedState> {
     state.inodes.sort_by(|left, right| {
         left.components
             .len()
@@ -365,8 +688,10 @@ fn rebuild(fs: &PassthroughFs, mut state: PassthroughState) -> io::Result<Prepar
     let mut inodes = MultikeyBTreeMap::new();
     for saved in &state.inodes {
         let fd = open_inode_components(fs, &saved.components)?;
-        let (alt_key, data) = inode_data_from_fd(fs, &inodes, saved, &path_ids, fd)?;
-        unsafe { libc::close(fd) };
+        let pinned = unsafe { File::from_raw_fd(fd) };
+        verify_reopened(&pinned, saved.inode, verified)?;
+        let (alt_key, data) =
+            inode_data_from_fd(fs, &inodes, saved, &path_ids, pinned.as_raw_fd())?;
         if inodes.get_alt(&alt_key).is_some() {
             return Err(invalid_state(
                 "multiple guest inodes resolve to one destination object",
@@ -383,12 +708,14 @@ fn rebuild(fs: &PassthroughFs, mut state: PassthroughState) -> io::Result<Prepar
         let mut flags = restored_open_flags(saved.flags, state.writeback);
         flags |= libc::O_NOFOLLOW;
         let fd = open_components(fs, components, flags)?;
+        let file = unsafe { File::from_raw_fd(fd) };
+        verify_reopened(&file, saved.inode, verified)?;
         files.insert(
             saved.handle,
             Arc::new(HandleData {
                 inode: saved.inode,
                 flags: saved.flags,
-                file: RwLock::new(unsafe { File::from_raw_fd(fd) }),
+                file: RwLock::new(file),
             }),
         );
     }
@@ -399,6 +726,8 @@ fn rebuild(fs: &PassthroughFs, mut state: PassthroughState) -> io::Result<Prepar
             .get(&saved.inode)
             .ok_or_else(|| invalid_state("directory handle inode is missing"))?;
         let fd = open_components(fs, components, directory_open_flags())?;
+        let file = unsafe { File::from_raw_fd(fd) };
+        verify_reopened(&file, saved.inode, verified)?;
         let snapshot = saved.entries.as_ref().map(|entries| DirSnapshot {
             entries: entries
                 .iter()
@@ -415,13 +744,14 @@ fn rebuild(fs: &PassthroughFs, mut state: PassthroughState) -> io::Result<Prepar
             Arc::new(PassthroughDirHandle {
                 inode: saved.inode,
                 flags: saved.flags,
-                file: RwLock::new(unsafe { File::from_raw_fd(fd) }),
+                file: RwLock::new(file),
                 snapshot: Mutex::new(snapshot),
             }),
         );
     }
 
     Ok(PreparedState {
+        invalid_inodes: BTreeSet::new(),
         next_inode: state.next_inode,
         next_handle: state.next_handle,
         writeback: state.writeback,
@@ -430,6 +760,38 @@ fn rebuild(fs: &PassthroughFs, mut state: PassthroughState) -> io::Result<Prepar
         files,
         dirs,
     })
+}
+
+fn verify_reopened(
+    file: &File,
+    inode: u64,
+    verified: Option<&BTreeMap<u64, ObjectIdentity>>,
+) -> io::Result<()> {
+    let Some(verified) = verified else {
+        return Ok(());
+    };
+    let expected = verified
+        .get(&inode)
+        .ok_or_else(|| invalid_state("reopened external inode was not verified"))?;
+    let current = file.metadata()?;
+    // Compare the destination-local identity even for a cross-host remap. A second
+    // pathname open must not swap a validated object for an unvalidated replacement.
+    if current.dev() != expected.device
+        || current.ino() != expected.inode
+        || current.mode() & libc::S_IFMT as u32 != expected.kind
+        || current.mode() & 0o7777 != expected.permissions
+        || (current.uid(), current.gid()) != expected.owner
+        || current.len() != expected.size
+        || current.mtime() != expected.modified_seconds
+        || current.mtime_nsec() != expected.modified_nanos
+        || current.ctime() != expected.changed_seconds
+        || current.ctime_nsec() != expected.changed_nanos
+    {
+        return Err(invalid_state(
+            "external object changed while rebuilding captured handles",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -678,8 +1040,8 @@ fn relative_components(root: &Path, path: &Path) -> io::Result<Vec<Vec<u8>>> {
     Ok(components)
 }
 
-fn invalid_state(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+fn invalid_state(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -709,6 +1071,232 @@ mod tests {
             gid: 0,
             pid: 0,
         }
+    }
+
+    fn external_backend(root: &std::path::Path, relaxed: bool, remapped: bool) -> PassthroughFs {
+        PassthroughFs::new(super::super::PassthroughConfig {
+            root_dir: root.to_path_buf(),
+            inject_init: false,
+            stat_virtualization: StatVirtualization::Off,
+            external_checkpoint: Some(crate::ExternalCheckpointOptions {
+                relaxed,
+                remapped,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn external_state_restores_open_handles_without_copying_host_data() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("data"), b"external").unwrap();
+        let source = external_backend(root.path(), false, false);
+        source.init(FsOptions::empty()).unwrap();
+        let entry = source.lookup(context(), 1, c"data").unwrap();
+        let handle = source
+            .open(context(), entry.inode, false, 2)
+            .unwrap()
+            .0
+            .unwrap();
+        let encoded = capture(&source).unwrap();
+        let destination = external_backend(root.path(), false, false);
+        restore(&destination, &encoded).unwrap();
+        assert_eq!(destination.request_error(entry.inode), None);
+        let restored = destination.handles.read().unwrap()[&handle].clone();
+        assert_eq!(
+            restored.file.read().unwrap().metadata().unwrap().ino(),
+            std::fs::metadata(root.path().join("data")).unwrap().ino()
+        );
+        assert_eq!(capture(&destination).unwrap(), encoded);
+    }
+
+    #[test]
+    fn external_changed_file_strict_rejects_relaxed_tombstones_old_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        std::fs::write(&path, b"old").unwrap();
+        let source = external_backend(root.path(), false, false);
+        source.init(FsOptions::empty()).unwrap();
+        let entry = source.lookup(context(), 1, c"data").unwrap();
+        let old_handle = source
+            .open(context(), entry.inode, false, 2)
+            .unwrap()
+            .0
+            .unwrap();
+        let encoded = capture(&source).unwrap();
+        std::fs::write(&path, b"new host bytes").unwrap();
+        assert!(prepare(&external_backend(root.path(), false, false), &encoded).is_err());
+        let relaxed = external_backend(root.path(), true, false);
+        restore(&relaxed, &encoded).unwrap();
+        assert_eq!(relaxed.request_error(entry.inode), Some(116));
+        assert!(!relaxed.handles.read().unwrap().contains_key(&old_handle));
+        assert_eq!(
+            *relaxed
+                .cfg
+                .external_checkpoint
+                .as_ref()
+                .unwrap()
+                .invalid_inodes
+                .lock()
+                .unwrap(),
+            vec![entry.inode]
+        );
+        let fresh = relaxed.lookup(context(), 1, c"data").unwrap();
+        assert_ne!(fresh.inode, entry.inode);
+        assert_eq!(relaxed.request_error(fresh.inode), None);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new host bytes");
+        let recaptured = capture(&relaxed).unwrap();
+        validate_unavailable(&recaptured).unwrap();
+    }
+
+    #[test]
+    fn external_replacement_before_capture_is_not_fingerprinted_as_old_handle() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        std::fs::write(&path, b"old").unwrap();
+        let source = external_backend(root.path(), false, false);
+        source.init(FsOptions::empty()).unwrap();
+        let entry = source.lookup(context(), 1, c"data").unwrap();
+        source.open(context(), entry.inode, false, 0).unwrap();
+        // Atomic replacement unlinks the object still held by the guest's FD.
+        let replacement = root.path().join("replacement");
+        std::fs::write(&replacement, b"replacement").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(capture(&source).is_err());
+    }
+
+    #[test]
+    fn external_explicit_remap_requires_matching_referenced_content() {
+        let source_root = tempfile::tempdir().unwrap();
+        let destination_root = tempfile::tempdir().unwrap();
+        std::fs::write(source_root.path().join("data"), b"same content").unwrap();
+        std::fs::write(destination_root.path().join("data"), b"same content").unwrap();
+        let source = external_backend(source_root.path(), false, false);
+        source.init(FsOptions::empty()).unwrap();
+        source.lookup(context(), 1, c"data").unwrap();
+        let encoded = capture(&source).unwrap();
+        assert!(
+            prepare(
+                &external_backend(destination_root.path(), false, false),
+                &encoded
+            )
+            .is_err()
+        );
+        restore(
+            &external_backend(destination_root.path(), false, true),
+            &encoded,
+        )
+        .unwrap();
+        std::fs::write(destination_root.path().join("data"), b"wrong content").unwrap();
+        assert!(
+            prepare(
+                &external_backend(destination_root.path(), false, true),
+                &encoded
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn external_relaxed_policy_never_accepts_malformed_identity_state() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("data"), b"data").unwrap();
+        let source = external_backend(root.path(), false, false);
+        source.init(FsOptions::empty()).unwrap();
+        let entry = source.lookup(context(), 1, c"data").unwrap();
+        let mut state: ExternalState =
+            mobility::decode(EXTERNAL_KIND, &capture(&source).unwrap()).unwrap();
+        state
+            .identities
+            .get_mut(&entry.inode)
+            .unwrap()
+            .content
+            .clear();
+        let malformed = mobility::encode(EXTERNAL_KIND, &state).unwrap();
+        assert!(prepare(&external_backend(root.path(), true, false), &malformed).is_err());
+        assert!(
+            crate::UnavailableFs::default()
+                .validate_state(&malformed)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn external_rebuild_rechecks_validated_destination_object() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        std::fs::write(&path, b"old").unwrap();
+        let source = external_backend(root.path(), false, false);
+        source.init(FsOptions::empty()).unwrap();
+        source.lookup(context(), 1, c"data").unwrap();
+        let state: ExternalState =
+            mobility::decode(EXTERNAL_KIND, &capture(&source).unwrap()).unwrap();
+        std::fs::rename(&path, root.path().join("old")).unwrap();
+        std::fs::write(&path, b"old").unwrap();
+        assert!(rebuild(&source, state.state, Some(&state.identities)).is_err());
+    }
+
+    #[test]
+    fn external_strict_rejects_permission_changes_without_changing_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        std::fs::write(&path, b"same bytes").unwrap();
+        let source = external_backend(root.path(), false, false);
+        source.init(FsOptions::empty()).unwrap();
+        source.lookup(context(), 1, c"data").unwrap();
+        let state = capture(&source).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(prepare(&external_backend(root.path(), false, false), &state).is_err());
+    }
+
+    #[test]
+    fn external_symlink_identity_does_not_follow_outside_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret");
+        std::fs::write(&target, b"not part of the export").unwrap();
+        std::os::unix::fs::symlink(&target, root.path().join("link")).unwrap();
+        let source = external_backend(root.path(), false, false);
+        source.init(FsOptions::empty()).unwrap();
+        let entry = source.lookup(context(), 1, c"link").unwrap();
+        let state = capture(&source).unwrap();
+        std::fs::write(&target, b"outside host changed").unwrap();
+        let destination = external_backend(root.path(), false, false);
+        restore(&destination, &state).unwrap();
+        assert_eq!(
+            destination.readlink(context(), entry.inode).unwrap(),
+            std::os::unix::ffi::OsStrExt::as_bytes(target.as_os_str())
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"outside host changed");
+    }
+
+    #[test]
+    fn external_guest_rename_preserves_handle_identity_but_unlink_refuses_capture() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("data"), b"identity").unwrap();
+        let source = external_backend(root.path(), false, false);
+        source.init(FsOptions::empty()).unwrap();
+        let entry = source.lookup(context(), 1, c"data").unwrap();
+        let handle = source
+            .open(context(), entry.inode, false, 0)
+            .unwrap()
+            .0
+            .unwrap();
+        source
+            .rename(context(), 1, c"data", 1, c"renamed", 0)
+            .unwrap();
+        let state = capture(&source).unwrap();
+        let destination = external_backend(root.path(), false, false);
+        restore(&destination, &state).unwrap();
+        assert_eq!(
+            destination.handles.read().unwrap()[&handle].inode,
+            entry.inode
+        );
+        source.unlink(context(), 1, c"renamed").unwrap();
+        assert!(capture(&source).is_err());
     }
 
     #[test]

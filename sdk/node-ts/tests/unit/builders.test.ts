@@ -352,6 +352,21 @@ describe("PatchBuilder", () => {
 });
 
 describe("SandboxBuilder.build", () => {
+  it.each(["strict", "relaxed"] as const)("accepts external mount policy %s", async (policy) => {
+    const cfg = await Sandbox.builder("external-policy")
+      .image("alpine")
+      .externalMountPolicy(policy)
+      .build();
+    expect(cfg).toHaveProperty("externalMountPolicy", policy);
+  });
+
+  it("rejects unknown external mount policies without consuming the builder", async () => {
+    const builder = Sandbox.builder("external-policy").image("alpine");
+    expect(() => builder.externalMountPolicy("unsafe" as "strict"))
+      .toThrow("external mount policy must be strict or relaxed");
+    await expect(builder.externalMountPolicy("strict").build()).resolves.toBeDefined();
+  });
+
   it("rejects forked for a fresh boot", async () => {
     await expect(Sandbox.builder("forked-policy").image("alpine").forked().build())
       .rejects.toThrow("forked requires a full snapshot");

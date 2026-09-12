@@ -15,6 +15,7 @@ pub mod heartbeat;
 pub(crate) mod logging;
 pub mod metrics;
 pub mod policy;
+pub(crate) mod progress;
 pub mod relay;
 pub(crate) mod startup;
 pub mod vm;

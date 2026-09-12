@@ -45,9 +45,9 @@ use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, Operation, size::Me
 
 /// Builder for constructing a [`SandboxConfig`] with a fluent API.
 pub struct SandboxBuilder {
-    config: SandboxConfig,
+    pub(crate) config: SandboxConfig,
     detached: bool,
-    build_error: Option<crate::MicrosandboxError>,
+    pub(crate) build_error: Option<crate::MicrosandboxError>,
     cpus_explicit: bool,
     memory_explicit: bool,
     max_cpus_explicit: bool,
@@ -96,6 +96,13 @@ impl RegistryConfigBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxBuilder {
+    /// Select how full restore treats missing external bindings and stale captured handles.
+    /// Strict is the default. Explicit mappings use the existing volume builders at the
+    /// captured guest path; relaxed restore preserves the mount and reports degraded resources.
+    pub fn external_mount_policy(mut self, policy: super::ExternalMountRestorePolicy) -> Self {
+        self.config.external_mount_policy = policy;
+        self
+    }
     /// Start building a sandbox configuration.
     ///
     /// The name must be unique among existing sandboxes (unless
@@ -1306,6 +1313,9 @@ impl SandboxBuilder {
         }
 
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
+        if self.config.spec.runtime.user.is_none() {
+            self.config.spec.runtime.user = snap.manifest().restore_defaults()?.user;
+        }
         self.config.snapshot_parent = Some(snap.id().to_string());
         let unsupported = snap.manifest().unsupported_requires();
         if !unsupported.is_empty() {
@@ -1362,6 +1372,19 @@ impl SandboxBuilder {
                 }
                 self.config.checkpoint_restore =
                     Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                        network_gateway_mac: if self.config.snapshot_restore_mode
+                            == SnapshotRestoreMode::Full
+                        {
+                            microsandbox_runtime::checkpoint::captured_gateway_mac(
+                                &opened.resources,
+                            )
+                            .map_err(crate::MicrosandboxError::SnapshotIntegrity)?
+                        } else {
+                            None
+                        },
+                        external_mount_policy: self.config.external_mount_policy,
+                        external_mounts: Vec::new(),
+                        unavailable_disks: Default::default(),
                         local_branch: false,
                         forked: false,
                         closure,
@@ -1479,6 +1502,84 @@ impl SandboxBuilder {
     pub async fn create_detached(self) -> MicrosandboxResult<super::Sandbox> {
         let config = self.build().await?;
         super::Sandbox::create_detached(config).await
+    }
+
+    /// Create with image-pull, snapshot-preparation, and activation progress.
+    ///
+    /// Events are best-effort and never block creation. Await the task for the authoritative
+    /// result; dropping the progress receiver does not cancel it. Abort the task to cancel.
+    #[cfg(feature = "local")]
+    pub fn create_with_progress(
+        mut self,
+    ) -> crate::MicrosandboxResult<(
+        crate::CreationProgressHandle,
+        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
+    )> {
+        let (handle, sender) = crate::progress::channel();
+        self.config.creation_progress = Some(sender.downgrade());
+        let task = tokio::spawn(async move {
+            if self.pending_snapshot.is_some() {
+                let _ = sender.try_send(crate::CreationProgress::Startup(
+                    crate::StartupProgress::phase(crate::StartupPhase::PreparingSnapshot),
+                ));
+            }
+            let (mut pull, pull_sender) = microsandbox_image::progress_channel();
+            let create = async {
+                let requested_detached = self.detached;
+                let config = self.build().await?;
+                let detached = requested_detached || config.resumed_from_full_snapshot();
+                let backend = crate::backend::default_backend();
+                match backend.kind() {
+                    crate::backend::BackendKind::Local => {
+                        let mode = if detached {
+                            crate::runtime::SpawnMode::Detached
+                        } else {
+                            crate::runtime::SpawnMode::Attached
+                        };
+                        let local = backend.as_local().ok_or_else(|| {
+                            MicrosandboxError::local_only(Operation::SandboxCreate)
+                        })?;
+                        local
+                            .create_sandbox(backend.clone(), config, mode, Some(pull_sender))
+                            .await
+                    }
+                    crate::backend::BackendKind::Cloud => {
+                        drop(pull_sender);
+                        if detached {
+                            backend
+                                .sandboxes()
+                                .create_detached(backend.clone(), config)
+                                .await
+                        } else {
+                            backend
+                                .sandboxes()
+                                .create(backend.clone(), config, true)
+                                .await
+                        }
+                    }
+                }
+            };
+            let forward = async {
+                while let Some(event) = pull.recv().await {
+                    let _ = sender.try_send(crate::CreationProgress::Pull(event));
+                }
+            };
+            // No detached forwarding task: cancellation drops both futures together.
+            let (result, ()) = tokio::join!(create, forward);
+            result
+        });
+        Ok((handle, task))
+    }
+
+    /// Create a detached sandbox with the same creation-progress stream.
+    #[cfg(feature = "local")]
+    pub fn create_detached_with_progress(
+        self,
+    ) -> crate::MicrosandboxResult<(
+        crate::CreationProgressHandle,
+        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
+    )> {
+        self.detached(true).create_with_progress()
     }
 
     /// Create the sandbox with pull progress reporting.
@@ -1760,7 +1861,7 @@ impl SandboxBuilder {
     }
 
     /// Validate the stable route key and the host resources it references.
-    fn validate_vsock_routes(&self) -> MicrosandboxResult<()> {
+    pub(crate) fn validate_vsock_routes(&self) -> MicrosandboxResult<()> {
         if self.config.spec.deployment_profile == DeploymentProfile::MultiTenant
             && !self.config.spec.vsock.is_empty()
         {
@@ -1962,6 +2063,21 @@ pub(crate) fn apply_checkpoint_restore_constraints(
     checkpoint: &microsandbox_image::checkpoint::CheckpointManifest,
     overrides: RestoreOverrideIntent,
 ) -> MicrosandboxResult<()> {
+    // The summary is for inspection, not an independent source of VM layout.
+    // Reject disagreement before applying configuration or preparing child disks.
+    let geometry = checkpoint.geometry;
+    for (key, expected) in [
+        ("vcpus", u64::from(geometry.vcpus)),
+        ("max_vcpus", u64::from(geometry.max_vcpus)),
+        ("memory_mib", u64::from(geometry.memory_mib)),
+        ("max_memory_mib", u64::from(geometry.max_memory_mib)),
+    ] {
+        if checkpoint_requirement_u64(state, key)? != expected {
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                "checkpoint restore summary disagrees with captured geometry for {key}"
+            )));
+        }
+    }
     apply_checkpoint_resources(config, state, overrides)?;
     apply_capture_network(config, &checkpoint.resources)
 }
@@ -1971,6 +2087,9 @@ pub(crate) fn apply_capture_network(
     config: &mut SandboxConfig,
     captured_resources: &[microsandbox_image::checkpoint::ResourceDescriptor],
 ) -> MicrosandboxResult<()> {
+    // Reject missing gateway identity before creating child-owned disk state.
+    microsandbox_runtime::checkpoint::captured_gateway_mac(captured_resources)
+        .map_err(MicrosandboxError::SnapshotIntegrity)?;
     let mut resources = captured_resources
         .iter()
         .filter(|resource| resource.kind == "network");
@@ -3525,6 +3644,10 @@ mod tests {
         let mut builder = SandboxBuilder::new("forked-child").image("alpine").forked();
         builder.config.checkpoint_restore =
             Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                network_gateway_mac: None,
+                external_mount_policy: Default::default(),
+                external_mounts: Vec::new(),
+                unavailable_disks: Default::default(),
                 local_branch: false,
                 forked: false,
                 closure: "/owned/checkpoint".into(),
