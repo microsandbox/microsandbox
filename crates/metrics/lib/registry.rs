@@ -153,12 +153,19 @@ struct RegistryInner {
     capacity: u32,
 }
 
-struct MappedRegion {
+pub(crate) struct MappedRegion {
     ptr: NonNull<u8>,
     #[cfg(unix)]
     len: usize,
     #[cfg(target_os = "windows")]
     handle: HANDLE,
+}
+
+impl MappedRegion {
+    /// Return the base address of the mapped shared-memory region.
+    pub(crate) fn as_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -982,7 +989,7 @@ fn create_and_init(
 }
 
 #[cfg(unix)]
-fn open_existing_region(
+pub(crate) fn open_existing_region(
     name: &std::ffi::CStr,
     map_len: usize,
 ) -> MetricsResult<Option<MappedRegion>> {
@@ -1022,7 +1029,7 @@ fn open_existing_region(
 }
 
 #[cfg(target_os = "windows")]
-fn open_existing_region(
+pub(crate) fn open_existing_region(
     name: &std::ffi::CStr,
     map_len: usize,
 ) -> MetricsResult<Option<MappedRegion>> {
@@ -1040,7 +1047,7 @@ fn open_existing_region(
 }
 
 #[cfg(unix)]
-fn create_region(name: &std::ffi::CStr, map_len: usize) -> MetricsResult<MappedRegion> {
+pub(crate) fn create_region(name: &std::ffi::CStr, map_len: usize) -> MetricsResult<MappedRegion> {
     let fd = unsafe {
         libc::shm_open(
             name.as_ptr(),
@@ -1091,7 +1098,7 @@ fn create_region(name: &std::ffi::CStr, map_len: usize) -> MetricsResult<MappedR
 }
 
 #[cfg(target_os = "windows")]
-fn create_region(name: &std::ffi::CStr, map_len: usize) -> MetricsResult<MappedRegion> {
+pub(crate) fn create_region(name: &std::ffi::CStr, map_len: usize) -> MetricsResult<MappedRegion> {
     let name = windows_mapping_name(name)?;
     let max_size = map_len as u64;
     let handle = unsafe {
@@ -1116,7 +1123,7 @@ fn create_region(name: &std::ffi::CStr, map_len: usize) -> MetricsResult<MappedR
 }
 
 #[cfg(all(unix, test))]
-fn unlink_region(name: &std::ffi::CStr) {
+pub(crate) fn unlink_region(name: &std::ffi::CStr) {
     unsafe {
         libc::shm_unlink(name.as_ptr());
     }
@@ -1124,7 +1131,7 @@ fn unlink_region(name: &std::ffi::CStr) {
 
 #[cfg(target_os = "windows")]
 #[cfg(test)]
-fn unlink_region(_name: &std::ffi::CStr) {}
+pub(crate) fn unlink_region(_name: &std::ffi::CStr) {}
 
 #[cfg(target_os = "windows")]
 fn map_windows_region(handle: HANDLE, map_len: usize) -> MetricsResult<MappedRegion> {
@@ -1165,14 +1172,14 @@ fn windows_mapping_name(name: &std::ffi::CStr) -> MetricsResult<Vec<u16>> {
 }
 
 /// Outcome of `wait_for_ready`.
-enum WaitForReadyError {
+pub(crate) enum WaitForReadyError {
     /// The header was still `UNINIT`/`INITIALIZING` when the wait expired.
     Stuck,
     /// The header carried an unrecognised state value.
     Invalid(u32),
 }
 
-fn wait_for_ready(header: &Header) -> Result<(), WaitForReadyError> {
+pub(crate) fn wait_for_ready(header: &Header) -> Result<(), WaitForReadyError> {
     let deadline = Instant::now() + INIT_WAIT_TIMEOUT;
     loop {
         let state = header.state.load(Ordering::Acquire);
@@ -1190,16 +1197,24 @@ fn wait_for_ready(header: &Header) -> Result<(), WaitForReadyError> {
 }
 
 fn validate_header(header: &Header, expected_capacity: Option<u32>) -> MetricsResult<()> {
+    validate_header_version(header, REGISTRY_VERSION, expected_capacity)
+}
+
+pub(crate) fn validate_header_version(
+    header: &Header,
+    expected_version: u32,
+    expected_capacity: Option<u32>,
+) -> MetricsResult<()> {
     if header.magic != REGISTRY_MAGIC {
         return Err(MetricsError::Custom(format!(
             "invalid registry magic: 0x{:x}",
             header.magic
         )));
     }
-    if header.version != REGISTRY_VERSION {
+    if header.version != expected_version {
         return Err(MetricsError::Custom(format!(
-            "incompatible registry version: {}",
-            header.version
+            "incompatible registry version: {} (expected {expected_version})",
+            header.version,
         )));
     }
     if header.header_len as usize != HEADER_SIZE {
@@ -1278,7 +1293,7 @@ fn read_name(slot: &Slot) -> String {
     String::from_utf8_lossy(&bytes[..len]).into_owned()
 }
 
-fn flag_value(flags: u32, flag: u32, value: u64) -> Option<u64> {
+pub(crate) fn flag_value(flags: u32, flag: u32, value: u64) -> Option<u64> {
     if flag_set(flags, flag) {
         Some(value)
     } else {
@@ -1387,7 +1402,7 @@ fn pid_is_alive(pid: i32) -> bool {
     ok != 0 && exit_code == STILL_ACTIVE as u32
 }
 
-fn ms_to_datetime(ms: i64) -> DateTime<Utc> {
+pub(crate) fn ms_to_datetime(ms: i64) -> DateTime<Utc> {
     if ms <= 0 {
         return DateTime::<Utc>::UNIX_EPOCH;
     }
