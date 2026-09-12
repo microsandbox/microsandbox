@@ -507,10 +507,12 @@ export type {
 // consistent with what each other native builder emits (TlsConfig /
 // DnsConfig / SecretEntry / VolumeMount / Patch — all flat shapes
 // with `kind` discriminator + per-variant fields).
-export type VolumeMountKind = "bind" | "named" | "tmpfs" | "disk";
+export type { NapiOwnedVolumeOptions as OwnedVolumeOptions } from "./internal/napi.js";
+export type VolumeMountKind = "bind" | "named" | "owned" | "tmpfs" | "disk";
 export const VolumeMountKinds: readonly VolumeMountKind[] = [
   "bind",
   "named",
+  "owned",
   "tmpfs",
   "disk",
 ] as const;

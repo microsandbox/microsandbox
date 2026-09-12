@@ -1214,6 +1214,7 @@ impl SandboxBuilder {
     /// file, or a bare name resolved under the default snapshots directory. Disk snapshots cold
     /// boot; full snapshots resume their captured execution unless [`disk_only`](Self::disk_only)
     /// is selected.
+    #[allow(clippy::wrong_self_convention)] // Internal fluent builder, not a constructor.
     pub(crate) fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
         self.pending_snapshot = Some(path_or_name.into());
         self.pending_snapshot_from_config = false;
@@ -1357,6 +1358,7 @@ impl SandboxBuilder {
                         "snapshot and checkpoint closure identities differ".into(),
                     ));
                 }
+                crate::snapshot::validate_checkpoint_owned_inventory(snap.manifest(), &opened)?;
                 if self.config.snapshot_restore_mode == SnapshotRestoreMode::Full {
                     if opened.architecture != std::env::consts::ARCH {
                         return Err(crate::MicrosandboxError::SnapshotIntegrity(
@@ -1430,6 +1432,10 @@ impl SandboxBuilder {
             )
             .collect();
         self.config.snapshot_root_virtual_size = Some(file_state.virtual_size);
+        let owned = snap.manifest().owned_volumes()?;
+        if !owned.is_empty() {
+            self.config.snapshot_owned_source = Some((snap.path().to_path_buf(), owned));
+        }
         Ok(())
     }
 

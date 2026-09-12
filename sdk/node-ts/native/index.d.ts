@@ -394,7 +394,7 @@ export type JsMetricsStream = MetricsStream
 /**
  * Fluent builder for a sandbox volume mount.
  *
- * Pick exactly one mount kind via `.bind()`, `.named()`, `.tmpfs()`, or
+ * Pick exactly one mount kind via `.bind()`, `.named()`, `.owned()`, `.tmpfs()`, or
  * `.disk(...)`, then chain modifiers (`.readonly()`, `.noexec()`, `.nosuid()`, `.nodev()`,
  * `.size(mib)` for tmpfs, `.format(fmt)` / `.fstype(s)` for disk).
  * Validation is deferred to the terminal `.build()` call.
@@ -409,6 +409,11 @@ export declare class MountBuilder {
   named(name: string): this
   /** Mount a named volume with explicit existence behavior. */
   namedWith(name: string, mode?: string | undefined | null, kind?: string | undefined | null, sizeMib?: number | undefined | null, quotaMib?: number | undefined | null): this
+  /**
+   * Allocate storage retained across restarts and removed with this sandbox.
+   * Defaults to a directory; disk storage requires a positive `sizeMib`.
+   */
+  owned(options?: { kind?: 'dir' | 'disk'; sizeMib?: number; quotaMib?: number }): this
   /** Mount an in-memory tmpfs at the guest path. */
   tmpfs(): this
   /** Mount a host disk image file as a virtio-blk device. */
@@ -441,19 +446,19 @@ export declare class MountBuilder {
    * Set the guest stat virtualization policy.
    *
    * Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
-   * directory-backed named volume mounts.
+   * directory-backed named or owned volume mounts.
    */
   statVirtualization(policy: string): this
   /**
    * Set the host permission propagation policy.
    *
    * Accepts `"private"` or `"mirror"`. Valid only for bind and
-   * directory-backed named volume mounts.
+   * directory-backed named or owned volume mounts.
    */
   hostPermissions(policy: string): this
   /**
    * Present host files that carry no per-file stat override as this guest
-   * owner. Valid only for bind and directory-backed named volume mounts.
+   * owner. Valid only for bind and directory-backed named or owned volume mounts.
    */
   owner(uid: number, gid: number): this
   /**
@@ -2699,22 +2704,30 @@ export interface VolumeMount {
   name?: string
   namedMode?: string
   namedKind?: string
+  /** Storage kind for sandbox-owned mounts: `"dir"` or `"disk"`. */
+  ownedKind?: string
   sizeMib?: number
   quotaMib?: number
   format?: string
   fstype?: string
-  /** `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk. */
+  /**
+   * `"strict" | "relaxed" | "off"` for bind/named and owned-directory mounts;
+   * `None` for tmpfs, host disks, or owned disks.
+   */
   statVirtualization?: string
-  /** `"private" | "mirror"` for bind/named mounts; `None` for tmpfs/disk. */
+  /**
+   * `"private" | "mirror"` for bind/named and owned-directory mounts;
+   * `None` for tmpfs, host disks, or owned disks.
+   */
   hostPermissions?: string
   /**
-   * Guest owner uid for host-created files under bind/named mounts; `None`
-   * when unset or for tmpfs/disk. Set together with `override_gid`.
+   * Guest owner uid for host-created files under bind/named or owned-directory mounts;
+   * `None` when unset or for tmpfs/disks. Set together with `override_gid`.
    */
   overrideUid?: number
   /**
-   * Guest owner gid for host-created files under bind/named mounts; `None`
-   * when unset or for tmpfs/disk. Set together with `override_uid`.
+   * Guest owner gid for host-created files under bind/named or owned-directory mounts;
+   * `None` when unset or for tmpfs/disks. Set together with `override_uid`.
    */
   overrideGid?: number
 }

@@ -228,6 +228,9 @@ pub struct DiskCheckpointControlState {
     pub path: PathBuf,
     /// Complete base-to-head disk generation; contains no memory or device payloads.
     pub disk: microsandbox_image::checkpoint::DiskGenerationManifest,
+    /// Complete lifetime-owned backing sealed at the same root-disk cut.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owned_volumes: Vec<microsandbox_image::snapshot::OwnedVolumeCapture>,
 }
 
 /// Verified capacity and measured phases of a completed online root growth.

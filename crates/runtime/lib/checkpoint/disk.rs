@@ -1327,6 +1327,7 @@ mod tests {
             ],
             devices: Vec::new(),
             resources: Vec::new(),
+            owned_volumes: Vec::new(),
             requires: Vec::new(),
         };
         let bytes = checkpoint.to_canonical_bytes().unwrap();
@@ -1368,6 +1369,7 @@ mod tests {
             rootfs_upper_spec: None,
             mounts: Vec::new(),
             file_mounts: Vec::new(),
+            owned_volumes: Vec::new(),
             disks: Vec::new(),
             vsock: Vec::new(),
             #[cfg(unix)]

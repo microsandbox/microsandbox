@@ -1755,6 +1755,7 @@ type MountSpec struct {
 	Named              string  `json:"named,omitempty"`
 	NamedMode          string  `json:"named_mode,omitempty"`
 	NamedKind          string  `json:"named_kind,omitempty"`
+	Owned              string  `json:"owned,omitempty"`
 	Tmpfs              bool    `json:"tmpfs,omitempty"`
 	Disk               string  `json:"disk,omitempty"`
 	Format             string  `json:"format,omitempty"`

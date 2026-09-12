@@ -98,6 +98,22 @@ Removing the sandbox also removes the nested daemon's images, containers, and bu
 
 The flat root gives Docker a direct ext4 filesystem. That matters because Docker's default storage driver uses overlay layers; a normal managed root would place those layers on top of the sandbox's own OverlayFS.
 
+### Alternative: a separate disk for Docker data
+
+To keep the default layered root, replace `--root-disk flat:10G` in the start command with:
+
+```sh
+--mount-owned /var/lib/docker:kind=disk,size=10G
+```
+
+Docker gets a private ext4 disk for its data while the rest of the sandbox keeps its layered root. The disk survives stop/start and is removed with the sandbox.
+
+To keep Docker data independently of the sandbox, use a [named volume](/sandboxes/volumes#named-volumes) instead:
+
+```sh
+--mount-named docker-data:/var/lib/docker:kind=disk,size=10G
+```
+
 ## Notes
 
 - **Memory.** The example uses `--memory 2G`. Increase it for larger builds or memory-hungry containers.

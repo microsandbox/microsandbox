@@ -326,6 +326,7 @@ pub fn run(args: MachineArgs) -> ! {
         rootfs_disk_spec,
         rootfs_disk_runtime_owned: launch.rootfs.disk_runtime_owned,
         mounts: launch.mounts,
+        owned_volumes: launch.owned_volumes,
         file_mounts: launch.file_mounts,
         disks,
         vsock: launch.vsock,
@@ -552,10 +553,17 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
 
     // This must-understand suffix is emitted only by the trusted launcher after ownership
     // resolution. Older runtimes reject it as an unknown format instead of assuming ownership.
+    let (rest, lifecycle_owned) = match rest.strip_suffix(":lifecycle-owned") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
     let (rest, snapshot_owned) = match rest.strip_suffix(":snapshot-owned") {
         Some(rest) => (rest, true),
         None => (rest, false),
     };
+    if lifecycle_owned && !snapshot_owned {
+        return Err("lifecycle-owned disks must also be snapshot-owned".into());
+    }
     let (rest, readonly) = match rest.strip_suffix(":ro") {
         Some(rest) => (rest, true),
         None => (rest, false),
@@ -585,6 +593,7 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
         fstype: None, // ditto
         readonly,
         snapshot_owned,
+        lifecycle_owned,
     })
 }
 

@@ -139,6 +139,7 @@ async fn fixture(
             .put_bytes(&memory.to_canonical_bytes().unwrap())
             .unwrap(),
         disks,
+        owned_volumes: Vec::new(),
         devices: vec![DeviceStateRef {
             device_type: 4,
             device_id: "rng".into(),
@@ -229,6 +230,434 @@ async fn unpack(path: &Path, stage: &Path) -> ArchiveInventory {
         .unwrap()
         .inventory
         .unwrap()
+}
+
+async fn with_owned_volumes(local: &LocalBackend, snapshot: Snapshot, generation: u64) -> Snapshot {
+    use microsandbox_image::snapshot::{
+        OwnedDirectoryPayload, OwnedMountSnapshot, OwnedVolumeCapture, OwnedVolumeData,
+    };
+    use microsandbox_types::{OwnedVolumeStorage, VolumeMount};
+    let root = snapshot.path().join(CHECKPOINT_DIRECTORY);
+    let closure = CheckpointClosure::open_portable(&root, None).unwrap();
+    let mut checkpoint = closure.checkpoint().clone();
+    let store = LocalObjectStore::open(&root).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(
+        source.path().join(if generation == 1 {
+            "original"
+        } else {
+            "renamed"
+        }),
+        b"unchanged bytes",
+    )
+    .unwrap();
+    std::fs::write(
+        source
+            .path()
+            .join(if generation == 1 { "deleted" } else { "added" }),
+        if generation == 1 { b"old" } else { b"new" },
+    )
+    .unwrap();
+    let mount_id = microsandbox_types::owned_volume_mount_id("/cache");
+    std::fs::create_dir_all(root.join("owned")).unwrap();
+    let captured = microsandbox_filesystem::OwnedDirectorySnapshot::capture(
+        source.path(),
+        &root.join("owned").join(&mount_id),
+    )
+    .unwrap();
+    let directory = VolumeMount::Owned {
+        guest: "/cache".into(),
+        storage: OwnedVolumeStorage::Directory {
+            quota_mib: Some(32),
+        },
+        options: Default::default(),
+        stat_virtualization: microsandbox_types::StatVirtualization::Strict,
+        host_permissions: microsandbox_types::HostPermissions::Private,
+    };
+    let directory = OwnedVolumeCapture {
+        mount_id,
+        mount: OwnedMountSnapshot::from_mount(&directory).unwrap(),
+        data: OwnedVolumeData::Directory {
+            descriptor: OwnedDirectoryPayload {
+                digest: captured.digest().unwrap(),
+                bytes: captured.descriptor_bytes().unwrap().len() as u64,
+            },
+            files: captured
+                .payloads()
+                .into_iter()
+                .map(|payload| OwnedDirectoryPayload {
+                    digest: payload.digest,
+                    bytes: payload.bytes,
+                })
+                .collect(),
+        },
+    };
+    let mount_id = crate::runtime::spawn::guest_mount_tag("/data");
+    let layer_id = format!("layer_{:032x}", 5000 + generation);
+    std::fs::create_dir_all(root.join("layers")).unwrap();
+    let path = root.join("layers").join(format!("{layer_id}.raw"));
+    std::fs::write(&path, vec![37; 1024 * 1024]).unwrap();
+    let disk = DiskGenerationManifest {
+        schema: "microsandbox.disk-generation/1".into(),
+        volume_id: "vol_owned".into(),
+        device_id: mount_id.clone(),
+        generation,
+        head: layer_id.clone(),
+        pause_generation: checkpoint.pause_generation,
+        layers: vec![DiskLayerRef {
+            layer_id,
+            format: "raw".into(),
+            virtual_size: 1024 * 1024,
+            predecessor: None,
+            integrity_root: sparse_file_integrity(&path).unwrap().root,
+        }],
+    };
+    checkpoint.disks.push(
+        store
+            .put_bytes(&disk.to_canonical_bytes().unwrap())
+            .unwrap(),
+    );
+    let disk_mount = VolumeMount::Owned {
+        guest: "/data".into(),
+        storage: OwnedVolumeStorage::Disk { capacity_mib: 1 },
+        options: Default::default(),
+        stat_virtualization: microsandbox_types::StatVirtualization::Strict,
+        host_permissions: microsandbox_types::HostPermissions::Private,
+    };
+    checkpoint.owned_volumes = vec![
+        directory,
+        OwnedVolumeCapture {
+            mount_id,
+            mount: OwnedMountSnapshot::from_mount(&disk_mount).unwrap(),
+            data: OwnedVolumeData::Disk { generation: disk },
+        },
+    ];
+    checkpoint.resources = checkpoint
+        .owned_volumes
+        .iter()
+        .map(|volume| {
+            let binding = match volume.data {
+                OwnedVolumeData::Directory { .. } => BTreeMap::from([
+                    ("role".into(), "owned_directory".into()),
+                    ("guest_tag".into(), volume.mount_id.clone()),
+                ]),
+                OwnedVolumeData::Disk { .. } => BTreeMap::from([
+                    ("lifecycle_owned".into(), "true".into()),
+                    ("device_id".into(), volume.mount_id.clone()),
+                    ("guest_path".into(), volume.mount.guest.clone()),
+                ]),
+            };
+            microsandbox_image::checkpoint::ResourceDescriptor {
+                id: volume.mount_id.clone(),
+                kind: "virtio".into(),
+                treatment: microsandbox_image::checkpoint::ResourceTreatment::Serialize,
+                binding,
+            }
+        })
+        .collect();
+    let bytes = checkpoint.to_canonical_bytes().unwrap();
+    let root_id = ObjectId::from_bytes(&bytes).unwrap();
+    std::fs::write(root.join("checkpoint.json"), bytes).unwrap();
+    let mut manifest = snapshot.manifest().clone();
+    manifest
+        .set_owned_volumes(checkpoint.owned_volumes)
+        .unwrap();
+    let SnapshotState::Checkpoint(state) = &mut manifest.state else {
+        unreachable!()
+    };
+    state.checkpoint_root = root_id.to_string();
+    std::fs::write(
+        snapshot.path().join(DESCRIPTOR_FILENAME),
+        manifest.to_canonical_bytes().unwrap(),
+    )
+    .unwrap();
+    store::open_snapshot(local, snapshot.path().to_str().unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn owned_delta_reuses_bytes_and_restores_private_renamed_namespace_after_source_deletion() {
+    let temp = tempfile::tempdir().unwrap();
+    let local = LocalBackend::builder()
+        .home(temp.path().join("home"))
+        .build()
+        .await
+        .unwrap();
+    let base = fixture(&local, &temp.path().join("base"), 1, None, false).await;
+    let base = with_owned_volumes(&local, base, 1).await;
+    let head = fixture(&local, &temp.path().join("head"), 2, Some(&base), false).await;
+    let head = with_owned_volumes(&local, head, 2).await;
+    let base_archive = temp.path().join("base.msb");
+    let delta_archive = temp.path().join("delta.msb");
+    save_snapshot(
+        &local,
+        base.path().to_str().unwrap(),
+        &base_archive,
+        SaveOpts {
+            plain_tar: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    save_snapshot(
+        &local,
+        head.path().to_str().unwrap(),
+        &delta_archive,
+        SaveOpts {
+            plain_tar: true,
+            since: Some(base.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let stage = temp.path().join("delta-stage");
+    let inventory = unpack(&delta_archive, &stage).await;
+    let dependencies = validate(&inventory).unwrap().unwrap();
+    assert_eq!(
+        dependencies.owned.len(),
+        2,
+        "unchanged directory data and owned disk must both use the base"
+    );
+    assert!(
+        inventory
+            .entries
+            .iter()
+            .any(|entry| entry.path.ends_with("directory.bin") && entry.included)
+    );
+    assert!(
+        inventory
+            .entries
+            .iter()
+            .any(|entry| entry.kind == "owned-directory-payload"
+                && entry.path.contains("/files/")
+                && entry.included)
+    );
+    std::fs::remove_dir_all(base.path()).unwrap();
+    std::fs::remove_dir_all(head.path()).unwrap();
+    let loaded = load_snapshot_with_base(
+        &local,
+        &delta_archive,
+        None,
+        Some(base_archive.to_str().unwrap()),
+    )
+    .await
+    .unwrap();
+    let loaded_snapshot = store::open_snapshot(&local, loaded.path().to_str().unwrap())
+        .await
+        .unwrap();
+    let volumes = loaded_snapshot.manifest().owned_volumes().unwrap();
+    let source = loaded.path().join(CHECKPOINT_DIRECTORY);
+    let first = temp.path().join("first-child");
+    let second = temp.path().join("second-child");
+    for child in [&first, &second] {
+        std::fs::create_dir(child).unwrap();
+        let mounts = crate::snapshot::materialize_owned_volumes(
+            &volumes,
+            &source,
+            child,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert!(
+            mounts
+                .iter()
+                .all(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }))
+        );
+        let data = child
+            .join("owned-volumes")
+            .join(crate::runtime::spawn::guest_mount_tag("/cache"))
+            .join("data");
+        assert_eq!(
+            std::fs::read(data.join("renamed")).unwrap(),
+            b"unchanged bytes"
+        );
+        assert_eq!(std::fs::read(data.join("added")).unwrap(), b"new");
+        assert!(!data.join("original").exists());
+        assert!(!data.join("deleted").exists());
+    }
+    let disk_path = |child: &Path| {
+        child
+            .join("owned-volumes")
+            .join(crate::runtime::spawn::guest_mount_tag("/data"))
+            .join("disk.raw")
+    };
+    std::fs::write(disk_path(&first), b"changed child").unwrap();
+    assert_eq!(
+        std::fs::read(disk_path(&second)).unwrap(),
+        vec![37; 1024 * 1024]
+    );
+    let mut conflict = crate::sandbox::restore_resources::RestoreResources::default();
+    conflict.mapped.insert("/cache".into());
+    assert!(
+        crate::snapshot::materialize_owned_volumes(
+            &volumes,
+            &source,
+            &temp.path().join("conflict"),
+            &conflict
+        )
+        .await
+        .is_err()
+    );
+    let missing = source
+        .join(volumes[0].directory_path())
+        .join("directory.bin");
+    std::fs::remove_file(missing).unwrap();
+    assert!(CheckpointClosure::open_portable(&source, None).is_err());
+}
+
+#[tokio::test]
+async fn owned_file_archives_restore_all_backing_without_source_or_inheritance() {
+    use microsandbox_image::snapshot::{
+        DiskLayer, DiskLayerId, FileSnapshotState, LayerFileKind, LayerPayload, SnapshotFormat,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let local = LocalBackend::builder()
+        .home(temp.path().join("home"))
+        .build()
+        .await
+        .unwrap();
+    let snapshot = fixture(&local, &temp.path().join("source"), 21, None, false).await;
+    let snapshot = with_owned_volumes(&local, snapshot, 2).await;
+    let mut manifest = snapshot.manifest().clone();
+    // Convert the same owned closure fixture to the independently supported cold-boot format.
+    for directory in ["owned", "layers"] {
+        std::fs::rename(
+            snapshot.path().join(CHECKPOINT_DIRECTORY).join(directory),
+            snapshot.path().join(directory),
+        )
+        .unwrap();
+    }
+    let empty = tempfile::tempdir().unwrap();
+    let empty_mount = microsandbox_types::VolumeMount::Owned {
+        guest: "/缓存 data".into(),
+        storage: microsandbox_types::OwnedVolumeStorage::Directory { quota_mib: None },
+        options: Default::default(),
+        stat_virtualization: microsandbox_types::StatVirtualization::Strict,
+        host_permissions: microsandbox_types::HostPermissions::Private,
+    };
+    let mount_id = microsandbox_types::owned_volume_mount_id(empty_mount.guest());
+    let captured = microsandbox_filesystem::OwnedDirectorySnapshot::capture(
+        empty.path(),
+        &snapshot.path().join("owned").join(&mount_id),
+    )
+    .unwrap();
+    let mut volumes = manifest.owned_volumes().unwrap();
+    volumes.push(microsandbox_image::snapshot::OwnedVolumeCapture {
+        mount_id,
+        mount: microsandbox_image::snapshot::OwnedMountSnapshot::from_mount(&empty_mount).unwrap(),
+        data: microsandbox_image::snapshot::OwnedVolumeData::Directory {
+            descriptor: microsandbox_image::snapshot::OwnedDirectoryPayload {
+                digest: captured.digest().unwrap(),
+                bytes: captured.descriptor_bytes().unwrap().len() as u64,
+            },
+            files: Vec::new(),
+        },
+    });
+    manifest.set_owned_volumes(volumes).unwrap();
+    let layer_id = DiskLayerId::new(format!("layer_{:032x}", 9001)).unwrap();
+    let root_file = snapshot
+        .path()
+        .join("layers")
+        .join(format!("{layer_id}.raw"));
+    std::fs::write(&root_file, vec![92; 4096]).unwrap();
+    manifest.scope = SnapshotScope::Disk;
+    manifest.root_disk = SnapshotRootDisk::Managed;
+    manifest.state = SnapshotState::File(FileSnapshotState {
+        disk_format: SnapshotFormat::Raw,
+        filesystem: "ext4".into(),
+        virtual_size: 4096,
+        head: layer_id.clone(),
+        layers: vec![DiskLayer {
+            layer_id,
+            format: SnapshotFormat::Raw,
+            virtual_size: 4096,
+            backing: None,
+            payload: LayerPayload {
+                file_kind: LayerFileKind::Regular,
+                integrity: None,
+            },
+        }],
+    });
+    std::fs::write(
+        snapshot.path().join(DESCRIPTOR_FILENAME),
+        manifest.to_canonical_bytes().unwrap(),
+    )
+    .unwrap();
+    let direct = temp.path().join("direct.msb");
+    let installed = temp.path().join("installed.msb");
+    save_direct_file_snapshot(
+        &manifest,
+        &Default::default(),
+        "owned-file",
+        &[root_file],
+        Some(snapshot.path()),
+        &direct,
+        true,
+        false,
+    )
+    .await
+    .unwrap();
+    save_snapshot(
+        &local,
+        snapshot.path().to_str().unwrap(),
+        &installed,
+        SaveOpts {
+            plain_tar: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    std::fs::remove_dir_all(snapshot.path()).unwrap();
+    for (index, archive) in [&direct, &installed].into_iter().enumerate() {
+        let child = temp.path().join(format!("child-{index}"));
+        let restored = materialize_archive_for_child_with_base(
+            &local,
+            archive,
+            &child,
+            false,
+            None,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.disk_mounts.len(), 3);
+        let data = child
+            .join("owned-volumes")
+            .join(microsandbox_types::owned_volume_mount_id("/cache"))
+            .join("data");
+        assert_eq!(
+            std::fs::read(data.join("renamed")).unwrap(),
+            b"unchanged bytes"
+        );
+        assert!(!data.join("deleted").exists());
+        let disk = child
+            .join("owned-volumes")
+            .join(microsandbox_types::owned_volume_mount_id("/data"))
+            .join("disk.raw");
+        assert_eq!(std::fs::read(disk).unwrap(), vec![37; 1024 * 1024]);
+        let empty = child
+            .join("owned-volumes")
+            .join(microsandbox_types::owned_volume_mount_id("/缓存 data"))
+            .join("data");
+        assert_eq!(std::fs::read_dir(empty).unwrap().count(), 0);
+    }
+    let loaded = load_snapshot(&local, &installed, None).await.unwrap();
+    let loaded = store::open_snapshot(&local, loaded.path().to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        loaded.manifest().owned_volumes().unwrap(),
+        manifest.owned_volumes().unwrap()
+    );
+    super::super::super::verify::verify_snapshot(&loaded)
+        .await
+        .unwrap();
 }
 
 async fn with_additional_disks(

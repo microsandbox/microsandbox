@@ -266,6 +266,9 @@ pub struct DiskMountSpec {
     /// The trusted launcher established managed ownership and retained the disk mutation lock.
     /// Only named disk volumes and this sandbox's restored private copies may set this flag.
     pub snapshot_owned: bool,
+
+    /// Backing is collected with this sandbox, not a shared named disk.
+    pub lifecycle_owned: bool,
 }
 
 /// VM hardware and rootfs configuration.
@@ -343,6 +346,9 @@ pub struct VmConfig {
 
     /// Additional mounts as `tag:host_path[:opts]` strings.
     pub mounts: Vec<String>,
+
+    /// Required private volumes retained in every snapshot and branch.
+    pub owned_volumes: Vec<microsandbox_types::VolumeMount>,
 
     /// Isolated host-file mounts backed by synthetic one-entry filesystems.
     pub file_mounts: Vec<FileMountConfig>,
@@ -440,6 +446,7 @@ type VmBuildOutput = (
     GuestBootstrap,
     BindIdentityMapRegistration,
     Option<crate::checkpoint::RestoredAgentState>,
+    std::collections::BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
 );
 
 /// Public runtime endpoints held back until a restored guest is activated.
@@ -1029,6 +1036,7 @@ fn run(
         resolved_bootstrap,
         bind_identity_map,
         restored_agent,
+        owned_directory_checkpoints,
     ) = match build_result {
         Ok(vm) => vm,
         Err(e) => {
@@ -1105,6 +1113,7 @@ fn run(
             &config.agent_sock_path,
             Arc::clone(&shared.workload_control),
             Arc::clone(&shared.resident_paused),
+            owned_directory_checkpoints,
         );
         let context = super::control::ControlContext {
             executor: match executor {
@@ -1737,6 +1746,7 @@ fn build_vm(
     // as a dedicated bulk port. Once dual-port is selected it returns to the small control queue.
     let agent_queue_size = agent_primary_queue_size(bulk_console_backend.is_some());
     let vm = &config.vm;
+    let mut owned_directory_checkpoints = std::collections::BTreeMap::new();
     // Decode once before constructing devices: unavailable disks need the exact
     // captured capacity/features, never guessed geometry or a temporary backing.
     let prepared_restore = vm
@@ -2143,6 +2153,30 @@ fn build_vm(
         // Keep the host path as a PathBuf so mount failures can format it
         // without relying on the string-only mount spec field.
         let host_path = PathBuf::from(&parsed.host_path);
+        let owned_mount = vm.owned_volumes.iter().find(|mount| {
+            matches!(
+                mount,
+                microsandbox_types::VolumeMount::Owned {
+                    storage: microsandbox_types::OwnedVolumeStorage::Directory { .. },
+                    ..
+                }
+            ) && microsandbox_types::owned_volume_mount_id(mount.guest()) == tag
+                && vm
+                    .bootstrap
+                    .dir_mounts
+                    .iter()
+                    .any(|binding| binding.tag == tag && binding.guest_path == mount.guest())
+        });
+        let owned_checkpoint =
+            owned_mount.map(|_| microsandbox_filesystem::OwnedDirectoryCheckpoint::default());
+        if let Some(checkpoint) = &owned_checkpoint {
+            if let Some(restore) = &vm.checkpoint_restore {
+                checkpoint
+                    .set_restore(&restore.closure.join("owned").join(&tag))
+                    .map_err(|error| RuntimeError::Custom(format!("owned mount {tag}: {error}")))?;
+            }
+            owned_directory_checkpoints.insert(tag.clone(), checkpoint.clone());
+        }
         // Explicit guest owner for host files with no per-file override. Parsing
         // guarantees uid/gid come as a pair, so this is Some only when both are set.
         let override_owner = match (parsed.override_uid, parsed.override_gid) {
@@ -2169,7 +2203,8 @@ fn build_vm(
         }
         let cfg = PassthroughConfig {
             root_dir: host_path.clone(),
-            external_checkpoint: Some(external_options),
+            external_checkpoint: owned_checkpoint.is_none().then_some(external_options),
+            owned_checkpoint,
             inject_init: false,
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
@@ -2185,7 +2220,7 @@ fn build_vm(
             ..Default::default()
         };
         let backend = match PassthroughFs::new(cfg) {
-            Err(error) if relaxed && restore_binding.is_some()
+            Err(error) if owned_mount.is_none() && relaxed && restore_binding.is_some()
                 && matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotADirectory) => {
                 external_mount_reports.last_mut().expect("restore report").unavailable = Some(format!("external export cannot be opened: {error}; filesystem operations return EIO"));
                 builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(microsandbox_filesystem::UnavailableFs::default())));
@@ -2583,6 +2618,7 @@ fn build_vm(
         bootstrap,
         bind_identity_map,
         restored_agent,
+        owned_directory_checkpoints,
     ))
 }
 

@@ -1225,6 +1225,8 @@ struct SnapshotLoadOptsJson {
 struct MountSpec {
     bind: Option<String>,
     named: Option<String>,
+    /// Exclusive sandbox-owned storage selector; no legacy source is emitted.
+    owned: Option<String>,
     named_mode: Option<String>,
     named_kind: Option<String>,
     #[serde(default)]
@@ -2003,6 +2005,71 @@ fn volume_mount(
     let override_gid = m.override_gid;
     let raw_named_mode = m.named_mode.clone();
     let raw_named_kind = m.named_kind.clone();
+
+    if let Some(kind) = m.owned.as_deref() {
+        // Reject mixed sources at the native boundary as well as in Go. The
+        // ownership selector must never become a named or host-backed mount.
+        if bind.is_some()
+            || named.is_some()
+            || tmpfs
+            || disk.is_some()
+            || raw_named_mode.is_some()
+            || raw_named_kind.is_some()
+            || m.format.is_some()
+            || fstype.is_some()
+        {
+            return Err(FfiError::invalid_argument(
+                "owned mount cannot specify a source, name, mode, format or fstype",
+            ));
+        }
+        if !matches!(kind, "dir" | "disk") {
+            return Err(FfiError::invalid_argument(
+                "owned volume kind must be dir or disk",
+            ));
+        }
+        if override_uid.is_some() != override_gid.is_some() {
+            return Err(FfiError::invalid_argument(
+                "override_uid and override_gid must be specified together",
+            ));
+        }
+        let mut mount =
+            microsandbox::sandbox::MountBuilder::new(guest_path).owned_with(|mut owned| {
+                owned = if kind == "disk" {
+                    owned.disk()
+                } else {
+                    owned.directory()
+                };
+                if let Some(size) = size_mib {
+                    owned = owned.size(size);
+                }
+                if let Some(quota) = quota_mib {
+                    owned = owned.quota(quota);
+                }
+                owned
+            });
+        if readonly {
+            mount = mount.readonly();
+        }
+        if noexec {
+            mount = mount.noexec();
+        }
+        if nosuid {
+            mount = mount.nosuid();
+        }
+        if nodev {
+            mount = mount.nodev();
+        }
+        if let Some(policy) = stat_virt {
+            mount = mount.stat_virtualization(policy);
+        }
+        if let Some(policy) = host_perms {
+            mount = mount.host_permissions(policy);
+        }
+        if let (Some(uid), Some(gid)) = (override_uid, override_gid) {
+            mount = mount.owner(uid, gid);
+        }
+        return Ok(mount);
+    }
 
     let kinds_set: u8 =
         bind.is_some() as u8 + named.is_some() as u8 + tmpfs as u8 + disk.is_some() as u8;
@@ -7682,6 +7749,54 @@ mod tests {
             "got: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn owned_volume_wire_preserves_storage_and_flags() {
+        let spec: MountSpec = serde_json::from_str(
+            r#"{"owned":"disk","size_mib":10240,"noexec":true,"nosuid":true}"#,
+        )
+        .unwrap();
+        let mount = volume_mount("/data", &spec)
+            .unwrap_or_else(|error| panic!("{}", error.message))
+            .build()
+            .unwrap();
+        let json = serde_json::to_value(mount).unwrap();
+        assert_eq!(json["type"], "Owned");
+        assert_eq!(json["options"]["noexec"], true);
+        assert_eq!(json["options"]["nosuid"], true);
+        assert!(json.get("name").is_none());
+        assert!(json.get("host").is_none());
+    }
+
+    #[test]
+    fn owned_volume_rejects_legacy_source_and_invalid_storage() {
+        for payload in [
+            r#"{"owned":"dir","named":"shared"}"#,
+            r#"{"owned":"dir","bind":"/host"}"#,
+            r#"{"owned":"dir","disk":"/host/disk.raw"}"#,
+            r#"{"owned":"dir","format":"raw"}"#,
+            r#"{"owned":"unknown"}"#,
+        ] {
+            let spec = serde_json::from_str(payload).unwrap();
+            assert!(volume_mount("/data", &spec).is_err(), "{payload}");
+        }
+        for payload in [
+            r#"{"owned":"disk"}"#,
+            r#"{"owned":"disk","size_mib":0}"#,
+            r#"{"owned":"dir","size_mib":64}"#,
+            r#"{"owned":"disk","size_mib":64,"quota_mib":0}"#,
+            r#"{"owned":"disk","size_mib":64,"override_uid":0,"override_gid":0}"#,
+        ] {
+            let spec = serde_json::from_str(payload).unwrap();
+            assert!(
+                volume_mount("/data", &spec)
+                    .unwrap_or_else(|error| panic!("{}", error.message))
+                    .build()
+                    .is_err(),
+                "{payload}"
+            );
+        }
     }
 
     #[test]
