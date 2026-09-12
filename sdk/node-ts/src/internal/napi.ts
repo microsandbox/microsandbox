@@ -69,7 +69,6 @@ export interface NativeBindings {
   readonly RegistryConfigBuilder: NapiBuilderCtor<NapiRegistryConfigBuilder>;
   readonly ImageBuilder: NapiBuilderCtor<NapiImageBuilder>;
   readonly RootDiskBuilder: NapiBuilderCtor<NapiRootDiskBuilder>;
-  readonly Setup: new () => NapiSetup;
   readonly imageGet: (reference: string) => Promise<NapiImageHandle>;
   readonly imageList: () => Promise<NapiImageInfo[]>;
   readonly imageInspect: (reference: string) => Promise<NapiImageDetail>;
@@ -84,8 +83,10 @@ export interface NativeBindings {
     outputPath: string,
     format?: string,
   ) => Promise<void>;
-  readonly install: () => Promise<void>;
-  readonly isInstalled: () => boolean;
+  readonly resolveRuntime: (configJson: string) => string;
+  readonly isRuntimeInstalled: (configJson: string) => boolean;
+  readonly installRuntime: (configJson: string, optionsJson: string) => Promise<string>;
+  readonly ensureRuntime: (configJson: string, optionsJson: string) => Promise<string>;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
   readonly AgentClient: NapiAgentClientStatic;
 }
@@ -800,14 +801,6 @@ export interface NapiImagePruneReport {
   readonly fsmetaRemoved: number;
   readonly vmdkRemoved: number;
   readonly bytesReclaimed: number | null | undefined;
-}
-
-export interface NapiSetup {
-  baseDir(path: string): NapiSetup;
-  version(version: string): NapiSetup;
-  skipVerify(enabled: boolean): NapiSetup;
-  force(enabled: boolean): NapiSetup;
-  install(): Promise<void>;
 }
 
 export interface NapiExecHandle extends AsyncIterable<NapiExecEvent> {

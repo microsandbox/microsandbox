@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -37,7 +37,7 @@ function installed(before = "") {
     const sdk = await import(${JSON.stringify(entry)});
     const native = createRequire(import.meta.url)(${JSON.stringify(nativeEntry)});
     ${before}
-    console.log(sdk.isInstalled());`;
+    console.log(sdk.isRuntimeInstalled());`;
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
     cwd: root, env, encoding: "utf8", timeout: 30000,
   });
@@ -67,4 +67,63 @@ it("package discovery does not pin default home when MSB_HOME is custom", () => 
   pair(join(root, ".microsandbox"));
   env.MSB_HOME = join(root, "absent-custom-home");
   expect(installed()).toBe("false");
+});
+
+function installSource(home: string) {
+  pair(home);
+  // Directory installation takes a flat release bundle, not an installed home.
+  copyFileSync(join(home, "bin", executable), join(home, executable));
+  copyFileSync(join(home, "lib", library), join(home, library));
+}
+
+function runSetup(script: string) {
+  const code = `const sdk = await import(${JSON.stringify(entry)}); ${script}`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+    cwd: root, env, encoding: "utf8", timeout: 30000,
+  });
+  expect(result.status, result.stderr).toBe(0);
+  return JSON.parse(result.stdout);
+}
+
+it("exports the four operations and removes legacy entry points", () => {
+  expect(runSetup(`console.log(JSON.stringify([
+    ...['resolveRuntime', 'isRuntimeInstalled', 'installRuntime', 'ensureRuntime'].map(n => typeof sdk[n]),
+    ...['install', 'isInstalled', 'setup', 'Setup'].map(n => n in sdk)
+  ]));`)).toEqual(["function", "function", "function", "function", false, false, false, false]);
+});
+
+it("returns the selected pair and ensure ignores acquisition for an existing home", () => {
+  const home = join(root, "chosen");
+  pair(home);
+  const results = runSetup(`const config = {home: ${JSON.stringify(home)}};
+    console.log(JSON.stringify([sdk.resolveRuntime(config), await sdk.ensureRuntime(config, {
+      source: 'directory', sourcePath: '/absent-source', force: true, verify: false
+    })]));`);
+  expect(results).toEqual(Array(2).fill({msbPath: join(home, "bin", executable), libkrunfwPath: join(home, "lib", library), origin: "home"}));
+});
+
+it("installs an explicit directory and returns its pair even with a package present", () => {
+  const home = join(root, "destination");
+  installSource(packageRoot);
+  const result = runSetup(`console.log(JSON.stringify(await sdk.installRuntime(
+    {home: ${JSON.stringify(home)}}, {source: 'directory', sourcePath: ${JSON.stringify(packageRoot)}, verify: false}
+  )));`);
+  expect(result).toEqual({msbPath: join(home, "bin", executable), libkrunfwPath: join(home, "lib", library), origin: "installed"});
+});
+
+it("ensure installs only when absent and refuses partial homes", () => {
+  // Remove package discovery while retaining a separate installation source.
+  const source = join(root, "source");
+  installSource(source);
+  unlinkSync(join(packageRoot, "bin", executable));
+  const home = join(root, "destination");
+  const result = runSetup(`console.log(JSON.stringify(await sdk.ensureRuntime(
+    {home: ${JSON.stringify(home)}}, {source: 'directory', sourcePath: ${JSON.stringify(source)}, verify: false}
+  )));`);
+  expect(result.origin).toBe("installed");
+  unlinkSync(join(home, "lib", library));
+  expect(runSetup(`try {
+    await sdk.ensureRuntime({home: ${JSON.stringify(home)}}, {source: 'directory', sourcePath: ${JSON.stringify(source)}, verify: false});
+    throw new Error('unexpected success');
+  } catch (e) { console.log(JSON.stringify(e.constructor.name)); }`)).toBe("RuntimeIncompleteError");
 });

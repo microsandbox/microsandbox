@@ -48,8 +48,10 @@ struct PyBackendInfo {
 #[pymodule]
 fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
-    m.add_function(wrap_pyfunction!(setup::install, m)?)?;
-    m.add_function(wrap_pyfunction!(setup::is_installed, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::resolve_runtime, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::is_runtime_installed, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::install_runtime, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::ensure_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(set_runtime_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(setup::set_packaged_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(set_runtime_libkrunfw_path, m)?)?;

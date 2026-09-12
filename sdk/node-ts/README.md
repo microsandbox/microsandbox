@@ -61,11 +61,10 @@ npm install microsandbox
 Runtime setup is normally included. To provision `msb` + `libkrunfw` separately, use the [CLI installer](https://docs.microsandbox.dev/getting-started/quickstart) or explicitly install them from your application:
 
 ```typescript
-import { install, isInstalled } from "microsandbox";
+import { ensureRuntime } from "microsandbox";
 
-if (!isInstalled()) {
-  await install();
-}
+const runtime = await ensureRuntime();
+console.log(runtime.msbPath, runtime.libkrunfwPath);
 ```
 
 Use `MSB_PATH` and `MSB_LIBKRUNFW_PATH` to select an external runtime; this does not remove the npm package's bundled files. See [Runtime setup](https://docs.microsandbox.dev/sdk/setup) for custom paths and versions.

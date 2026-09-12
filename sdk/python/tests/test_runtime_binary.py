@@ -15,8 +15,10 @@ from microsandbox import _microsandbox as native
 
 MSB = "msb.exe" if os.name == "nt" else "msb"
 LIBRARY = (
-    "libkrunfw.5.dylib" if sys.platform == "darwin"
-    else "libkrunfw.dll" if os.name == "nt"
+    "libkrunfw.5.dylib"
+    if sys.platform == "darwin"
+    else "libkrunfw.dll"
+    if os.name == "nt"
     else "libkrunfw.so.5.6.1"
 )
 
@@ -59,8 +61,12 @@ def resolve(root, env, before=""):
         + "print(native.resolved_cli_msb_path())"
     )
     return subprocess.run(
-        [sys.executable, "-c", script], cwd=root, env=env,
-        capture_output=True, text=True, timeout=30,
+        [sys.executable, "-c", script],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
 
 
@@ -136,7 +142,107 @@ def test_cli_executes_home_with_wheel_present(runtime_fixture):
     pair(root / ".microsandbox", "home")
     result = subprocess.run(
         [sys.executable, "-c", "from microsandbox._cli import main; main()", "--version"],
-        cwd=root, env=env, capture_output=True, text=True, timeout=30,
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == "home:--version\n"
+
+
+def run_setup(root, env, script):
+    result = subprocess.run(
+        [sys.executable, "-c", "import asyncio, json; import microsandbox as sdk; " + script],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_public_setup_surface(runtime_fixture):
+    root, _, _, env = runtime_fixture
+    result = run_setup(
+        root,
+        env,
+        "print(json.dumps(["
+        "all(callable(getattr(sdk, n)) for n in "
+        "['resolve_runtime', 'is_runtime_installed', 'install_runtime', 'ensure_runtime']),"
+        "hasattr(sdk, 'install'), hasattr(sdk, 'is_installed')]))",
+    )
+    assert result == [True, False, False]
+
+
+def test_public_ensure_reuses_selected_pair(runtime_fixture):
+    root, _, _, env = runtime_fixture
+    home = root / "chosen"
+    pair(home)
+    result = run_setup(
+        root,
+        env,
+        f"config = sdk.RuntimeConfig(home={str(home)!r}); "
+        "resolved = sdk.resolve_runtime(config); "
+        "ensured = asyncio.run(sdk.ensure_runtime(config, "
+        "sdk.InstallOptions(source='directory', source_path='/absent', force=True))); "
+        "print(json.dumps([resolved == ensured, resolved.msb_path, "
+        "resolved.libkrunfw_path, resolved.origin]))",
+    )
+    assert result == [True, str(home / "bin" / MSB), str(home / "lib" / LIBRARY), "home"]
+
+
+@pytest.mark.parametrize("operation", ["install_runtime", "ensure_runtime"])
+def test_public_install_returns_pair(runtime_fixture, operation):
+    root, package, _, env = runtime_fixture
+    source = root / "source"
+    pair(source)
+    shutil.copyfile(source / "bin" / MSB, source / MSB)
+    shutil.copyfile(source / "lib" / LIBRARY, source / LIBRARY)
+    if operation == "ensure_runtime":
+        (package / "_bundled" / "bin" / MSB).unlink()
+    home = root / "destination"
+    result = run_setup(
+        root,
+        env,
+        f"runtime = asyncio.run(sdk.{operation}("
+        f"sdk.RuntimeConfig(home={str(home)!r}), "
+        f"sdk.InstallOptions(source='directory', source_path={str(source)!r}, "
+        "verify=False))); "
+        "print(json.dumps([runtime.msb_path, runtime.libkrunfw_path, runtime.origin]))",
+    )
+    assert result == [str(home / "bin" / MSB), str(home / "lib" / LIBRARY), "installed"]
+
+
+def test_public_resolve_is_read_only_and_ensure_rejects_partial(runtime_fixture):
+    root, package, _, env = runtime_fixture
+    (package / "_bundled" / "bin" / MSB).unlink()
+    home = root / "absent"
+    result = run_setup(
+        root,
+        env,
+        f"print(json.dumps(sdk.is_runtime_installed(sdk.RuntimeConfig(home={str(home)!r}))))",
+    )
+    assert result is False
+    assert not home.exists()
+    pair(home)
+    (home / "lib" / LIBRARY).unlink()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio; import microsandbox as sdk; "
+            f"asyncio.run(sdk.ensure_runtime(sdk.RuntimeConfig(home={str(home)!r})))",
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "expected both" in result.stderr
+    assert not (home / "lib" / LIBRARY).exists()

@@ -7,6 +7,7 @@ use std::{
 
 use flate2::read::GzDecoder;
 use futures::StreamExt;
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use tar::Archive;
 
@@ -45,7 +46,8 @@ struct RuntimeCandidates {
 }
 
 /// Where a resolved host runtime pair came from.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeOrigin {
     /// Explicit `MSB_PATH` and optional `MSB_LIBKRUNFW_PATH` environment configuration.
     Environment,
@@ -60,7 +62,7 @@ pub enum RuntimeOrigin {
 }
 
 /// The matched host runtime pair used for local sandbox execution.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ResolvedRuntime {
     /// Path to the `msb` executable.
     pub msb_path: PathBuf,

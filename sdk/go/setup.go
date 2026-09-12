@@ -1,67 +1,24 @@
 package microsandbox
 
 import (
-	"archive/tar"
-	"compress/gzip"
-	"context"
-	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/bundle"
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
 // sdkVersion is the microsandbox release that this SDK binds to. The
-// embedded FFI library and newly downloaded msb+libkrunfw artifacts use
-// this version. Existing complete runtime installations are reused. Bump
-// when cutting a new SDK release so downloads match published binaries.
+// embedded FFI library uses this version. Runtime downloads use the
+// version pinned in that native SDK. Both are updated by the release train.
 const sdkVersion = "0.6.18"
-
-// libkrunfwABI is the major SONAME version of libkrunfw that msb links
-// against.
-const libkrunfwABI = "5"
-
-// libkrunfwVersion is the full version of the prebuilt libkrunfw shipped in
-// each release tarball.
-const libkrunfwVersion = "5.6.1"
-
-// githubOrg / githubRepo locate the GitHub release assets for the
-// msb + libkrunfw download (FFI library ships embedded in the SDK).
-const (
-	githubOrg  = "superradcompany"
-	githubRepo = "microsandbox"
-)
-
-// httpTimeout bounds the msb + libkrunfw bundle download.
-const httpTimeout = 5 * time.Minute
-
-// SetupOption configures EnsureInstalled.
-type SetupOption func(*setupConfig)
-
-type setupConfig struct {
-	skipDownload bool
-}
-
-// WithSkipDownload prevents EnsureInstalled from fetching the msb +
-// libkrunfw bundle from GitHub releases. Use when the runtime is
-// already on disk at the install path (e.g. air-gapped CI, vendored
-// fixtures). The embedded FFI library is unaffected — it ships with
-// the SDK and is materialized automatically on first use.
-func WithSkipDownload() SetupOption {
-	return func(c *setupConfig) { c.skipDownload = true }
-}
 
 // init wires the FFI auto-loader so the first SDK call (e.g.
 // CreateSandbox) transparently extracts + dlopens the embedded
-// library. No explicit EnsureInstalled call is needed for FFI
+// library. No explicit EnsureRuntime call is needed for FFI
 // bootstrap.
 func init() {
 	ffi.SetAutoLoader(autoLoadFFI)
@@ -78,7 +35,7 @@ var (
 // sync.Once-guarded; safe to call from concurrent SDK goroutines.
 //
 // This handles ONLY the FFI plumbing — msb + libkrunfw downloading
-// is the explicit job of EnsureInstalled.
+// is the explicit job of EnsureRuntime.
 func autoLoadFFI() error {
 	autoLoadOnce.Do(func() {
 		dir, err := installDir()
@@ -101,84 +58,6 @@ func autoLoadFFI() error {
 	return autoLoadErr
 }
 
-var (
-	installMu   sync.Mutex
-	installDone bool
-)
-
-// EnsureInstalled ensures the msb + libkrunfw runtime is present at the
-// install dir ($MSB_HOME, default ~/.microsandbox) and downloads it from
-// the matching GitHub release if not. It is OPTIONAL: the SDK's FFI
-// library is embedded in the Go binary and loads automatically on first
-// use, so EnsureInstalled only governs the optional msb runtime download.
-//
-// Call it explicitly at startup if you want to surface install errors
-// up front rather than at first sandbox-spawn time:
-//
-//	if err := microsandbox.EnsureInstalled(ctx); err != nil {
-//	    log.Fatal(err)
-//	}
-//
-// Idempotent — subsequent calls are no-ops. Options apply only to
-// the first call.
-func EnsureInstalled(ctx context.Context, opts ...SetupOption) error {
-	installMu.Lock()
-	defer installMu.Unlock()
-
-	if installDone {
-		return nil
-	}
-
-	cfg := setupConfig{}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
-	dir, err := installDir()
-	if err != nil {
-		return err
-	}
-
-	installed, err := runtimePairInstalled(dir)
-	if err != nil {
-		return err
-	}
-	if installed {
-		installDone = true
-		return nil
-	}
-	if cfg.skipDownload {
-		return &Error{
-			Kind: ErrLibraryNotLoaded,
-			Message: fmt.Sprintf(
-				"microsandbox: msb/libkrunfw not present under %s and "+
-					"WithSkipDownload() was set; install them manually",
-				dir),
-		}
-	}
-	if err := downloadMsbAndKrunfw(ctx, dir); err != nil {
-		return &Error{
-			Kind:    ErrLibraryNotLoaded,
-			Message: fmt.Sprintf("microsandbox: download msb+libkrunfw: %v", err),
-			Cause:   err,
-		}
-	}
-	installDone = true
-	return nil
-}
-
-// IsInstalled reports whether msb + libkrunfw are present at the install
-// dir ($MSB_HOME, default ~/.microsandbox), regardless of release version.
-// It does NOT touch the FFI library (which ships embedded in the SDK).
-func IsInstalled() bool {
-	dir, err := installDir()
-	if err != nil {
-		return false
-	}
-	installed, err := runtimePairInstalled(dir)
-	return err == nil && installed
-}
-
 // SDKVersion returns the microsandbox release version this SDK was
 // compiled against.
 func SDKVersion() string { return sdkVersion }
@@ -191,21 +70,9 @@ func RuntimeVersion() (string, error) {
 	return v, wrapFFI(err)
 }
 
-// installDir returns the on-disk root under which the SDK materializes
-// the embedded FFI library (lib/v<ver>/) and, in download mode, fetches
-// and looks up msb + libkrunfw (bin/, lib/): $MSB_HOME when set,
-// otherwise ~/.microsandbox.
-//
-// Honoring MSB_HOME here matches the runtime's resolve_home(), which
-// already uses it for the state db, sandboxes, and cache. Previously
-// this path was hardcoded to ~/.microsandbox, so MSB_HOME could relocate
-// the runtime state but not the Go SDK's FFI/runtime files — leaving the
-// microsandbox footprint split between a private root and the shared
-// global home. Resolving both from the same env lets a single MSB_HOME
-// fully contain (or isolate) an instance's on-disk footprint. When
-// MSB_HOME is unset the behavior is unchanged: every Go binary linking
-// this SDK shares ~/.microsandbox so msb + libkrunfw aren't redownloaded
-// per consumer.
+// installDir returns the SDK FFI extraction root: nonempty MSB_HOME or
+// ~/.microsandbox. RuntimeConfig overrides affect host runtime resolution and
+// installation, independently of this per-version SDK library cache.
 func installDir() (string, error) {
 	if h := os.Getenv("MSB_HOME"); h != "" {
 		return h, nil
@@ -261,241 +128,6 @@ func wrapDlopenErr(err error, path string) error {
 		Message: msg,
 		Cause:   err,
 	}
-}
-
-// runtimePairInstalled accepts a complete home pair without executing msb or
-// comparing package versions. A partial installation must not be overwritten.
-func runtimePairInstalled(installDir string) (bool, error) {
-	paths := []string{
-		filepath.Join(installDir, "bin", msbFilename()),
-		filepath.Join(installDir, "lib", libkrunfwFilename()),
-	}
-	present := 0
-	for _, path := range paths {
-		info, err := os.Stat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return false, fmt.Errorf("microsandbox: inspect runtime file %s: %w", path, err)
-		}
-		if !info.Mode().IsRegular() {
-			return false, fmt.Errorf("microsandbox: runtime path is not a regular file: %s", path)
-		}
-		present++
-	}
-	if present == 1 {
-		return false, fmt.Errorf("microsandbox: incomplete runtime installation: expected both %s and %s", paths[0], paths[1])
-	}
-	return present == 2, nil
-}
-
-// msbFilename returns the platform-specific runtime executable name.
-func msbFilename() string {
-	return msbFilenameFor(runtime.GOOS)
-}
-
-func msbFilenameFor(goos string) string {
-	if goos == "windows" {
-		return "msb.exe"
-	}
-	return "msb"
-}
-
-// libkrunfwFilename returns the exact filename of the prebuilt libkrunfw
-// for the current platform.
-func libkrunfwFilename() string {
-	return libkrunfwFilenameFor(runtime.GOOS)
-}
-
-func libkrunfwFilenameFor(goos string) string {
-	switch goos {
-	case "darwin":
-		return fmt.Sprintf("libkrunfw.%s.dylib", libkrunfwABI)
-	case "windows":
-		return "libkrunfw.dll"
-	default:
-		return fmt.Sprintf("libkrunfw.so.%s", libkrunfwVersion)
-	}
-}
-
-// libkrunfwSymlinks returns (linkName, target) pairs for the Unix libkrunfw
-// SONAME layout. Windows resolves the DLL directly and needs no links.
-func libkrunfwSymlinks() [][2]string {
-	return libkrunfwSymlinksFor(runtime.GOOS)
-}
-
-func libkrunfwSymlinksFor(goos string) [][2]string {
-	full := libkrunfwFilenameFor(goos)
-	switch goos {
-	case "darwin":
-		return [][2]string{{"libkrunfw.dylib", full}}
-	case "windows":
-		return nil
-	default:
-		soname := fmt.Sprintf("libkrunfw.so.%s", libkrunfwABI)
-		return [][2]string{
-			{soname, full},
-			{"libkrunfw.so", soname},
-		}
-	}
-}
-
-// archString converts Go's runtime.GOARCH into the tag used in release
-// asset filenames ("aarch64" or "x86_64").
-func archString() (string, error) {
-	switch runtime.GOARCH {
-	case "arm64":
-		return "aarch64", nil
-	case "amd64":
-		return "x86_64", nil
-	default:
-		return "", fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
-	}
-}
-
-// osString converts Go's runtime.GOOS into the tag used in release assets.
-func osString() (string, error) {
-	return osStringFor(runtime.GOOS)
-}
-
-func osStringFor(goos string) (string, error) {
-	switch goos {
-	case "darwin", "linux", "windows":
-		return goos, nil
-	default:
-		return "", fmt.Errorf("unsupported platform: %s", goos)
-	}
-}
-
-// bundleURL is the GitHub release asset URL for the current OS/arch.
-func bundleURL() (string, error) {
-	arch, err := archString()
-	if err != nil {
-		return "", err
-	}
-	osName, err := osString()
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(
-		"https://github.com/%s/%s/releases/download/v%s/%s-%s-%s.tar.gz",
-		githubOrg, githubRepo, sdkVersion, githubRepo, osName, arch,
-	), nil
-}
-
-// downloadMsbAndKrunfw fetches the release bundle and extracts msb +
-// libkrunfw into <installDir>/{bin,lib}/. The FFI library inside the
-// tarball is ignored (the SDK ships it embedded).
-func downloadMsbAndKrunfw(ctx context.Context, installDir string) error {
-	binDir := filepath.Join(installDir, "bin")
-	libDir := filepath.Join(installDir, "lib")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(libDir, 0o755); err != nil {
-		return err
-	}
-
-	url, err := bundleURL()
-	if err != nil {
-		return err
-	}
-
-	reqCtx, cancel := context.WithTimeout(ctx, httpTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-
-	client := &http.Client{Timeout: httpTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("GET %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
-	}
-
-	if err := extractMsbAndKrunfw(resp.Body, binDir, libDir); err != nil {
-		return err
-	}
-
-	// Create libkrunfw SONAME symlinks. Without them ld.so can't find
-	// the library msb was linked against.
-	for _, pair := range libkrunfwSymlinks() {
-		linkPath := filepath.Join(libDir, pair[0])
-		target := pair[1]
-		_ = os.Remove(linkPath)
-		if err := os.Symlink(target, linkPath); err != nil {
-			return fmt.Errorf("symlink %s -> %s: %w", linkPath, target, err)
-		}
-	}
-
-	// Sanity check.
-	if _, err := os.Stat(filepath.Join(binDir, msbFilename())); err != nil {
-		return fmt.Errorf("msb not found after extraction: %w", err)
-	}
-	if _, err := os.Stat(filepath.Join(libDir, libkrunfwFilename())); err != nil {
-		return fmt.Errorf("%s not found after extraction: %w", libkrunfwFilename(), err)
-	}
-	return nil
-}
-
-// extractMsbAndKrunfw streams a tar.gz from r and copies msb + libkrunfw*
-// into the appropriate dirs. Any libmicrosandbox_go_ffi entries are
-// skipped — the SDK ships its FFI library embedded.
-func extractMsbAndKrunfw(r io.Reader, binDir, libDir string) error {
-	gz, err := gzip.NewReader(r)
-	if err != nil {
-		return fmt.Errorf("gzip reader: %w", err)
-	}
-	defer gz.Close()
-
-	tr := tar.NewReader(gz)
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("tar: %w", err)
-		}
-		if hdr.Typeflag != tar.TypeReg {
-			continue
-		}
-
-		name := filepath.Base(hdr.Name)
-		if name == "" || name == "." || name == ".." {
-			continue
-		}
-		// FFI lib travels alongside msb+libkrunfw in the legacy tarball
-		// shape; we now use the embed instead. Skip it on extract.
-		if strings.HasPrefix(name, "libmicrosandbox_go_ffi") {
-			continue
-		}
-
-		var dest string
-		switch {
-		case strings.HasPrefix(name, "libkrunfw"):
-			dest = filepath.Join(libDir, name)
-		default:
-			dest = filepath.Join(binDir, name)
-		}
-
-		buf, err := io.ReadAll(tr)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", name, err)
-		}
-		if err := writeFile(dest, buf, 0o755); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // writeFile atomically writes data to dest with the given mode. Writes to
