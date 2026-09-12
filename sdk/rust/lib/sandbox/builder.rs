@@ -1384,6 +1384,7 @@ impl SandboxBuilder {
                         },
                         external_mount_policy: self.config.external_mount_policy,
                         external_mounts: Vec::new(),
+                        unavailable_disks: Default::default(),
                         local_branch: false,
                         forked: false,
                         closure,
@@ -1860,7 +1861,7 @@ impl SandboxBuilder {
     }
 
     /// Validate the stable route key and the host resources it references.
-    fn validate_vsock_routes(&self) -> MicrosandboxResult<()> {
+    pub(crate) fn validate_vsock_routes(&self) -> MicrosandboxResult<()> {
         if self.config.spec.deployment_profile == DeploymentProfile::MultiTenant
             && !self.config.spec.vsock.is_empty()
         {
@@ -3646,6 +3647,7 @@ mod tests {
                 network_gateway_mac: None,
                 external_mount_policy: Default::default(),
                 external_mounts: Vec::new(),
+                unavailable_disks: Default::default(),
                 local_branch: false,
                 forked: false,
                 closure: "/owned/checkpoint".into(),

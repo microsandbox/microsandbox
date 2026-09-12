@@ -37,8 +37,60 @@ pub(crate) async fn resolve_external_mounts(
             .resources
     };
     let mut bindings = Vec::new();
-    let mut tags = BTreeSet::new();
+    let mut unavailable_disks = std::collections::BTreeMap::new();
+    let mut disk_ids = BTreeSet::new();
     let mut paths = BTreeSet::new();
+    for resource in resources.iter().filter(|resource| {
+        resource
+            .binding
+            .get("managed_disk")
+            .is_some_and(|value| value == "true")
+    }) {
+        let guest = resource
+            .binding
+            .get("guest_path")
+            .ok_or_else(|| integrity("disk resource lacks guest path"))?;
+        let id = resource
+            .binding
+            .get("device_id")
+            .ok_or_else(|| integrity("disk resource lacks device identity"))?;
+        if guest == "/"
+            || !guest.starts_with('/')
+            || crate::runtime::spawn::guest_mount_tag(guest) != *id
+            || !disk_ids.insert(id.clone())
+            || !paths.insert(guest.clone())
+        {
+            return Err(integrity("invalid additional disk binding"));
+        }
+        if let Some(selected) = config
+            .spec
+            .mounts
+            .iter()
+            .find(|mount| mount.guest() == guest)
+        {
+            match selected {
+                VolumeMount::DiskImage { .. } => {}
+                VolumeMount::Named { name, .. } => {
+                    let db = local.db().await?;
+                    let model = volume::Entity::find()
+                        .filter(volume::Column::Name.eq(name.as_str()))
+                        .one(db.read())
+                        .await?
+                        .ok_or_else(|| integrity("explicit disk volume does not exist"))?;
+                    if model.kind != "disk" {
+                        return Err(integrity("captured block device requires a disk mapping"));
+                    }
+                }
+                _ => return Err(integrity("captured block device requires a disk mapping")),
+            }
+        } else if unavailable_disks
+            .insert(id.clone(), guest.clone())
+            .is_some()
+        {
+            return Err(integrity("duplicate additional disk binding"));
+        }
+    }
+    let mut tags = BTreeSet::new();
     for resource in resources.iter().filter(|resource| {
         resource
             .binding
@@ -165,6 +217,7 @@ pub(crate) async fn resolve_external_mounts(
         .expect("restore was resolved above");
     restore.external_mount_policy = config.external_mount_policy;
     restore.external_mounts = bindings;
+    restore.unavailable_disks = unavailable_disks;
     Ok(())
 }
 

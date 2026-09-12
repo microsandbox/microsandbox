@@ -43,15 +43,6 @@ pub(crate) async fn materialize_additional_disks(
             "no captured disk at selected guest paths: {unknown:?}"
         )));
     }
-    let missing: Vec<_> = available
-        .iter()
-        .filter(|guest| !choices.inherit && !choices.captured.contains(**guest))
-        .collect();
-    if !missing.is_empty() {
-        return Err(invalid(&format!(
-            "additional disks require explicit captured-content selection at {missing:?}; use volume(path, |m| m.captured()) or -v GUEST_PATH"
-        )));
-    }
     let mut mounts = Vec::new();
     let mut guests = BTreeSet::new();
     for disk in disks
@@ -110,6 +101,12 @@ pub(crate) async fn materialize_additional_disks(
             nodev: flags.nodev,
             ..Default::default()
         };
+        // A missing choice grants no host storage access. Full restore constructs
+        // an error-serving device from the captured state, not a dummy disk file.
+        if choices.mapped.contains(guest) || (!choices.inherit && !choices.captured.contains(guest))
+        {
+            continue;
+        }
         let directory = child.join("additional-disks");
         let target = directory.join(format!("{}.{}", disk.device_id, layer.format));
         let source = source
@@ -318,6 +315,30 @@ mod tests {
             captured: BTreeSet::from(["/data".into()]),
             ..Default::default()
         };
+        // Omission and explicit remapping must not read a source file or create a
+        // child-owned copy. The full restore's device constructor handles omission.
+        for selection in [
+            Default::default(),
+            crate::sandbox::restore_resources::RestoreResources {
+                mapped: BTreeSet::from(["/data".into()]),
+                inherit: true,
+                ..Default::default()
+            },
+        ] {
+            let untouched = temporary.path().join("unmapped-child");
+            let mounts = materialize_additional_disks(
+                std::slice::from_ref(&disk),
+                std::slice::from_ref(&resource),
+                &temporary.path().join("no-source"),
+                &untouched,
+                Some("vdb"),
+                &selection,
+            )
+            .await
+            .unwrap();
+            assert!(mounts.is_empty());
+            assert!(!untouched.exists());
+        }
         let mounts = materialize_additional_disks(
             std::slice::from_ref(&disk),
             std::slice::from_ref(&resource),

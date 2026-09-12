@@ -109,12 +109,18 @@ macro_rules! resource_methods {
                         self.inner.config.restore_resources.captured.remove(guest);
                         self.inner
                             .config
+                            .restore_resources
+                            .mapped
+                            .insert(guest.into());
+                        self.inner
+                            .config
                             .spec
                             .mounts
                             .retain(|existing| existing.guest() != guest);
                         self.inner.config.spec.mounts.push(mount);
                     }
                     Ok(Err(guest)) => {
+                        self.inner.config.restore_resources.mapped.remove(&guest);
                         self.inner
                             .config
                             .spec
@@ -126,6 +132,18 @@ macro_rules! resource_methods {
                         self.inner.build_error = Some(error);
                     }
                 }
+                self
+            }
+
+            /// Bind a host stream socket or local named pipe to a guest-to-host vsock port.
+            pub fn vsock(mut self, path: impl AsRef<std::path::Path>, port: u32) -> Self {
+                self.inner = self.inner.vsock(path, port);
+                self
+            }
+
+            /// Bind a host datagram endpoint to a guest-to-host vsock port.
+            pub fn vsock_dgram(mut self, path: impl AsRef<std::path::Path>, port: u32) -> Self {
+                self.inner = self.inner.vsock_dgram(path, port);
                 self
             }
 

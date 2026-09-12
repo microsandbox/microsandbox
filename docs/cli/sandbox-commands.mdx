@@ -234,6 +234,8 @@ msb sbx restore ./saved.msb --name disk-copy --disk-only
 
 Restore progress covers RAM-backing preparation, cache waits/reuse, syncing, and activation. Slow preparation does not consume the activation timeout. `create` and `run` no longer accept `--from-snapshot`.
 
+Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. An unmapped filesystem or additional disk stays present during full restore but backend requests return I/O errors; data already cached in guest RAM may still be readable. Warnings are shown even with `--quiet`. Disk errors can make the guest filesystem abort its journal or become read-only. The root disk is always restored from the snapshot and cannot be omitted. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+
 <a id="msb-start"></a>
 
 ## msb sandbox start

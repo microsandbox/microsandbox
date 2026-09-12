@@ -1436,7 +1436,7 @@ fn apply_sandbox_opts_inner(
 
 /// Parse `HOST_PATH:PORT[/stream|/dgram]` without treating colons in the
 /// host path as separators. Stream is intentionally the compact default.
-fn parse_vsock_route(spec: &str) -> anyhow::Result<(PathBuf, u32, VsockSocketType)> {
+pub(crate) fn parse_vsock_route(spec: &str) -> anyhow::Result<(PathBuf, u32, VsockSocketType)> {
     let (host_socket, endpoint) = spec.rsplit_once(':').ok_or_else(|| {
         anyhow::anyhow!("--vsock must use HOST_PATH:PORT[/stream|/dgram], got {spec:?}")
     })?;

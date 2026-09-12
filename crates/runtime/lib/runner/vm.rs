@@ -1737,6 +1737,32 @@ fn build_vm(
     // as a dedicated bulk port. Once dual-port is selected it returns to the small control queue.
     let agent_queue_size = agent_primary_queue_size(bulk_console_backend.is_some());
     let vm = &config.vm;
+    // Decode once before constructing devices: unavailable disks need the exact
+    // captured capacity/features, never guessed geometry or a temporary backing.
+    let prepared_restore = vm
+        .checkpoint_restore
+        .as_ref()
+        .map(|restore| {
+            let prepared = if restore.local_branch {
+                crate::checkpoint::PreparedCheckpointRestore::open_local(
+                    restore.closure.clone(),
+                    &restore.checkpoint_id,
+                )
+            } else {
+                crate::checkpoint::PreparedCheckpointRestore::open(
+                    restore.closure.clone(),
+                    &restore.checkpoint_root,
+                )
+            }
+            .map_err(|error| {
+                RuntimeError::Custom(format!("prepare checkpoint restore: {error}"))
+            })?;
+            prepared
+                .validate_geometry(vm)
+                .map_err(RuntimeError::Custom)?;
+            Ok::<_, RuntimeError>(prepared)
+        })
+        .transpose()?;
     let mut bootstrap = vm.bootstrap.clone();
     let balloon_stats_interval = config
         .metrics_sample_interval_ms
@@ -2196,7 +2222,52 @@ fn build_vm(
 
     // Disk-image volume mounts. Each adds an extra virtio-blk device with
     // a stable block id so agentd can find it via /dev/disk/by-id/virtio-<id>.
-    for disk in &vm.disks {
+    let disk_inputs = if let Some(prepared) = &prepared_restore {
+        let captured = prepared.additional_blocks();
+        if vm
+            .disks
+            .iter()
+            .any(|disk| !captured.iter().any(|(id, _)| *id == disk.id))
+        {
+            return Err(RuntimeError::Custom(
+                "restore cannot add uncaptured block devices".into(),
+            ));
+        }
+        captured
+            .into_iter()
+            .map(|(id, state)| {
+                (
+                    vm.disks.iter().find(|disk| disk.id == id),
+                    Some((id, state)),
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vm.disks.iter().map(|disk| (Some(disk), None)).collect()
+    };
+    for (disk, captured) in disk_inputs {
+        let Some(disk) = disk else {
+            let (id, state) = captured.expect("only restored devices omit backing");
+            let guest = vm
+                .checkpoint_restore
+                .as_ref()
+                .and_then(|restore| restore.unavailable_disks.get(id))
+                .ok_or_else(|| {
+                    RuntimeError::Custom(format!("block {id} has no explicit unavailable binding"))
+                })?;
+            if state.device.id != id {
+                return Err(RuntimeError::Custom(
+                    "captured block identity mismatch".into(),
+                ));
+            }
+            builder = builder.disk(|disk| disk.unavailable(state.clone()));
+            external_mount_reports.push(crate::checkpoint::ExternalMountReport {
+                guest_path: guest.clone(),
+                unavailable: Some("additional disk was not mapped; disk I/O returns EIO and the guest filesystem may abort its journal or become read-only".into()),
+                stale_inodes: Default::default(),
+            });
+            continue;
+        };
         if !disk.host.exists() {
             return Err(RuntimeError::Custom(format!(
                 "disk {}: host path not found: {}",
@@ -2470,21 +2541,7 @@ fn build_vm(
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
     let restored_agent = if let Some(restore) = &config.vm.checkpoint_restore {
-        let prepared = if restore.local_branch {
-            crate::checkpoint::PreparedCheckpointRestore::open_local(
-                restore.closure.clone(),
-                &restore.checkpoint_id,
-            )
-        } else {
-            crate::checkpoint::PreparedCheckpointRestore::open(
-                restore.closure.clone(),
-                &restore.checkpoint_root,
-            )
-        }
-        .map_err(|error| RuntimeError::Custom(format!("prepare checkpoint restore: {error}")))?;
-        prepared
-            .validate_geometry(&config.vm)
-            .map_err(RuntimeError::Custom)?;
+        let prepared = prepared_restore.expect("restore was admitted before device construction");
         if let Some(admitted) = prepared.disk_closure() {
             // Reuse this process's exact admitted file bindings before the closure is moved
             // into RAM restoration. The later coordinator opens the completed journal.

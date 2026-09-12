@@ -82,6 +82,24 @@ struct CheckpointMemoryRestore {
 //--------------------------------------------------------------------------------------------------
 
 impl PreparedCheckpointRestore {
+    /// Captured additional block devices in transport order, including unmapped ones.
+    pub(crate) fn additional_blocks(&self) -> Vec<(&str, &msb_krun::BlockDeviceState)> {
+        let mut blocks: Vec<_> = self
+            .devices
+            .iter()
+            .filter_map(|device| match device {
+                PreparedDeviceRestore::Block { device_id, state }
+                    if !matches!(device_id.as_str(), "vda" | "vdb") =>
+                {
+                    Some((device_id.as_str(), state))
+                }
+                _ => None,
+            })
+            .collect();
+        blocks.sort_by_key(|(_, state)| state.transport.irq_line);
+        blocks
+    }
+
     /// Borrow disk admission while the prepared durable restore owns its validated closure.
     pub(crate) fn disk_closure(&self) -> Option<&CheckpointClosure> {
         self.memory.as_ref().map(|memory| &memory.closure)

@@ -72,6 +72,7 @@ impl BranchBuilder {
         let mut inner = SandboxBuilder::new(name);
         inner.config.spec.mounts.clear();
         inner.config.spec.network.ports.clear();
+        inner.config.spec.vsock = Default::default();
         inner.config.spec.runtime.user = None;
         Self {
             backend,
@@ -83,6 +84,7 @@ impl BranchBuilder {
 
     /// Capture source execution and start an independent child; preserve source running/paused state.
     pub async fn branch(mut self) -> MicrosandboxResult<Sandbox> {
+        self.inner.validate_vsock_routes()?;
         if let Some(error) = self.inner.build_error.take() {
             return Err(error);
         }
@@ -171,11 +173,10 @@ async fn branch(
         && (config.spec.network.outbound_proxy.is_some()
             || config.spec.network.secrets.is_some()
             || config.spec.network.tls.is_some()
-            || config.spec.network.trust_host_cas
-            || !config.spec.vsock.is_empty())
+            || config.spec.network.trust_host_cas)
     {
         return Err(MicrosandboxError::InvalidConfig(
-            "source uses host-backed proxy, TLS, secret or vsock resources; explicit compatible authorization is required (or dangerously_inherit_resources for this local source)".into(),
+            "source uses host-backed proxy, TLS or secret resources; explicit compatible authorization is required (or dangerously_inherit_resources for this local source)".into(),
         ));
     }
     // Inheritance never copies a source's writable disks into the child configuration.
@@ -189,6 +190,16 @@ async fn branch(
         config.spec.runtime.user = Some(user);
     }
     config.restore_resources = options.restore_resources;
+    if !config.restore_resources.inherit {
+        // Retained guest streams reset; an omitted route grants no source host access.
+        config.spec.vsock = Default::default();
+    }
+    for route in options.spec.vsock.routes {
+        config.spec.vsock.routes.retain(|existing| {
+            existing.port != route.port || existing.socket_type != route.socket_type
+        });
+        config.spec.vsock.routes.push(route);
+    }
     config.external_mount_policy = options.external_mount_policy;
     config.creation_progress = options.creation_progress;
     let capabilities =
@@ -339,6 +350,7 @@ pub(crate) async fn capture_child(
         .map_err(MicrosandboxError::SnapshotIntegrity)?,
         external_mount_policy: config.external_mount_policy,
         external_mounts: Vec::new(),
+        unavailable_disks: Default::default(),
         local_branch: true,
         forked: true,
         closure,

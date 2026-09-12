@@ -5,7 +5,7 @@ use microsandbox::sandbox::{BranchBuilder, RestoreBuilder, Sandbox};
 
 #[cfg(feature = "net")]
 use super::common::parse_port_mapping;
-use super::common::{display_restore_warnings, parse_restore_volume};
+use super::common::{display_restore_warnings, parse_restore_volume, parse_vsock_route};
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
@@ -40,6 +40,9 @@ pub struct RestoreArgs {
 /// Resource choices shared by restore and branch, separate from fresh-boot configuration.
 #[derive(Debug, Args)]
 pub struct RestoreResourceArgs {
+    /// Bind a host socket/named pipe to a guest-to-host vsock port: PATH:PORT[/stream|/dgram].
+    #[arg(long)]
+    pub vsock: Vec<String>,
     /// Map SOURCE:GUEST[:OPTIONS], or select a captured private disk with GUEST alone.
     #[arg(short, long, value_name = "SOURCE:GUEST|GUEST")]
     pub volume: Vec<String>,
@@ -121,6 +124,15 @@ macro_rules! apply_resources {
                 for volume in &self.volume {
                     let (guest, mount) = parse_restore_volume(volume)?;
                     builder = builder.volume(guest, |_| mount);
+                }
+                for route in &self.vsock {
+                    let (host, port, kind) = parse_vsock_route(route)?;
+                    builder = match kind {
+                        microsandbox::sandbox::VsockSocketType::Stream => builder.vsock(host, port),
+                        microsandbox::sandbox::VsockSocketType::Dgram => {
+                            builder.vsock_dgram(host, port)
+                        }
+                    };
                 }
                 #[cfg(feature = "net")]
                 for port in &self.port {

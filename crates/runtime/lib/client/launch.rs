@@ -209,6 +209,10 @@ pub struct CheckpointRestoreConfig {
     /// Captured external mount topology; host paths come only from trusted launch mounts.
     #[serde(default)]
     pub external_mounts: Vec<ExternalMountRestoreBinding>,
+    /// Additional disks intentionally retained without host backing: device ID to guest path.
+    /// Kept in the strict restore envelope so older runtimes reject unsupported requests.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub unavailable_disks: std::collections::BTreeMap<String, String>,
     /// Restore a local branch handoff instead of a durable checkpoint closure.
     pub local_branch: bool,
     /// Require private CoW memory rather than eager restoration.
@@ -236,7 +240,7 @@ pub struct ExternalMountRestoreBinding {
     pub filename: Option<String>,
     /// User explicitly selected a destination binding through a volume declaration.
     pub remapped: bool,
-    /// No trusted destination mapping was available; relaxed mode must retain an error backend.
+    /// No destination mapping was selected; retain an error-serving filesystem backend.
     pub unavailable: bool,
 }
 
@@ -396,6 +400,7 @@ mod tests {
                 network_gateway_mac: None,
                 external_mount_policy: Default::default(),
                 external_mounts: Vec::new(),
+                unavailable_disks: Default::default(),
                 local_branch: false,
                 forked: true,
                 closure: "/owned/child/restore".into(),

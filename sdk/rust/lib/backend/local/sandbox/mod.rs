@@ -1790,6 +1790,7 @@ mod tests {
             network_gateway_mac: None,
             external_mount_policy: Default::default(),
             external_mounts: Vec::new(),
+            unavailable_disks: Default::default(),
             local_branch: false,
             forked: false,
             closure: home.path().join("checkpoint"),

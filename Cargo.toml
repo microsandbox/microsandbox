@@ -91,8 +91,9 @@ microsandbox-protocol = { version = "=0.6.18", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.18", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.18", path = "crates/utils" }
 microsandbox-vsock = { version = "=0.6.18", path = "crates/vsock" }
-msb_krun = "0.1.37"
-msb_krun_utils = "0.1.37"
+# Keep both crates on the tested companion until its unavailable-device API is released.
+msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "e98f2c6310766fab3f71c26f8e79cdfa2b89d2da" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "e98f2c6310766fab3f71c26f8e79cdfa2b89d2da" }
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 
