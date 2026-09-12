@@ -4,9 +4,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -177,5 +179,66 @@ func TestInstallDir_HonorsMSBHome(t *testing.T) {
 	}
 	if want := filepath.Join(home, ".microsandbox"); got != want {
 		t.Fatalf("installDir() without MSB_HOME = %q, want %q", got, want)
+	}
+}
+
+// These tests exercise public setup without a network server: a complete pair
+// must return before any version subprocess or release download is attempted.
+func TestEnsureInstalledReusesDifferentVersion(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("MSB_HOME", root)
+	installDone = false
+	t.Cleanup(func() { installDone = false })
+	for _, file := range []string{filepath.Join("bin", msbFilename()), filepath.Join("lib", libkrunfwFilename())} {
+		dest := filepath.Join(root, file)
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dest, []byte("older version; never execute or replace"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !IsInstalled() {
+		t.Fatal("complete older pair must count as installed")
+	}
+	if err := EnsureInstalled(context.Background(), WithSkipDownload()); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContents(t, filepath.Join(root, "bin", msbFilename()), "older version; never execute or replace")
+}
+
+func TestEnsureInstalledRejectsEitherPartialPair(t *testing.T) {
+	for _, file := range []string{filepath.Join("bin", msbFilename()), filepath.Join("lib", libkrunfwFilename())} {
+		t.Run(file, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("MSB_HOME", root)
+			installDone = false
+			t.Cleanup(func() { installDone = false })
+			dest := filepath.Join(root, file)
+			if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dest, []byte("preserve"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if IsInstalled() {
+				t.Fatal("partial pair must not count as installed")
+			}
+			// No skip-download flag: even ordinary setup must refuse before networking.
+			err := EnsureInstalled(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "incomplete runtime") {
+				t.Fatalf("got %v", err)
+			}
+			assertFileContents(t, dest, "preserve")
+		})
+	}
+}
+
+func TestEnsureInstalledAbsentWithSkipDownload(t *testing.T) {
+	t.Setenv("MSB_HOME", t.TempDir())
+	installDone = false
+	t.Cleanup(func() { installDone = false })
+	if err := EnsureInstalled(context.Background(), WithSkipDownload()); err == nil {
+		t.Fatal("missing runtime must fail")
 	}
 }

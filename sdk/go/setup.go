@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -21,9 +20,9 @@ import (
 )
 
 // sdkVersion is the microsandbox release that this SDK binds to. The
-// embedded FFI library and the downloaded msb+libkrunfw artefacts are
-// both pinned to this version. Bump when cutting a new SDK release so
-// it matches published binaries.
+// embedded FFI library and newly downloaded msb+libkrunfw artifacts use
+// this version. Existing complete runtime installations are reused. Bump
+// when cutting a new SDK release so downloads match published binaries.
 const sdkVersion = "0.6.18"
 
 // libkrunfwABI is the major SONAME version of libkrunfw that msb links
@@ -96,8 +95,8 @@ func autoLoadFFI() error {
 			autoLoadErr = wrapDlopenErr(err, ffiPath)
 			return
 		}
-		// Pin the resolver's SDK-tier msb path to our install dir.
-		ffi.SetSdkMsbPath(filepath.Join(dir, "bin", msbFilename()))
+		// The native resolver discovers the runtime home itself. Registering this
+		// path as an explicit SDK override would mask caller configuration.
 	})
 	return autoLoadErr
 }
@@ -140,7 +139,11 @@ func EnsureInstalled(ctx context.Context, opts ...SetupOption) error {
 		return err
 	}
 
-	if msbAndKrunfwInstalled(dir) {
+	installed, err := runtimePairInstalled(dir)
+	if err != nil {
+		return err
+	}
+	if installed {
 		installDone = true
 		return nil
 	}
@@ -165,14 +168,15 @@ func EnsureInstalled(ctx context.Context, opts ...SetupOption) error {
 }
 
 // IsInstalled reports whether msb + libkrunfw are present at the install
-// dir ($MSB_HOME, default ~/.microsandbox) at the SDK's pinned version.
+// dir ($MSB_HOME, default ~/.microsandbox), regardless of release version.
 // It does NOT touch the FFI library (which ships embedded in the SDK).
 func IsInstalled() bool {
 	dir, err := installDir()
 	if err != nil {
 		return false
 	}
-	return msbAndKrunfwInstalled(dir)
+	installed, err := runtimePairInstalled(dir)
+	return err == nil && installed
 }
 
 // SDKVersion returns the microsandbox release version this SDK was
@@ -259,31 +263,31 @@ func wrapDlopenErr(err error, path string) error {
 	}
 }
 
-// msbAndKrunfwInstalled reports whether msb is present at the expected
-// version and libkrunfw is present.
-func msbAndKrunfwInstalled(installDir string) bool {
-	msbBin := filepath.Join(installDir, "bin", msbFilename())
-	if _, err := os.Stat(msbBin); err != nil {
-		return false
+// runtimePairInstalled accepts a complete home pair without executing msb or
+// comparing package versions. A partial installation must not be overwritten.
+func runtimePairInstalled(installDir string) (bool, error) {
+	paths := []string{
+		filepath.Join(installDir, "bin", msbFilename()),
+		filepath.Join(installDir, "lib", libkrunfwFilename()),
 	}
-	if _, err := os.Stat(filepath.Join(installDir, "lib", libkrunfwFilename())); err != nil {
-		return false
+	present := 0
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("microsandbox: inspect runtime file %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return false, fmt.Errorf("microsandbox: runtime path is not a regular file: %s", path)
+		}
+		present++
 	}
-	return installedMsbVersion(msbBin) == sdkVersion
-}
-
-// installedMsbVersion runs `msb --version` and returns the version string,
-// or "" on any error.
-func installedMsbVersion(msbPath string) string {
-	out, err := exec.Command(msbPath, "--version").Output()
-	if err != nil {
-		return ""
+	if present == 1 {
+		return false, fmt.Errorf("microsandbox: incomplete runtime installation: expected both %s and %s", paths[0], paths[1])
 	}
-	s := strings.TrimSpace(string(out))
-	if !strings.HasPrefix(s, "msb ") {
-		return ""
-	}
-	return strings.TrimPrefix(s, "msb ")
+	return present == 2, nil
 }
 
 // msbFilename returns the platform-specific runtime executable name.

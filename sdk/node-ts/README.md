@@ -10,6 +10,8 @@ For the full API reference and longer guides, use the docs site:
 - [SDK overview](https://docs.microsandbox.dev/sdk/overview)
 - [Repository examples](../../examples/typescript)
 
+A complete runtime in the configured home (`MSB_HOME`, or `~/.microsandbox` by default) takes precedence over platform-package binaries. Explicit binary paths still win. A partial home installation errors instead of falling back to the package. This also applies to the `msb` and `microsandbox` CLI entry points.
+
 ## Features
 
 - Hardware VM isolation with a guest Linux kernel

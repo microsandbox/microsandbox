@@ -3,17 +3,15 @@ import type { NetworkConfig } from "../network-config.js";
 import type { NetworkPolicy } from "../policy/types.js";
 import { msbPath } from "./resolve-binary.js";
 
-// Resolve the bundled runtime binary once and push it into the Rust
-// resolver's SDK tier. User-provided MSB_PATH still wins — Rust reads it
-// natively as its highest-precedence tier — so we don't duplicate the
-// env-var read here.
+// Register only the package fallback. Rust resolves explicit overrides and
+// the current runtime home before considering this executable.
 const resolvedMsbPath = msbPath();
 
 const require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const native = require("../../native/index.cjs") as NativeBindings;
 
-if (resolvedMsbPath) native.setRuntimeMsbPath?.(resolvedMsbPath);
+if (resolvedMsbPath) native.setPackagedMsbPath(resolvedMsbPath);
 
 export const napi = native;
 
@@ -23,6 +21,7 @@ export const napi = native;
 // dependency on the generated d.ts.
 
 export interface NativeBindings {
+  readonly setPackagedMsbPath: (path: string) => void;
   readonly setRuntimeMsbPath?: (path: string) => void;
   readonly setRuntimeLibkrunfwPath?: (path: string) => void;
   readonly setDefaultBackend?: (

@@ -8,6 +8,20 @@ Local sandboxes use the `msb` executable and `libkrunfw` library. Depending on t
 
 The default install root is `~/.microsandbox/` (`%USERPROFILE%\.microsandbox` on Windows). Explicit setup is useful when you want installation failures to surface at process startup or when you are preparing an offline environment.
 
+## Runtime selection
+
+Local SDK calls select an existing `msb` and `libkrunfw` pair in this order:
+
+1. Explicit binary-path overrides: environment variables, process-level setters, then configured paths.
+2. The resolved runtime home: configured `home`, otherwise non-empty `MSB_HOME`, otherwise `~/.microsandbox`.
+3. Binaries supplied by the SDK package, when available.
+
+A complete home installation wins over Python wheel and Node platform-package binaries, even when its release version differs from the SDK. You do not need to set `MSB_HOME` for `~/.microsandbox` to take precedence. The Python and Node CLI entry points follow the same home-first policy. Go's `EnsureInstalled` also reuses a complete home installation without replacing it to match the SDK's pinned download version.
+
+A partial home installation fails with an incomplete-runtime error; it is not silently bypassed by package binaries or repaired by setup. An invalid explicit path also fails instead of falling through. Keep the executable and firmware library from the same runtime bundle, and use compatible SDK/runtime releases.
+
+Resolution never downloads or extracts binaries. Rust's embedded archive is an explicit installation source: call `ensure_runtime` with `InstallSource::EmbeddedArchive` to install it only if no runtime resolves. An existing resolved pair wins even when that installation source is requested.
+
 ## Bring your own runtime
 
 You can provision `msb` + `libkrunfw` with the [CLI installer](/getting-started/quickstart) or the SDK helpers below. For a custom location, set `MSB_PATH` and `MSB_LIBKRUNFW_PATH` to the matching pair.
@@ -136,7 +150,7 @@ In Go, `WithSkipDownload()` returns a `SetupOption`, whose exported type is `fun
 
 ## Override runtime paths
 
-The TypeScript, Rust, Python, and Ruby SDKs can override process-wide runtime paths directly. Call setters before creating a local sandbox. Native language packages already provide their bundled `msb` path, so their public libkrunfw setter completes that package-owned pair.
+The TypeScript, Rust, Python, and Ruby SDKs can override process-wide runtime paths directly. Call setters before creating a local sandbox. Automatic package discovery is a fallback and does not occupy the explicit setter slot. A public libkrunfw setter overrides the library for the selected executable, whether that executable comes from configured paths, home, or a package.
 
 <CodeGroup>
 ```typescript TypeScript

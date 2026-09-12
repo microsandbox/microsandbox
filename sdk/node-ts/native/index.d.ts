@@ -2513,6 +2513,9 @@ export interface SecretSubstitution {
  */
 export declare function setDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): void
 
+/** Register the platform package executable as a fallback after the runtime home. */
+export declare function setPackagedMsbPath(path: string): void
+
 /**
  * Set the `libkrunfw` shared library path resolved by the JS SDK.
  *

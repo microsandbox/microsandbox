@@ -44,7 +44,7 @@ export async function install(): Promise<void> {
   await withMappedErrors(() => napi.install());
 }
 
-/** True when the runtime binaries are present and runnable. */
+/** True when a complete runtime pair resolves using overrides, home, or package files. */
 export function isInstalled(): boolean {
   return napi.isInstalled();
 }

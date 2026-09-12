@@ -11,6 +11,8 @@ For the full API reference and longer guides, use Go docs and the microsandbox d
 - [SDK overview](https://docs.microsandbox.dev/sdk/overview)
 - [Repository examples](./examples)
 
+`EnsureInstalled` reuses any complete `msb` and `libkrunfw` pair in `MSB_HOME` (or `~/.microsandbox` by default), without executing the binary or requiring its version to equal the SDK version. It refuses partial installations. The SDK version selects newly downloaded artifacts; it does not trigger replacement of an existing pair.
+
 ## Features
 
 - Hardware VM isolation with a guest Linux kernel
@@ -38,7 +40,7 @@ For the full API reference and longer guides, use Go docs and the microsandbox d
 | Linux | ARM64 | Embedded FFI library |
 | Windows | x86_64, ARM64 | Embedded FFI library; runtime support is in preview |
 
-The Go binary embeds the SDK FFI library and extracts it on first use. The `msb` runtime and `libkrunfw` are installed separately into `~/.microsandbox/` by `EnsureInstalled` (`%USERPROFILE%\.microsandbox` on Windows).
+The Go binary embeds the SDK FFI library and extracts it on first use. The `msb` runtime and `libkrunfw` are installed separately into `MSB_HOME` (default `~/.microsandbox/`) by `EnsureInstalled` (`%USERPROFILE%\.microsandbox` on Windows).
 
 ## Installation
 

@@ -1,7 +1,5 @@
 """microsandbox — Python SDK for secure, fast microVM-based sandboxing."""
 
-import os as _os
-
 from microsandbox._microsandbox import (
     BackendInfo,
     ExecEvent,
@@ -52,10 +50,10 @@ from microsandbox._microsandbox import (
     version,
 )
 from microsandbox._microsandbox import (
-    set_runtime_libkrunfw_path as set_libkrunfw_path,
+    set_packaged_msb_path as _set_packaged_msb_path,
 )
 from microsandbox._microsandbox import (
-    set_runtime_msb_path as _set_runtime_msb_path,
+    set_runtime_libkrunfw_path as set_libkrunfw_path,
 )
 from microsandbox._runtime import msb_path as _msb_path
 from microsandbox.agent import (
@@ -185,12 +183,11 @@ from microsandbox.types import (
     VsockSocketType,
 )
 
-# Pass the bundled msb path to Rust explicitly. `MSB_PATH` remains a user
-# override and is still honored first by the native resolver.
-if "MSB_PATH" not in _os.environ:
-    _bundled_msb = _msb_path()
-    if _bundled_msb.exists():
-        _set_runtime_msb_path(str(_bundled_msb))
+# Register package discovery separately from explicit user overrides. Rust checks
+# the resolved runtime home before this candidate on each resolution.
+_bundled_msb = _msb_path()
+if _bundled_msb.is_file():
+    _set_packaged_msb_path(str(_bundled_msb))
 
 __all__ = [
     # Backend selection

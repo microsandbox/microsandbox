@@ -690,5 +690,6 @@ module.exports.isInstalled = nativeBinding.isInstalled
 module.exports.popDefaultBackend = nativeBinding.popDefaultBackend
 module.exports.pushDefaultBackend = nativeBinding.pushDefaultBackend
 module.exports.setDefaultBackend = nativeBinding.setDefaultBackend
+module.exports.setPackagedMsbPath = nativeBinding.setPackagedMsbPath
 module.exports.setRuntimeLibkrunfwPath = nativeBinding.setRuntimeLibkrunfwPath
 module.exports.setRuntimeMsbPath = nativeBinding.setRuntimeMsbPath
