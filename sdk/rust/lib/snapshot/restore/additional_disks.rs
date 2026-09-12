@@ -182,7 +182,12 @@ fn stage_additional_disk(
         permissions.set_mode(0o600);
     }
     #[cfg(not(unix))]
-    permissions.set_readonly(false);
+    {
+        // Unix uses owner-only mode above. On Windows this clears the read-only
+        // attribute without granting additional access through the file's ACL.
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+    }
     std::fs::set_permissions(&copy_to, permissions)?;
     std::fs::OpenOptions::new()
         .write(true)

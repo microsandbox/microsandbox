@@ -3368,6 +3368,7 @@ pub unsafe extern "C" fn msb_sandbox_branch(
                     .await
                     .map_err(FfiError::from)?
                     .branch(child)
+                    .branch()
                     .await
                     .map_err(FfiError::from)?
             };

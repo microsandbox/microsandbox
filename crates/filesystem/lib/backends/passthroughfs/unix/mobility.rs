@@ -48,6 +48,17 @@ const GUEST_O_CREAT: u32 = 0x40;
 const GUEST_O_EXCL: u32 = 0x80;
 const GUEST_O_TRUNC: u32 = 0x200;
 
+// libc's mode_t constants are u16 on macOS and u32 on Linux, while persisted
+// file kinds use u32 on both. Normalize once without changing the wire format.
+#[allow(clippy::unnecessary_cast)]
+const FILE_TYPE_MASK: u32 = libc::S_IFMT as u32;
+#[allow(clippy::unnecessary_cast)]
+const REGULAR_FILE: u32 = libc::S_IFREG as u32;
+#[allow(clippy::unnecessary_cast)]
+const SYMBOLIC_LINK: u32 = libc::S_IFLNK as u32;
+#[allow(clippy::unnecessary_cast)]
+const DIRECTORY: u32 = libc::S_IFDIR as u32;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -335,7 +346,7 @@ pub(super) fn prepare_single_file_state(
             continue;
         }
         if inode.components != [source.to_bytes().to_vec()]
-            || external.identities[&inode.inode].kind != libc::S_IFREG as u32
+            || external.identities[&inode.inode].kind != REGULAR_FILE
         {
             return Err(invalid_state(
                 "single-file state references a sibling or non-file object",
@@ -384,10 +395,10 @@ fn validate_external_shape(external: &ExternalState) -> io::Result<()> {
             .identities
             .values()
             .any(|identity| match identity.kind {
-                kind if kind == libc::S_IFREG as u32 || kind == libc::S_IFLNK as u32 => {
+                kind if kind == REGULAR_FILE || kind == SYMBOLIC_LINK => {
                     identity.content.len() != 32
                 }
-                kind if kind == libc::S_IFDIR as u32 => !identity.content.is_empty(),
+                kind if kind == DIRECTORY => !identity.content.is_empty(),
                 _ => true,
             })
         || (external.invalid_inodes.contains(&1) && !external.state.inodes.is_empty())
@@ -405,7 +416,7 @@ fn same_object(saved: &ObjectIdentity, current: &ObjectIdentity, remapped: bool)
         && (remapped || (saved.permissions == current.permissions && saved.owner == current.owner))
         // Directory contents remain external and mutable. Existing directory iterators
         // keep their captured sequence, while new lookups see the current namespace.
-        && (saved.kind == libc::S_IFDIR as u32
+        && (saved.kind == DIRECTORY
             || (saved.size == current.size && saved.content == current.content
                 && (remapped || (saved.modified_seconds == current.modified_seconds
                     && saved.modified_nanos == current.modified_nanos))))
@@ -415,9 +426,9 @@ fn object_identity(fs: &PassthroughFs, saved: &InodeState) -> io::Result<ObjectI
     let raw = open_inode_components(fs, &saved.components)?;
     let pinned = unsafe { File::from_raw_fd(raw) };
     let before = pinned.metadata()?;
-    let kind = before.mode() & libc::S_IFMT as u32;
+    let kind = before.mode() & FILE_TYPE_MASK;
     let mut content = Vec::new();
-    if kind == libc::S_IFREG as u32 {
+    if kind == REGULAR_FILE {
         let fd = open_components(fs, &saved.components, libc::O_RDONLY | libc::O_NOFOLLOW)?;
         let mut readable = unsafe { File::from_raw_fd(fd) };
         let metadata = readable.metadata()?;
@@ -436,7 +447,7 @@ fn object_identity(fs: &PassthroughFs, saved: &InodeState) -> io::Result<ObjectI
             hash.update(&buffer[..count]);
         }
         content = hash.finalize().to_vec();
-    } else if kind == libc::S_IFLNK as u32 {
+    } else if kind == SYMBOLIC_LINK {
         let (name, parent) = saved
             .components
             .split_last()
@@ -462,7 +473,7 @@ fn object_identity(fs: &PassthroughFs, saved: &InodeState) -> io::Result<ObjectI
         }
         target.truncate(count as usize);
         content = Sha256::digest(target).to_vec();
-    } else if kind != libc::S_IFDIR as u32 {
+    } else if kind != DIRECTORY {
         return Err(invalid_state(
             "external special objects are not checkpointable",
         ));
@@ -778,7 +789,7 @@ fn verify_reopened(
     // pathname open must not swap a validated object for an unvalidated replacement.
     if current.dev() != expected.device
         || current.ino() != expected.inode
-        || current.mode() & libc::S_IFMT as u32 != expected.kind
+        || current.mode() & FILE_TYPE_MASK != expected.kind
         || current.mode() & 0o7777 != expected.permissions
         || (current.uid(), current.gid()) != expected.owner
         || current.len() != expected.size
