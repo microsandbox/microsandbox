@@ -74,6 +74,10 @@ func own(t *testing.T, s *msb.Sandbox, name string) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		// Graceful shutdown requires a running guest; Resume is idempotent.
+		if err := s.Resume(ctx); err != nil {
+			t.Errorf("resume before stopping %s: %v", name, err)
+		}
 		if err := s.Stop(ctx); err != nil {
 			t.Errorf("stop %s: %v", name, err)
 		}
@@ -249,7 +253,7 @@ func TestFullSnapshot(t *testing.T) {
 			}
 			check(t, os.Remove(direct.Path()))
 			sameProcess(t, call(t, ctx, archived, "get"), original)
-			check(t, source.Pause(ctx)) // Cleanup must also stop a paused source.
+			check(t, source.Pause(ctx)) // Cleanup resumes the paused source before graceful shutdown.
 		})
 	}
 }
