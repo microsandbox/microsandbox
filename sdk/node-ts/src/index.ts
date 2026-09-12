@@ -24,6 +24,7 @@ export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox, SandboxListBuilder } from "./sandbox.js";
+export type { RestoreBuilder } from "./sandbox.js";
 import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
 /**
  * Native fluent builder for a sandbox. `new SandboxBuilder(name)` is
@@ -44,6 +45,7 @@ export type {
   SandboxPage,
   SandboxPingResult,
   SandboxTouchResult,
+  ExternalMountWarning,
 } from "./sandbox.js";
 export type {
   ChangeKind,
@@ -104,7 +106,8 @@ export {
 } from "./volume-fs.js";
 
 // Snapshots
-export { Snapshot } from "./snapshot.js";
+export { Snapshot, SnapshotArchive } from "./snapshot.js";
+export type { DiskCompactionOptions, DiskCompactionResult } from "./compact.js";
 import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapshot.js";
 /**
  * Native fluent builder for a snapshot. `new SnapshotBuilder(name)`
@@ -112,14 +115,16 @@ import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapsh
  */
 export const SnapshotBuilder = function SnapshotBuilder(
   this: unknown,
-  name: string,
+  name = "",
 ) {
   return _Snapshot.builder(name);
-} as unknown as new (name: string) => _SnapBT;
+} as unknown as new (name?: string) => _SnapBT;
 export type SnapshotBuilder = _SnapBT;
 export { SnapshotHandle } from "./snapshot-handle.js";
 export type {
   SaveOpts,
+  LoadOpts,
+  HeadUpdate,
   SnapshotScope,
   SnapshotState,
   SnapshotVerifyReport,
@@ -426,6 +431,7 @@ export {
   CloudHttpError,
   DatabaseError,
   ExecTimeoutError,
+  StopTimeoutError,
   HttpError,
   ImageError,
   ImageInUseError,
@@ -442,19 +448,26 @@ export {
   PatchFailedError,
   ProtocolError,
   RuntimeError,
+  RuntimeIncompleteError,
+  RuntimeNotInstalledError,
   SandboxFsOpsError,
   SandboxAlreadyExistsError,
   SandboxNotFoundError,
   SandboxNotRunningError,
   SandboxReplacedError,
   SandboxStillRunningError,
+  SnapshotSourceRecoveryError,
   TerminalError,
   UnsupportedOperationError,
   UnsupportedError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "./errors.js";
-export type { MicrosandboxErrorCode } from "./errors.js";
+export type {
+  MicrosandboxErrorCode,
+  PublishedSnapshotArtifact,
+  SnapshotSourceRecoveryDetails,
+} from "./errors.js";
 
 // Sizes
 export { GiB, KiB, MiB, TiB } from "./size.js";
@@ -542,6 +555,8 @@ export type { SandboxMetrics } from "./metrics.js";
 
 // Pull progress
 export type { PullProgress } from "./pull-progress.js";
+export { CreationProgressCreate } from "./sandbox.js";
+export type { CreationProgress, CreationProgressStream, StartupPhase } from "./creation-progress.js";
 
 // Network policy
 export { ViolationActions } from "./violation-action.js";

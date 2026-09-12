@@ -26,7 +26,6 @@ type SandboxConfig struct {
 	// Deprecated: set RootDisk (via WithRootDisk / RootDisk.Managed) instead.
 	OCIUpperSizeMiB   uint32
 	ociUpperSizeSet   bool
-	Snapshot          string
 	MemoryMiB         uint32
 	CPUs              uint8
 	MaxMemoryMiB      uint32
@@ -85,6 +84,15 @@ type SandboxOption func(*SandboxConfig)
 
 // CPUPlacement controls how sandbox vCPU threads are placed on host processors.
 type CPUPlacement string
+
+// ExternalMountRestorePolicy selects validation of authorized filesystem mappings.
+// Neither policy inherits resources; unmapped filesystems remain unavailable.
+type ExternalMountRestorePolicy string
+
+const (
+	ExternalMountStrict  ExternalMountRestorePolicy = "strict"
+	ExternalMountRelaxed ExternalMountRestorePolicy = "relaxed"
+)
 
 const (
 	CPUPlacementInherit CPUPlacement = "inherit"
@@ -477,6 +485,18 @@ const (
 // THPPolicy selects the guest transparent huge-page policy at boot.
 type THPPolicy string
 
+// WithForked restores a full snapshot with private copy-on-write memory.
+// It cannot be combined with a fresh boot or disk-only restore.
+func WithForked() RestoreOption {
+	return func(o *RestoreConfig) { o.Forked = true }
+}
+
+// WithExternalMountPolicy selects strict (default) or relaxed validation of mapped filesystems.
+// It does not authorize or inherit host resources.
+func WithExternalMountPolicy(policy ExternalMountRestorePolicy) RestoreOption {
+	return func(o *RestoreConfig) { o.ExternalMountPolicy = policy }
+}
+
 const (
 	// THPAlways transparently uses huge pages for eligible anonymous mappings.
 	THPAlways THPPolicy = "always"
@@ -653,15 +673,20 @@ func WithImageDisk(path string, fstype string) SandboxOption {
 // WithBindRootfs uses a host directory directly as the sandbox root filesystem
 // (a bind rootfs): the directory's contents become the guest root filesystem
 // as-is, with no OCI pull and no overlay. Mutually exclusive with WithImage,
-// WithImageDisk, and WithFromSnapshot.
+// WithImageDisk.
 func WithBindRootfs(path string) SandboxOption {
 	return func(o *SandboxConfig) { o.ImageBind = path }
 }
 
-// WithFromSnapshot boots from a snapshot artifact by bare name or filesystem path.
-// It is mutually exclusive with WithImage.
-func WithFromSnapshot(pathOrName string) SandboxOption {
-	return func(o *SandboxConfig) { o.Snapshot = pathOrName }
+// WithSnapshotDiskOnly cold-boots only the disk state carried by a full snapshot.
+// Use with RestoreSandbox.
+func WithSnapshotDiskOnly() RestoreOption {
+	return func(o *RestoreConfig) { o.SnapshotDiskOnly = true }
+}
+
+// WithSnapshotBase supplies the exact base snapshot or standalone base archive for a delta archive.
+func WithSnapshotBase(base string) RestoreOption {
+	return func(o *RestoreConfig) { o.SnapshotBase = base }
 }
 
 // WithMemory sets the memory limit in MiB (default 512MiB).
@@ -1156,9 +1181,8 @@ type NetworkConfig struct {
 	// unlimited in both directions.
 	RateLimiter *NetworkRateLimiterConfig
 
-	// OnSecretViolation is the sandbox-wide action when a secret is sent to
-	// a disallowed host. Per-secret overrides via SecretEntry.OnViolation.
-	OnSecretViolation ViolationAction
+	// SecretViolationAction is the sandbox-wide action for blocked placeholders.
+	SecretViolationAction ViolationAction
 
 	// TrustHostCAs ships the host's extra CA bundles into the guest.
 	TrustHostCAs *bool
@@ -1386,36 +1410,43 @@ type SecretEntry struct {
 	// Value is the actual secret; it never crosses the FFI into the guest.
 	Value string
 
-	// AllowHosts restricts substitution to exact host matches.
-	AllowHosts []string
+	// Allow lists exact or wildcard hosts that may receive the real secret.
+	Allow []string
 
-	// AllowHostPatterns restricts substitution to wildcard host patterns
-	// (e.g. "*.openai.com").
-	AllowHostPatterns []string
+	// Passthrough lists hosts that may receive the unchanged placeholder.
+	Passthrough []string
 
 	// Placeholder is the string used inside the sandbox in place of the secret.
 	// Auto-generated from EnvVar when empty. Custom values must be non-empty,
 	// at most 1024 bytes, and cannot contain NUL, CR, or LF.
 	Placeholder string
 
-	// RequireTLS requires a verified TLS identity before substituting.
+	// RequireTLSIdentity requires a verified TLS identity before substituting.
 	// Defaults to true when nil.
-	RequireTLS *bool
+	RequireTLSIdentity *bool
 
-	// OnViolation overrides the sandbox-level action when this secret is
-	// detected going to a disallowed host. The last non-empty value across
-	// all secrets wins (matches Node/Python behaviour, since the runtime
-	// applies it network-wide).
-	OnViolation ViolationAction
+	// Substitution selects request locations where the placeholder becomes the secret.
+	Substitution SecretSubstitution
+
+	// ViolationAction overrides the sandbox-level blocking action for this secret.
+	ViolationAction ViolationAction
+}
+
+// SecretSubstitution selects request locations where substitution is enabled.
+type SecretSubstitution struct {
+	Headers *bool
+	Query   bool
+	Body    bool
 }
 
 // SecretEnvOptions tunes Secret.Env beyond the required envVar and value.
 type SecretEnvOptions struct {
-	AllowHosts        []string
-	AllowHostPatterns []string
-	Placeholder       string
-	RequireTLS        *bool
-	OnViolation       ViolationAction
+	Allow              []string
+	Passthrough        []string
+	Placeholder        string
+	RequireTLSIdentity *bool
+	Substitution       SecretSubstitution
+	ViolationAction    ViolationAction
 }
 
 // secretFactory is the factory namespace matching Node's `Secret.env(...)` and
@@ -1426,7 +1457,7 @@ type secretFactory struct{}
 //
 //	microsandbox.Secret.Env("OPENAI_API_KEY",
 //	    os.Getenv("OPENAI_API_KEY"),
-//	    microsandbox.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
+//	    microsandbox.SecretEnvOptions{Allow: []string{"api.openai.com"}},
 //	)
 var Secret secretFactory
 
@@ -1434,13 +1465,14 @@ var Secret secretFactory
 // SecretEnvOptions{} if no additional tuning is needed.
 func (secretFactory) Env(envVar, value string, opts SecretEnvOptions) SecretEntry {
 	return SecretEntry{
-		EnvVar:            envVar,
-		Value:             value,
-		AllowHosts:        opts.AllowHosts,
-		AllowHostPatterns: opts.AllowHostPatterns,
-		Placeholder:       opts.Placeholder,
-		RequireTLS:        opts.RequireTLS,
-		OnViolation:       opts.OnViolation,
+		EnvVar:             envVar,
+		Value:              value,
+		Allow:              opts.Allow,
+		Passthrough:        opts.Passthrough,
+		Placeholder:        opts.Placeholder,
+		RequireTLSIdentity: opts.RequireTLSIdentity,
+		Substitution:       opts.Substitution,
+		ViolationAction:    opts.ViolationAction,
 	}
 }
 

@@ -44,6 +44,9 @@ pub struct ProcessHandle {
     /// The sandbox child process handle.
     child: Child,
 
+    /// Retained only until preparation completes. No background reader survives creation.
+    pub(crate) startup_reader: Option<Box<dyn tokio::io::AsyncBufRead + Send + Unpin>>,
+
     /// When true, the Drop impl will NOT send SIGTERM.
     detached: bool,
 
@@ -63,6 +66,14 @@ pub struct ProcessHandle {
     /// Open disk-image lock files. Kept for the process lifetime so disk
     /// images cannot be attached with incompatible write modes.
     _disk_locks: Vec<File>,
+}
+
+/// Cancellation owner for a process whose startup has not completed.
+///
+/// Dropping a Tokio child alone does not terminate it. Keep the process and its locks together
+/// until either startup hands them off or cancellation has killed and reaped the child.
+pub(crate) struct StartupProcess {
+    handle: Option<ProcessHandle>,
 }
 
 /// Token used to release a metrics reservation that never reached Active.
@@ -87,7 +98,68 @@ unsafe impl Send for WindowsJob {}
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl StartupProcess {
+    pub(crate) fn new(handle: ProcessHandle) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    pub(crate) fn handle_mut(&mut self) -> &mut ProcessHandle {
+        self.handle
+            .as_mut()
+            .expect("startup owner already consumed")
+    }
+
+    pub(crate) fn child_mut(&mut self) -> &mut Child {
+        &mut self.handle_mut().child
+    }
+
+    /// Transfer ownership without detaching the established process.
+    pub(crate) fn into_handle(mut self) -> ProcessHandle {
+        self.handle.take().expect("startup owner already consumed")
+    }
+}
+
 impl ProcessHandle {
+    /// Wait without a preparation deadline. The caller owns cancellation and process cleanup.
+    pub(crate) async fn wait_for_preparation(
+        &mut self,
+        observer: &Option<tokio::sync::mpsc::WeakSender<crate::CreationProgress>>,
+    ) -> MicrosandboxResult<()> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+        let Some(mut reader) = self.startup_reader.take() else {
+            // Older runtimes only report a PID. Preserve their bounded readiness path.
+            return Ok(());
+        };
+        loop {
+            let mut line = String::new();
+            let mut frame = (&mut reader).take(4096);
+            let length = tokio::select! {
+                result = frame.read_line(&mut line) => result?,
+                status = self.child.wait() => {
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "sandbox exited during preparation: {}", status?
+                    )));
+                }
+            };
+            if length == 0 || !line.ends_with('\n') {
+                return Err(crate::MicrosandboxError::Runtime(
+                    "sandbox startup channel ended before activation or sent an oversized frame"
+                        .into(),
+                ));
+            }
+            let event: crate::StartupProgress = serde_json::from_str(&line).map_err(|error| {
+                crate::MicrosandboxError::Runtime(format!("invalid startup progress: {error}"))
+            })?;
+            let activating = event.phase == crate::StartupPhase::Activating;
+            crate::progress::report(observer, crate::CreationProgress::Startup(event));
+            if activating {
+                return Ok(());
+            }
+        }
+    }
+
     /// Create a new handle.
     pub(crate) fn new(
         pid: u32,
@@ -102,6 +174,7 @@ impl ProcessHandle {
             pid,
             sandbox_name,
             child,
+            startup_reader: None,
             detached: false,
             _disk_locks: disk_locks,
             #[cfg(unix)]
@@ -176,6 +249,37 @@ impl ProcessHandle {
     /// Check if the process has exited without blocking.
     pub fn try_wait(&mut self) -> MicrosandboxResult<Option<ExitStatus>> {
         Ok(self.child.try_wait()?)
+    }
+
+    /// Reap a creator-owned process after startup has failed.
+    ///
+    /// This is rollback of an unpublished child, not the public graceful-stop API. The child
+    /// handle pins process identity; never rediscover a process by sandbox name during cleanup.
+    pub(crate) async fn terminate_failed_startup(&mut self) -> MicrosandboxResult<ExitStatus> {
+        if let Some(status) = self.try_wait()? {
+            self.cleanup_metrics_reservation();
+            return Ok(status);
+        }
+        #[cfg(unix)]
+        {
+            // Give installed exit observers a chance to reconcile state, but don't let a
+            // signal queued before the VMM event loop leave construction alive indefinitely.
+            let _ = signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM);
+            if let Ok(result) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), self.wait()).await
+            {
+                return result;
+            }
+        }
+        self.child.start_kill()?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.wait())
+            .await
+            .map_err(|_| {
+                crate::MicrosandboxError::Runtime(format!(
+                    "startup cleanup pending: runtime process {} for {:?} has not exited",
+                    self.pid, self.sandbox_name,
+                ))
+            })?
     }
 
     /// Disarm the SIGTERM safety net so the sandbox keeps running after
@@ -313,6 +417,34 @@ impl WindowsJob {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl Drop for StartupProcess {
+    fn drop(&mut self) {
+        let Some(mut handle) = self.handle.take() else {
+            return;
+        };
+        if matches!(handle.try_wait(), Ok(Some(_))) {
+            handle.cleanup_metrics_reservation();
+            return;
+        }
+
+        // Cancellation has no caller left to await graceful rollback. Request termination
+        // synchronously, before scheduling the reaper: a runtime shutdown must not leave an
+        // unpublished VM running merely because the cleanup task never got polled.
+        if let Err(error) = handle.child.start_kill() {
+            tracing::error!(pid = handle.pid, %error, "failed to terminate cancelled startup");
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                // Retain disk locks and the Windows job until exit, not just until kill is sent.
+                // There is deliberately no cleanup deadline that would release these early.
+                if let Err(error) = handle.wait().await {
+                    tracing::error!(pid = handle.pid, %error, "failed to reap cancelled startup");
+                }
+            });
+        }
+    }
+}
+
 impl Drop for ProcessHandle {
     fn drop(&mut self) {
         if self.detached {
@@ -422,6 +554,203 @@ fn terminate_process(pid: u32) -> std::io::Result<()> {
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, unix))]
+mod startup_tests {
+    use std::process::Stdio;
+
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    use super::*;
+
+    async fn blocked_startup(ignore_term: bool) -> (ProcessHandle, tokio::process::ChildStdin) {
+        let script = if ignore_term {
+            "trap '' TERM; printf 'ready\\n'; read value"
+        } else {
+            "printf 'ready\\n'; read value"
+        };
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Wait until the signal disposition is installed, without spawning grandchildren.
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .await
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        // Tokio's Child::wait closes a child-owned stdin to avoid deadlock. Retain the writer
+        // externally so EOF cannot accidentally make our signal-resistant fixture exit.
+        let stdin = child.stdin.take().unwrap();
+        let handle = ProcessHandle::new(
+            child.id().unwrap(),
+            "startup-cleanup-test".into(),
+            child,
+            Vec::new(),
+            None,
+            None,
+        );
+        (handle, stdin)
+    }
+
+    #[tokio::test]
+    async fn failed_startup_is_terminated_and_reaped() {
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        let status = handle.terminate_failed_startup().await.unwrap();
+        assert!(!status.success());
+        assert!(handle.try_wait().unwrap().is_some());
+        assert!(handle.child.id().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_startup_escalates_when_sigterm_is_ignored() {
+        let (mut handle, _stdin) = blocked_startup(true).await;
+        let status = handle.terminate_failed_startup().await.unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        assert!(handle.try_wait().unwrap().is_some());
+        // Repeated cleanup observes the same exited child instead of signaling a stale PID.
+        assert_eq!(handle.terminate_failed_startup().await.unwrap(), status);
+    }
+
+    #[tokio::test]
+    async fn cancelled_startup_kills_and_reaps_a_signal_resistant_child() {
+        let (handle, _stdin) = blocked_startup(true).await;
+        let pid = handle.pid();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let launch = tokio::spawn(async move {
+            let _owner = StartupProcess::new(handle);
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        waiting.await.unwrap();
+        launch.abort();
+        assert!(launch.await.unwrap_err().is_cancelled());
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            // A zombie still answers kill(pid, 0). ESRCH therefore checks reaping, not merely
+            // delivery of SIGKILL. The fixture has no grandchildren or unrelated processes.
+            while signal::kill(Pid::from_raw(pid as i32), None) != Err(nix::errno::Errno::ESRCH) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled startup child was not reaped");
+        assert_eq!(
+            nix::sys::wait::waitpid(
+                Pid::from_raw(pid as i32),
+                Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+            ),
+            Err(nix::errno::Errno::ECHILD),
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_owner_handoff_preserves_the_live_child() {
+        let (handle, _stdin) = blocked_startup(false).await;
+        let mut handle = StartupProcess::new(handle).into_handle();
+        tokio::task::yield_now().await;
+        assert!(handle.try_wait().unwrap().is_none());
+        handle.terminate_failed_startup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparation_is_unbounded_and_activation_is_explicit() {
+        use tokio::io::AsyncWriteExt;
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        let (reader, mut writer) = tokio::io::duplex(4096);
+        handle.startup_reader = Some(Box::new(BufReader::new(reader)));
+        let started = std::time::Instant::now();
+        let write = tokio::spawn(async move {
+            writer.write_all(b"{\"phase\":\"waiting_for_memory_backing\",\"completed_bytes\":0,\"total_bytes\":null}\n").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            writer
+                .write_all(
+                    b"{\"phase\":\"activating\",\"completed_bytes\":0,\"total_bytes\":null}\n",
+                )
+                .await
+                .unwrap();
+        });
+        let (events, sender) = crate::progress::channel();
+        drop(events); // No observer: the internal activation event must still be consumed.
+        handle
+            .wait_for_preparation(&Some(sender.downgrade()))
+            .await
+            .unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+        assert!(handle.startup_reader.is_none());
+        write.await.unwrap();
+        handle.terminate_failed_startup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparation_eof_is_not_readiness() {
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        handle.startup_reader = Some(Box::new(BufReader::new(&b""[..])));
+        let error = handle.wait_for_preparation(&None).await.unwrap_err();
+        assert!(error.to_string().contains("before activation"));
+        handle.terminate_failed_startup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_ram_progress_does_not_start_activation() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        let (reader, mut writer) = tokio::io::duplex(4096);
+        handle.startup_reader = Some(Box::new(BufReader::new(reader)));
+        writer.write_all(b"{\"phase\":\"preparing_snapshot\",\"completed_bytes\":4096,\"total_bytes\":4096}\n").await.unwrap();
+
+        // RAM can be complete while CPU/device reconstruction is still in progress.
+        // Only the explicit construction-boundary event starts activation deadlines.
+        {
+            let waiting = handle.wait_for_preparation(&None);
+            tokio::pin!(waiting);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), &mut waiting)
+                    .await
+                    .is_err()
+            );
+            writer
+                .write_all(
+                    b"{\"phase\":\"activating\",\"completed_bytes\":0,\"total_bytes\":null}\n",
+                )
+                .await
+                .unwrap();
+            waiting.await.unwrap();
+        }
+        handle.terminate_failed_startup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_pid_only_runtime_does_not_wait_for_events() {
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        handle.wait_for_preparation(&None).await.unwrap();
+        handle.terminate_failed_startup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparation_rejects_oversized_frame() {
+        let (mut handle, _stdin) = blocked_startup(false).await;
+        handle.startup_reader = Some(Box::new(BufReader::new(std::io::Cursor::new(vec![
+            b'x';
+            4097
+        ]))));
+        assert!(
+            handle
+                .wait_for_preparation(&None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("oversized")
+        );
+        handle.terminate_failed_startup().await.unwrap();
+    }
+}
 
 #[cfg(all(test, unix))]
 mod tests {

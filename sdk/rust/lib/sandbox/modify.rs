@@ -2,14 +2,16 @@
 
 use std::sync::Arc;
 
-use microsandbox_types::{EnvVar, RootDisk, RootfsSource};
+use microsandbox_types::{
+    EnvVar, RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction,
+};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
-use crate::MicrosandboxResult;
 use crate::backend::Backend;
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
+use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::{SandboxConfig, SandboxStatus};
 
@@ -70,7 +72,7 @@ pub struct SandboxModificationBuilder {
 /// It shares the create-time [`SecretBuilder`](crate::sandbox::SecretBuilder)
 /// vocabulary: [`env`](Self::env) names the secret, [`source`](Self::source)
 /// or [`value`](Self::value) provides material (mutually exclusive),
-/// [`placeholder`](Self::placeholder) and [`allow_host`](Self::allow_host)
+/// [`placeholder`](Self::placeholder) and [`allow`](Self::allow)
 /// state the guest-visible reference and the host allow-list.
 #[derive(Default)]
 pub struct SecretPatchBuilder {
@@ -91,11 +93,19 @@ struct ExistingSecret {
 /// discovered through the control socket's `capabilities` op.
 #[derive(Debug, Clone, Copy, Default)]
 struct LiveControl {
+    /// Host understands root growth; the runtime separately preflights its guest.
+    root_disk_grow: bool,
     /// CPU and memory resize targets are served.
     resize: bool,
 
     /// Secret rotation, removal, and allowed-host updates are served.
     secrets: bool,
+}
+
+/// A published runtime checkpoint and the independent outcome of source recovery.
+pub(crate) struct CheckpointCaptureOutcome {
+    pub(crate) checkpoint: microsandbox_runtime::control::CheckpointControlState,
+    pub(crate) recovery_error: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -124,54 +134,24 @@ impl SandboxModificationBuilder {
         self
     }
 
-    /// Set the desired effective guest memory.
+    /// Set the desired effective guest memory. Accepts a bare `u32` in MiB or a typed size.
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
         self.patch.memory_mib = Some(size.into().as_u32());
         self
     }
 
-    /// Set the desired effective guest memory in MiB.
-    pub fn memory_mib(mut self, memory_mib: u32) -> Self {
-        self.patch.memory_mib = Some(memory_mib);
-        self
-    }
-
-    /// Set the desired boot-time maximum hotpluggable memory.
+    /// Set the boot-time maximum hotpluggable memory. Accepts a bare `u32` in MiB or a typed size.
     pub fn max_memory(mut self, size: impl Into<Mebibytes>) -> Self {
         self.patch.max_memory_mib = Some(size.into().as_u32());
         self
     }
 
-    /// Set the desired boot-time maximum hotpluggable memory in MiB.
-    pub fn max_memory_mib(mut self, max_memory_mib: u32) -> Self {
-        self.patch.max_memory_mib = Some(max_memory_mib);
-        self
-    }
-
-    /// Set the desired root disk size. Managed kind: grow-only (shrinking an
-    /// existing upper risks data loss and is rejected). Tmpfs kind: any
-    /// direction, effective next boot. Disk-image kind: rejected (user-owned).
+    /// Set the desired total root disk size, accepting a bare `u32` in MiB or a typed size.
+    /// Managed and flat roots are grow-only. Tmpfs changes take effect on the next boot;
+    /// user-owned disk images cannot be resized through this API.
     pub fn root_disk_size(mut self, size: impl Into<Mebibytes>) -> Self {
         self.patch.root_disk_size_mib = Some(size.into().as_u32());
         self
-    }
-
-    /// Set the desired root disk size in MiB. See [`root_disk_size`](Self::root_disk_size).
-    pub fn root_disk_size_mib(mut self, size_mib: u32) -> Self {
-        self.patch.root_disk_size_mib = Some(size_mib);
-        self
-    }
-
-    /// Set the desired OCI writable overlay upper size.
-    #[deprecated(since = "0.6.0", note = "use `root_disk_size` instead")]
-    pub fn oci_upper_size(self, size: impl Into<Mebibytes>) -> Self {
-        self.root_disk_size(size)
-    }
-
-    /// Set the desired OCI writable overlay upper size in MiB.
-    #[deprecated(since = "0.6.0", note = "use `root_disk_size_mib` instead")]
-    pub fn oci_upper_size_mib(self, size_mib: u32) -> Self {
-        self.root_disk_size_mib(size_mib)
     }
 
     /// Set an environment variable for future execs.
@@ -220,7 +200,7 @@ impl SandboxModificationBuilder {
     ///
     /// The spec mirrors the create-time secret vocabulary: name the secret
     /// with `.env(..)`, provide material with `.source(..)` or `.value(..)`,
-    /// and optionally set `.placeholder(..)` and `.allow_host(..)`. The
+    /// and optionally set `.placeholder(..)` and `.allow(..)`. The
     /// planner diffs the spec against the existing config to infer the
     /// change: a secret that does not exist yet is added, material on an
     /// existing secret rotates it, and host or placeholder differences
@@ -231,7 +211,7 @@ impl SandboxModificationBuilder {
     ///     .secret(|s| s
     ///         .env("API_KEY")
     ///         .source(SecretSource::Env { var: "API_KEY".into() })
-    ///         .allow_host("api.example.com"))
+    ///         .allow("api.example.com"))
     ///     .apply()
     ///     .await?;
     /// ```
@@ -302,6 +282,9 @@ impl SandboxModificationBuilder {
             .await?;
         let status = handle.status_snapshot();
         let mut config = handle.config()?;
+        // A failed restore can still own staged immutable lower layers. Do not let
+        // offline disk growth or a restart-backed modification bypass its launch gate.
+        crate::LocalBackend::validate_completed_restore(&config)?;
         let mut active = handle.active_config().ok().flatten();
         let live = live_control(&self.name, status).await;
         let mut plan = build_plan(
@@ -375,6 +358,33 @@ impl SandboxModificationBuilder {
                 }
             }
         }
+        if running_status(status)
+            && !restart_required
+            && self.policy == ModificationPolicy::NoRestart
+            && let Some(target_mib) = root_disk_grow_target(&plan, &self.patch, &config)
+        {
+            let size_bytes = u64::from(target_mib) * 1024 * 1024;
+            let request = serde_json::to_string(
+                &microsandbox_runtime::control::ControlRequest::RootDiskGrow { size_bytes },
+            )? + "\n";
+            let response = control_request(&self.name, request).await?;
+            let observed = response.root_disk.ok_or_else(|| {
+                crate::MicrosandboxError::Runtime("root growth reply missing capacity".into())
+            })?;
+            if observed.filesystem_bytes != size_bytes || observed.device_bytes < size_bytes {
+                return Err(crate::MicrosandboxError::Runtime(
+                    "root growth did not confirm usable capacity".into(),
+                ));
+            }
+            if let Some(active) = active.as_mut() {
+                let disk_patch = SandboxModificationPatch {
+                    root_disk_size_mib: Some(target_mib),
+                    ..Default::default()
+                };
+                apply_patch_to_config(active, &disk_patch);
+                persist_active_config(&self.backend, &handle, active).await?;
+            }
+        }
         // Grow the real upper.ext4 before persisting the new desired size:
         // the persisted value may only ever claim capacity the file actually
         // has. A running sandbox under `--next-start` keeps its mounted upper
@@ -442,8 +452,32 @@ impl SecretPatchBuilder {
     /// Add an allowed host pattern (`api.example.com`, `*.example.org`, or
     /// `*`). A non-empty list replaces the secret's current allow-list; an
     /// empty list leaves it unchanged.
-    pub fn allow_host(mut self, host: impl Into<String>) -> Self {
+    pub fn allow(mut self, host: impl Into<String>) -> Self {
         self.spec.allowed_hosts.push(host.into());
+        self
+    }
+
+    /// Replace the request locations where substitution is enabled.
+    pub fn substitution(mut self, value: SecretSubstitution) -> Self {
+        self.spec.substitution = Some(value);
+        self
+    }
+
+    /// Add a host allowed to receive the placeholder unchanged.
+    pub fn allow_passthrough_for(mut self, host: impl Into<String>) -> Self {
+        self.spec.passthrough_hosts.push(host.into());
+        self
+    }
+
+    /// Set the per-secret blocking action.
+    pub fn violation_action(mut self, value: SecretViolationAction) -> Self {
+        self.spec.violation_action = Some(value);
+        self
+    }
+
+    /// Set whether substitution requires verified TLS identity.
+    pub fn require_tls_identity(mut self, value: bool) -> Self {
+        self.spec.require_tls_identity = Some(value);
         self
     }
 
@@ -481,6 +515,23 @@ fn build_plan(
         &mut warnings,
     );
     push_root_disk_size_change(status, config, &patch, policy, &mut changes);
+    if live.root_disk_grow
+        && running_status(status)
+        && policy == ModificationPolicy::NoRestart
+        && matches!(
+            root_disk_size_state(config),
+            Some(RootDiskSizeState::Managed { .. })
+        )
+    {
+        for change in &mut changes {
+            if let PlannedChange::Config(change) = change
+                && change.field == ROOT_DISK_FIELD
+            {
+                change.disposition = ModificationDisposition::Live;
+                change.reason = None;
+            }
+        }
+    }
     push_spec_changes(status, config, &patch, policy, &mut changes, &mut warnings);
     push_secret_changes(
         status,
@@ -578,6 +629,25 @@ async fn grow_root_disk_now(
         )
     })?;
     let sandbox_dir = local_backend.sandboxes_dir().join(name);
+    let runtime_dir = sandbox_dir.join("runtime");
+    let handled = tokio::task::spawn_blocking(move || {
+        microsandbox_runtime::checkpoint::grow_stopped_root(
+            &runtime_dir,
+            u64::from(target_mib) * 1024 * 1024,
+        )
+    })
+    .await
+    .map_err(|e| crate::MicrosandboxError::Runtime(e.to_string()))?
+    .map_err(crate::MicrosandboxError::Runtime)?;
+    if handled {
+        return Ok(());
+    }
+    if !config.snapshot_upper_layers.is_empty() {
+        return Err(crate::MicrosandboxError::Runtime(
+            "start this restored sandbox once to initialize its owned root chain before resizing"
+                .into(),
+        ));
+    }
     if matches!(
         &config.spec.image,
         RootfsSource::Oci(oci) if matches!(&oci.root_disk, Some(RootDisk::Flat { .. }))
@@ -634,12 +704,14 @@ async fn live_control(name: &str, status: SandboxStatus) -> LiveControl {
     }
     match control_capabilities(name).await {
         Ok(caps) => LiveControl {
+            root_disk_grow: caps.root_disk_grow,
             resize: caps.cpu_resize || caps.memory_resize,
             secrets: caps.secrets_update,
         },
         // Runtimes that predate the capabilities op served the socket only
         // when they could resize; live secret ops did not exist yet.
         Err(_) => LiveControl {
+            root_disk_grow: false,
             resize: true,
             secrets: false,
         },
@@ -647,7 +719,7 @@ async fn live_control(name: &str, status: SandboxStatus) -> LiveControl {
 }
 
 /// Ask the sandbox process which live-control operations it serves.
-async fn control_capabilities(
+pub(super) async fn control_capabilities(
     name: &str,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlCapabilities> {
     let response = control_request(name, "{\"op\":\"capabilities\"}\n".to_string()).await?;
@@ -656,37 +728,225 @@ async fn control_capabilities(
     })
 }
 
-/// Open the runtime control pipe, retrying briefly while the single server
-/// instance is serving another client.
+/// Open the runtime control pipe within its connection budget. Restore callers
+/// additionally bound this wait by their remaining startup deadline.
 #[cfg(windows)]
 async fn connect_control_pipe(
     path: &std::path::Path,
 ) -> MicrosandboxResult<tokio::net::windows::named_pipe::NamedPipeClient> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    const ERROR_PIPE_BUSY: i32 = 231;
-    for _ in 0..100 {
-        match ClientOptions::new().open(path.as_os_str()) {
-            Ok(client) => return Ok(client),
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            Err(e) => {
-                return Err(crate::MicrosandboxError::Runtime(format!(
-                    "failed to reach the runtime control pipe at {}: {e}",
-                    path.display()
-                )));
-            }
-        }
-    }
-    Err(crate::MicrosandboxError::Runtime(format!(
-        "the runtime control pipe at {} stayed busy",
-        path.display()
-    )))
+    super::control_pipe::connect(path).await.map_err(|error| {
+        crate::MicrosandboxError::Runtime(format!(
+            "failed to reach the runtime control pipe at {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 /// Send one control request line and parse the reply.
-async fn control_request(
+pub(super) async fn control_request(
+    name: &str,
+    request: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    let response = control_request_raw(name, request).await?;
+    if !response.ok {
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "live update refused: {}",
+            response
+                .error
+                .unwrap_or_else(|| "unknown error".to_string())
+        )));
+    }
+    Ok(response)
+}
+
+/// Use the handle's local backend, never an ambient backend with a matching sandbox name.
+pub(super) async fn control_request_for(
+    local: &crate::backend::LocalBackend,
+    name: &str,
+    request: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    let response = control_request_raw_for(local, name, request).await?;
+    if !response.ok {
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "runtime control refused: {}",
+            response.error.unwrap_or_else(|| "unknown error".into())
+        )));
+    }
+    Ok(response)
+}
+
+/// Project restored live targets into configuration after construction used original geometry.
+pub(crate) async fn restore_requested_resources(
+    local: &crate::backend::LocalBackend,
+    config: &mut super::SandboxConfig,
+) -> MicrosandboxResult<()> {
+    let resources = &config.spec.resources;
+    let mut cpus = resources.cpus;
+    let mut memory_mib = resources.memory_mib;
+    // libkrun creates the CPU controller only when capacity exceeds boot CPUs.
+    // A fixed multi-CPU VM has no controller; its captured boot count is already final.
+    if resources.max_cpus > resources.cpus {
+        let state =
+            control_request_for(local, &config.spec.name, "{\"op\":\"cpu_state\"}\n".into())
+                .await?
+                .cpu
+                .ok_or_else(|| {
+                    crate::MicrosandboxError::Runtime("restored runtime omitted CPU state".into())
+                })?;
+        if state.possible != u32::from(resources.max_cpus)
+            || state.requested_online == 0
+            || state.requested_online > state.possible
+        {
+            return Err(crate::MicrosandboxError::Runtime(
+                "restored CPU target is outside captured capacity".into(),
+            ));
+        }
+        cpus = state.requested_online as u8;
+    }
+    if resources.max_memory_mib > resources.memory_mib {
+        let state = control_request_for(
+            local,
+            &config.spec.name,
+            "{\"op\":\"memory_state\"}\n".into(),
+        )
+        .await?
+        .memory
+        .ok_or_else(|| {
+            crate::MicrosandboxError::Runtime("restored runtime omitted memory state".into())
+        })?;
+        if state.boot_mib != u64::from(resources.memory_mib)
+            || state.max_mib != u64::from(resources.max_memory_mib)
+            || state.target_mib < state.boot_mib
+            || state.target_mib > state.max_mib
+        {
+            return Err(crate::MicrosandboxError::Runtime(
+                "restored memory target is outside captured capacity".into(),
+            ));
+        }
+        memory_mib = state.target_mib as u32;
+    }
+    // Persist requested targets, not the boot values or possibly still-converging actual values,
+    // so subsequent modify calls neither silently skip changes nor claim false convergence.
+    config.spec.resources.cpus = cpus;
+    config.spec.resources.memory_mib = memory_mib;
+    Ok(())
+}
+
+/// Bind the command to the selected process before sending any bytes on a reusable endpoint.
+pub(super) async fn control_request_for_run(
+    local: &crate::backend::LocalBackend,
+    name: &str,
+    run: super::identity::SandboxRunIdentity,
+    request: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    let candidates = crate::runtime::sandbox_agent_socket_path_candidates_for(local, name)
+        .into_iter()
+        .map(|path| microsandbox_runtime::control::control_socket_path_for(&path));
+    #[cfg(unix)]
+    let stream = connect_control_socket(candidates).await?;
+    #[cfg(windows)]
+    let stream = connect_control_pipe(
+        &candidates
+            .into_iter()
+            .next()
+            .ok_or_else(|| MicrosandboxError::Runtime("no backend control endpoint".into()))?,
+    )
+    .await?;
+    let peer_pid = control_peer_pid(&stream)?;
+    if peer_pid != run.pid {
+        return Err(MicrosandboxError::Runtime(format!(
+            "sandbox {name:?} control endpoint belongs to pid {peer_pid}, expected {}",
+            run.pid
+        )));
+    }
+    local.validate_control_run(name, run).await?;
+    let response = control_request_over_stream(stream, &request).await?;
+    if !response.ok {
+        return Err(MicrosandboxError::Runtime(format!(
+            "runtime control refused: {}",
+            response.error.unwrap_or_else(|| "unknown error".into())
+        )));
+    }
+    Ok(response)
+}
+
+#[cfg(target_os = "linux")]
+fn control_peer_pid(stream: &tokio::net::UnixStream) -> std::io::Result<i32> {
+    stream.peer_cred()?.pid().ok_or_else(|| {
+        std::io::Error::other("control endpoint did not report its process identity")
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn control_peer_pid(stream: &tokio::net::UnixStream) -> std::io::Result<i32> {
+    use std::os::fd::AsRawFd;
+    let mut pid: libc::pid_t = 0;
+    let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
+    // LOCAL_PEERPID identifies the server attached to this connected socket, not a later
+    // process that reuses its filesystem pathname. getpeereid alone exposes only UID/GID.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut size,
+        )
+    };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if size as usize != std::mem::size_of_val(&pid) || pid <= 0 {
+        return Err(std::io::Error::other(
+            "invalid control endpoint process identity",
+        ));
+    }
+    Ok(pid)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn control_peer_pid(_stream: &tokio::net::UnixStream) -> std::io::Result<i32> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "control endpoint process verification is unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn control_peer_pid(
+    stream: &tokio::net::windows::named_pipe::NamedPipeClient,
+) -> std::io::Result<i32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{Foundation::HANDLE, System::Pipes::GetNamedPipeServerProcessId};
+    let mut pid = 0u32;
+    let result = unsafe { GetNamedPipeServerProcessId(stream.as_raw_handle() as HANDLE, &mut pid) };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    i32::try_from(pid)
+        .map_err(|_| std::io::Error::other("control endpoint PID exceeds supported range"))
+}
+
+async fn control_request_raw_for(
+    local: &crate::backend::LocalBackend,
+    name: &str,
+    request: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    let candidates = crate::runtime::sandbox_agent_socket_path_candidates_for(local, name)
+        .into_iter()
+        .map(|path| microsandbox_runtime::control::control_socket_path_for(&path));
+    #[cfg(unix)]
+    let stream = connect_control_socket(candidates).await?;
+    #[cfg(windows)]
+    let stream =
+        connect_control_pipe(&candidates.into_iter().next().ok_or_else(|| {
+            crate::MicrosandboxError::Runtime("no backend control endpoint".into())
+        })?)
+        .await?;
+    control_request_over_stream(stream, &request).await
+}
+
+async fn control_request_raw(
     name: &str,
     request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
@@ -755,15 +1015,108 @@ where
         .map_err(|e| crate::MicrosandboxError::Runtime(format!("control response failed: {e}")))?;
     let response: microsandbox_runtime::control::ControlResponse =
         serde_json::from_str(line.trim())?;
-    if !response.ok {
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "live update refused: {}",
-            response
-                .error
-                .unwrap_or_else(|| "unknown error".to_string())
-        )));
-    }
     Ok(response)
+}
+
+/// Capability-gated disk maintenance over the existing control endpoint.
+pub(crate) async fn control_disk_compact(
+    name: &str,
+    layers: Option<usize>,
+    dry_run: bool,
+) -> MicrosandboxResult<super::DiskCompactionResult> {
+    if !control_capabilities(name).await?.disk_compact {
+        return Err(crate::MicrosandboxError::Runtime(
+            "this running sandbox does not support disk compaction; restart with the updated runtime".into(),
+        ));
+    }
+    let request = microsandbox_runtime::control::ControlRequest::DiskCompact { layers, dry_run };
+    let mut line = serde_json::to_string(&request)?;
+    line.push('\n');
+    let response = control_request(name, line).await?;
+    response.compaction.ok_or_else(|| {
+        crate::MicrosandboxError::Runtime("control response omitted compaction result".into())
+    })
+}
+
+/// Capture one full checkpoint through the running sandbox's existing control endpoint.
+///
+/// A published checkpoint may coexist with failed source recovery. Preserve both facts so the
+/// snapshot caller can publish the artifact before reporting a typed partial failure.
+pub(crate) async fn control_checkpoint_create(
+    local: &crate::backend::LocalBackend,
+    name: &str,
+    checkpoint_id: String,
+) -> MicrosandboxResult<CheckpointCaptureOutcome> {
+    let capabilities =
+        control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
+    if !capabilities
+        .capabilities
+        .is_some_and(|capabilities| capabilities.checkpoint_create)
+    {
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(
+                "this running sandbox does not support full checkpoint capture".into(),
+            ),
+        ));
+    }
+    let request = microsandbox_runtime::control::ControlRequest::CheckpointCreate {
+        checkpoint_id,
+        intent: microsandbox_runtime::control::CheckpointCaptureIntent::FullSnapshot,
+    };
+    let response = control_request_raw_for(
+        local,
+        name,
+        format!("{}\n", serde_json::to_string(&request)?),
+    )
+    .await?;
+    checkpoint_response(response)
+}
+
+fn checkpoint_response(
+    response: microsandbox_runtime::control::ControlResponse,
+) -> MicrosandboxResult<CheckpointCaptureOutcome> {
+    if let Some(checkpoint) = response.checkpoint {
+        return Ok(CheckpointCaptureOutcome {
+            checkpoint,
+            recovery_error: (!response.ok).then(|| {
+                response
+                    .error
+                    .unwrap_or_else(|| "source recovery failed without a runtime diagnostic".into())
+            }),
+        });
+    }
+    Err(crate::MicrosandboxError::Runtime(format!(
+        "full checkpoint refused: {}",
+        response
+            .error
+            .unwrap_or_else(|| "control response omitted checkpoint state".into())
+    )))
+}
+
+/// Request disk-only capture without falling back to full-state capture or a stopped copy.
+pub(crate) async fn control_disk_checkpoint_create(
+    local: &crate::backend::LocalBackend,
+    name: &str,
+    checkpoint_id: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::DiskCheckpointControlState> {
+    let capabilities =
+        control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
+    if !capabilities
+        .capabilities
+        .is_some_and(|c| c.disk_checkpoint_create)
+    {
+        return Err(MicrosandboxError::unsupported(Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable("this runtime does not support live disk-only snapshots; recreate the sandbox with the updated runtime".into())));
+    }
+    let request =
+        microsandbox_runtime::control::ControlRequest::DiskCheckpointCreate { checkpoint_id };
+    let mut line = serde_json::to_string(&request)?;
+    line.push('\n');
+    let response = control_request_for(local, name, line).await?;
+    response.disk_checkpoint.ok_or_else(|| {
+        MicrosandboxError::Runtime("runtime omitted the disk-only capture result".into())
+    })
 }
 
 /// Send the value-bearing live secret batch to the sandbox process. The
@@ -1024,7 +1377,7 @@ fn apply_secret_spec(
     secrets: &mut microsandbox_network::secrets::config::SecretsConfig,
     spec: &SecretModificationPatch,
 ) -> MicrosandboxResult<()> {
-    use microsandbox_network::secrets::config::{SecretEntry, SecretInjection};
+    use microsandbox_network::secrets::config::SecretEntry;
 
     let material = secret_material(spec)?;
     if let Some(entry) = secrets
@@ -1049,6 +1402,18 @@ fn apply_secret_spec(
         if !spec.allowed_hosts.is_empty() {
             entry.allowed_hosts = parse_host_patterns(&spec.allowed_hosts);
         }
+        if let Some(substitution) = &spec.substitution {
+            entry.substitution = substitution.clone();
+        }
+        if !spec.passthrough_hosts.is_empty() {
+            entry.passthrough_hosts = parse_host_patterns(&spec.passthrough_hosts);
+        }
+        if let Some(action) = &spec.violation_action {
+            entry.violation_action = Some(action.clone());
+        }
+        if let Some(required) = spec.require_tls_identity {
+            entry.require_tls_identity = required;
+        }
     } else {
         let (value, source) = match material {
             Some(SecretMaterial::Value(value)) => (value, None),
@@ -1071,9 +1436,10 @@ fn apply_secret_spec(
                 .clone()
                 .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&spec.name)),
             allowed_hosts: parse_host_patterns(&spec.allowed_hosts),
-            injection: SecretInjection::default(),
-            on_violation: None,
-            require_tls_identity: true,
+            substitution: spec.substitution.clone().unwrap_or_default(),
+            passthrough_hosts: parse_host_patterns(&spec.passthrough_hosts),
+            violation_action: spec.violation_action.clone(),
+            require_tls_identity: spec.require_tls_identity.unwrap_or(true),
         });
     }
     Ok(())
@@ -2335,6 +2701,284 @@ mod tests {
 
     use super::*;
     use crate::backend::LocalBackend;
+    use crate::size::SizeExt;
+
+    #[tokio::test]
+    async fn restored_fixed_cpu_counts_do_not_require_a_hotplug_controller() {
+        let home = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        // No runtime/control endpoint exists: fixed geometry needs no query.
+        for cpus in [1, 2, 4] {
+            let mut config = config(cpus, 256);
+            config.spec.resources.max_cpus = cpus;
+            config.spec.resources.max_memory_mib = 256;
+            restore_requested_resources(&local, &mut config)
+                .await
+                .unwrap();
+            assert_eq!(config.spec.resources.cpus, cpus);
+            assert_eq!(config.spec.resources.memory_mib, 256);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restored_hotplug_cpu_state_still_rejects_invalid_targets() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        let agent =
+            crate::runtime::sandbox_agent_socket_path_candidates_for(&local, "api").remove(0);
+        let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        let server = tokio::spawn(async move {
+            for (possible, requested) in [(3, 2), (4, 0), (4, 5)] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+                    "cpu_state"
+                );
+                let response = serde_json::json!({"ok":true,"cpu":{
+                    "possible":possible,"requested_online":requested,"actual_online":1,"enforced":1
+                }});
+                stream
+                    .get_mut()
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        for _ in 0..3 {
+            let mut config = config(1, 256);
+            config.spec.resources.max_cpus = 4;
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                restore_requested_resources(&local, &mut config),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.to_string().contains("outside captured capacity"));
+            assert_eq!(config.spec.resources.cpus, 1);
+        }
+        server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restored_targets_use_complete_frames_and_requested_not_actual_sizes() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        let agent =
+            crate::runtime::sandbox_agent_socket_path_candidates_for(&local, "api").remove(0);
+        let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        let server = tokio::spawn(async move {
+            for (op, response) in [
+                (
+                    "cpu_state",
+                    serde_json::json!({"ok":true,"cpu":{"possible":4,"requested_online":2,"actual_online":3,"enforced":2}}),
+                ),
+                (
+                    "memory_state",
+                    serde_json::json!({"ok":true,"memory":{"boot_mib":256,"max_mib":1024,"target_mib":768,"current_mib":512}}),
+                ),
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert!(line.ends_with('\n'));
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+                    op
+                );
+                stream
+                    .get_mut()
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut config = config(1, 256);
+        config.spec.resources.max_cpus = 4;
+        config.spec.resources.max_memory_mib = 1024;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            restore_requested_resources(&local, &mut config),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.memory_mib, 768);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn full_checkpoint_uses_selected_backend_and_retains_post_publish_failure() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let first_home = tempfile::tempdir_in("/tmp").unwrap();
+        let second_home = tempfile::tempdir_in("/tmp").unwrap();
+        let first = LocalBackend::builder()
+            .home(first_home.path())
+            .build()
+            .await
+            .unwrap();
+        let second = LocalBackend::builder()
+            .home(second_home.path())
+            .build()
+            .await
+            .unwrap();
+        let mut servers = Vec::new();
+        for (local, label, resume_ok) in [(&first, "first", true), (&second, "second", false)] {
+            let agent =
+                crate::runtime::sandbox_agent_socket_path_candidates_for(local, "worker").remove(0);
+            let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let listener = tokio::net::UnixListener::bind(path).unwrap();
+            servers.push(tokio::spawn(async move {
+                for request_index in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let response = if request_index == 0 {
+                        assert_eq!(request["op"], "capabilities");
+                        serde_json::json!({"ok":true,"capabilities":{"checkpoint_create":true,"cpu_resize":false,"memory_resize":false,"secrets_update":false}})
+                    } else {
+                        assert_eq!(request["op"], "checkpoint_create");
+                        serde_json::json!({"ok":resume_ok,"error":"source resume failed","checkpoint":{
+                            "checkpoint_id":request["checkpoint_id"], "checkpoint_root":format!("sha256:{}", "a".repeat(64)),
+                            "path":format!("/capture/{label}"), "memory_mode":"full", "memory_logical_bytes":4096, "memory_emitted_bytes":4096
+                        }})
+                    };
+                    stream.get_mut().write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                }
+            }));
+        }
+        let first_capture = control_checkpoint_create(&first, "worker", "first-checkpoint".into())
+            .await
+            .unwrap();
+        let second_capture =
+            control_checkpoint_create(&second, "worker", "second-checkpoint".into())
+                .await
+                .unwrap();
+        assert_eq!(
+            first_capture.checkpoint.path,
+            std::path::Path::new("/capture/first")
+        );
+        assert!(first_capture.recovery_error.is_none());
+        assert_eq!(
+            second_capture.checkpoint.path,
+            std::path::Path::new("/capture/second")
+        );
+        assert_eq!(
+            second_capture.recovery_error.as_deref(),
+            Some("source resume failed")
+        );
+        for server in servers {
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn size_setters_accept_bare_mib_and_typed_sizes() {
+        let temp = tempdir().unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(
+            LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let plain = SandboxModificationBuilder::new(backend.clone(), "size-api")
+            .memory(1024)
+            .max_memory(8192)
+            .root_disk_size(4096);
+        let typed = SandboxModificationBuilder::new(backend, "size-api")
+            .memory(1.gib())
+            .max_memory(8.gib())
+            .root_disk_size(4.gib());
+        for patch in [&plain.patch, &typed.patch] {
+            assert_eq!(patch.memory_mib, Some(1024));
+            assert_eq!(patch.max_memory_mib, Some(8192));
+            assert_eq!(patch.root_disk_size_mib, Some(4096));
+        }
+    }
+
+    fn checkpoint_reply(ok: bool) -> microsandbox_runtime::control::ControlResponse {
+        microsandbox_runtime::control::ControlResponse {
+            ok,
+            checkpoint: Some(microsandbox_runtime::control::CheckpointControlState {
+                checkpoint_id: "checkpoint_test".into(),
+                checkpoint_root: format!("sha256:{}", "a".repeat(64)),
+                path: "/runtime/checkpoint_test".into(),
+                memory_mode: "full".into(),
+                memory_logical_bytes: 4096,
+                memory_emitted_bytes: 4096,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn checkpoint_reply_preserves_publication_and_failed_source_recovery() {
+        for detail in ["resume failed", "thaw timed out; re-pause failed"] {
+            let mut response = checkpoint_reply(false);
+            response.error = Some(detail.into());
+            let outcome = checkpoint_response(response).unwrap();
+            assert_eq!(outcome.checkpoint.checkpoint_id, "checkpoint_test");
+            assert_eq!(outcome.recovery_error.as_deref(), Some(detail));
+        }
+    }
+
+    #[test]
+    fn checkpoint_reply_preserves_success_without_requesting_another_resume() {
+        // The runtime alone restores the prior execution state. This also covers its successful
+        // capture of an intentionally paused source; the SDK must not initiate another resume.
+        let outcome = checkpoint_response(checkpoint_reply(true)).unwrap();
+        assert!(outcome.recovery_error.is_none());
+    }
+
+    #[test]
+    fn checkpoint_reply_never_invents_a_published_artifact() {
+        for ok in [false, true] {
+            let mut response = checkpoint_reply(ok);
+            response.checkpoint = None;
+            assert!(matches!(
+                checkpoint_response(response),
+                Err(crate::MicrosandboxError::Runtime(_))
+            ));
+        }
+        let outcome = checkpoint_response(checkpoint_reply(false)).unwrap();
+        assert_eq!(
+            outcome.recovery_error.as_deref(),
+            Some("source recovery failed without a runtime diagnostic")
+        );
+    }
 
     #[test]
     #[cfg(unix)]
@@ -2543,6 +3187,7 @@ mod tests {
             &desired,
             Some(&active),
             LiveControl {
+                root_disk_grow: false,
                 resize: true,
                 secrets: false,
             },
@@ -2580,6 +3225,7 @@ mod tests {
                 &desired,
                 Some(&active),
                 LiveControl {
+                    root_disk_grow: false,
                     resize: live_memory_supported,
                     secrets: false,
                 },
@@ -2614,6 +3260,7 @@ mod tests {
             &config(2, 1024),
             Some(&active),
             LiveControl {
+                root_disk_grow: false,
                 resize: true,
                 secrets: false,
             },
@@ -2843,19 +3490,76 @@ mod tests {
     }
 
     #[test]
-    fn running_upper_grow_is_restart_backed_never_live() {
+    fn invalid_checkpoint_backed_root_grow_does_not_mutate_the_sealed_base() {
+        let sandbox = tempdir().unwrap();
+        let runtime = sandbox.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let base = sandbox.path().join("rootfs.raw");
+        let head = sandbox.path().join("root-active.qcow2");
+        std::fs::write(&base, vec![0; 4096]).unwrap();
+        // Checkpoint chains can grow here; malformed heads must still fail before any write.
+        std::fs::write(&head, b"qcow").unwrap();
+        let head_before = std::fs::read(&head).unwrap();
+        let state = serde_json::json!({
+            "schema": "microsandbox.runtime-root-disk/1",
+            "volume_id": "vol_00000000000000000000000000000000",
+            "device_id": "vda",
+            "layout": "flat-root",
+            "published_generation": 1,
+            "layers": [
+                {
+                    "layer_id": "layer_00000000000000000000000000000001",
+                    "path": base,
+                    "format": "raw",
+                    "integrity_root": microsandbox_image::checkpoint::sparse_file_integrity(&base).unwrap().root
+                },
+                {
+                    "layer_id": "layer_00000000000000000000000000000002",
+                    "path": head,
+                    "format": "qcow2",
+                    "integrity_root": null
+                }
+            ]
+        });
+        std::fs::write(
+            runtime.join("root-disk.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+
+        let error =
+            microsandbox_runtime::checkpoint::grow_stopped_root(&runtime, 8192).unwrap_err();
+        let expected = microsandbox_image::checkpoint::layer_capacities(vec![
+            microsandbox_image::checkpoint::CompactLayer {
+                path: head.clone(),
+                qcow2: true,
+            },
+        ])
+        .unwrap_err();
+        assert_eq!(error, expected.to_string());
+        assert_eq!(std::fs::read(&base).unwrap(), vec![0; 4096]);
+        assert_eq!(std::fs::read(&head).unwrap(), head_before);
+        assert_eq!(
+            std::fs::read(runtime.join("root-disk.json")).unwrap(),
+            serde_json::to_vec(&state).unwrap()
+        );
+    }
+
+    #[test]
+    fn old_runtime_upper_grow_requires_explicit_restart() {
         let patch = SandboxModificationPatch {
             root_disk_size_mib: Some(8192),
             ..SandboxModificationPatch::default()
         };
 
-        // Even a resize-capable runtime cannot grow the mounted upper live.
+        // CPU/memory resize capability alone does not advertise root growth.
         let plan = build_plan(
             "api".to_string(),
             SandboxStatus::Running,
             &oci_config_with_upper(4096),
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: true,
                 secrets: true,
             },
@@ -2886,6 +3590,47 @@ mod tests {
         );
         assert!(validate_apply_supported(&restart_plan).is_ok());
         assert!(plan_requires_restart(&restart_plan));
+    }
+
+    #[test]
+    fn owned_root_growth_uses_live_capability_but_respects_explicit_policies() {
+        for root in [RootDisk::managed(512), RootDisk::flat(512)] {
+            let config = oci_config_with_root_disk(root);
+            for (policy, expected) in [
+                (ModificationPolicy::NoRestart, ModificationDisposition::Live),
+                (
+                    ModificationPolicy::NextStart,
+                    ModificationDisposition::NextStart,
+                ),
+                (
+                    ModificationPolicy::Restart,
+                    ModificationDisposition::RequiresRestart,
+                ),
+            ] {
+                let plan = build_plan(
+                    "grow".into(),
+                    SandboxStatus::Running,
+                    &config,
+                    None,
+                    LiveControl {
+                        root_disk_grow: true,
+                        resize: false,
+                        secrets: false,
+                    },
+                    SandboxModificationPatch {
+                        root_disk_size_mib: Some(1024),
+                        ..Default::default()
+                    },
+                    policy,
+                );
+                assert!(plan.conflicts.is_empty());
+                let PlannedChange::Config(change) = &plan.changes[0] else {
+                    panic!("expected disk change")
+                };
+                assert_eq!(change.disposition, expected);
+                assert!(validate_apply_supported(&plan).is_ok());
+            }
+        }
     }
 
     #[test]
@@ -3379,15 +4124,18 @@ mod tests {
 
     #[test]
     fn secret_plan_never_contains_secret_values() {
+        const VALUE_SENTINEL: &str = "modify-plan-secret-sentinel";
+
+        // Put real material into the input: an empty value would make the
+        // absence assertion pass even if planning accidentally copied it.
         let patch = SandboxModificationPatch {
             secrets: vec![SecretModificationPatch {
                 name: "API_KEY".to_string(),
-                source: Some(SecretSource::Env {
-                    var: "API_KEY".to_string(),
-                }),
-                value: zeroize::Zeroizing::new(String::new()),
+                source: None,
+                value: zeroize::Zeroizing::new(VALUE_SENTINEL.to_string()),
                 placeholder: None,
                 allowed_hosts: vec!["api.example.com".to_string()],
+                ..SecretModificationPatch::default()
             }],
             ..SandboxModificationPatch::default()
         };
@@ -3405,7 +4153,9 @@ mod tests {
 
         assert!(json.contains("$MSB_API_KEY"));
         assert!(json.contains("api.example.com"));
-        assert!(!json.contains("real-secret-value"));
+        assert!(!json.contains(VALUE_SENTINEL));
+        assert!(!format!("{plan:?}").contains(VALUE_SENTINEL));
+        assert_eq!(plan.sandbox, "api");
 
         let PlannedChange::Secret(change) = &plan.changes[0] else {
             panic!("expected secret change");
@@ -3424,7 +4174,7 @@ mod tests {
 
     #[cfg(feature = "net")]
     fn config_with_secret(name: &str, value: &str) -> SandboxConfig {
-        use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
+        use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretSubstitution};
 
         let mut config = config(2, 1024);
         let mut network = config.local_network_config().unwrap();
@@ -3434,8 +4184,9 @@ mod tests {
             source: None,
             placeholder: format!("$MSB_{name}"),
             allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
-            injection: SecretInjection::default(),
-            on_violation: None,
+            substitution: SecretSubstitution::default(),
+            passthrough_hosts: Vec::new(),
+            violation_action: None,
             require_tls_identity: true,
         });
         config.set_local_network_config(network).unwrap();
@@ -3522,6 +4273,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -3547,6 +4299,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -3578,6 +4331,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -3613,6 +4367,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -3990,6 +4745,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -4058,6 +4814,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -4108,6 +4865,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -4128,6 +4886,7 @@ mod tests {
             &config,
             None,
             LiveControl {
+                root_disk_grow: false,
                 resize: false,
                 secrets: true,
             },
@@ -4164,8 +4923,8 @@ mod tests {
                 var: "HOST_API_KEY".to_string(),
             })
             .placeholder("$REF")
-            .allow_host("api.example.com")
-            .allow_host("*.example.org")
+            .allow("api.example.com")
+            .allow("*.example.org")
             .build();
 
         assert_eq!(spec.name, "API_KEY");

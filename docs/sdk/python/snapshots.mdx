@@ -6,7 +6,37 @@ keywords: ["Python SDK", "Python snapshots", "microsandbox snapshots"]
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+Create disk snapshots and full checkpoints in local snapshot groups. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+
+## Snapshot groups
+
+Installed snapshots belong to a group. A bare group selects its head; `group:member` selects a member by name or stable snapshot ID. Artifact paths remain valid selectors. Creation defaults to the source sandbox's group and generates a member name when omitted; imports without `group=` create a new generated group. `dest_dir` and `dest` select the parent directory containing groups.
+
+```python
+snap = await Snapshot.create("baseline", from_sandbox="box", group="work")
+loaded = await Snapshot.load("changes.msb", base="work:baseline", group="work")
+head = await Snapshot.group_head("work")
+selected = await Snapshot.group_head("work:baseline")
+# Explicitly select an imported member even when it is not a descendant.
+loaded = await Snapshot.load("other.msb", group="work", set_head=True)
+```
+
+`group_head(selector)` returns a dictionary with `group`, `previous`, `head`, `reason`, and `changed`. `previous` and `head` are stable snapshot IDs. Automatic head updates initialize an empty group or advance to a proven descendant; divergent imports and imports with unknown ancestry retain the current head. Reasons are `initialized`, `fast_forwarded`, `selected`, `unchanged`, `diverged`, `unknown_ancestry`, and `ambiguous_candidates`. Direct archive capture creates no group and rejects `group=`.
+
+## Load multiple archives
+
+```python
+from pathlib import Path
+
+handles = await Snapshot.load_many(
+    list(Path("checkpoints").glob("*.msb")),
+    group="received",
+)
+```
+
+`load_many(archives, *, dest=None, base=None, group=None, set_head=False)` returns one `SnapshotHandle` for each supplied archive, in input order. The batch resolves dependencies regardless of argument order, using its archives and exact matching members already installed in an explicitly named destination group. `base` provides an external snapshot or standalone archive when needed. Single-file `load` also reuses dependencies from its named destination group. Omitting `group` creates one generated group for the whole batch.
+
+The importer validates the complete batch before publishing members. `set_head=True` requires a unique tip. With divergent tips and the default `False`, an existing head is retained (`ambiguous_candidates`); a new group has no head and imported handles report `head_update=None`. Select a member explicitly to give that group a head. Existing archive formats are unchanged. The CLI equivalent is `msb snapshot load checkpoints/*.msb --group received`, with `--dest DIR` for another group-store root.
 
 ## SandboxHandle
 
@@ -16,14 +46,14 @@ Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/san
 async def snapshot(self, name: str) -> Snapshot
 ```
 
-Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). The sandbox must be stopped or crashed. To place the artifact elsewhere, use [`Snapshot.save()`](#snapshot-save) / [`Snapshot.load()`](#snapshot-load) or move the self-contained artifact directory. Called on a [`SandboxHandle`](/sdk/python/sandbox#sandboxhandle), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
+Snapshot this sandbox into its default group with the given member name. Live disk captures preserve the source's running or paused state. Use the returned artifact path or `sandbox:member` to open it later. Called on a [`SandboxHandle`](/sdk/python/sandbox#sandboxhandle), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Snapshot name; resolved under the default snapshots directory.</div>
+    <div className="msb-param-desc">Member name within the source sandbox's group.</div>
   </div>
 </div>
 
@@ -49,52 +79,32 @@ print(snap.digest)
 ---
 
 
-## Sandbox
-
-#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
+## Restore a sandbox
 
 ```python
-@staticmethod
-async def create(name: str, *, from_snapshot: str | os.PathLike | None = None, **kwargs) -> Sandbox
+child = await Sandbox.restore("api:baseline", name="api-restored", forked=True)
 ```
 
-Boot a fresh sandbox from a snapshot artifact by passing `from_snapshot=` as a peer of `image=`. The two are mutually exclusive: pass exactly one. See [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create) for the full set of configuration kwargs.
+`Sandbox.restore(snapshot, *, name, ...)` accepts a group head, `group:member`, artifact directory, or archive. The returned sandbox is detached. Disk snapshots cold-boot; full snapshots resume captured execution without a new startup command.
 
-<p className="msb-label">Parameters</p>
+Use `forked=True` for private CoW RAM, `disk_only=True` for only a full snapshot's disk, and `snapshot_base="group:member"` for a dependent archive. `Sandbox.restore_with_progress()` accepts the same options and returns a `PullSession`. Image, CPU/RAM size, replacement, and startup-command options are rejected.
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>from_snapshot</code><span className="msb-type">str | os.PathLike | None</span></div>
-    <div className="msb-param-desc">Snapshot bare name or artifact path to boot from instead of <code>image=</code>.</div>
-  </div>
-</div>
+Supply destination bindings with `volumes`, `ports`, and `vsock`, using the same typed values as creation. `captured_volumes=["/data"]` selects private captured disks. `user` changes the default for new execs, and `log_level` configures host logging. Resources are not inherited unless `dangerously_inherit_resources=True` is explicit. `external_mount_policy="strict"` (default) or `"relaxed"` validates supplied filesystem mappings, not permission to inherit them.
 
-<p className="msb-label">Returns</p>
+## Disk maintenance and incremental export
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="/sdk/python/sandbox#instance-methods">Sandbox</a></div>
-    <div className="msb-param-desc">Running sandbox.</div>
-  </div>
-</div>
-
-<Accordion title="Example">
+Exporting since a base omits its reusable disk layers and RAM objects. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option only selects disk layers and leaves RAM payloads complete. Imports resolve dependencies from the batch or an explicitly named destination group. Use an external base for missing dependencies; direct restore still accepts an explicit base.
 
 ```python
-# Boot from a snapshot
-sb = await Sandbox.create("worker", from_snapshot="after-pip-install")
-
-# Or from an image (existing flow, unchanged)
-sb = await Sandbox.create("worker", image="python:3.12")
+worker = await Sandbox.get("worker")
+plan = await worker.compact(layers=3, dry_run=True)
+result = await worker.compact(layers=3)
+await Snapshot.save("worker:checkpoint-b", "changes.msb", since="worker:checkpoint-a")
+await Snapshot.load("changes.msb", base="worker:checkpoint-a")
+child = await Sandbox.restore("changes.msb", name="child", snapshot_base="worker:checkpoint-a")
 ```
 
-</Accordion>
-
----
+The count includes the oldest base but excludes the writable head. Omit `layers` to compact all sealed layers. Use `last_layers=n` instead of `since` to export the newest N sealed layers. Results are dictionaries with `input_layers`, `selected_layers`, `output_layers`, `materialized_bytes`, `total_us`, `pause_us`, and `dry_run`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
 
 ## Snapshot
 
@@ -103,6 +113,12 @@ sb = await Sandbox.create("worker", image="python:3.12")
 <p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a> · <a href="#handle-open">handle.open()</a></p>
 
 A fully-parsed snapshot artifact. Properties are read-only attributes (not async).
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">id</span>
+
+`str`
+
+Stable opaque `snap_...` identity
 
 #### <span className="msb-recv">snapshot.</span><span className="msb-hn">path</span>
 
@@ -199,25 +215,26 @@ Best-effort source-sandbox name
 ```python
 @staticmethod
 async def create(
-    name: str,
+    name: str = "",
     *,
     from_sandbox: str,
+    group: str | None = None,
     dest_dir: str | os.PathLike[str] | None = None,
     labels: dict[str, str] | None = None,
     force: bool = False,
     record_integrity: bool = False,
-    resumable: bool = False,
+    full: bool = False,
 ) -> Snapshot
 ```
 
-Create a snapshot from a stopped or crashed sandbox. `name` is resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`), or under `dest_dir=` when given; `from_sandbox=` names the sandbox to capture and is required.
+Create a disk snapshot, or set `full=True` to include memory and execution state. `name` identifies a member within `group`; an omitted name is generated and an omitted group uses the source sandbox's name. `dest_dir` selects the parent directory containing the group. `from_sandbox` names the sandbox to capture and is required.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Bare snapshot name; resolved under the default snapshots directory.</div>
+    <div className="msb-param-desc">Snapshot member name; generated when omitted.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>from_sandbox</code><span className="msb-type">str</span></div>
@@ -225,23 +242,23 @@ Create a snapshot from a stopped or crashed sandbox. `name` is resolved under th
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>dest_dir</code><span className="msb-type">str | os.PathLike[str] | None</span></div>
-    <div className="msb-param-desc">Parent directory to create the artifact in; the artifact lands at <code>dest_dir/&lt;name&gt;</code>. Defaults to the snapshots directory.</div>
+    <div className="msb-param-desc">Parent directory containing snapshot groups. Defaults to the snapshots directory.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>labels</code><span className="msb-type">dict[str, str] | None</span></div>
-    <div className="msb-param-desc">User-supplied labels stored in the manifest.</div>
+    <div className="msb-param-desc">User-supplied local labels stored outside the identity-bearing descriptor.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Overwrite an existing artifact with the same name. Default <code>False</code>.</div>
+    <div className="msb-param-desc">Must remain <code>False</code> for installed group members, which are immutable. Direct archive capture supports overwriting its output file.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>record_integrity</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Record an integrity hash in the manifest so the artifact can be verified later. Default <code>False</code>.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>resumable</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Request a <code>"resumable"</code> snapshot (disk plus VM state). Accepted, but currently fails with an <code>Unsupported</code> error; resumable snapshots have not landed yet. Default <code>False</code>.</div>
+    <div className="msb-param-key"><code>full</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Capture disk, memory, execution, and device state from a running sandbox. Default <code>False</code> selects stopped-sandbox disk capture.</div>
   </div>
 </div>
 
@@ -269,6 +286,36 @@ snap = await Snapshot.create(
 
 ---
 
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">create_archive()</span>
+
+```python
+@staticmethod
+async def create_archive(
+    name: str,
+    archive: str | os.PathLike[str],
+    *,
+    from_sandbox: str,
+    group: str | None = None,
+    labels: dict[str, str] | None = None,
+    force: bool = False,
+    record_integrity: bool = False,
+    full: bool = False,
+    plain_tar: bool = False,
+) -> SnapshotArchive
+```
+
+Capture directly into an archive without installing a snapshot directory or index row.
+
+```python
+archive = await Snapshot.create_archive(
+    "after-pip-install",
+    "/tmp/after-pip-install.msb",
+    from_sandbox="baseline",
+)
+```
+
+---
+
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">open()</span>
 
 ```python
@@ -279,20 +326,20 @@ async def open(path_or_name: str) -> Snapshot
 <Accordion title="Example">
 
 ```python
-snap = await Snapshot.open("after-pip-install")
+snap = await Snapshot.open("baseline:after-pip-install")
 print(snap.image_ref)
 ```
 
 </Accordion>
 
-Open an existing artifact by bare name (resolved under the default snapshots directory) or path. Cheap metadata validation only; does **not** read the upper file. Use [`verify()`](#snap-verify) for content checks.
+Open an existing artifact by group head, `group:member`, or path. This validates metadata without reading the full upper file. Use [`verify()`](#snap-verify) for content checks.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>path_or_name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Bare snapshot name or artifact directory path.</div>
+    <div className="msb-param-desc">Group head, <code>group:member</code>, or artifact directory path.</div>
   </div>
 </div>
 
@@ -315,20 +362,20 @@ async def get(name_or_digest: str) -> SnapshotHandle
 <Accordion title="Example">
 
 ```python
-h = await Snapshot.get("after-pip-install")
+h = await Snapshot.get("baseline:after-pip-install")
 print(h.digest)
 ```
 
 </Accordion>
 
-Look up a handle in the local index by name, digest, or path.
+Look up a handle by group head, `group:member`, stable snapshot ID, descriptor digest, or artifact path. Global IDs and digests must resolve unambiguously.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name_or_digest</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Snapshot name, digest, or path.</div>
+    <div className="msb-param-desc">Group head, <code>group:member</code>, stable snapshot ID, descriptor digest, or artifact path.</div>
   </div>
 </div>
 
@@ -405,7 +452,7 @@ async def remove(path_or_name: str, *, force: bool = False) -> None
 <Accordion title="Example">
 
 ```python
-await Snapshot.remove("after-pip-install", force=True)
+await Snapshot.remove("baseline:after-pip-install", force=True)
 ```
 
 </Accordion>
@@ -417,7 +464,7 @@ Remove a snapshot artifact and its index row. Refuses if the snapshot has indexe
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>path_or_name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Bare snapshot name or artifact path.</div>
+    <div className="msb-param-desc">Group head, <code>group:member</code>, or artifact path.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
@@ -482,22 +529,22 @@ async def save(
 
 ```python
 await Snapshot.save(
-    "after-pip-install",
-    "/tmp/after-pip-install.tar.zst",
+    "baseline:after-pip-install",
+    "/tmp/after-pip-install.msb",
     with_parents=True,
 )
 ```
 
 </Accordion>
 
-Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is archived as-is; create the snapshot with recorded integrity when the archive will cross a trust boundary.
+Bundle a snapshot into a `.msb` archive. The existing snapshot manifest is archived as-is; create the snapshot with recorded integrity when the archive will cross a trust boundary.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name_or_path</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Snapshot bare name or artifact path to save.</div>
+    <div className="msb-param-desc">Group head or <code>group:member</code> or artifact path to save.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>out</code><span className="msb-type">str | os.PathLike</span></div>
@@ -513,10 +560,21 @@ Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is a
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>plain_tar</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Write an uncompressed <code>.tar</code> instead of <code>.tar.zst</code>. Default <code>False</code>.</div>
+    <div className="msb-param-desc">Write an uncompressed <code>.tar</code> instead of <code>.msb</code>. Default <code>False</code>.</div>
   </div>
 </div>
 
+<Accordion title="Example">
+
+```python
+await Snapshot.save(
+    "baseline:after-pip-install",
+    "/tmp/after-pip-install.msb",
+    with_parents=True,
+)
+```
+
+</Accordion>
 ---
 
 <p className="msb-member-group">Move artifacts</p>
@@ -532,17 +590,20 @@ async def load(
     archive: str | os.PathLike,
     *,
     dest: str | os.PathLike | None = None,
+    base: str | None = None,
+    group: str | None = None,
+    set_head: bool = False,
 ) -> SnapshotHandle
 ```
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
+Unpack a snapshot archive (`.msb` or `.tar`) into the selected or generated group. The returned handle's `group` identifies the group and `head_update` reports the head selection outcome. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>archive</code><span className="msb-type">str | os.PathLike</span></div>
-    <div className="msb-param-desc">Archive path (<code>.tar.zst</code> or <code>.tar</code>).</div>
+    <div className="msb-param-desc">Archive path (<code>.msb</code> or <code>.tar</code>).</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>dest</code><span className="msb-type">str | os.PathLike | None</span></div>
@@ -562,7 +623,7 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. S
 <Accordion title="Example">
 
 ```python
-h = await Snapshot.load("/tmp/after-pip-install.tar.zst")
+h = await Snapshot.load("/tmp/after-pip-install.msb")
 print(h.path)
 ```
 
@@ -590,7 +651,7 @@ else:
 
 </Accordion>
 
-Recompute the upper layer's recorded content integrity and compare against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches; released SHA descriptors retain their exact, potentially O(logical size), verifier. Returns `not_recorded` without reading payload contents when no integrity was stored.
+Verify the snapshot's complete state closure. File state recomputes recorded upper-layer integrity. Checkpoint state validates the complete checkpoint closure and returns `checkpoint={"kind": "verified", "root": ...}` in the report.
 
 <p className="msb-label">Returns</p>
 
@@ -725,7 +786,7 @@ async def open(self) -> Snapshot
 <Accordion title="Example">
 
 ```python
-h = await Snapshot.get("after-pip-install")
+h = await Snapshot.get("baseline:after-pip-install")
 snap = await h.open()
 print(snap.fstype)
 ```
@@ -752,13 +813,13 @@ async def remove(self, *, force: bool = False) -> None
 <Accordion title="Example">
 
 ```python
-h = await Snapshot.get("after-pip-install")
+h = await Snapshot.get("baseline:after-pip-install")
 await h.remove(force=False)
 ```
 
 </Accordion>
 
-Remove this snapshot artifact and its index row. Refuses if the snapshot has indexed children unless `force=True`.
+Remove this installed snapshot copy and its index row using the handle's stored artifact path. Other groups containing the same snapshot ID or digest remain unchanged. Refuses if the snapshot has indexed children unless `force=True`.
 
 <p className="msb-label">Parameters</p>
 
@@ -802,7 +863,7 @@ Captured snapshot state scope.
 | Member | Value | Description |
 |--------|-------|-------------|
 | `SnapshotScope.DISK` | `"disk"` | Disk-only state |
-| `SnapshotScope.RESUMABLE` | `"resumable"` | Disk, memory, and device state |
+| `SnapshotScope.FULL` | `"full"` | Disk, memory, and device state |
 
 ```python
 from microsandbox import SnapshotFormat, SnapshotScope, SnapshotStateKind

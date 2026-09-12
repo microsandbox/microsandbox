@@ -129,6 +129,12 @@ impl JsSandboxHandle {
         crate::sandbox::run_modify(builder, crate::sandbox::modify_dry_run(options.as_ref())).await
     }
 
+    /// Explicitly compact a running or stopped sandbox's immutable disk prefix.
+    #[napi]
+    pub async fn compact(&self, layers: Option<f64>, dry_run: Option<bool>) -> Result<String> {
+        crate::sandbox::run_compact(self.inner.compact(), layers, dry_run.unwrap_or(false)).await
+    }
+
     /// Start the sandbox (attached mode) — returns a live Sandbox handle.
     #[napi]
     pub async fn start(&self) -> Result<Sandbox> {
@@ -180,13 +186,35 @@ impl JsSandboxHandle {
 
     /// Stop the sandbox gracefully.
     ///
-    /// Lets the sandbox finish writing any pending data to disk before
-    /// it exits, so files written inside the sandbox aren't lost across
-    /// a later restart. Waits 10_000 ms by default before force-kill;
-    /// override with `stopWithTimeout(timeoutMs)`.
+    /// Wait indefinitely for the targeted runtime to finish gracefully and release
+    /// ownership. No implicit kill; use `stopWithTimeout` for a bounded wait.
     #[napi]
     pub async fn stop(&self) -> Result<()> {
         self.inner.stop().await.map_err(to_napi_error)
+    }
+
+    /// Create an independent local CoW child without a durable full snapshot.
+    #[napi]
+    pub async fn branch(&self, name: String) -> Result<crate::sandbox::Sandbox> {
+        Ok(crate::sandbox::Sandbox::from_rust(
+            self.inner
+                .branch(name)
+                .branch()
+                .await
+                .map_err(to_napi_error)?,
+        ))
+    }
+
+    /// Explicit resident pause through host control.
+    #[napi]
+    pub async fn pause(&self) -> Result<()> {
+        self.inner.pause().await.map_err(to_napi_error)
+    }
+
+    /// Explicit resident resume through host control.
+    #[napi]
+    pub async fn resume(&self) -> Result<()> {
+        self.inner.resume().await.map_err(to_napi_error)
     }
 
     /// Request graceful shutdown without waiting.
@@ -195,8 +223,8 @@ impl JsSandboxHandle {
         self.inner.request_stop().await.map_err(to_napi_error)
     }
 
-    /// Stop the sandbox gracefully with an explicit timeout in
-    /// milliseconds before escalation.
+    /// One graceful-completion budget in milliseconds. Timeout rejects without killing;
+    /// zero expires before dispatch.
     #[napi]
     pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
         let timeout = std::time::Duration::from_millis(timeout_ms.into());
@@ -318,7 +346,7 @@ impl JsSandboxHandle {
         crate::sandbox::spawn_log_stream_from_stream(stream).await
     }
 
-    /// Snapshot this (stopped) sandbox under a bare name.
+    /// Snapshot this sandbox's disk under a bare name, preserving its running/paused state.
     ///
     /// Resolves under `~/.microsandbox/snapshots/<name>/`. Move
     /// artifacts with `Snapshot.save`/`Snapshot.load`.

@@ -66,6 +66,14 @@ pub struct JsMountBuilder {
 
 #[napi]
 impl JsMountBuilder {
+    /// Restore this captured private disk without a host binding.
+    #[napi]
+    pub fn captured(&mut self) -> &Self {
+        let previous = self.take_inner();
+        self.inner = Some(previous.captured());
+        self
+    }
+
     #[napi(constructor)]
     pub fn new(guest: String) -> Self {
         Self {

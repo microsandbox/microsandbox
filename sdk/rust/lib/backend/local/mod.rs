@@ -15,24 +15,22 @@
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
 //! backends can hold different configurations for tests / migrations.
 
+mod control_lookup;
 mod sandbox;
 
 use std::{
     collections::{HashMap, HashSet},
+    fs::File,
     num::NonZero,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
-#[cfg(unix)]
-use std::{
-    fs::{File, OpenOptions},
-    os::fd::AsRawFd,
-};
 
 use microsandbox_db::pool::DbPools;
 use microsandbox_migration::{Migrator, MigratorTrait, schema_metadata};
 use microsandbox_types::DeploymentProfile;
+use microsandbox_utils::process_lock::{lock_exclusive, open_lock_file, unlock};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
 use tokio::sync::OnceCell;
 
@@ -98,7 +96,6 @@ pub struct LocalBackendBuilder {
 }
 
 struct MigrationLock {
-    #[cfg(unix)]
     file: File,
 }
 
@@ -129,6 +126,15 @@ impl LocalBackend {
         profile: Option<String>,
     ) -> Self {
         let config = load_persisted_config_or_default().unwrap_or_default();
+        Self::lazy_with_config(config, selection_source, profile)
+    }
+
+    /// Reuse the configuration document already read by ambient profile resolution.
+    pub(crate) fn lazy_with_config(
+        config: GlobalConfig,
+        selection_source: BackendSelectionSource,
+        profile: Option<String>,
+    ) -> Self {
         Self {
             config: Arc::new(config),
             db: OnceCell::new(),
@@ -541,32 +547,17 @@ impl LocalBackendBuilder {
 }
 
 impl MigrationLock {
-    #[cfg(unix)]
     fn acquire(path: PathBuf) -> MicrosandboxResult<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(|err| {
-                MicrosandboxError::Runtime(format!("open migration lock {}: {err}", path.display()))
-            })?;
-
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(MicrosandboxError::Runtime(format!(
-                "lock migration file {}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
+        let file = open_lock_file(&path).map_err(|err| {
+            MicrosandboxError::Runtime(format!("open migration lock {}: {err}", path.display()))
+        })?;
+        // Serialize database opening and artifact reconciliation on Windows too:
+        // SQLite's writer lock alone does not cover the installation lease.
+        lock_exclusive(&file).map_err(|err| {
+            MicrosandboxError::Runtime(format!("lock migration file {}: {err}", path.display()))
+        })?;
 
         Ok(Self { file })
-    }
-
-    #[cfg(not(unix))]
-    fn acquire(_path: PathBuf) -> MicrosandboxResult<Self> {
-        Ok(Self {})
     }
 }
 
@@ -651,10 +642,9 @@ impl From<LocalBackend> for Arc<dyn Backend> {
     }
 }
 
-#[cfg(unix)]
 impl Drop for MigrationLock {
     fn drop(&mut self) {
-        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        let _ = unlock(&self.file);
     }
 }
 
@@ -826,6 +816,77 @@ mod tests {
     use crate::backend::with_backend;
     use crate::sandbox::SandboxBuilder;
     use crate::volume::VolumeConfig;
+
+    #[tokio::test]
+    async fn migration_lock_blocks_contenders_and_releases_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let held = acquire_migration_lock(tmp.path()).await.unwrap();
+        let path = tmp.path().join(format!(
+            "{}.migration.lock",
+            microsandbox_utils::DB_FILENAME
+        ));
+        let probe = open_lock_file(&path).unwrap();
+        assert!(!microsandbox_utils::process_lock::try_lock_exclusive(&probe).unwrap());
+
+        // The contender uses the real blocking acquisition, not a test-only
+        // retry loop. The async runtime must remain usable while it waits.
+        let contender = acquire_migration_lock(tmp.path());
+        tokio::pin!(contender);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut contender)
+                .await
+                .is_err()
+        );
+        drop(held);
+        let acquired = tokio::time::timeout(Duration::from_secs(5), contender)
+            .await
+            .expect("migration lock must become available after drop")
+            .unwrap();
+        assert!(!microsandbox_utils::process_lock::try_lock_exclusive(&probe).unwrap());
+        drop(acquired);
+        assert!(microsandbox_utils::process_lock::try_lock_exclusive(&probe).unwrap());
+        unlock(&probe).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_local_backends_migrate_the_same_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshots = tmp.path().join("snapshots");
+        let first = LocalBackend::builder()
+            .home(tmp.path())
+            .snapshots_dir(&snapshots)
+            .build();
+        let second = LocalBackend::builder()
+            .home(tmp.path())
+            .snapshots_dir(&snapshots)
+            .build();
+        let (first, second) = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("concurrent startup must complete without a lease collision");
+
+        // Both independent pools must observe the complete canonical schema.
+        for backend in [first.unwrap(), second.unwrap()] {
+            let pools = backend.db().await.unwrap();
+            refuse_schema_ahead(pools.write().inner()).await.unwrap();
+            let count = pools
+                .read()
+                .query_one_raw(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    "SELECT COUNT(*) FROM seaql_migrations",
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by_index::<i64>(0)
+                .unwrap();
+            assert_eq!(count as usize, schema_metadata::migration_ids().count());
+            microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
+                .await
+                .unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn sandbox_config_patch_overlays_global_config_by_field_presence() {
@@ -1043,10 +1104,9 @@ mod tests {
             Manifest::from_bytes(&std::fs::read(root_dir.join("snapshot.json")).unwrap()).unwrap();
         let child_manifest =
             Manifest::from_bytes(&std::fs::read(child_dir.join("snapshot.json")).unwrap()).unwrap();
-        let root_target_digest = root_manifest.digest().unwrap();
         assert_eq!(
-            child_manifest.parent.as_deref(),
-            Some(root_target_digest.as_str())
+            child_manifest.parent.as_ref().map(|parent| parent.as_str()),
+            Some(root_manifest.snapshot_id.as_str())
         );
         assert!(!root_dir.join("manifest.json").exists());
         assert!(!child_dir.join("manifest.json").exists());
@@ -1097,6 +1157,22 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("install operation in progress"));
+
+        // Refusal releases the migration lock without clearing or waiting out
+        // a genuine exclusive installation operation.
+        let _lock = tokio::time::timeout(Duration::from_secs(5), acquire_migration_lock(&db_dir))
+            .await
+            .expect("failed startup must release the migration lock")
+            .unwrap();
+        let path = db_dir.join(microsandbox_utils::DB_FILENAME);
+        let pools = DbPools::open(&path, 1, Duration::from_secs(5), Duration::from_secs(5))
+            .await
+            .unwrap();
+        let error =
+            microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("install operation in progress"));
     }
 
     #[tokio::test]

@@ -1071,6 +1071,17 @@ impl RubySandbox {
         })
     }
 
+    fn stop_with_timeout(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        seconds: f64,
+    ) -> Result<(), Error> {
+        // A required scalar cannot turn an explicit bounded call into an unbounded stop.
+        let timeout = duration(ruby, seconds, "timeout")?;
+        let sb = this.inner_clone()?;
+        run(ruby, async move { sb.stop_with_timeout(timeout).await })
+    }
+
     fn kill(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
         let parsed = scan_args::<(), (Option<f64>,), (), (), RHash, ()>(args)?;
         let timeout = parse_timeout(ruby, parsed.optional.0, parsed.keywords, "kill")?;
@@ -1466,6 +1477,16 @@ impl RubySandboxHandle {
         })
     }
 
+    fn stop_with_timeout(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        seconds: f64,
+    ) -> Result<(), Error> {
+        let timeout = duration(ruby, seconds, "timeout")?;
+        let handle = Arc::clone(&this.inner);
+        run(ruby, async move { handle.stop_with_timeout(timeout).await })
+    }
+
     fn kill(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
         let parsed = scan_args::<(), (Option<f64>,), (), (), RHash, ()>(args)?;
         let timeout = parse_timeout(ruby, parsed.optional.0, parsed.keywords, "kill")?;
@@ -1722,11 +1743,20 @@ fn version() -> &'static str {
 }
 
 fn installed() -> bool {
-    microsandbox_core::setup::is_installed()
+    microsandbox_core::setup::is_runtime_installed(
+        &microsandbox_core::config::GlobalConfig::default(),
+    )
 }
 
 fn install(ruby: &Ruby) -> Result<(), Error> {
-    run(ruby, microsandbox_core::setup::install())
+    run(ruby, async {
+        microsandbox_core::setup::install_runtime(
+            &microsandbox_core::config::GlobalConfig::default(),
+            Default::default(),
+        )
+        .await
+        .map(|_| ())
+    })
 }
 
 fn set_runtime_msb_path(path: String) {
@@ -2339,6 +2369,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     sandbox.define_method("exec", method!(RubySandbox::exec, -1))?;
     sandbox.define_method("shell", method!(RubySandbox::shell, -1))?;
     sandbox.define_method("stop", method!(RubySandbox::stop, -1))?;
+    sandbox.define_method(
+        "stop_with_timeout",
+        method!(RubySandbox::stop_with_timeout, 1),
+    )?;
     sandbox.define_method("kill", method!(RubySandbox::kill, -1))?;
     sandbox.define_method("request_stop", method!(RubySandbox::request_stop, 0))?;
     sandbox.define_method("request_kill", method!(RubySandbox::request_kill, 0))?;
@@ -2394,6 +2428,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     )?;
     handle.define_method("start", method!(RubySandboxHandle::start, -1))?;
     handle.define_method("stop", method!(RubySandboxHandle::stop, -1))?;
+    handle.define_method(
+        "stop_with_timeout",
+        method!(RubySandboxHandle::stop_with_timeout, 1),
+    )?;
     handle.define_method("kill", method!(RubySandboxHandle::kill, -1))?;
     handle.define_method("remove", method!(RubySandboxHandle::remove, 0))?;
     handle.define_method(

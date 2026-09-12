@@ -333,13 +333,25 @@ func TestFFIWireShape_LegacyConfigFieldMapsToRootDisk(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_WithFromSnapshot(t *testing.T) {
-	got := marshalCreateOptions(t, WithFromSnapshot("after-pip-install"))
+func TestFFIWireShape_Restore(t *testing.T) {
+	config := RestoreConfig{}
+	WithSnapshotDiskOnly()(&config)
+	raw, err := json.Marshal(buildFFIRestoreOptions("after-pip-install", config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
 	if v := mustField(t, got, "snapshot"); v != "after-pip-install" {
 		t.Fatalf("snapshot = %v, want %q", v, "after-pip-install")
 	}
 	if _, present := got["image"]; present {
 		t.Fatal("image must not appear in payload when only snapshot is set")
+	}
+	if v := mustField(t, got, "disk_only"); v != true {
+		t.Fatalf("snapshot_disk_only = %v, want true", v)
 	}
 }
 
@@ -696,9 +708,9 @@ func TestFFIWireShape_Secrets(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
 		WithSecrets(Secret.Env("OPENAI_API_KEY", "sk-xxx", SecretEnvOptions{
-			AllowHosts:        []string{"api.openai.com"},
-			AllowHostPatterns: []string{"*.openai.com"},
-			OnViolation:       ViolationActionBlockAndTerminate,
+			Allow:           []string{"api.openai.com", "*.openai.com"},
+			Passthrough:     []string{"api.anthropic.com"},
+			ViolationAction: ViolationActionBlockAndTerminate,
 		})),
 	)
 	secs := mustField(t, got, "secrets").([]any)
@@ -709,12 +721,12 @@ func TestFFIWireShape_Secrets(t *testing.T) {
 	if s["env_var"] != "OPENAI_API_KEY" || s["value"] != "sk-xxx" {
 		t.Fatalf("secret = %v", s)
 	}
-	if s["on_violation"] != "block-and-terminate" {
-		t.Fatalf("on_violation = %v", s["on_violation"])
+	if s["violation_action"] != "block-and-terminate" {
+		t.Fatalf("violation_action = %v", s["violation_action"])
 	}
-	hosts := s["allow_hosts"].([]any)
-	if len(hosts) != 1 || hosts[0] != "api.openai.com" {
-		t.Fatalf("allow_hosts = %v", hosts)
+	hosts := s["allow"].([]any)
+	if len(hosts) != 2 || hosts[0] != "api.openai.com" || hosts[1] != "*.openai.com" {
+		t.Fatalf("allow = %v", hosts)
 	}
 }
 
@@ -750,7 +762,7 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			DNS: &DNSConfig{
 				Nameservers: []string{"1.1.1.1:53"},
 			},
-			Strict:  true,
+			Strict:   true,
 			IPv4Pool: "172.31.240.0/24",
 			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),
@@ -979,7 +991,7 @@ func TestFFIWireShape_KitchenSinkDoesNotPanic(t *testing.T) {
 			TLS: &TLSConfig{Bypass: []string{"*.googleapis.com"}},
 		}),
 		WithSecrets(Secret.Env("K", "v", SecretEnvOptions{
-			AllowHosts: []string{"h"},
+			Allow: []string{"h"},
 		})),
 		WithPatches(Patch.Mkdir("/app", PatchOptions{})),
 		WithPorts(map[uint16]uint16{8080: 80}),

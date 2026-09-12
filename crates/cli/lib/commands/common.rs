@@ -4,13 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
+#[cfg(feature = "net")]
+use microsandbox::OutboundProxy;
+use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
     RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
     TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
-use microsandbox::{OutboundProxy, VolumeKind};
 #[cfg(feature = "net")]
 use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
 #[cfg(feature = "net")]
@@ -38,6 +40,26 @@ pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Backend>> {
         );
     }
     Ok(backend)
+}
+
+/// Display relaxed-restore diagnostics even when ordinary progress is quiet.
+pub(crate) async fn display_restore_warnings(sandbox: &Sandbox) {
+    if !sandbox.config().resumed_from_full_snapshot() {
+        return;
+    }
+    match sandbox.restore_warnings().await {
+        Ok(warnings) => {
+            for warning in warnings {
+                ui::warn(&format!(
+                    "external mount {}: {} (stale inodes: {:?})",
+                    warning.guest_path, warning.reason, warning.stale_inodes,
+                ));
+            }
+        }
+        // Creation already succeeded. Reporting a diagnostic-read failure must not imply
+        // rollback or discard the live handle and accidentally trigger its drop policy.
+        Err(error) => ui::warn(&format!("could not read restore warnings: {error}")),
+    }
 }
 
 /// Borrow the `LocalBackend` inside the resolved default backend, or error.
@@ -582,19 +604,32 @@ pub struct SandboxOpts {
     pub tls_no_verify_upstream_for: Vec<String>,
 
     // --- Secrets ---
-    /// Inject a secret that is only sent to allowed hosts (ENV@HOST[,HOST...]).
+    /// Configure a protected secret (`ENV[:OPTIONS]@HOST[,HOST...]`).
     /// The value is read from the host environment variable ENV at start time
     /// and stored only as a source reference, never inlined in the sandbox
     /// config. Inline `ENV=VALUE@HOST` is rejected; export the value and use
-    /// `ENV@HOST[,HOST...]`.
+    /// `ENV[:OPTIONS]@HOST[,HOST...]`.
     #[cfg(feature = "net")]
     #[arg(long)]
     pub secret: Vec<String>,
 
-    /// Action when a secret is sent to a disallowed host (block, block-and-log, block-and-terminate, passthrough).
+    /// Action when a secret placeholder is blocked (block, block-and-log, block-and-terminate).
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub on_secret_violation: Option<String>,
+    pub secret_violation_action: Option<String>,
+}
+
+/// Parsed `--secret` policy for one environment variable.
+///
+/// Shared with live modification parsing, which uses only wire-model types.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedSecret {
+    pub(crate) env_var: String,
+    pub(crate) allowed_hosts: Vec<String>,
+    pub(crate) passthrough_hosts: Vec<String>,
+    pub(crate) substitute_headers: bool,
+    pub(crate) substitute_query: bool,
+    pub(crate) substitute_body: bool,
 }
 
 /// Parsed public CLI mount options.
@@ -785,7 +820,7 @@ impl SandboxOpts {
             || !self.tls_upstream_ca_cert.is_empty()
             || !self.tls_upstream_ca_cert_for.is_empty()
             || !self.tls_no_verify_upstream_for.is_empty()
-            || self.on_secret_violation.is_some()
+            || self.secret_violation_action.is_some()
     }
 
     /// Builds one direction of the network rate limiter from its related flags.
@@ -1037,7 +1072,7 @@ impl SandboxOpts {
             || !self.tls_upstream_ca_cert_for.is_empty()
             || !self.tls_no_verify_upstream_for.is_empty()
             || !self.secret.is_empty()
-            || self.on_secret_violation.is_some();
+            || self.secret_violation_action.is_some();
 
         #[cfg(not(feature = "net"))]
         let net = false;
@@ -1401,7 +1436,7 @@ fn apply_sandbox_opts_inner(
 
 /// Parse `HOST_PATH:PORT[/stream|/dgram]` without treating colons in the
 /// host path as separators. Stream is intentionally the compact default.
-fn parse_vsock_route(spec: &str) -> anyhow::Result<(PathBuf, u32, VsockSocketType)> {
+pub(crate) fn parse_vsock_route(spec: &str) -> anyhow::Result<(PathBuf, u32, VsockSocketType)> {
     let (host_socket, endpoint) = spec.rsplit_once(':').ok_or_else(|| {
         anyhow::anyhow!("--vsock must use HOST_PATH:PORT[/stream|/dgram], got {spec:?}")
     })?;
@@ -1770,6 +1805,23 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
     Ok(builder.volume(guest, move |mount| {
         configure_volume_mount(mount, &source, is_path, options)
     }))
+}
+
+/// Restore-only guest-path shorthand; explicit mappings retain the existing path grammar.
+pub(crate) fn parse_restore_volume(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
+    if spec.starts_with('/') && !spec.contains(':') {
+        return Ok((spec.into(), MountBuilder::new(spec).captured()));
+    }
+    let parsed = parse_volume_mount_spec(spec)?;
+    let guest = parsed.guest.to_string();
+    let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
+    let mount = configure_volume_mount(
+        MountBuilder::new(&guest),
+        parsed.source,
+        is_path,
+        parsed.options,
+    );
+    Ok((guest, mount))
 }
 
 /// Parse and materialize a bind mount with the shared `-v/--volume` options.
@@ -2355,25 +2407,40 @@ fn apply_network_opts(
     // Secrets. `create` persists a host-side source reference, not the raw
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
-    let mut secret_specs: Vec<(String, Vec<String>)> = Vec::new();
+    let mut secret_specs: Vec<ParsedSecret> = Vec::new();
     for secret_str in &opts.secret {
-        let (env_var, hosts) = parse_secret(secret_str, "create")?;
+        let parsed = parse_secret(secret_str, "create")?;
         match secret_specs
             .iter_mut()
-            .find(|(existing, _)| *existing == env_var)
+            .find(|existing| existing.env_var == parsed.env_var)
         {
-            Some((_, existing_hosts)) => existing_hosts.extend(hosts),
-            None => secret_specs.push((env_var, hosts)),
+            Some(existing) => {
+                extend_unique(&mut existing.allowed_hosts, parsed.allowed_hosts);
+                extend_unique(&mut existing.passthrough_hosts, parsed.passthrough_hosts);
+                existing.substitute_headers &= parsed.substitute_headers;
+                existing.substitute_query |= parsed.substitute_query;
+                existing.substitute_body |= parsed.substitute_body;
+            }
+            None => secret_specs.push(parsed),
         }
     }
-    for (env_var, hosts) in secret_specs {
+    for secret in secret_specs {
+        let env_var = secret.env_var;
         let source = microsandbox::sandbox::SecretSource::Env {
             var: env_var.clone(),
         };
         builder = builder.secret(|mut s| {
-            s = s.env(&env_var).source(source);
-            for host in hosts {
+            s = s
+                .env(&env_var)
+                .source(source)
+                .substitute_in_headers(secret.substitute_headers)
+                .substitute_in_query(secret.substitute_query)
+                .substitute_in_body(secret.substitute_body);
+            for host in secret.allowed_hosts {
                 s = allow_secret_host(s, &host);
+            }
+            for host in secret.passthrough_hosts {
+                s = s.allow_passthrough_for(host);
             }
             s
         });
@@ -2439,7 +2506,7 @@ fn apply_network_opts(
             .map(|spec| parse_scoped_upstream_ca_cert(spec))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let no_verify_upstream_for = opts.tls_no_verify_upstream_for.clone();
-        let violation_action = parse_violation_action(&opts.on_secret_violation)?;
+        let violation_action = parse_violation_action(&opts.secret_violation_action)?;
         let egress_rate_limiter = opts.build_rate_limiter(NetworkRateLimitDirection::Egress)?;
         let ingress_rate_limiter = opts.build_rate_limiter(NetworkRateLimitDirection::Ingress)?;
 
@@ -2485,9 +2552,7 @@ fn apply_network_opts(
                 });
             }
             if let Some(action) = violation_action {
-                n = n.on_secret_violation(|_| {
-                    microsandbox_network::builder::ViolationActionBuilder::from_action(action)
-                });
+                n = n.secret_violation_action(action);
             }
 
             // TLS configuration.
@@ -2700,8 +2765,7 @@ pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr
     Ok((bind, host, guest, udp))
 }
 
-/// Parse a `--secret ENV@HOST[,HOST...]` spec into `(env_var, hosts)` for
-/// `command` (`create` or `modify`).
+/// Parse `--secret ENV[:OPTIONS]@HOST[,HOST...]` for `command`.
 ///
 /// The value is NOT read here: the CLI records a host-side source reference
 /// (`{kind: env, var: ENV}`) that is resolved from the host environment when
@@ -2711,33 +2775,111 @@ pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr
 /// The inline `ENV=VALUE@HOST` form is rejected loudly: the shell would leak
 /// the value regardless, so the value path is SDK-only. Users are pointed at
 /// the `ENV@HOST[,HOST...]` env-var form instead.
-pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, Vec<String>)> {
-    if let Some(eq_pos) = spec.find('=') {
-        let env_var = &spec[..eq_pos];
+pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSecret> {
+    let at_pos = spec
+        .rfind('@')
+        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV[:OPTIONS]@HOST[,HOST...]"))?;
+    let policy = &spec[..at_pos];
+    let (env_var, options) = policy
+        .split_once(':')
+        .map_or((policy, None), |(env, options)| (env, Some(options)));
+
+    if let Some((name, _)) = env_var.split_once('=') {
         anyhow::bail!(
-            "inline secret values (`{env_var}=VALUE@HOST`) are not supported by `{command}`: \
+            "inline secret values (`{name}=VALUE@HOST`) are not supported by `{command}`: \
              the value would be stored in the sandbox config at rest. Export the value as a \
-             host environment variable and reference it with `{env_var}@HOST` instead, which \
+             host environment variable and reference it with `{name}@HOST` instead, which \
              is resolved from the environment at start time."
         );
     }
 
-    let at_pos = spec
-        .rfind('@')
-        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV@HOST[,HOST...]"))?;
-    let env_var = spec[..at_pos].to_string();
-    let hosts: Vec<String> = spec[at_pos + 1..]
+    let allowed_hosts: Vec<String> = spec[at_pos + 1..]
         .split(',')
         .map(str::trim)
         .filter(|host| !host.is_empty())
         .map(ToString::to_string)
         .collect();
 
-    if env_var.is_empty() || hosts.is_empty() {
-        anyhow::bail!("secret must be in format ENV@HOST[,HOST...] (all parts required)");
+    if env_var.is_empty() || allowed_hosts.is_empty() {
+        anyhow::bail!("secret must be in format ENV[:OPTIONS]@HOST[,HOST...] (all parts required)");
     }
 
-    Ok((env_var, hosts))
+    let mut parsed = ParsedSecret {
+        env_var: env_var.to_string(),
+        allowed_hosts,
+        passthrough_hosts: Vec::new(),
+        substitute_headers: true,
+        substitute_query: false,
+        substitute_body: false,
+    };
+    if let Some(options) = options {
+        for option in split_secret_options(options)? {
+            match option.as_str() {
+                "no-headers" => parsed.substitute_headers = false,
+                "query" => parsed.substitute_query = true,
+                "body" => parsed.substitute_body = true,
+                value if value.starts_with("passthrough=") => {
+                    let hosts = value.trim_start_matches("passthrough=");
+                    let hosts = hosts
+                        .strip_prefix('[')
+                        .and_then(|value| value.strip_suffix(']'))
+                        .unwrap_or(hosts);
+                    let parsed_hosts = hosts
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|host| !host.is_empty())
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>();
+                    if parsed_hosts.is_empty() {
+                        anyhow::bail!("secret passthrough requires at least one host");
+                    }
+                    extend_unique(&mut parsed.passthrough_hosts, parsed_hosts);
+                }
+                other => anyhow::bail!(
+                    "invalid secret option: {other} (expected: no-headers, query, body, passthrough=HOST, or passthrough=[HOST,...])"
+                ),
+            }
+        }
+    }
+    if !parsed.substitute_headers && !parsed.substitute_query && !parsed.substitute_body {
+        anyhow::bail!("secret must enable at least one substitution location");
+    }
+
+    Ok(parsed)
+}
+
+/// Split comma-separated secret options while retaining bracketed host lists.
+fn split_secret_options(options: &str) -> anyhow::Result<Vec<String>> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    let mut bracketed = false;
+    for (index, ch) in options.char_indices() {
+        match ch {
+            '[' if !bracketed => bracketed = true,
+            ']' if bracketed => bracketed = false,
+            ',' if !bracketed => {
+                result.push(options[start..index].trim().to_string());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if bracketed {
+        anyhow::bail!("secret passthrough host list is missing a closing `]`");
+    }
+    result.push(options[start..].trim().to_string());
+    if result.iter().any(String::is_empty) {
+        anyhow::bail!("secret options must not be empty");
+    }
+    Ok(result)
+}
+
+fn extend_unique(target: &mut Vec<String>, values: impl IntoIterator<Item = String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
 }
 
 #[cfg(feature = "net")]
@@ -2746,10 +2888,8 @@ fn allow_secret_host(
     host: &str,
 ) -> microsandbox::sandbox::SecretBuilder {
     match microsandbox_network::secrets::config::HostPattern::parse(host) {
-        microsandbox_network::secrets::config::HostPattern::Exact(host) => builder.allow_host(host),
-        microsandbox_network::secrets::config::HostPattern::Wildcard(host) => {
-            builder.allow_host_pattern(host)
-        }
+        microsandbox_network::secrets::config::HostPattern::Exact(host)
+        | microsandbox_network::secrets::config::HostPattern::Wildcard(host) => builder.allow(host),
         microsandbox_network::secrets::config::HostPattern::Any => {
             builder.allow_any_host_dangerous(true)
         }
@@ -2771,16 +2911,15 @@ pub(crate) fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(Strin
 #[cfg(feature = "net")]
 pub(crate) fn parse_violation_action(
     s: &Option<String>,
-) -> anyhow::Result<Option<microsandbox_network::secrets::config::ViolationAction>> {
-    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
+) -> anyhow::Result<Option<microsandbox_network::secrets::config::SecretViolationAction>> {
+    use microsandbox_network::secrets::config::SecretViolationAction;
     match s.as_deref() {
         None => Ok(None),
-        Some("block") => Ok(Some(ViolationAction::Block)),
-        Some("block-and-log") => Ok(Some(ViolationAction::BlockAndLog)),
-        Some("block-and-terminate") => Ok(Some(ViolationAction::BlockAndTerminate)),
-        Some("passthrough") => Ok(Some(ViolationAction::Passthrough(vec![HostPattern::Any]))),
+        Some("block") => Ok(Some(SecretViolationAction::Block)),
+        Some("block-and-log") => Ok(Some(SecretViolationAction::BlockAndLog)),
+        Some("block-and-terminate") => Ok(Some(SecretViolationAction::BlockAndTerminate)),
         Some(other) => anyhow::bail!(
-            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate, passthrough)"
+            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate)"
         ),
     }
 }
@@ -3259,23 +3398,43 @@ mod tests {
     fn parse_secret_returns_env_and_host_reference() {
         // The value is NOT read here: `create` persists a source reference and
         // the spawn resolver reads the host env at start time.
-        let (env_var, hosts) =
-            parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com", "create").unwrap();
+        let secret = parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com", "create").unwrap();
 
-        assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
-        assert_eq!(hosts, vec!["api.example.com"]);
+        assert_eq!(secret.env_var, "MSB_PARSE_SECRET_TOKEN");
+        assert_eq!(secret.allowed_hosts, vec!["api.example.com"]);
     }
 
     #[test]
     fn parse_secret_accepts_multiple_hosts() {
-        let (env_var, hosts) = parse_secret(
+        let secret = parse_secret(
             "MSB_PARSE_SECRET_TOKEN@api.example.com, *.example.org, *",
             "create",
         )
         .unwrap();
 
-        assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
-        assert_eq!(hosts, vec!["api.example.com", "*.example.org", "*"]);
+        assert_eq!(secret.env_var, "MSB_PARSE_SECRET_TOKEN");
+        assert_eq!(
+            secret.allowed_hosts,
+            vec!["api.example.com", "*.example.org", "*"]
+        );
+    }
+
+    #[test]
+    fn parse_secret_supports_substitution_and_passthrough_options() {
+        let secret = parse_secret(
+            "GH_TOKEN:no-headers,query,body,passthrough=api.anthropic.com,passthrough=[example.com,*.example.org]@github.com,api.github.com",
+            "create",
+        )
+        .unwrap();
+
+        assert!(!secret.substitute_headers);
+        assert!(secret.substitute_query);
+        assert!(secret.substitute_body);
+        assert_eq!(
+            secret.passthrough_hosts,
+            vec!["api.anthropic.com", "example.com", "*.example.org"]
+        );
+        assert_eq!(secret.allowed_hosts, vec!["github.com", "api.github.com"]);
     }
 
     #[test]
@@ -3450,15 +3609,8 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn parse_violation_action_accepts_passthrough() {
-        let action = parse_violation_action(&Some("passthrough".to_string()))
-            .expect("passthrough should parse")
-            .expect("action should be present");
-
-        assert!(matches!(
-            action,
-            microsandbox_network::secrets::config::ViolationAction::Passthrough(_)
-        ));
+    fn parse_violation_action_rejects_passthrough() {
+        assert!(parse_violation_action(&Some("passthrough".to_string())).is_err());
     }
 
     #[test]

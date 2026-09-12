@@ -78,3 +78,24 @@ describe("native image cache contract", () => {
     }
   });
 });
+
+describe("native snapshot contract", () => {
+  it("exports group creation, import, and head selection", () => {
+    expect(typeof napi.Snapshot.loadWithOptions).toBe("function");
+    expect(typeof napi.Snapshot.loadMany).toBe("function");
+    expect(typeof napi.Snapshot.groupHead).toBe("function");
+    expect(typeof napi.SnapshotBuilder.prototype.group).toBe("function");
+    const builder = new napi.SnapshotBuilder("").fromSandbox("source").group("work");
+    const config = (builder as unknown as { build(): { name: string; group: string } }).build();
+    expect(config.name).toBe("");
+    expect(config.group).toBe("work");
+  });
+  it("exports the direct archive result used by the TS wrapper", () => {
+    expect(typeof napi.SnapshotArchive).toBe("function");
+  });
+  it("passes empty batches to core validation", async () => {
+    await expect(napi.Snapshot.loadMany([])).rejects.toThrow(
+      "snapshot load requires at least one archive",
+    );
+  });
+});

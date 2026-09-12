@@ -101,6 +101,23 @@ fn fs_for(path: &Path) -> PassthroughFs {
     fs
 }
 
+fn external_fs_for(path: &Path, relaxed: bool, remapped: bool) -> PassthroughFs {
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: path.to_path_buf(),
+        inject_init: false,
+        stat_virtualization: StatVirtualization::Off,
+        external_checkpoint: Some(super::super::ExternalCheckpointOptions {
+            relaxed,
+            remapped,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+    fs
+}
+
 fn assert_ads_store(fs: &PassthroughFs) {
     let store = fs.stat_store.as_ref().expect("stat store enabled");
     assert!(matches!(
@@ -132,6 +149,106 @@ fn expect_errno<T>(result: io::Result<T>, errno: i32) {
         Ok(_) => panic!("expected errno {errno}"),
         Err(error) => assert_eq!(error.raw_os_error(), Some(errno)),
     }
+}
+
+#[test]
+fn external_checkpoint_changed_file_requires_relaxed_and_retains_stale_ids() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("data"), b"before").unwrap();
+    let source = external_fs_for(&temp.path, false, false);
+    let entry = source.lookup(context(), ROOT_INODE, c"data").unwrap();
+    source.open(context(), entry.inode, false, 0).unwrap();
+    let bytes = source.capture_state().unwrap();
+    std::fs::write(temp.path.join("data"), b"after!").unwrap();
+
+    let strict = external_fs_for(&temp.path, false, false);
+    let untouched = strict.capture_state().unwrap();
+    assert!(strict.restore_state(&bytes).is_err());
+    assert_eq!(strict.capture_state().unwrap(), untouched);
+
+    let relaxed = external_fs_for(&temp.path, true, false);
+    relaxed.restore_state(&bytes).unwrap();
+    assert_eq!(relaxed.request_error(entry.inode), Some(116));
+    assert_eq!(relaxed.request_error(ROOT_INODE), None);
+    assert!(relaxed.handles.read().unwrap().is_empty());
+    let current = relaxed.lookup(context(), ROOT_INODE, c"data").unwrap();
+    assert_ne!(current.inode, entry.inode);
+    assert_eq!(relaxed.request_error(current.inode), None);
+    assert_eq!(
+        *relaxed
+            .cfg
+            .external_checkpoint
+            .as_ref()
+            .unwrap()
+            .invalid_inodes
+            .lock()
+            .unwrap(),
+        vec![entry.inode]
+    );
+
+    // A later checkpoint must not recycle an inode previously reported as stale.
+    let second = relaxed.capture_state().unwrap();
+    let next = external_fs_for(&temp.path, true, false);
+    next.restore_state(&second).unwrap();
+    assert_eq!(next.request_error(entry.inode), Some(116));
+    assert_eq!(
+        next.lookup(context(), ROOT_INODE, c"data").unwrap().inode,
+        current.inode
+    );
+}
+
+#[test]
+fn external_checkpoint_remap_validates_content_and_requires_explicit_policy() {
+    let source_dir = TempDir::new();
+    let destination_dir = TempDir::new();
+    std::fs::write(source_dir.path.join("data"), b"identical").unwrap();
+    std::fs::write(destination_dir.path.join("data"), b"identical").unwrap();
+    let source = external_fs_for(&source_dir.path, false, false);
+    let entry = source.lookup(context(), ROOT_INODE, c"data").unwrap();
+    let bytes = source.capture_state().unwrap();
+    assert!(
+        external_fs_for(&destination_dir.path, false, false)
+            .restore_state(&bytes)
+            .is_err()
+    );
+    let remapped = external_fs_for(&destination_dir.path, false, true);
+    remapped.restore_state(&bytes).unwrap();
+    assert_eq!(
+        remapped
+            .lookup(context(), ROOT_INODE, c"data")
+            .unwrap()
+            .inode,
+        entry.inode
+    );
+    std::fs::write(destination_dir.path.join("data"), b"different").unwrap();
+    assert!(remapped.restore_state(&bytes).is_err());
+}
+
+#[test]
+fn external_checkpoint_refuses_replaced_live_file_handle() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("data"), b"same").unwrap();
+    let source = external_fs_for(&temp.path, false, false);
+    let entry = source.lookup(context(), ROOT_INODE, c"data").unwrap();
+    source.open(context(), entry.inode, false, 0).unwrap();
+    std::fs::rename(temp.path.join("data"), temp.path.join("old-data")).unwrap();
+    std::fs::write(temp.path.join("data"), b"same").unwrap();
+    assert!(source.capture_state().is_err());
+}
+
+#[test]
+fn unavailable_external_checkpoint_validates_bytes_and_always_returns_eio() {
+    let temp = TempDir::new();
+    let source = external_fs_for(&temp.path, false, false);
+    let bytes = source.capture_state().unwrap();
+    let unavailable = crate::UnavailableFs::default();
+    unavailable.restore_state(&bytes).unwrap();
+    assert_eq!(unavailable.request_error(ROOT_INODE), Some(5));
+    assert_eq!(unavailable.request_error(123), Some(5));
+    let relaxed = external_fs_for(&temp.path, true, false);
+    assert!(relaxed.restore_state(&bytes[..bytes.len() - 1]).is_err());
+    assert!(unavailable.restore_state(b"invalid").is_err());
+    assert!(unavailable.capture_state().is_err());
 }
 
 #[test]
@@ -266,6 +383,217 @@ fn quota_rejects_growth_past_limit() {
             &mut second,
             1,
             4,
+            None,
+            false,
+            false,
+            0,
+        ),
+        LINUX_ENOSPC,
+    );
+}
+
+#[test]
+fn mobility_preserves_inode_file_handle_and_directory_cookie_state() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("alpha.txt"), b"alpha").unwrap();
+    std::fs::write(temp.path.join("beta.txt"), b"beta").unwrap();
+    let source = fs_for(&temp.path);
+
+    let alpha = source.lookup(context(), ROOT_INODE, c"alpha.txt").unwrap();
+    let beta = source.lookup(context(), ROOT_INODE, c"beta.txt").unwrap();
+    let (file_handle, _) = source.open(context(), alpha.inode, false, 0).unwrap();
+    let file_handle = file_handle.unwrap();
+    let (dir_handle, _) = source
+        .opendir(context(), ROOT_INODE, LINUX_O_DIRECTORY as u32)
+        .unwrap();
+    let dir_handle = dir_handle.unwrap();
+    let entries = source
+        .readdir(context(), ROOT_INODE, dir_handle, 4096, 0)
+        .unwrap();
+    let cookie = entries
+        .iter()
+        .find(|entry| entry.name == b"alpha.txt")
+        .unwrap()
+        .offset;
+    let expected_tail = source
+        .readdir(context(), ROOT_INODE, dir_handle, 4096, cookie)
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.ino, entry.offset, entry.name.to_vec()))
+        .collect::<Vec<_>>();
+    let next_inode = source.next_inode.load(Ordering::Acquire);
+    let next_handle = source.next_handle.load(Ordering::Acquire);
+    let state = source.capture_state().unwrap();
+
+    let destination = fs_for(&temp.path);
+    destination.restore_state(&state).unwrap();
+
+    assert_eq!(
+        destination
+            .lookup(context(), ROOT_INODE, c"alpha.txt")
+            .unwrap()
+            .inode,
+        alpha.inode
+    );
+    assert_eq!(
+        destination
+            .lookup(context(), ROOT_INODE, c"beta.txt")
+            .unwrap()
+            .inode,
+        beta.inode
+    );
+    let mut writer = CaptureWriter { bytes: Vec::new() };
+    destination
+        .read(
+            context(),
+            alpha.inode,
+            file_handle,
+            &mut writer,
+            5,
+            0,
+            None,
+            0,
+        )
+        .unwrap();
+    assert_eq!(writer.bytes, b"alpha");
+    let restored_tail = destination
+        .readdir(context(), ROOT_INODE, dir_handle, 4096, cookie)
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.ino, entry.offset, entry.name.to_vec()))
+        .collect::<Vec<_>>();
+    assert_eq!(restored_tail, expected_tail);
+    assert_eq!(destination.next_inode.load(Ordering::Acquire), next_inode);
+    assert_eq!(destination.next_handle.load(Ordering::Acquire), next_handle);
+}
+
+#[test]
+fn mobility_missing_object_rejection_does_not_mutate_destination() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("source.txt"), b"source").unwrap();
+    std::fs::write(temp.path.join("destination.txt"), b"destination").unwrap();
+    let source = fs_for(&temp.path);
+    let source_entry = source.lookup(context(), ROOT_INODE, c"source.txt").unwrap();
+    let (source_handle, _) = source
+        .open(context(), source_entry.inode, false, 0)
+        .unwrap();
+    assert!(source_handle.is_some());
+    let state = source.capture_state().unwrap();
+
+    let destination = fs_for(&temp.path);
+    let destination_entry = destination
+        .lookup(context(), ROOT_INODE, c"destination.txt")
+        .unwrap();
+    let (destination_handle, _) = destination
+        .open(context(), destination_entry.inode, false, 0)
+        .unwrap();
+    assert!(destination_handle.is_some());
+    let before = destination.capture_state().unwrap();
+    drop(source);
+    std::fs::remove_file(temp.path.join("source.txt")).unwrap();
+
+    assert!(destination.restore_state(&state).is_err());
+
+    assert_eq!(destination.capture_state().unwrap(), before);
+    let mut writer = CaptureWriter { bytes: Vec::new() };
+    destination
+        .read(
+            context(),
+            destination_entry.inode,
+            destination_handle.unwrap(),
+            &mut writer,
+            11,
+            0,
+            None,
+            0,
+        )
+        .unwrap();
+    assert_eq!(writer.bytes, b"destination");
+}
+
+#[test]
+fn mobility_preserves_quota_accounting_and_open_handle() {
+    let temp = TempDir::new();
+    let config = PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        quota_bytes: Some(8),
+        ..Default::default()
+    };
+    let source = PassthroughFs::new(config.clone()).unwrap();
+    source.init(FsOptions::empty()).unwrap();
+    let (entry, handle, _) = source
+        .create(
+            context(),
+            ROOT_INODE,
+            c"quota.txt",
+            S_IFREG | 0o644,
+            false,
+            (LINUX_O_CREAT | LINUX_O_RDWR) as u32,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
+    let handle = handle.unwrap();
+    let mut initial = SourceReader {
+        bytes: b"abcd".to_vec(),
+        pos: 0,
+    };
+    source
+        .write(
+            context(),
+            entry.inode,
+            handle,
+            &mut initial,
+            4,
+            0,
+            None,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    let quota_state = source.quota.as_ref().unwrap().capture_state();
+    let state = source.capture_state().unwrap();
+
+    let destination = PassthroughFs::new(config).unwrap();
+    destination.init(FsOptions::empty()).unwrap();
+    destination.restore_state(&state).unwrap();
+
+    assert_eq!(
+        destination.quota.as_ref().unwrap().capture_state(),
+        quota_state
+    );
+    let mut remaining = SourceReader {
+        bytes: b"efgh".to_vec(),
+        pos: 0,
+    };
+    destination
+        .write(
+            context(),
+            entry.inode,
+            handle,
+            &mut remaining,
+            4,
+            4,
+            None,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    let mut over = SourceReader {
+        bytes: b"i".to_vec(),
+        pos: 0,
+    };
+    expect_errno(
+        destination.write(
+            context(),
+            entry.inode,
+            handle,
+            &mut over,
+            1,
+            8,
             None,
             false,
             false,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from microsandbox.types import (
     BackendKind,
@@ -42,7 +42,6 @@ from microsandbox.types import (
     StatVirtualization,
     Stdin,
     ViolationAction,
-    ViolationPolicy,
     VolumeKind,
     VsockRoute,
 )
@@ -88,11 +87,44 @@ class Sandbox:
     """
 
     @staticmethod
+    async def restore(
+        snapshot: str | os.PathLike[str],
+        *,
+        name: str,
+        forked: bool = False,
+        disk_only: bool = False,
+        snapshot_base: str | None = None,
+        user: str | None = None,
+        log_level: LogLevel | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
+        captured_volumes: Sequence[str] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
+        external_mount_policy: Literal["strict", "relaxed"] = "strict",
+        dangerously_inherit_resources: bool = False,
+    ) -> Sandbox: ...
+    @staticmethod
+    def restore_with_progress(
+        snapshot: str | os.PathLike[str],
+        *,
+        name: str,
+        forked: bool = False,
+        disk_only: bool = False,
+        snapshot_base: str | None = None,
+        user: str | None = None,
+        log_level: LogLevel | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
+        captured_volumes: Sequence[str] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
+        external_mount_policy: Literal["strict", "relaxed"] = "strict",
+        dangerously_inherit_resources: bool = False,
+    ) -> PullSession: ...
+    @staticmethod
     async def create(
         name: str,
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
-        from_snapshot: str | os.PathLike[str] | None = None,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -124,7 +156,7 @@ class Sandbox:
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
-        on_secret_violation: ViolationAction | ViolationPolicy | None = None,
+        secret_violation_action: ViolationAction | None = None,
         detached: bool = False,
     ) -> Sandbox: ...
     @staticmethod
@@ -132,7 +164,6 @@ class Sandbox:
         name: str,
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
-        from_snapshot: str | os.PathLike[str] | None = None,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -164,7 +195,7 @@ class Sandbox:
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
-        on_secret_violation: ViolationAction | ViolationPolicy | None = None,
+        secret_violation_action: ViolationAction | None = None,
         detached: bool = False,
     ) -> Sandbox: ...
     @staticmethod
@@ -187,7 +218,6 @@ class Sandbox:
         name: str,
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
-        from_snapshot: str | os.PathLike[str] | None = None,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -219,7 +249,7 @@ class Sandbox:
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
-        on_secret_violation: ViolationAction | ViolationPolicy | None = None,
+        secret_violation_action: ViolationAction | None = None,
         detached: bool = False,
     ) -> PullSession: ...
     async def name(self) -> str: ...
@@ -323,6 +353,9 @@ class Sandbox:
     async def metrics(self) -> SandboxMetrics: ...
     async def ping(self) -> SandboxPingResult: ...
     async def touch(self) -> SandboxTouchResult: ...
+    async def compact(
+        self, *, layers: int | None = None, dry_run: bool = False
+    ) -> dict[str, int | bool]: ...
     async def modify(
         self,
         *,
@@ -357,7 +390,12 @@ class Sandbox:
         until_ms: float | None = None,
         follow: bool = False,
     ) -> LogStream: ...
+    async def restore_warnings(self) -> list[ExternalMountWarning]: ...
     async def stop(self, timeout: float | None = None) -> None: ...
+    async def stop_with_timeout(self, timeout: float) -> None: ...
+    async def branch(self, name: str) -> Sandbox: ...
+    async def pause(self) -> None: ...
+    async def resume(self) -> None: ...
     async def request_stop(self) -> None: ...
     async def kill(self, timeout: float | None = None) -> None: ...
     async def request_kill(self) -> None: ...
@@ -425,6 +463,9 @@ class SandboxHandle:
     async def metrics(self) -> SandboxMetrics: ...
     async def ping(self) -> SandboxPingResult: ...
     async def touch(self) -> SandboxTouchResult: ...
+    async def compact(
+        self, *, layers: int | None = None, dry_run: bool = False
+    ) -> dict[str, int | bool]: ...
     async def modify(
         self,
         *,
@@ -464,6 +505,10 @@ class SandboxHandle:
     async def connect(self, timeout: float | None = None) -> Sandbox: ...
     async def connect_or_start(self, *, detached: bool = False) -> Sandbox: ...
     async def stop(self, timeout: float | None = None) -> None: ...
+    async def stop_with_timeout(self, timeout: float) -> None: ...
+    async def branch(self, name: str) -> Sandbox: ...
+    async def pause(self) -> None: ...
+    async def resume(self) -> None: ...
     async def request_stop(self) -> None: ...
     async def kill(self, timeout: float | None = None) -> None: ...
     async def request_kill(self) -> None: ...
@@ -874,18 +919,40 @@ class ImagePruneReport:
     @property
     def bytes_reclaimed(self) -> int | None: ...
 
+class ExternalMountWarning:
+    @property
+    def guest_path(self) -> str: ...
+    @property
+    def reason(self) -> str: ...
+    @property
+    def stale_inodes(self) -> list[int]: ...
+
 class Snapshot:
     @staticmethod
     async def create(
-        name: str,
+        name: str = "",
         *,
         from_sandbox: str,
+        group: str | None = None,
         dest_dir: str | os.PathLike[str] | None = None,
         labels: dict[str, str] | None = None,
         force: bool = False,
         record_integrity: bool = False,
-        resumable: bool = False,
+        full: bool = False,
     ) -> Snapshot: ...
+    @staticmethod
+    async def create_archive(
+        name: str,
+        archive: str | os.PathLike[str],
+        *,
+        from_sandbox: str,
+        group: str | None = None,
+        labels: dict[str, str] | None = None,
+        force: bool = False,
+        record_integrity: bool = False,
+        full: bool = False,
+        plain_tar: bool = False,
+    ) -> SnapshotArchive: ...
     @staticmethod
     async def open(path_or_name: str) -> Snapshot: ...
     @staticmethod
@@ -906,13 +973,33 @@ class Snapshot:
         with_parents: bool = False,
         with_image: bool = False,
         plain_tar: bool = False,
+        since: str | None = None,
+        last_layers: int | None = None,
     ) -> None: ...
     @staticmethod
     async def load(
         archive: str | os.PathLike[str],
         *,
         dest: str | os.PathLike[str] | None = None,
+        base: str | None = None,
+        group: str | None = None,
+        set_head: bool = False,
     ) -> SnapshotHandle: ...
+    @staticmethod
+    async def load_many(
+        archives: Sequence[str | os.PathLike[str]],
+        *,
+        dest: str | os.PathLike[str] | None = None,
+        base: str | None = None,
+        group: str | None = None,
+        set_head: bool = False,
+    ) -> list[SnapshotHandle]: ...
+    @staticmethod
+    async def group_head(selector: str) -> dict[str, str | bool | None]: ...
+    @property
+    def head_update(self) -> dict[str, str | bool | None] | None: ...
+    @property
+    def id(self) -> str: ...
     @property
     def path(self) -> str: ...
     @property
@@ -945,7 +1032,21 @@ class Snapshot:
     def source_sandbox(self) -> str | None: ...
     async def verify(self) -> dict[str, Any]: ...
 
+class SnapshotArchive:
+    @property
+    def id(self) -> str: ...
+    @property
+    def descriptor_digest(self) -> str: ...
+    @property
+    def path(self) -> str: ...
+
 class SnapshotHandle:
+    @property
+    def group(self) -> str | None: ...
+    @property
+    def head_update(self) -> dict[str, str | bool | None] | None: ...
+    @property
+    def id(self) -> str: ...
     @property
     def digest(self) -> str: ...
     @property
@@ -982,6 +1083,7 @@ class SnapshotHandle:
     async def remove(self, *, force: bool = False) -> None: ...
 
 class PullSession:
+    def cancel(self) -> None: ...
     @property
     def progress(self) -> PullProgressIter: ...
     async def result(self) -> Sandbox: ...
@@ -996,6 +1098,8 @@ class PullProgressIter:
 
 class PullEvent:
     event_type: PullEventType
+    phase: str | None
+    completed_bytes: int | None
     reference: str | None
     manifest_digest: str | None
     layer_count: int | None

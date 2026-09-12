@@ -86,13 +86,13 @@ microsandbox-metrics = { version = "=0.6.18", path = "crates/metrics" }
 microsandbox-types-macros = { version = "=0.6.18", path = "packages/microsandbox-types/macros" }
 microsandbox-types = { version = "=0.6.18", path = "packages/microsandbox-types/rust" }
 microsandbox-migration = { version = "=0.6.18", path = "crates/migration" }
-microsandbox-network = { version = "=0.6.18", path = "crates/network" }
+microsandbox-network = { version = "=0.6.18", path = "crates/network", default-features = false }
 microsandbox-protocol = { version = "=0.6.18", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.18", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.18", path = "crates/utils" }
 microsandbox-vsock = { version = "=0.6.18", path = "crates/vsock" }
-msb_krun = "=0.1.32"
-msb_krun_utils = "=0.1.32"
+msb_krun = "=0.1.38"
+msb_krun_utils = "=0.1.38"
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 
@@ -121,9 +121,11 @@ hex = "0.4"
 hickory-net = "0.26.1"
 hickory-proto = "0.26.1"
 httlib-hpack = "0.1.3"
+imago = { package = "msb-imago", version = "0.1.7" }
 indicatif = "0.18"
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 libc = "0.2"
+memmap2 = "0.9"
 nix = "0.31"
 notify = "8"
 oci-client = "0.17"

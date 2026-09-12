@@ -9,7 +9,6 @@ STUB_PATH = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
 
 EXPECTED_KWARGS = [
     "image",
-    "from_snapshot",
     "memory",
     "cpus",
     "max_memory",
@@ -41,7 +40,7 @@ EXPECTED_KWARGS = [
     "vsock",
     "network",
     "secrets",
-    "on_secret_violation",
+    "secret_violation_action",
     "detached",
 ]
 
@@ -156,3 +155,11 @@ def test_lifecycle_convergence_methods_are_typed() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert "connect_or_start" in handle_methods
+
+
+def test_restore_has_only_destination_options() -> None:
+    restore = _method("restore")
+    names = {arg.arg for arg in restore.args.kwonlyargs}
+    assert {"name", "forked", "disk_only", "snapshot_base", "volumes", "ports", "vsock"} <= names
+    assert not names & {"image", "memory", "cpus", "cmd", "replace", "detached", "from_snapshot"}
+    assert names == {arg.arg for arg in _method("restore_with_progress").args.kwonlyargs}

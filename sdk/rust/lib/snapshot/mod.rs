@@ -1,21 +1,19 @@
-//! Disk snapshot creation, inspection, and consumption.
+//! Disk and full snapshot creation, inspection, and consumption.
 //!
-//! A snapshot is a self-describing, content-addressed directory on
-//! disk. It captures a stopped sandbox's writable upper layer plus
-//! the metadata needed to pin the immutable lower (image). The
-//! artifact is the source of truth; the local DB index is just a
-//! cache of "snapshots I happen to know about on this machine."
-//!
-//! See `planning/microsandbox/implementation/snapshot-api-resumable-cloning.md` for the
-//! full design. Today snapshots are stopped-sandbox / raw-format only;
-//! the manifest schema and DB columns are forward-compatible with
-//! qcow2 backing chains landing later.
+//! A snapshot is a self-describing, content-addressed artifact on disk. A disk snapshot captures
+//! the writable root closure for a cold boot. A full snapshot captures one running sandbox's
+//! disk, memory, execution, and device state for eager restore. The artifact is the source of
+//! truth; the local DB index is a rebuildable cache.
 
 mod archive;
 mod create;
 #[doc(hidden)]
 pub mod downgrade;
+pub(crate) mod group;
+pub(crate) mod lineage;
+mod metadata;
 pub(crate) mod migration;
+mod restore;
 mod store;
 mod verify;
 
@@ -23,6 +21,7 @@ mod verify;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::Operation;
@@ -38,6 +37,19 @@ pub struct Snapshot {
     path: PathBuf,
     digest: String,
     manifest: Manifest,
+    labels: BTreeMap<String, String>,
+    head_update: Option<HeadUpdate>,
+}
+
+/// Result of direct sandbox-to-archive capture.
+///
+/// No installed snapshot directory or index row is created.
+#[derive(Debug, Clone)]
+pub struct SnapshotArchive {
+    path: PathBuf,
+    digest: String,
+    manifest: Manifest,
+    labels: BTreeMap<String, String>,
 }
 
 /// Builder for [`SnapshotConfig`].
@@ -47,12 +59,13 @@ pub struct Snapshot {
 /// [`from_sandbox`](Self::from_sandbox) and is required.
 pub struct SnapshotBuilder {
     name: String,
+    group: Option<String>,
     source_sandbox: Option<String>,
     dest_dir: Option<PathBuf>,
     labels: Vec<(String, String)>,
     force: bool,
     record_integrity: bool,
-    resumable: bool,
+    full: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -75,32 +88,43 @@ impl Snapshot {
     pub fn builder(name: impl Into<String>) -> SnapshotBuilder {
         SnapshotBuilder {
             name: name.into(),
+            group: None,
             source_sandbox: None,
             dest_dir: None,
             labels: Vec::new(),
             force: false,
             record_integrity: false,
-            resumable: false,
+            full: false,
         }
     }
 
-    /// Create a snapshot artifact from a stopped sandbox.
+    /// Create an installed disk or full snapshot artifact.
     ///
-    /// Writes `snapshot.json` and the captured `upper.ext4` into the
-    /// destination directory atomically (manifest renamed last). On
-    /// success, also upserts a row into the local `snapshot_index`
-    /// cache; index failures are logged but do not fail the call —
-    /// the artifact is the source of truth.
+    /// Disk capture supports resident and stopped sources, briefly quiescing a running root
+    /// without capturing RAM. A user-paused source remains paused. A builder configured with
+    /// [`full`](SnapshotBuilder::full) also captures memory and execution state.
+    /// Publication is atomic and the local index remains a rebuildable cache.
     pub async fn create(config: SnapshotConfig) -> MicrosandboxResult<Self> {
         let backend = crate::backend::default_backend();
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
         create::create_snapshot(local, config).await
     }
 
-    /// Open an existing snapshot artifact by path or bare name.
+    /// Capture a disk or full snapshot directly into an archive.
+    pub async fn create_archive(
+        config: SnapshotConfig,
+        out: impl AsRef<Path>,
+        plain_tar: bool,
+    ) -> MicrosandboxResult<SnapshotArchive> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        create::create_snapshot_archive(local, config, out.as_ref(), plain_tar).await
+    }
+
+    /// Open an existing snapshot by explicit path, group head, or `group:member`.
     ///
-    /// Bare names (no path separator) resolve under the default
-    /// snapshots directory; anything else is treated as a path.
+    /// Bare names select the group's head under the default snapshots directory.
+    /// An exact member selector or explicit path remains fixed if that head advances.
     /// This is a fast metadata operation: it verifies the manifest
     /// structure, recomputes the manifest digest, and checks that the
     /// upper file exists with the recorded size. It does not read the
@@ -121,8 +145,12 @@ impl Snapshot {
         &self.path
     }
 
-    /// Canonical content digest of this snapshot's manifest
-    /// (`sha256:hex`). This is the snapshot's identity.
+    /// Stable opaque snapshot identity.
+    pub fn id(&self) -> &SnapshotId {
+        &self.manifest.snapshot_id
+    }
+
+    /// SHA-256 digest of the canonical descriptor bytes.
     pub fn digest(&self) -> &str {
         &self.digest
     }
@@ -132,17 +160,49 @@ impl Snapshot {
         &self.manifest
     }
 
+    /// Mutable local labels, which do not participate in descriptor identity.
+    pub fn labels(&self) -> &BTreeMap<String, String> {
+        &self.labels
+    }
+
+    /// Group publication outcome, present on a newly captured snapshot.
+    pub fn head_update(&self) -> Option<&HeadUpdate> {
+        self.head_update.as_ref()
+    }
+
     /// Apparent size of a file-state upper layer in bytes.
     pub fn size_bytes(&self) -> Option<u64> {
         self.manifest
             .state
             .as_file()
-            .map(|state| state.upper.size_bytes)
+            .map(|state| state.virtual_size)
     }
 
     /// Closed state variant carried by the descriptor.
     pub fn state(&self) -> &SnapshotState {
         &self.manifest.state
+    }
+
+    /// Resolve a physical layer through the final layout or the exact
+    /// released flat-artifact compatibility binding.
+    pub(crate) fn layer_path(&self, layer: &DiskLayer) -> PathBuf {
+        let canonical = self.path.join(microsandbox_image::snapshot::layer_path(
+            &layer.layer_id,
+            layer.format,
+        ));
+        if canonical.exists() {
+            canonical
+        } else if self
+            .manifest
+            .state
+            .as_file()
+            .is_some_and(|file| file.layers.len() == 1)
+            && self.path.join("upper.ext4").exists()
+        {
+            self.path.join("upper.ext4")
+        } else {
+            canonical
+        }
     }
 
     /// Get a handle by digest, name, or path from the local index.
@@ -190,7 +250,8 @@ impl Snapshot {
         store::reindex_dir(local, dir.as_ref()).await
     }
 
-    /// Bundle a snapshot into a `.tar.zst` archive.
+    /// Bundle a snapshot into a `.msb` archive (tar + zstd by default).
+    /// The explicit output path is preserved; legacy suffixes remain supported.
     pub async fn save(
         name_or_path: &str,
         out: &Path,
@@ -201,7 +262,7 @@ impl Snapshot {
         archive::save_snapshot(local, name_or_path, out, opts).await
     }
 
-    /// Unpack a snapshot archive (`.tar.zst` or `.tar`) into the
+    /// Unpack a snapshot archive (`.msb`, `.tar.zst`, or `.tar`) into the
     /// snapshots dir, registering anything found in the index.
     pub async fn load(
         archive_path: &Path,
@@ -211,6 +272,76 @@ impl Snapshot {
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
         archive::load_snapshot(local, archive_path, dest).await
     }
+
+    /// Load a dependent archive using its base snapshot or standalone base archive.
+    /// The imported snapshot owns a complete local closure after this call.
+    pub async fn load_with_base(
+        archive_path: &Path,
+        dest: Option<&Path>,
+        base: &str,
+    ) -> MicrosandboxResult<SnapshotHandle> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        archive::load_snapshot_with_base(local, archive_path, dest, Some(base)).await
+    }
+
+    /// Import into a selected or newly generated group with explicit dependency/head policy.
+    pub async fn load_with_options(
+        archive_path: &Path,
+        opts: LoadOpts,
+    ) -> MicrosandboxResult<SnapshotHandle> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        archive::load_snapshot_with_options(local, archive_path, opts).await
+    }
+
+    /// Load archives together, resolving omitted payloads from the batch, destination group,
+    /// and optional external base. Input order never chooses the group's head.
+    ///
+    /// Returns one handle per input archive head, in input order. Repeated snapshots are
+    /// installed once; all inputs are validated before publishing any snapshot members.
+    pub async fn load_many(
+        archive_paths: &[std::path::PathBuf],
+        opts: LoadOpts,
+    ) -> MicrosandboxResult<Vec<SnapshotHandle>> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        archive::load_snapshots(local, archive_paths, opts).await
+    }
+
+    /// Read a group's head, or explicitly select a qualified `group:member`.
+    pub async fn group_head(selector: &str) -> MicrosandboxResult<HeadUpdate> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        group::select(&local.snapshots_dir(), selector).await
+    }
+}
+
+impl SnapshotArchive {
+    /// Stable identity of the archived snapshot.
+    pub fn id(&self) -> &SnapshotId {
+        &self.manifest.snapshot_id
+    }
+
+    /// SHA-256 digest of the canonical descriptor.
+    pub fn descriptor_digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Published archive path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Parsed snapshot descriptor.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Labels stored alongside the archived descriptor.
+    pub fn labels(&self) -> &BTreeMap<String, String> {
+        &self.labels
+    }
 }
 
 /// Build an `Unsupported` error for snapshot ops that aren't wired through
@@ -219,6 +350,33 @@ fn snapshots_require_local() -> MicrosandboxError {
     MicrosandboxError::local_only(Operation::SnapshotOps)
 }
 
+pub(crate) async fn materialize_archive_for_child(
+    local: &crate::backend::LocalBackend,
+    archive: &Path,
+    child_stage: &Path,
+    disk_only: bool,
+    base: Option<&str>,
+    choices: &crate::sandbox::restore_resources::RestoreResources,
+) -> MicrosandboxResult<archive::ArchiveChildMaterialization> {
+    archive::materialize_archive_for_child_with_base(
+        local,
+        archive,
+        child_stage,
+        disk_only,
+        base,
+        choices,
+    )
+    .await
+}
+
+pub(crate) use restore::{
+    apply_additional_disks, materialize_additional_disks, materialize_checkpoint_child_disk_state,
+    materialize_checkpoint_child_state, materialize_checkpoint_disk_for_child,
+    materialize_checkpoint_for_child, materialize_file_snapshot_for_child, root_device,
+};
+
+pub(crate) use create::CHECKPOINT_DIRECTORY;
+
 /// Lightweight handle backed by an index row.
 ///
 /// Returned by [`Snapshot::list`]. Use [`open`](SnapshotHandle::open)
@@ -226,6 +384,9 @@ fn snapshots_require_local() -> MicrosandboxError {
 /// content verification.
 #[derive(Debug, Clone)]
 pub struct SnapshotHandle {
+    pub(crate) group: Option<String>,
+    pub(crate) head_update: Option<HeadUpdate>,
+    pub(crate) snapshot_id: String,
     pub(crate) digest: String,
     pub(crate) name: Option<String>,
     pub(crate) parent_digest: Option<String>,
@@ -245,7 +406,20 @@ pub struct SnapshotHandle {
 }
 
 impl SnapshotHandle {
-    /// Manifest digest (`sha256:hex`) — canonical identity.
+    /// Group publication outcome, present when this handle was returned by import.
+    pub fn head_update(&self) -> Option<&HeadUpdate> {
+        self.head_update.as_ref()
+    }
+    /// Local group containing this installed copy, if any.
+    pub fn group(&self) -> Option<&str> {
+        self.group.as_deref()
+    }
+    /// Stable opaque snapshot identity.
+    pub fn id(&self) -> &str {
+        &self.snapshot_id
+    }
+
+    /// SHA-256 digest of the canonical descriptor.
     pub fn digest(&self) -> &str {
         &self.digest
     }
@@ -332,20 +506,25 @@ impl SnapshotHandle {
 
     /// Remove this snapshot. See [`Snapshot::remove`].
     pub async fn remove(&self, force: bool) -> MicrosandboxResult<()> {
-        Snapshot::remove(&self.digest, force).await
+        // A handle denotes this installed copy, not every copy of its portable identity.
+        Snapshot::remove(self.artifact_path.to_string_lossy().as_ref(), force).await
     }
 }
 
 impl SnapshotBuilder {
+    /// Place the new member in this local snapshot group.
+    pub fn group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
     /// Set the source sandbox to snapshot. Required.
     pub fn from_sandbox(mut self, source_sandbox: impl Into<String>) -> Self {
         self.source_sandbox = Some(source_sandbox.into());
         self
     }
 
-    /// Create the artifact under this parent directory instead of the
-    /// default snapshots store. The artifact directory is
-    /// `dest_dir/<name>`; the name stays the snapshot's identity.
+    /// Use this group-store root instead of the default snapshots directory.
+    /// The artifact is installed at `dest_dir/<group>/<snapshot_id>`.
     pub fn dest_dir(mut self, dest_dir: impl Into<PathBuf>) -> Self {
         self.dest_dir = Some(dest_dir.into());
         self
@@ -357,7 +536,7 @@ impl SnapshotBuilder {
         self
     }
 
-    /// Overwrite an existing artifact at the destination.
+    /// Overwrite a direct archive destination. Installed group members are immutable.
     pub fn force(mut self) -> Self {
         self.force = true;
         self
@@ -373,12 +552,9 @@ impl SnapshotBuilder {
         self
     }
 
-    /// Request a future resumable snapshot.
-    ///
-    /// The builder accepts this stable option now, but creation returns
-    /// `Unsupported` until VM pause/resume capture is implemented.
-    pub fn resumable(mut self) -> Self {
-        self.resumable = true;
+    /// Capture disk, memory, execution, and device state from a running sandbox.
+    pub fn full(mut self) -> Self {
+        self.full = true;
         self
     }
 
@@ -391,12 +567,13 @@ impl SnapshotBuilder {
         })?;
         Ok(SnapshotConfig {
             name: self.name,
+            group: self.group,
             dest_dir: self.dest_dir,
             source_sandbox,
             labels: self.labels,
             force: self.force,
             record_integrity: self.record_integrity,
-            resumable: self.resumable,
+            full: self.full,
         })
     }
 
@@ -404,32 +581,67 @@ impl SnapshotBuilder {
     pub async fn create(self) -> MicrosandboxResult<Snapshot> {
         Snapshot::create(self.build()?).await
     }
+
+    /// Capture directly to `out` without installing an intermediate artifact.
+    pub async fn create_archive(
+        self,
+        out: impl AsRef<Path>,
+        plain_tar: bool,
+    ) -> MicrosandboxResult<SnapshotArchive> {
+        Snapshot::create_archive(self.build()?, out, plain_tar).await
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use archive::SaveOpts;
 #[cfg(feature = "fuzzing")]
 pub use archive::fuzz_unpack_archive;
+pub use archive::{LoadOpts, SaveOpts};
+pub use group::{HeadUpdate, HeadUpdateReason};
 pub use microsandbox_image::snapshot::{
-    CheckpointSnapshotState, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef, Manifest,
-    SnapshotDescriptor, SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
+    CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,
+    ImageRef, LayerFileKind, LayerPayload, Manifest, SnapshotCapture, SnapshotConsistency,
+    SnapshotDescriptor, SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState,
+    UpperIntegrity, UpperLayer,
 };
 pub use microsandbox_types::{SnapshotSpec, SnapshotSpec as SnapshotConfig};
-pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};
+pub use verify::{CheckpointVerifyStatus, SnapshotVerifyReport, UpperVerifyStatus};
 
 //--------------------------------------------------------------------------------------------------
 // Internal — used by submodules
 //--------------------------------------------------------------------------------------------------
 
 impl Snapshot {
-    pub(crate) fn from_parts(path: PathBuf, digest: String, manifest: Manifest) -> Self {
+    pub(crate) fn from_parts(
+        path: PathBuf,
+        digest: String,
+        manifest: Manifest,
+        labels: BTreeMap<String, String>,
+    ) -> Self {
         Self {
             path,
             digest,
             manifest,
+            labels,
+            head_update: None,
+        }
+    }
+}
+
+impl SnapshotArchive {
+    pub(crate) fn from_parts(
+        path: PathBuf,
+        digest: String,
+        manifest: Manifest,
+        labels: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            path,
+            digest,
+            manifest,
+            labels,
         }
     }
 }

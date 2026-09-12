@@ -158,6 +158,12 @@ const (
 	// ErrSandboxReplaced indicates that a receiver's name now refers to a
 	// different persisted sandbox identity.
 	ErrSandboxReplaced
+
+	// ErrSnapshotSourceRecovery indicates capture succeeded but source recovery failed.
+	ErrSnapshotSourceRecovery
+
+	// ErrStopTimeout indicates graceful shutdown exceeded its budget without requesting a kill.
+	ErrStopTimeout
 )
 
 func (k ErrorKind) String() string {
@@ -178,6 +184,8 @@ func (k ErrorKind) String() string {
 		return "VolumeAlreadyExists"
 	case ErrExecTimeout:
 		return "ExecTimeout"
+	case ErrStopTimeout:
+		return "StopTimeout"
 	case ErrExecFailed:
 		return "ExecFailed"
 	case ErrFilesystem:
@@ -202,6 +210,8 @@ func (k ErrorKind) String() string {
 		return "SnapshotIntegrity"
 	case ErrSnapshotMigration:
 		return "SnapshotMigration"
+	case ErrSnapshotSourceRecovery:
+		return "SnapshotSourceRecovery"
 	case ErrPatchFailed:
 		return "PatchFailed"
 	case ErrNetworkPolicy:
@@ -247,6 +257,38 @@ type Error struct {
 	Cause   error
 }
 
+// PublishedSnapshotArtifact names an artifact published despite source recovery failure.
+type PublishedSnapshotArtifact struct {
+	Kind       string
+	Path       string
+	SnapshotID string
+	Digest     string
+}
+
+// SnapshotSourceRecoveryDetails contains recovery locators. Their presence does not
+// imply the source is running, safely paused, or eligible for ordinary resume.
+type SnapshotSourceRecoveryDetails struct {
+	SourceSandbox    string
+	CheckpointID     string
+	CheckpointRoot   string
+	CheckpointPath   string
+	Artifact         *PublishedSnapshotArtifact
+	Detail           string
+	PublicationError *string
+}
+
+// SnapshotSourceRecoveryError reports partial capture success without losing recovery metadata.
+// Use errors.As to obtain this type; IsKind also recognizes ErrSnapshotSourceRecovery.
+type SnapshotSourceRecoveryError struct {
+	Recovery SnapshotSourceRecoveryDetails
+	err      *Error
+}
+
+func (e *SnapshotSourceRecoveryError) Error() string { return e.err.Error() }
+
+// Unwrap preserves access to the standard SDK error kind.
+func (e *SnapshotSourceRecoveryError) Unwrap() error { return e.err }
+
 // Error implements the error interface.
 //
 // The string form deliberately omits the Kind to avoid duplicating the
@@ -291,6 +333,22 @@ func wrapFFI(err error) error {
 	}
 	var fe *ffi.Error
 	if errors.As(err, &fe) {
+		if fe.Kind == ffi.KindSnapshotSourceRecovery && fe.Recovery != nil {
+			r := fe.Recovery
+			recovery := SnapshotSourceRecoveryDetails{
+				SourceSandbox: r.SourceSandbox, CheckpointID: r.CheckpointID,
+				CheckpointRoot: r.CheckpointRoot, CheckpointPath: r.CheckpointPath,
+				Detail: r.Detail, PublicationError: cloneStringPtr(r.PublicationError),
+			}
+			if a := r.Artifact; a != nil {
+				recovery.Artifact = &PublishedSnapshotArtifact{
+					Kind: a.Kind, Path: a.Path, SnapshotID: a.SnapshotID, Digest: a.Digest,
+				}
+			}
+			return &SnapshotSourceRecoveryError{
+				Recovery: recovery, err: &Error{Kind: ErrSnapshotSourceRecovery, Message: fe.Message},
+			}
+		}
 		return &Error{Kind: kindFromFFI(fe.Kind), Message: fe.Message}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -315,6 +373,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrVolumeAlreadyExists
 	case ffi.KindExecTimeout:
 		return ErrExecTimeout
+	case ffi.KindStopTimeout:
+		return ErrStopTimeout
 	case ffi.KindNoDefaultCommand:
 		return ErrNoDefaultCommand
 	case ffi.KindFilesystem:
@@ -335,6 +395,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrSnapshotIntegrity
 	case ffi.KindSnapshotMigration:
 		return ErrSnapshotMigration
+	case ffi.KindSnapshotSourceRecovery:
+		return ErrSnapshotSourceRecovery
 	case ffi.KindPatchFailed:
 		return ErrPatchFailed
 	case ffi.KindIO:
