@@ -340,6 +340,7 @@ class Smoke:
                         self.run("diagnostics-" + name, "logs", "--source", "system", name,
                                  phase="diagnostics", timeout=5)
                     except Exception:
+                        # Diagnostics are best-effort and must not mask the original failure.
                         pass
             self.report["home_removed"] = False
             if not failure and not cleanup_errors and self.home.exists():

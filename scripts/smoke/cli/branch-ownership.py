@@ -24,7 +24,7 @@ def evictable(path):
     with path.open("rb") as file:
         if os.name == "nt":
             import ctypes
-            from ctypes import wintypes
+            import ctypes.wintypes as wintypes
             import msvcrt
 
             class Overlapped(ctypes.Structure):

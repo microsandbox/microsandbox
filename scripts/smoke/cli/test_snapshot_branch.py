@@ -18,7 +18,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest import mock
+import unittest.mock as mock
 
 
 SPEC = importlib.util.spec_from_file_location(

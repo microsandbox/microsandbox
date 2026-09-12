@@ -10,7 +10,7 @@ import runpy
 import subprocess
 import tempfile
 import unittest
-from unittest import mock
+import unittest.mock as mock
 
 
 SCRIPT = Path(__file__).with_name("restore-resource-intent.py")

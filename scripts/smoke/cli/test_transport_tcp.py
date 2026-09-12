@@ -92,6 +92,8 @@ class TcpProbeTests(unittest.TestCase):
                         for offset in range(0, len(output), 7):
                             peer.sendall(output[offset:offset + 7])
                 except BaseException as error:
+                    # Propagate every worker failure, including SystemExit, to the test thread's
+                    # final assertion rather than letting a thread exit look like a passing relay.
                     errors.append(error)
 
             thread = threading.Thread(target=relay, daemon=True)

@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use flate2::read::GzDecoder;
@@ -339,13 +339,22 @@ fn install_archive_bytes(
         for entry in archive.entries()? {
             let mut entry = entry?;
             let path = entry.path()?;
-            if path.components().count() != 1 || !entry.header().entry_type().is_file() {
-                return Err(MicrosandboxError::Custom(format!(
-                    "runtime archive contains unexpected entry {}",
-                    path.display()
-                )));
-            }
-            let filename = path.file_name().expect("single-component archive path");
+            let mut components = path.components();
+            // A lone `.` or `..` is one component but has no filename. Require a
+            // normal basename so malformed archives return an error instead of panicking.
+            let filename = match (components.next(), components.next()) {
+                (Some(Component::Normal(filename)), None)
+                    if entry.header().entry_type().is_file() =>
+                {
+                    filename
+                }
+                _ => {
+                    return Err(MicrosandboxError::Custom(format!(
+                        "runtime archive contains unexpected entry {}",
+                        path.display()
+                    )));
+                }
+            };
             let destination = if filename == staged_msb.file_name().expect("msb filename") {
                 if found_msb {
                     return Err(MicrosandboxError::Custom(
@@ -818,6 +827,9 @@ mod tests {
         let msb_name = microsandbox_utils::msb_binary_filename(std::env::consts::OS);
         let library_name = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
         for (name, entry_type, expected_error) in [
+            (".", tar::EntryType::Regular, "unexpected entry"),
+            ("..", tar::EntryType::Regular, "unexpected entry"),
+            ("", tar::EntryType::Regular, "unexpected entry"),
             (
                 "../escaped-msb",
                 tar::EntryType::Regular,

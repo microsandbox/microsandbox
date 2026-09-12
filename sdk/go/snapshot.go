@@ -323,15 +323,13 @@ func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOp
 	if opts.ArchivePath == "" {
 		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot archive create requires ArchivePath"}
 	}
-	create := opts.SnapshotCreateOptions
-	create.DestDir = ""
 	info, err := ffi.SnapshotCreateArchive(ctx, opts.FromSandbox, opts.ArchivePath, ffi.SnapshotCreateOptions{
-		Name:            create.Name,
-		Group:           create.Group,
-		Labels:          create.Labels,
-		Force:           create.Force,
-		RecordIntegrity: create.RecordIntegrity,
-		Full:            create.Full,
+		Name:            opts.Name,
+		Group:           opts.Group,
+		Labels:          opts.Labels,
+		Force:           opts.Force,
+		RecordIntegrity: opts.RecordIntegrity,
+		Full:            opts.Full,
 	}, opts.PlainTar)
 	if err != nil {
 		return nil, wrapFFI(err)

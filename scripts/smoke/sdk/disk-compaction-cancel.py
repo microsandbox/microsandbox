@@ -27,6 +27,7 @@ async def main():
     try:
         await pending
     except asyncio.CancelledError:
+        # Cancellation is expected; continue to verify the worker finishes safely on restart.
         pass
     start = time.perf_counter()
     running = await handle.start()
