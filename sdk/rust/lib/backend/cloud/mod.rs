@@ -11,6 +11,8 @@
 //! issues today. No OAuth or session credentials are honored here.
 
 mod http;
+#[cfg(test)]
+mod pool_tests;
 pub(in crate::backend) mod sandbox;
 mod snapshot;
 mod timing;
@@ -88,6 +90,7 @@ pub struct CloudBackend {
     profile: Option<String>,
     /// UUID captured by a live handle; absent on an unbound backend.
     agent_identity: Option<(String, String)>,
+    agent_pool: Arc<crate::agent::pool::AgentPool>,
 }
 
 /// Fluent builder for `CloudBackend`. Use for tuned construction.
@@ -334,6 +337,7 @@ impl CloudBackendBuilder {
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
             agent_identity: None,
+            agent_pool: Arc::default(),
         })
     }
 }
@@ -371,6 +375,7 @@ impl Backend for CloudBackend {
     fn with_agent_identity(&self, name: &str, id: &str) -> Option<Arc<dyn Backend>> {
         let mut bound = self.clone();
         bound.agent_identity = Some((name.to_owned(), id.to_owned()));
+        bound.agent_pool = Arc::default();
         Some(Arc::new(bound))
     }
 
@@ -388,6 +393,19 @@ impl Backend for CloudBackend {
             // establishment, and the agent handshake. In particular, a peer
             // that accepts TCP but never completes TLS/HTTP upgrade must not
             // leave exec, filesystem, or attach calls hanging indefinitely.
+            let bound = self
+                .agent_identity
+                .as_ref()
+                .is_some_and(|(bound_name, _)| bound_name == name);
+            if bound && let Some(client) = self.agent_pool.take() {
+                tracing::debug!(
+                    sandbox_name = name,
+                    sandbox_id = self.agent_identity.as_ref().map(|(_, id)| id.as_str()),
+                    "reused completed cloud agent connection"
+                );
+                return Ok(client);
+            }
+            let ticket = bound.then(|| self.agent_pool.ticket());
             let mut timing = timing::ConnectionTiming::new(name);
             let result = tokio::time::timeout(timeout, async {
                 timing.stage("identity");
@@ -443,7 +461,10 @@ impl Backend for CloudBackend {
             match result {
                 Ok(result) => {
                     timing.finish(if result.is_ok() { "success" } else { "error" });
-                    result
+                    result.map(|client| match ticket {
+                        Some(ticket) => client.with_return_ticket(ticket),
+                        None => client,
+                    })
                 }
                 Err(_) => {
                     timing.finish("timeout");
