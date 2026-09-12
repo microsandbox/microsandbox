@@ -30,8 +30,8 @@ use windows_sys::Win32::Foundation::{
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
-    OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile,
+    CreateFileMappingW, FILE_MAP_ALL_ACCESS, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS,
+    MapViewOfFile, OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile,
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Threading::{
@@ -163,7 +163,12 @@ pub(crate) struct MappedRegion {
 
 impl MappedRegion {
     /// Return the base address of the mapped shared-memory region.
-    pub(crate) fn as_ptr(&self) -> *mut u8 {
+    pub(crate) fn as_ptr(&self) -> *const u8 {
+        self.ptr.as_ptr().cast_const()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_mut_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
     }
 }
@@ -989,11 +994,34 @@ fn create_and_init(
 }
 
 #[cfg(unix)]
-pub(crate) fn open_existing_region(
+fn open_existing_region(
     name: &std::ffi::CStr,
     map_len: usize,
 ) -> MetricsResult<Option<MappedRegion>> {
-    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR, 0) };
+    open_existing_unix_region(
+        name,
+        map_len,
+        libc::O_RDWR,
+        libc::PROT_READ | libc::PROT_WRITE,
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn open_existing_read_only_region(
+    name: &std::ffi::CStr,
+    map_len: usize,
+) -> MetricsResult<Option<MappedRegion>> {
+    open_existing_unix_region(name, map_len, libc::O_RDONLY, libc::PROT_READ)
+}
+
+#[cfg(unix)]
+fn open_existing_unix_region(
+    name: &std::ffi::CStr,
+    map_len: usize,
+    open_flags: libc::c_int,
+    protection: libc::c_int,
+) -> MetricsResult<Option<MappedRegion>> {
+    let fd = unsafe { libc::shm_open(name.as_ptr(), open_flags, 0) };
     if fd < 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::ENOENT) {
@@ -1011,7 +1039,7 @@ pub(crate) fn open_existing_region(
         libc::mmap(
             std::ptr::null_mut(),
             map_len,
-            libc::PROT_READ | libc::PROT_WRITE,
+            protection,
             libc::MAP_SHARED,
             fd,
             0,
@@ -1029,12 +1057,29 @@ pub(crate) fn open_existing_region(
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn open_existing_region(
+fn open_existing_region(
     name: &std::ffi::CStr,
     map_len: usize,
 ) -> MetricsResult<Option<MappedRegion>> {
+    open_existing_windows_region(name, map_len, FILE_MAP_ALL_ACCESS)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn open_existing_read_only_region(
+    name: &std::ffi::CStr,
+    map_len: usize,
+) -> MetricsResult<Option<MappedRegion>> {
+    open_existing_windows_region(name, map_len, FILE_MAP_READ)
+}
+
+#[cfg(target_os = "windows")]
+fn open_existing_windows_region(
+    name: &std::ffi::CStr,
+    map_len: usize,
+    desired_access: u32,
+) -> MetricsResult<Option<MappedRegion>> {
     let name = windows_mapping_name(name)?;
-    let handle = unsafe { OpenFileMappingW(FILE_MAP_ALL_ACCESS, 0, name.as_ptr()) };
+    let handle = unsafe { OpenFileMappingW(desired_access, 0, name.as_ptr()) };
     if handle.is_null() {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) {
@@ -1043,7 +1088,7 @@ pub(crate) fn open_existing_region(
         return Err(err.into());
     }
 
-    map_windows_region(handle, map_len).map(Some)
+    map_windows_region(handle, map_len, desired_access).map(Some)
 }
 
 #[cfg(unix)]
@@ -1119,7 +1164,7 @@ pub(crate) fn create_region(name: &std::ffi::CStr, map_len: usize) -> MetricsRes
         return Err(MetricsError::AlreadyExists);
     }
 
-    map_windows_region(handle, map_len)
+    map_windows_region(handle, map_len, FILE_MAP_ALL_ACCESS)
 }
 
 #[cfg(all(unix, test))]
@@ -1134,8 +1179,12 @@ pub(crate) fn unlink_region(name: &std::ffi::CStr) {
 pub(crate) fn unlink_region(_name: &std::ffi::CStr) {}
 
 #[cfg(target_os = "windows")]
-fn map_windows_region(handle: HANDLE, map_len: usize) -> MetricsResult<MappedRegion> {
-    let ptr = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, map_len) };
+fn map_windows_region(
+    handle: HANDLE,
+    map_len: usize,
+    desired_access: u32,
+) -> MetricsResult<MappedRegion> {
+    let ptr = unsafe { MapViewOfFile(handle, desired_access, 0, 0, map_len) };
     if ptr.Value.is_null() {
         let err = std::io::Error::last_os_error();
         unsafe { CloseHandle(handle) };

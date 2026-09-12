@@ -10,7 +10,7 @@ use crate::layout::{
     SAMPLE_FLAG_MEMORY_HOST_RESIDENT, SLOT_ACTIVE, SLOT_SIZE, registry_size,
 };
 use crate::registry::{
-    MappedRegion, WaitForReadyError, flag_value, ms_to_datetime, open_existing_region,
+    MappedRegion, WaitForReadyError, flag_value, ms_to_datetime, open_existing_read_only_region,
     validate_header_version, wait_for_ready,
 };
 use crate::{LiveMetric, LiveMetricState, MetricsError, MetricsRegistry, MetricsResult};
@@ -72,7 +72,30 @@ struct SlotV2 {
     _tail: [u8; SLOT_SIZE - 152 - NAME_BYTES],
 }
 
-const _: () = assert!(std::mem::size_of::<SlotV2>() == SLOT_SIZE);
+const _: () = {
+    assert!(std::mem::size_of::<SlotV2>() == SLOT_SIZE);
+    assert!(std::mem::offset_of!(SlotV2, state) == 0x00);
+    assert!(std::mem::offset_of!(SlotV2, generation) == 0x08);
+    assert!(std::mem::offset_of!(SlotV2, seq) == 0x10);
+    assert!(std::mem::offset_of!(SlotV2, sandbox_id) == 0x18);
+    assert!(std::mem::offset_of!(SlotV2, run_id) == 0x1c);
+    assert!(std::mem::offset_of!(SlotV2, pid) == 0x20);
+    assert!(std::mem::offset_of!(SlotV2, started_at_unix_ms) == 0x28);
+    assert!(std::mem::offset_of!(SlotV2, sampled_at_unix_ms) == 0x30);
+    assert!(std::mem::offset_of!(SlotV2, sample_flags) == 0x38);
+    assert!(std::mem::offset_of!(SlotV2, memory_limit_bytes) == 0x40);
+    assert!(std::mem::offset_of!(SlotV2, vcpu_time_ns) == 0x48);
+    assert!(std::mem::offset_of!(SlotV2, cpu_percent_bits) == 0x50);
+    assert!(std::mem::offset_of!(SlotV2, memory_bytes) == 0x58);
+    assert!(std::mem::offset_of!(SlotV2, memory_available_bytes) == 0x60);
+    assert!(std::mem::offset_of!(SlotV2, memory_host_resident_bytes) == 0x68);
+    assert!(std::mem::offset_of!(SlotV2, disk_read_bytes) == 0x70);
+    assert!(std::mem::offset_of!(SlotV2, disk_write_bytes) == 0x78);
+    assert!(std::mem::offset_of!(SlotV2, net_rx_bytes) == 0x80);
+    assert!(std::mem::offset_of!(SlotV2, net_tx_bytes) == 0x88);
+    assert!(std::mem::offset_of!(SlotV2, name_len) == 0x90);
+    assert!(std::mem::offset_of!(SlotV2, name_bytes) == 0x98);
+};
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -216,7 +239,7 @@ impl LegacyRegistryV2 {
 fn open_v2_registry(name: &str) -> MetricsResult<LegacyRegistryV2> {
     let name = CString::new(name)
         .map_err(|_| MetricsError::Custom("registry name contains NUL byte".into()))?;
-    let header_mapping = open_existing_region(&name, HEADER_SIZE)?.ok_or_else(|| {
+    let header_mapping = open_existing_read_only_region(&name, HEADER_SIZE)?.ok_or_else(|| {
         MetricsError::from(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "metrics registry does not exist",
@@ -242,7 +265,7 @@ fn open_v2_registry(name: &str) -> MetricsResult<LegacyRegistryV2> {
     let capacity = header.capacity;
     drop(header_mapping);
 
-    let mapping = open_existing_region(&name, registry_size(capacity))?
+    let mapping = open_existing_read_only_region(&name, registry_size(capacity))?
         .ok_or_else(|| MetricsError::Custom("registry disappeared during open".into()))?;
     let header = unsafe { &*(mapping.as_ptr() as *const Header) };
 
@@ -288,7 +311,7 @@ mod tests {
     fn create_v2_registry(name: &str, sandbox_id: i32, run_id: i32) -> MappedRegion {
         let name = CString::new(name).unwrap();
         let mapping = create_region(&name, registry_size(1)).unwrap();
-        let header = unsafe { &mut *(mapping.as_ptr() as *mut Header) };
+        let header = unsafe { &mut *(mapping.as_mut_ptr() as *mut Header) };
 
         header
             .state
@@ -301,7 +324,7 @@ mod tests {
         header.created_at_unix_ms = Utc::now().timestamp_millis();
         header.global_generation.store(1, Ordering::Release);
 
-        let slot = unsafe { &*(mapping.as_ptr().add(HEADER_SIZE) as *const SlotV2) };
+        let slot = unsafe { &*(mapping.as_mut_ptr().add(HEADER_SIZE) as *const SlotV2) };
         let now = Utc::now();
         slot.generation.store(1, Ordering::Release);
         slot.seq.store(2, Ordering::Release);
