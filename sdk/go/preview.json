@@ -1,0 +1,12 @@
+{
+  "source_commit": "7b66ff92732b347919024abd06f1e62ddb877bf8",
+  "source_branch": "releases/v0.7.0",
+  "check_run": "https://github.com/superradcompany/microsandbox/actions/runs/34665355605",
+  "runtime_image": "ghcr.io/superradcompany/microsandbox@sha256:f8c70a29a7460f5ea1c3aff7610828d613f66285b1f791a32c016b2660643684",
+  "runtime_tag": "ghcr.io/superradcompany/microsandbox:7b66ff92732b347919024abd06f1e62ddb877bf8",
+  "platforms": [
+    "linux/amd64"
+  ],
+  "ffi_sha256": "1a7624c6edde036cb3a6ec1413c8b47e7475bb61af61123972c47f8b2d748656",
+  "go_qualification": "https://github.com/superradcompany/microsandbox/actions/runs/34667082294"
+}
