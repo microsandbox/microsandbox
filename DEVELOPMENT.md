@@ -248,6 +248,12 @@ cargo fmt --all           # Format code
 cargo clippy --workspace  # Run lints
 ```
 
+### Self-hosted CI disk space
+
+The Linux integration runners share a disk. `scripts/ci/clean-runner-disk.sh` removes job artifacts and prunes oversized per-user caches: uv above 1 GiB, npm's download cache above 512 MiB, and Go's build cache above 512 MiB. Small caches, installed toolchains, and npm diagnostic logs are retained. Use `--finish` for end-of-job cleanup; startup additionally requires 25 GiB free (`MSB_CI_MIN_FREE_GIB` overrides the threshold).
+
+This check is a headroom floor, not a disk reservation. If concurrent jobs still exhaust the disk, reduce host concurrency or increase capacity. Do not prune another runner user's files or remove installed tools while jobs are active. Python integration uses its bounded local cache instead of restoring a multi-gigabyte Actions cache.
+
 ## Releasing
 
 Microsandbox releases are automated via CI. All crates and packages share the same version number. The process has two steps:

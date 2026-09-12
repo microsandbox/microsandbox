@@ -1455,6 +1455,7 @@ jobs:
 
       - name: Snapshot smoke runner unit tests
         run: |
+          python3 -m unittest discover -s scripts/ci -p test_runner_storage.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_restore_resource_intent.py
 
@@ -1491,7 +1492,7 @@ jobs:
 
       - name: Disk usage
         if: always()
-        run: scripts/ci/clean-runner-disk.sh
+        run: scripts/ci/clean-runner-disk.sh --finish
 
   # ---------------------------------------------------------------------------
   # Integration tests (requires KVM)
@@ -1598,7 +1599,7 @@ jobs:
 
       - name: Disk usage
         if: always()
-        run: scripts/ci/clean-runner-disk.sh
+        run: scripts/ci/clean-runner-disk.sh --finish
 
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)
@@ -1631,21 +1632,15 @@ jobs:
           rm -rf "${{ github.workspace }}"/{sdk,build}
           rm -rf ~/.microsandbox
 
+      # Keep SDK tests artifact-only; fetch only the shared CI maintenance scripts.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: .ci-source
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+
       - name: Clean runner disk
-        run: |
-          set -euo pipefail
-          df -hT / /tmp "${GITHUB_WORKSPACE}" "${RUNNER_WORKSPACE}" || true
-          rm -rf "${GITHUB_WORKSPACE}"/{sdk,build,target}
-          rm -rf ~/.microsandbox
-          find /tmp -mindepth 1 -maxdepth 1 -type d \
-            \( -name 'msb-*' -o -name 'TestSandbox*' -o -name 'go-build*' \) \
-            -mmin +120 -exec rm -rf {} + 2>/dev/null || true
-          find /tmp -mindepth 1 -maxdepth 1 -type d \
-            \( -name 'codex-*' -o -name 'microsandbox-*' -o -name 'libkrun-*' \) \
-            -mmin +360 -exec rm -rf {} + 2>/dev/null || true
-          find "${RUNNER_WORKSPACE}" -mindepth 1 -maxdepth 1 -type d \
-            -name 'microsandbox*' -mmin +360 -exec rm -rf {} + 2>/dev/null || true
-          df -hT / /tmp "${GITHUB_WORKSPACE}" "${RUNNER_WORKSPACE}" || true
+        run: bash .ci-source/scripts/ci/clean-runner-disk.sh
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -1745,9 +1740,7 @@ jobs:
 
       - name: Disk usage
         if: always()
-        run: |
-          df -hT / /tmp "${GITHUB_WORKSPACE}" "${RUNNER_WORKSPACE}" || true
-          du -xhd1 /tmp 2>/dev/null | sort -h | tail -30 || true
+        run: bash .ci-source/scripts/ci/clean-runner-disk.sh --finish
 
   # ---------------------------------------------------------------------------
   # Python SDK integration tests (requires KVM)
@@ -1775,7 +1768,9 @@ jobs:
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          enable-cache: true
+          # Persistent runners already retain a bounded local cache. Restoring a
+          # multi-GB Actions cache here can exhaust the shared disk before tests.
+          enable-cache: false
           cache-dependency-glob: "sdk/python/uv.lock"
 
       - name: Download build artifacts
@@ -1809,7 +1804,7 @@ jobs:
 
       - name: Disk usage
         if: always()
-        run: scripts/ci/clean-runner-disk.sh
+        run: scripts/ci/clean-runner-disk.sh --finish
 
   # ---------------------------------------------------------------------------
   # Python SDK lower-bound check (Python 3.10)
@@ -1981,7 +1976,7 @@ jobs:
 
       - name: Disk usage
         if: always()
-        run: scripts/ci/clean-runner-disk.sh
+        run: scripts/ci/clean-runner-disk.sh --finish
 
   # ---------------------------------------------------------------------------
   # Aggregator: a single status check that always reports, regardless of
