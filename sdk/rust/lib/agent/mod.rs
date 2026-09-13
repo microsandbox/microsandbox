@@ -5,6 +5,7 @@
 //! it for use by Node/Python/Go bindings.
 
 mod bridge;
+pub(crate) mod pool;
 
 use std::ops::Deref;
 use std::path::Path;
@@ -19,7 +20,10 @@ use tokio::{
 //--------------------------------------------------------------------------------------------------
 
 /// Client for communicating with `agentd` through a running sandbox's relay.
-pub struct AgentClient(microsandbox_agent_client::AgentClient);
+pub struct AgentClient {
+    inner: Option<microsandbox_agent_client::AgentClient>,
+    return_ticket: Option<pool::ReturnTicket>,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -82,7 +86,7 @@ impl AgentClient {
     pub async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<Self> {
         microsandbox_agent_client::AgentClient::connect(sock_path)
             .await
-            .map(Self)
+            .map(Self::from_inner)
     }
 
     /// Connect over an arbitrary byte-stream transport with an explicit
@@ -99,7 +103,7 @@ impl AgentClient {
     {
         microsandbox_agent_client::AgentClient::connect_stream_with_timeout(stream, timeout)
             .await
-            .map(Self)
+            .map(Self::from_inner)
     }
 
     /// Connect to an arbitrary agent relay socket path with an explicit
@@ -110,7 +114,7 @@ impl AgentClient {
     ) -> AgentClientResult<Self> {
         microsandbox_agent_client::AgentClient::connect_with_timeout(sock_path, timeout)
             .await
-            .map(Self)
+            .map(Self::from_inner)
     }
 
     /// Connect to an arbitrary agent relay socket path with an explicit
@@ -121,7 +125,7 @@ impl AgentClient {
     ) -> AgentClientResult<Self> {
         microsandbox_agent_client::AgentClient::connect_with_deadline(sock_path, deadline)
             .await
-            .map(Self)
+            .map(Self::from_inner)
     }
 
     /// Resolve a sandbox name to its agent socket path and connect.
@@ -160,8 +164,29 @@ impl AgentClient {
     }
 
     /// Close the connection.
-    pub async fn close(self) {
-        self.0.close().await;
+    pub async fn close(mut self) {
+        self.return_ticket = None;
+        if let Some(inner) = self.inner.take() {
+            inner.close().await;
+        }
+    }
+
+    fn from_inner(inner: microsandbox_agent_client::AgentClient) -> Self {
+        Self {
+            inner: Some(inner),
+            return_ticket: None,
+        }
+    }
+
+    pub(crate) fn with_return_ticket(mut self, ticket: pool::ReturnTicket) -> Self {
+        self.return_ticket = Some(ticket);
+        self
+    }
+
+    pub(crate) fn completed_exec(&self) {
+        if let Some(ticket) = &self.return_ticket {
+            ticket.complete();
+        }
     }
 }
 
@@ -173,7 +198,7 @@ impl Deref for AgentClient {
     type Target = microsandbox_agent_client::AgentClient;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.inner.as_ref().expect("agent client already closed")
     }
 }
 
@@ -184,3 +209,11 @@ impl Deref for AgentClient {
 pub use bridge::{AgentBridge, BridgeFrame, StreamHandle};
 pub use microsandbox_agent_client::{AgentClientError, AgentClientResult, AgentProtocol};
 pub use microsandbox_protocol::codec::RawFrame;
+
+impl Drop for AgentClient {
+    fn drop(&mut self) {
+        if let (Some(ticket), Some(inner)) = (self.return_ticket.take(), self.inner.take()) {
+            ticket.recycle(inner);
+        }
+    }
+}

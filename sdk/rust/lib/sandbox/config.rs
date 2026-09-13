@@ -445,10 +445,14 @@ impl SandboxConfig {
         Ok(())
     }
 
-    /// Apply runtime defaults that should exist for OCI sandboxes unless the
-    /// user explicitly overrode them.
+    /// Keep disk-backed OCI temporary files on the writable disk. Only a
+    /// deliberately RAM-backed root receives the historical bounded tmpfs.
+    /// Explicit mounts, including tmpfs stored by older versions, are retained.
     pub(crate) fn apply_runtime_defaults(&mut self) {
-        if !matches!(self.spec.image, RootfsSource::Oci(_)) {
+        if !matches!(
+            self.spec.image.oci_root_disk(),
+            Some(RootDisk::Tmpfs { .. })
+        ) {
             return;
         }
 
@@ -1415,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_runtime_defaults_adds_tmpfs_for_oci_tmp() {
+    fn test_apply_runtime_defaults_adds_tmpfs_for_ram_backed_oci_tmp() {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 image: RootfsSource::oci("python:3.12"),
@@ -1428,6 +1432,9 @@ mod tests {
             ..Default::default()
         };
 
+        if let RootfsSource::Oci(oci) = &mut config.spec.image {
+            oci.root_disk = Some(RootDisk::tmpfs(1024));
+        }
         config.apply_runtime_defaults();
 
         assert_eq!(config.spec.mounts.len(), 1);
@@ -1442,6 +1449,40 @@ mod tests {
                 assert_eq!(*options, MountOptions::default());
             }
             mount => panic!("expected tmpfs mount, got {mount:?}"),
+        }
+    }
+
+    #[test]
+    fn disk_backed_tmp_uses_root_disk_and_explicit_tmpfs_survives_restart() {
+        for root_disk in [
+            None,
+            Some(RootDisk::managed(16384)),
+            Some(RootDisk::flat(16384)),
+        ] {
+            let mut config = SandboxConfig::default();
+            config.spec.image = RootfsSource::oci("node:22");
+            if let RootfsSource::Oci(oci) = &mut config.spec.image {
+                oci.root_disk = root_disk;
+            }
+            config.apply_runtime_defaults();
+            assert!(config.spec.mounts.is_empty());
+            config.spec.mounts.push(VolumeMount::Tmpfs {
+                guest: "/tmp".into(),
+                size_mib: Some(128),
+                options: MountOptions::default(),
+            });
+            // Persisted mounts from older versions remain explicit on restart.
+            let mut restarted: SandboxConfig =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+            restarted.apply_runtime_defaults();
+            assert_eq!(restarted.spec.mounts.len(), 1);
+            assert!(matches!(
+                restarted.spec.mounts[0],
+                VolumeMount::Tmpfs {
+                    size_mib: Some(128),
+                    ..
+                }
+            ));
         }
     }
 

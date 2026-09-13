@@ -124,6 +124,7 @@ impl SandboxBackend for CloudBackend {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
+            self.agent_pool.invalidate();
             let current = CloudBackend::get_sandbox(self, name).await?;
             let config = sandbox_config_from_cloud(&current);
             let cloud = CloudBackend::start_sandbox(self, name).await?;
@@ -140,6 +141,7 @@ impl SandboxBackend for CloudBackend {
         // Cloud start is detached by definition — the sandbox keeps running
         // after this process exits. Same code path as `start`.
         Box::pin(async move {
+            self.agent_pool.invalidate();
             let current = CloudBackend::get_sandbox(self, name).await?;
             let config = sandbox_config_from_cloud(&current);
             let cloud = CloudBackend::start_sandbox(self, name).await?;
@@ -155,6 +157,7 @@ impl SandboxBackend for CloudBackend {
         identity: SandboxIdentity,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
+            self.agent_pool.invalidate();
             let id = cloud_identity(identity)?;
             let current = CloudBackend::get_sandbox_by_id(self, &id).await?;
             let config = sandbox_config_from_cloud(&current);
@@ -209,6 +212,7 @@ impl SandboxBackend for CloudBackend {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
+            self.agent_pool.invalidate();
             CloudBackend::destroy_sandbox(self, name).await?;
             Ok(())
         })
@@ -221,6 +225,7 @@ impl SandboxBackend for CloudBackend {
         identity: SandboxIdentity,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
+            self.agent_pool.invalidate();
             CloudBackend::destroy_sandbox_by_id(self, &cloud_identity(identity)?).await?;
             Ok(())
         })
@@ -232,6 +237,7 @@ impl SandboxBackend for CloudBackend {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
+            self.agent_pool.invalidate();
             CloudBackend::stop_sandbox(self, name).await?;
             Ok(())
         })
@@ -244,6 +250,7 @@ impl SandboxBackend for CloudBackend {
         identity: SandboxIdentity,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
+            self.agent_pool.invalidate();
             CloudBackend::stop_sandbox_by_id(self, &cloud_identity(identity)?).await?;
             Ok(())
         })

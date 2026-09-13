@@ -358,7 +358,11 @@ impl ExecHandle {
     ///
     /// Returns `None` when the session has ended.
     pub async fn recv(&mut self) -> Option<ExecEvent> {
-        self.events.recv().await
+        let event = self.events.recv().await;
+        if matches!(event, Some(ExecEvent::Exited { .. })) {
+            self.client.completed_exec();
+        }
+        event
     }
 
     /// Take the stdin sink (if `StdinMode::Pipe` was used).
@@ -370,7 +374,7 @@ impl ExecHandle {
 
     /// Wait for the command to complete and return the exit status.
     pub async fn wait(&mut self) -> MicrosandboxResult<ExitStatus> {
-        while let Some(event) = self.events.recv().await {
+        while let Some(event) = self.recv().await {
             match event {
                 ExecEvent::Exited { code } => {
                     return Ok(ExitStatus {
@@ -396,7 +400,7 @@ impl ExecHandle {
         let mut stderr = Vec::new();
         let mut exit_code: Option<i32> = None;
 
-        while let Some(event) = self.events.recv().await {
+        while let Some(event) = self.recv().await {
             match event {
                 ExecEvent::Started { pid: _ } => {}
                 ExecEvent::Stdout(data) => {

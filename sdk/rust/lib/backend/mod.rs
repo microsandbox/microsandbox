@@ -188,6 +188,15 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
+    /// Bind agent dialing to a cloud handle's immutable sandbox UUID.
+    ///
+    /// Lifecycle methods keep their existing selectors. Backends without
+    /// cloud identities leave the handle's backend unchanged.
+    #[doc(hidden)]
+    fn with_agent_identity(&self, _name: &str, _id: &str) -> Option<Arc<dyn Backend>> {
+        None
+    }
+
     /// Open a fresh agent connection to the named sandbox with an explicit
     /// handshake timeout. Local dials the relay socket; cloud dials the
     /// sandbox's agent WebSocket route.
